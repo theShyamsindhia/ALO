@@ -209,6 +209,16 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
             .removeDuplicates()
             .sink { [weak self] phase in self?.updatePhase(phase) }
             .store(in: &observers)
+        model.$floatingBarHidden
+            .removeDuplicates()
+            .dropFirst()
+            .filter { !$0 }
+            .sink { [weak self] _ in self?.closePopover() }
+            .store(in: &observers)
+        NSWorkspace.shared.notificationCenter
+            .publisher(for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification)
+            .sink { [weak self] _ in self?.syncMotionPreference() }
+            .store(in: &observers)
         Publishers.CombineLatest3(
             model.$floatingSection.removeDuplicates(),
             model.$permissionNotice.removeDuplicates(),
@@ -256,6 +266,10 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
         popover.contentSize = panelSize
     }
 
+    private func syncMotionPreference() {
+        popover.animates = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
     private func updateBadge(count: Int) {
         badgeView.isHidden = count == 0
         let detail = count == 0 ? "WERAI" : "WERAI · \(count) unread message\(count == 1 ? "" : "s")"
@@ -279,9 +293,8 @@ private final class StatusUnreadBadgeView: NSView {
         wantsLayer = true
         layer?.backgroundColor = NSColor.systemRed.cgColor
         layer?.cornerRadius = 4
-        layer?.borderWidth = 1
-        layer?.borderColor = NSColor.controlBackgroundColor.cgColor
         isHidden = true
+        setAccessibilityElement(false)
     }
 
     required init?(coder: NSCoder) {
@@ -1262,7 +1275,6 @@ private struct FloatingRoomView: View {
                 active: false,
                 help: model.roomIsPlaying ? "Pause for everyone" : "Play for everyone"
             ) { model.toggleRoomPlayback() }
-            .keyboardShortcut(.space, modifiers: [])
 
             roomBarButton(
                 icon: "music.note.list",
