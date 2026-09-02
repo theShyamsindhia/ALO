@@ -37,9 +37,6 @@ jobs:
       - name: Build and package arm64 app
         env:
           WERAI_CODESIGN_IDENTITY: ${{ vars.WERAI_CODESIGN_IDENTITY }}
-          # Apple's timestamp service currently stalls on the hosted runner. The app
-          # remains Developer ID signed; enable automatic timestamps with notarization.
-          WERAI_CODESIGN_TIMESTAMP: none
         run: ./Scripts/package.sh --arm64-only
 
       - name: Verify app architecture and Developer ID signature
