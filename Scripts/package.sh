@@ -26,7 +26,12 @@ app_archive="dist/WERAI-macos-$archive_suffix.zip"
 codesign_identity="${WERAI_CODESIGN_IDENTITY:--}"
 codesign_arguments=(--force --sign "$codesign_identity" --identifier in.werai.audio)
 if [[ "$codesign_identity" != "-" ]]; then
-    codesign_arguments+=(--options runtime --timestamp)
+    codesign_arguments+=(--options runtime)
+    if [[ "${WERAI_CODESIGN_TIMESTAMP:-automatic}" == "none" ]]; then
+        codesign_arguments+=(--timestamp=none)
+    else
+        codesign_arguments+=(--timestamp)
+    fi
     if [[ -n "${WERAI_SIGNING_KEYCHAIN:-}" ]]; then
         codesign_arguments+=(--keychain "$WERAI_SIGNING_KEYCHAIN")
     fi
