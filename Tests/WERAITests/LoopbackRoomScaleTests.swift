@@ -119,7 +119,7 @@ struct LoopbackRoomScaleTests {
         #expect(!inactiveLaterCheck)
     }
 
-    @Test("Participant play and pause requests are executed and rebroadcast by the host")
+    @Test("Participant play and pause requests force every receiver to resynchronize")
     func participantControlsHostPlayback() throws {
         let hostReady = DispatchSemaphore(value: 0)
         let commandReceived = DispatchSemaphore(value: 0)
@@ -145,18 +145,43 @@ struct LoopbackRoomScaleTests {
         else { throw LoopbackTestError.hostDidNotStart }
 
         let peer = HeadlessLoopbackPeer(index: 99)
+        let observer = HeadlessLoopbackPeer(index: 100)
         try peer.start(hostPort: hostPort)
-        defer { peer.stop() }
-        guard peer.waitUntilJoined(timeout: 3) else { throw LoopbackTestError.peerDidNotJoin }
+        try observer.start(hostPort: hostPort)
+        defer {
+            peer.stop()
+            observer.stop()
+        }
+        guard peer.waitUntilJoined(timeout: 3), observer.waitUntilJoined(timeout: 3) else {
+            throw LoopbackTestError.peerDidNotJoin
+        }
 
         peer.setRoomPlayback(playing: false)
         #expect(commandReceived.wait(timeout: .now() + 2) == .success)
         #expect(requestedCommands.values == [.pause])
         #expect(waitUntil(timeout: 2) { peer.playbackStates.contains(false) })
+        #expect(waitUntil(timeout: 2) {
+            peer.resyncCommandCount == 1 && observer.resyncCommandCount == 1
+        })
+
+        peer.setRoomPlayback(playing: true)
+        #expect(commandReceived.wait(timeout: .now() + 2) == .success)
+        #expect(requestedCommands.values == [.pause, .play])
+        #expect(waitUntil(timeout: 2) { observer.playbackStates.contains(true) })
+        #expect(waitUntil(timeout: 2) {
+            peer.resyncCommandCount == 2 && observer.resyncCommandCount == 2
+        })
 
         peer.sendMediaCommand(.nextTrack)
         #expect(commandReceived.wait(timeout: .now() + 2) == .success)
-        #expect(requestedCommands.values == [.pause, .nextTrack])
+        #expect(requestedCommands.values == [.pause, .play, .nextTrack])
+        #expect(peer.resyncCommandCount == 2)
+        #expect(observer.resyncCommandCount == 2)
+
+        host.setNowPlaying(NowPlayingMedia(isPlaying: false))
+        #expect(waitUntil(timeout: 2) {
+            peer.resyncCommandCount == 3 && observer.resyncCommandCount == 3
+        })
     }
 
     private func runRoom(

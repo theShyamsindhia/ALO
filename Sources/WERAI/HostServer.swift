@@ -159,8 +159,13 @@ final class HostServer {
     func setNowPlaying(_ media: NowPlayingMedia) {
         queue.async { [weak self] in
             guard let self, media != self.nowPlaying else { return }
+            let playbackStateChanged = media.isPlaying != nil
+                && media.isPlaying != self.nowPlaying.isPlaying
             self.nowPlaying = media
             self.broadcast(ControlMessage(type: "now_playing", nowPlaying: media))
+            if playbackStateChanged {
+                self.broadcast(ControlMessage(type: "resync"))
+            }
         }
     }
 
@@ -355,6 +360,7 @@ final class HostServer {
                 isPlaying: isPlaying
             )
             broadcast(ControlMessage(type: "now_playing", nowPlaying: nowPlaying))
+            broadcast(ControlMessage(type: "resync"))
 
         case "sync_status":
             guard message.participantID == client.id, let report = message.syncReport else { return }

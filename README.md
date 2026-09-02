@@ -170,6 +170,9 @@ Change one control at a time and compare it with the unbounded baseline in
 - `PlaybackWatchdog.stallThresholdNanos` controls how long an active receiver's render
   clock may stop before it re-anchors. `activePacketWindowNanos` prevents an intentionally
   paused source from being mistaken for a stalled client.
+- Every accepted play or pause command broadcasts an explicit hard-resync command. This
+  makes the menu-bar, floating-bar, and hardware media controls a manual recovery path:
+  pause and play once to re-anchor every receiver to the shared capture timeline.
 - `HostServer`'s `boundedLatest(maxInFlight:)` default controls how many packets each
   receiver may have outstanding before stale pending audio is replaced.
 - `linkBitsPerSecond`, peer count, callback count, and callback cadence in
