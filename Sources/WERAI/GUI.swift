@@ -219,10 +219,11 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
             .publisher(for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification)
             .sink { [weak self] _ in self?.syncMotionPreference() }
             .store(in: &observers)
-        Publishers.CombineLatest3(
+        Publishers.CombineLatest4(
             model.$floatingSection.removeDuplicates(),
             model.$permissionNotice.removeDuplicates(),
-            model.$participants.map(\.count).removeDuplicates()
+            model.$participants.map(\.count).removeDuplicates(),
+            model.$incomingMessagePreview.map { $0?.id }.removeDuplicates()
         )
         .dropFirst()
         .sink { [weak self] _ in self?.resizePopover() }
@@ -319,6 +320,7 @@ private enum FloatingMetrics {
     static let cornerRadius: CGFloat = 22
     static let separatorHeight: CGFloat = 1
     static let expansionDuration: TimeInterval = 0.24
+    static let messagePreviewHeight: CGFloat = 116
     static let chatHeight: CGFloat = 380
     static let queueHeight: CGFloat = 392
     static let videoHeight: CGFloat = 476
@@ -368,6 +370,7 @@ final class WERAIViewModel: ObservableObject {
     @Published var messages = [RoomMessage]()
     @Published var draftMessage = ""
     @Published var unreadMessageCount = 0
+    @Published private(set) var incomingMessagePreview: RoomMessage?
     @Published var mediaQueue = [RoomQueueItem]()
     @Published var queueURL = ""
     @Published var queueNotice: String?
@@ -390,6 +393,7 @@ final class WERAIViewModel: ObservableObject {
     private var hostSession: HostSession?
     private var receiver: Receiver?
     private var localNowPlayingMonitor: NowPlayingMonitor?
+    private var incomingMessagePreviewTask: Task<Void, Never>?
     private var activeRoom: String?
     private static let floatingBarPreferenceKey = "floatingBarHidden"
 
@@ -425,7 +429,10 @@ final class WERAIViewModel: ObservableObject {
     var floatingPanelHeight: CGFloat {
         if permissionNotice { return FloatingMetrics.permissionHeight }
         switch floatingSection {
-        case .collapsed: return FloatingMetrics.barHeight
+        case .collapsed:
+            return incomingMessagePreview == nil
+                ? FloatingMetrics.barHeight
+                : FloatingMetrics.messagePreviewHeight
         case .queue: return FloatingMetrics.queueHeight
         case .chat: return FloatingMetrics.chatHeight
         case .people: return FloatingMetrics.peopleHeight(count: participants.count)
@@ -613,6 +620,7 @@ final class WERAIViewModel: ObservableObject {
     }
 
     func showQueue() {
+        dismissIncomingMessagePreview()
         floatingSection = floatingSection == .queue ? .collapsed : .queue
         queueNotice = nil
     }
@@ -670,10 +678,12 @@ final class WERAIViewModel: ObservableObject {
     }
 
     func showPeople() {
+        dismissIncomingMessagePreview()
         floatingSection = floatingSection == .people ? .collapsed : .people
     }
 
     func showChat() {
+        dismissIncomingMessagePreview()
         if floatingSection == .chat {
             floatingSection = .collapsed
         } else {
@@ -684,6 +694,7 @@ final class WERAIViewModel: ObservableObject {
 
     func toggleFloatingVideo() {
         guard roomHasVideo else { return }
+        dismissIncomingMessagePreview()
         floatingSection = floatingSection == .video ? .collapsed : .video
     }
 
@@ -696,6 +707,7 @@ final class WERAIViewModel: ObservableObject {
     }
 
     func collapseFloatingBar() {
+        dismissIncomingMessagePreview()
         floatingSection = .collapsed
     }
 
@@ -822,6 +834,9 @@ final class WERAIViewModel: ObservableObject {
                     && (!self.floatingBarHidden || self.menuBarPopoverVisible)
                 if sender != self.currentUserName, !chatIsVisible {
                     self.unreadMessageCount += 1
+                    if self.floatingSection == .collapsed {
+                        self.presentIncomingMessagePreview(self.messages[self.messages.count - 1])
+                    }
                 }
             }
         }
@@ -879,6 +894,7 @@ final class WERAIViewModel: ObservableObject {
         participants = []
         messages = []
         unreadMessageCount = 0
+        dismissIncomingMessagePreview()
         mediaQueue = []
         queueURL = ""
         queueNotice = nil
@@ -890,6 +906,23 @@ final class WERAIViewModel: ObservableObject {
         experience = .audio
         draftMessage = ""
         floatingSection = .collapsed
+    }
+
+    private func presentIncomingMessagePreview(_ message: RoomMessage) {
+        incomingMessagePreviewTask?.cancel()
+        incomingMessagePreview = message
+        incomingMessagePreviewTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 3_200_000_000)
+            guard !Task.isCancelled else { return }
+            self?.incomingMessagePreview = nil
+            self?.incomingMessagePreviewTask = nil
+        }
+    }
+
+    private func dismissIncomingMessagePreview() {
+        incomingMessagePreviewTask?.cancel()
+        incomingMessagePreviewTask = nil
+        incomingMessagePreview = nil
     }
 
     private func finishStopping() {
@@ -1191,8 +1224,21 @@ private struct FloatingRoomView: View {
             : .smooth(duration: FloatingMetrics.expansionDuration)
     }
 
+    private var messageTransition: AnyTransition {
+        reduceMotion
+            ? .opacity
+            : .asymmetric(
+                insertion: .move(edge: .bottom)
+                    .combined(with: .scale(scale: 0.96, anchor: .bottom))
+                    .combined(with: .opacity),
+                removal: .opacity
+            )
+    }
+
     private var hasExpandedContent: Bool {
-        model.permissionNotice || model.floatingSection != .collapsed
+        model.permissionNotice
+            || model.floatingSection != .collapsed
+            || model.incomingMessagePreview != nil
     }
 
     private var expandedContentHeight: CGFloat {
@@ -1201,6 +1247,10 @@ private struct FloatingRoomView: View {
 
     private var expansionIdentity: String {
         if model.permissionNotice { return "permission" }
+        if let preview = model.incomingMessagePreview,
+           model.floatingSection == .collapsed {
+            return "message-\(preview.id)"
+        }
         switch model.floatingSection {
         case .collapsed: return "collapsed"
         case .queue: return "queue"
@@ -1218,6 +1268,9 @@ private struct FloatingRoomView: View {
     private var expandedContent: some View {
         if model.permissionNotice {
             permissionPanel
+        } else if let preview = model.incomingMessagePreview,
+                  model.floatingSection == .collapsed {
+            incomingMessagePreview(preview)
         } else {
             switch model.floatingSection {
             case .collapsed:
@@ -1264,6 +1317,7 @@ private struct FloatingRoomView: View {
         .animation(panelAnimation, value: model.floatingSection)
         .animation(panelAnimation, value: model.permissionNotice)
         .animation(panelAnimation, value: model.participants.count)
+        .animation(panelAnimation, value: model.incomingMessagePreview?.id)
     }
 
     private var roomBar: some View {
@@ -1408,25 +1462,26 @@ private struct FloatingRoomView: View {
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            ZStack(alignment: .topTrailing) {
-                Image(systemName: active ? (activeIcon ?? icon) : icon)
-                    .font(.system(size: 13, weight: .medium))
-                    .symbolRenderingMode(.monochrome)
-                    .contentTransition(.symbolEffect(.replace))
-                    .foregroundStyle(active ? Palette.selectedControlText : Palette.controlIcon)
-                    .frame(width: 34, height: 32)
-                    .contentShape(Rectangle())
+            Image(systemName: active ? (activeIcon ?? icon) : icon)
+                .font(.system(size: 13, weight: .medium))
+                .symbolRenderingMode(.monochrome)
+                .contentTransition(.symbolEffect(.replace))
+                .symbolEffect(.bounce, options: .nonRepeating, value: reduceMotion ? 0 : badge)
+                .foregroundStyle(active ? Palette.selectedControlText : Palette.controlIcon)
+                .frame(width: 34, height: 32)
+                .contentShape(Rectangle())
+                .overlay(alignment: .topTrailing) {
                 if badge > 0 {
-                    Text(badge > 99 ? "99+" : "\(badge)")
-                        .font(.system(size: 8, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, badge > 9 ? 4 : 0)
-                        .frame(minWidth: 14, minHeight: 14)
-                        .background(Palette.red)
-                        .clipShape(Capsule())
-                        .overlay(Capsule().stroke(Palette.opaqueSurface, lineWidth: 1.5))
-                        .offset(x: 2, y: -2)
-                        .transition(.scale.combined(with: .opacity))
+                    Circle()
+                        .fill(Palette.red)
+                        .frame(width: 8, height: 8)
+                        .overlay(Circle().stroke(Palette.opaqueSurface, lineWidth: 1))
+                        .offset(x: -2, y: 3)
+                        .transition(
+                            reduceMotion
+                                ? .opacity
+                                : .scale(scale: 0.35, anchor: .bottomLeading).combined(with: .opacity)
+                        )
                 }
             }
         }
@@ -1436,6 +1491,44 @@ private struct FloatingRoomView: View {
         .help(help)
         .accessibilityLabel(help)
         .accessibilityValue(badge > 0 ? "\(badge) unread" : active ? "Selected" : "")
+    }
+
+    private func incomingMessagePreview(_ message: RoomMessage) -> some View {
+        Button(action: model.showChat) {
+            HStack(spacing: 10) {
+                messageAvatar(message.sender, size: 30)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(message.sender)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Palette.ink)
+                    Text(message.text)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(Palette.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 8)
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Palette.controlIcon)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 42)
+            .background(Palette.messageSurface)
+            .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .stroke(Palette.strokeStrong, lineWidth: 1)
+            )
+            .padding(.horizontal, 10)
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressScaleButtonStyle())
+        .accessibilityLabel("New message from \(message.sender): \(message.text)")
+        .help("Open conversation")
     }
 
     private var queuePanel: some View {
@@ -1574,32 +1667,40 @@ private struct FloatingRoomView: View {
 
     private var chatHistory: some View {
         VStack(spacing: 0) {
-            panelHeader(title: "Conversation", detail: "\(model.messages.count) messages")
+            chatHeader
             Divider().opacity(0.42)
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 12) {
+                    LazyVStack(alignment: .leading, spacing: 6) {
                         if model.messages.isEmpty {
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text("The room is quiet.")
-                                    .font(.system(size: 13, weight: .semibold))
+                            VStack(spacing: 7) {
+                                Image(systemName: "bubble.left.and.bubble.right")
+                                    .font(.system(size: 18, weight: .medium))
+                                    .foregroundStyle(Palette.controlIcon)
+                                Text("Start the conversation")
+                                    .font(.system(size: 12, weight: .semibold))
                                     .foregroundStyle(Palette.ink)
-                                Text("Say something to everyone in the room.")
-                                    .font(.system(size: 11))
+                                Text("Everyone in the room will see it.")
+                                    .font(.system(size: 10, weight: .medium))
                                     .foregroundStyle(Palette.secondary)
                             }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.top, 8)
+                            .frame(maxWidth: .infinity, minHeight: 170, alignment: .center)
                         }
-                        ForEach(model.messages) { message in
-                            floatingMessage(message).id(message.id)
+                        ForEach(Array(model.messages.enumerated()), id: \.element.id) { index, message in
+                            let showsSender = index == 0
+                                || model.messages[index - 1].sender != message.sender
+                            floatingMessage(message, showsSender: showsSender)
+                                .id(message.id)
+                                .transition(messageTransition)
                         }
                     }
-                    .padding(14)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
                 }
+                .scrollIndicators(.hidden)
                 .onChange(of: model.messages.count) {
                     if let last = model.messages.last {
-                        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) {
+                        withAnimation(reduceMotion ? nil : .snappy(duration: 0.24, extraBounce: 0.04)) {
                             proxy.scrollTo(last.id, anchor: .bottom)
                         }
                     }
@@ -1609,69 +1710,137 @@ private struct FloatingRoomView: View {
             messageComposer
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .animation(
+            reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.8),
+            value: model.messages.count
+        )
+    }
+
+    private var chatHeader: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Room chat")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Palette.ink)
+                Text("\(model.participants.count) here · live")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(Palette.secondary)
+            }
+
+            Spacer()
+
+            HStack(spacing: -5) {
+                ForEach(Array(model.participants.prefix(3))) { participant in
+                    messageAvatar(participant.name, size: 22)
+                        .overlay(Circle().stroke(Palette.opaqueSurface, lineWidth: 1.5))
+                }
+            }
+            .accessibilityHidden(true)
+
+            Button(action: model.collapseFloatingBar) {
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Palette.controlIcon)
+                    .frame(width: 32, height: 30)
+            }
+            .buttonStyle(FlatToolButtonStyle(active: false))
+            .help("Collapse")
+            .accessibilityLabel("Collapse")
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 50)
     }
 
     private var messageComposer: some View {
         HStack(spacing: 8) {
-            Image(systemName: "bubble.left")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(composerFocused ? Palette.controlAccent : Palette.secondary)
-            TextField("Message the room", text: $model.draftMessage)
+            messageAvatar(model.currentUserName, size: 26)
+
+            TextField("Message \(model.roomTitle)", text: $model.draftMessage)
                 .textFieldStyle(.plain)
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(Palette.ink)
                 .focused($composerFocused)
                 .onSubmit(model.sendMessage)
-            if hasDraft {
-                Button(action: model.sendMessage) {
-                    Image(systemName: "arrow.up")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(Palette.selectedControlText)
-                        .frame(width: 26, height: 26)
-                        .background(Palette.controlAccent)
-                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                }
-                .buttonStyle(PressScaleButtonStyle())
-                .transition(
-                    reduceMotion
-                        ? .opacity
-                        : .scale(scale: 0.86).combined(with: .opacity)
-                )
-                .help("Send message")
+
+            Button(action: model.sendMessage) {
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(Palette.selectedControlText)
+                    .frame(width: 26, height: 26)
+                    .background(Palette.controlAccent)
+                    .clipShape(Circle())
             }
+            .buttonStyle(PressScaleButtonStyle())
+            .disabled(!hasDraft)
+            .opacity(hasDraft ? 1 : 0.26)
+            .scaleEffect(!reduceMotion && hasDraft ? 1 : 0.9)
+            .help("Send message")
+            .accessibilityLabel("Send message")
         }
-        .padding(.horizontal, 12)
-        .frame(height: 42)
+        .padding(.horizontal, 10)
+        .frame(height: 44)
         .background(Palette.composer)
-        .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 15, style: .continuous)
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .stroke(
                     composerFocused ? Palette.controlAccent : Palette.strokeStrong,
-                    lineWidth: composerFocused ? 2 : 1
+                    lineWidth: 1
                 )
         )
         .padding(10)
         .onTapGesture { composerFocused = true }
-        .animation(panelAnimation, value: hasDraft)
+        .animation(
+            reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.72),
+            value: hasDraft
+        )
     }
 
-    private func floatingMessage(_ message: RoomMessage) -> some View {
+    private func floatingMessage(_ message: RoomMessage, showsSender: Bool) -> some View {
         let own = message.sender == model.currentUserName
-        return VStack(alignment: own ? .trailing : .leading, spacing: 4) {
-            Text(own ? "You" : message.sender)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(Palette.secondary)
-            Text(message.text)
-                .font(.system(size: 12))
-                .foregroundStyle(Palette.ink)
-                .padding(.horizontal, 11)
-                .padding(.vertical, 8)
-                .background(own ? Palette.accentSoft : Palette.messageSurface)
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .textSelection(.enabled)
+        return HStack(alignment: .bottom, spacing: 7) {
+            if own {
+                Spacer(minLength: 74)
+            } else {
+                messageAvatar(message.sender, size: 24)
+                    .opacity(showsSender ? 1 : 0)
+                    .accessibilityHidden(true)
+            }
+
+            VStack(alignment: own ? .trailing : .leading, spacing: 3) {
+                if showsSender, !own {
+                    Text(message.sender)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(Palette.secondary)
+                        .padding(.leading, 3)
+                }
+
+                Text(message.text)
+                    .font(.system(size: 12))
+                    .foregroundStyle(own ? Palette.selectedControlText : Palette.ink)
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 8)
+                    .background(own ? Palette.controlAccent : Palette.messageSurface)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .textSelection(.enabled)
+            }
+
+            if !own {
+                Spacer(minLength: 74)
+            }
         }
-        .frame(maxWidth: .infinity, alignment: own ? .trailing : .leading)
+        .padding(.top, showsSender ? 5 : 0)
+        .frame(maxWidth: .infinity)
+    }
+
+    private func messageAvatar(_ name: String, size: CGFloat) -> some View {
+        Text(String(name.prefix(1)).uppercased())
+            .font(.system(size: size * 0.38, weight: .bold, design: .rounded))
+            .foregroundStyle(Palette.accentText)
+            .frame(width: size, height: size)
+            .background(Palette.accentSoft)
+            .clipShape(Circle())
+            .accessibilityLabel(name)
     }
 
     private var peopleMixer: some View {
@@ -1969,10 +2138,11 @@ private final class FloatingRoomWindowController {
         hostingView.layer?.drawsAsynchronously = true
         panel.contentView = hostingView
 
-        modelObserver = Publishers.CombineLatest3(
+        modelObserver = Publishers.CombineLatest4(
             model.$floatingSection.removeDuplicates(),
             model.$permissionNotice.removeDuplicates(),
-            model.$participants.map(\.count).removeDuplicates()
+            model.$participants.map(\.count).removeDuplicates(),
+            model.$incomingMessagePreview.map { $0?.id }.removeDuplicates()
         )
         .dropFirst()
         .sink { [weak self] _ in
