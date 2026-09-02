@@ -470,12 +470,20 @@ final class HostServer {
     ) -> Bool {
         guard let data = try? coordinatedResyncMessage(nowNanos: nowNanos).encodedLine() else { return false }
         if let targetID {
+            // The broadcaster's local receiver is the room's audible reference.
+            // Resetting it stops the only local playback path while SourceMuteTap
+            // keeps the original application muted. Listener resyncs should align
+            // to that reference, never interrupt it.
+            if targetID == localParticipantID { return true }
             guard let target = clients.values.first(where: { $0.id == targetID }) else { return false }
             send(data, over: target.control)
             return true
         } else {
-            let targets = clients.values.filter { $0.id != nil }
-            guard !targets.isEmpty else { return false }
+            let targets = clients.values.filter {
+                $0.id != nil && $0.id != localParticipantID
+            }
+            // A room containing only the broadcaster is already synchronized.
+            guard !targets.isEmpty else { return localParticipantID != nil }
             for target in targets {
                 send(data, over: target.control)
             }

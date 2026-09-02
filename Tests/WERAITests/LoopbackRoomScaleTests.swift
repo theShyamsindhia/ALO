@@ -225,7 +225,7 @@ struct LoopbackRoomScaleTests {
         #expect(observer.resyncCommandCount == 3)
     }
 
-    @Test("Any participant can manually resync one Mac or the whole room")
+    @Test("Manual resync aligns listeners without interrupting the broadcaster")
     func participantCanRequestManualResync() throws {
         let hostReady = DispatchSemaphore(value: 0)
         let state = PortState()
@@ -235,7 +235,8 @@ struct LoopbackRoomScaleTests {
             listenerReadyHandler: { port in
                 state.set(port)
                 hostReady.signal()
-            }
+            },
+            localParticipantID: "loopback-peer-201"
         )
         try host.start()
         defer { host.stop() }
@@ -260,15 +261,18 @@ struct LoopbackRoomScaleTests {
 
         healthyPeer.requestResync(participantID: nil)
         #expect(waitUntil(timeout: 2) {
-            requester.resyncCommandCount == 1
+            requester.resyncCommandCount == 0
                 && target.resyncCommandCount == 2
                 && healthyPeer.resyncCommandCount == 1
         })
-        let requesterCutover = try #require(requester.resyncCutovers.last)
         let targetCutover = try #require(target.resyncCutovers.last)
         let healthyCutover = try #require(healthyPeer.resyncCutovers.last)
-        #expect(requesterCutover == targetCutover)
         #expect(targetCutover == healthyCutover)
+
+        // Even a direct request cannot reset the broadcaster's loopback output.
+        target.requestResync(participantID: "loopback-peer-201")
+        Thread.sleep(forTimeInterval: 0.1)
+        #expect(requester.resyncCommandCount == 0)
     }
 
     @Test("Broadcaster system playback is the authoritative room state")

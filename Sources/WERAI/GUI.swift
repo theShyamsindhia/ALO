@@ -761,7 +761,7 @@ final class WERAIViewModel: ObservableObject {
 
     func syncAllDevices() {
         if meshSession?.requestResync() == true {
-            statusText = "Syncing every Mac to the room clock"
+            statusText = "Syncing listeners to the broadcaster"
         } else {
             statusText = "Wait for the audio connection, then try syncing again"
         }
