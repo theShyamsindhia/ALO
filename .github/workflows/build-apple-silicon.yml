@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - main
+  release:
+    types:
+      - published
   workflow_dispatch:
 
 permissions:
@@ -35,3 +38,23 @@ jobs:
           name: WERAI-macos-arm64
           path: dist/WERAI-macos-arm64.zip
           if-no-files-found: error
+
+  publish-release:
+    if: github.event_name == 'release'
+    needs: build-arm64
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download verified app
+        uses: actions/download-artifact@v4
+        with:
+          name: WERAI-macos-arm64
+          path: dist
+
+      - name: Attach app to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" dist/WERAI-macos-arm64.zip --clobber

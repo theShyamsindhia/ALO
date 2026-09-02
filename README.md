@@ -109,13 +109,81 @@ new WERAI build does not silently become a different app in macOS privacy settin
 
 ## Verify
 
+Run the complete test suite:
+
 ```sh
 swift test
 ```
 
-The tests cover audio and video framing, room media and queue state, mixer state, MTU
-size, packetization timing, clock-offset calculation, malformed input, and fragmented
-messages.
+Run only the fast, deterministic timing model:
+
+```sh
+swift test --filter RoomScaleLatencyReproductionTests
+```
+
+Run the realistic single-Mac room test:
+
+```sh
+swift test --filter LoopbackRoomScaleTests
+```
+
+The loopback suite starts the real host plus headless TCP and UDP peers on one Mac. It
+compares an unconstrained room, one receiver on a constrained link, eight receivers
+with unbounded buffering, and eight receivers with bounded buffering. It also exercises
+late-playback detection, receiver telemetry, and automatic hard resynchronization. It
+does not need Screen Recording permission or additional Macs.
+
+Useful output from the loopback test includes:
+
+- **Final packet age:** must remain below the room's active playout delay.
+- **Audible lateness:** should remain at zero; a positive value means playback missed
+  the shared timeline.
+- **Arrival skew:** shows how far receivers diverged while receiving the same packet.
+- **Packets delivered:** exposes the audio-quality cost of dropping stale packets.
+- **Resync commands:** confirms that the host detected late receivers and requested
+  live recovery.
+
+### Fine-tune synchronization
+
+Change one control at a time and compare it with the unbounded baseline in
+`LoopbackRoomScaleTests`:
+
+- `RoomTiming.defaultPlayoutDelayNanos`, `maximumPlayoutDelayNanos`, and
+  `timingStepNanos` control the adaptive shared room buffer.
+- `SynchronizedPlayer.hardResyncThresholdNanos` controls when gradual varispeed
+  correction gives way to a hard re-anchor.
+- `HostServer`'s `boundedLatest(maxInFlight:)` default controls how many packets each
+  receiver may have outstanding before stale pending audio is replaced.
+- `linkBitsPerSecond`, peer count, callback count, and callback cadence in
+  `LoopbackRoomScaleTests` define repeatable congestion scenarios.
+
+After tuning, run both focused suites at least twice, followed by `swift test`. A useful
+change should keep the direct eight-peer control lossless, reduce packet age and audible
+lateness in the constrained eight-peer case, and avoid excessive hard resynchronizations.
+
+The broader tests also cover audio and video framing, room media and queue state, mixer
+state, packetization timing, clock offset and drift, adaptive jitter handling, malformed
+input, and fragmented messages.
+
+## GitHub builds and releases
+
+Every push to `main` runs **Build Apple Silicon app** on an Apple Silicon GitHub runner.
+The resulting `WERAI-macos-arm64.zip` is available from the workflow run's **Artifacts**
+section.
+
+To publish a downloadable build on the repository's **Releases** page:
+
+1. Update `CFBundleShortVersionString` and `CFBundleVersion` in `Resources/Info.plist`.
+2. Commit and push the version change to `main`.
+3. Create a tag and publish a GitHub Release for that tag, either in GitHub or with:
+
+   ```sh
+   gh release create v0.9.0 --target main --generate-notes
+   ```
+
+Publishing the release triggers the same arm64 build and automatically attaches
+`WERAI-macos-arm64.zip` to the release. The app is ad-hoc signed for local distribution;
+it is not notarized with an Apple Developer ID.
 
 ## License
 
