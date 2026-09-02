@@ -39,7 +39,40 @@ jobs:
           WERAI_CODESIGN_IDENTITY: ${{ vars.WERAI_CODESIGN_IDENTITY }}
         run: ./Scripts/package.sh --arm64-only
 
-      - name: Verify app architecture and Developer ID signature
+      - name: Notarize and staple app and disk image
+        env:
+          APP_STORE_CONNECT_API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
+          APP_STORE_CONNECT_KEY_ID: ${{ vars.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ vars.APP_STORE_CONNECT_ISSUER_ID }}
+          WERAI_CODESIGN_IDENTITY: ${{ vars.WERAI_CODESIGN_IDENTITY }}
+        run: |
+          test -n "$APP_STORE_CONNECT_API_KEY_BASE64"
+          test -n "$APP_STORE_CONNECT_KEY_ID"
+          test -n "$APP_STORE_CONNECT_ISSUER_ID"
+          api_key_path="$RUNNER_TEMP/AuthKey_$APP_STORE_CONNECT_KEY_ID.p8"
+          trap 'rm -f "$api_key_path"' EXIT
+          printf '%s' "$APP_STORE_CONNECT_API_KEY_BASE64" | /usr/bin/base64 -D > "$api_key_path"
+
+          xcrun notarytool submit dist/WERAI-macos-arm64.zip \
+            --key "$api_key_path" \
+            --key-id "$APP_STORE_CONNECT_KEY_ID" \
+            --issuer "$APP_STORE_CONNECT_ISSUER_ID" \
+            --wait \
+            --timeout 15m
+          xcrun stapler staple dist/WERAI.app
+          ./Scripts/create_distribution_archives.sh arm64
+          codesign --force --timestamp --sign "$WERAI_CODESIGN_IDENTITY" \
+            dist/WERAI-macos-arm64.dmg
+
+          xcrun notarytool submit dist/WERAI-macos-arm64.dmg \
+            --key "$api_key_path" \
+            --key-id "$APP_STORE_CONNECT_KEY_ID" \
+            --issuer "$APP_STORE_CONNECT_ISSUER_ID" \
+            --wait \
+            --timeout 15m
+          xcrun stapler staple dist/WERAI-macos-arm64.dmg
+
+      - name: Verify architecture, signature, and Gatekeeper acceptance
         env:
           APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
         run: |
@@ -50,12 +83,18 @@ jobs:
           signature="$(codesign -dvvv dist/WERAI.app 2>&1)"
           grep -F "Authority=Developer ID Application:" <<< "$signature"
           grep -F "TeamIdentifier=$APPLE_TEAM_ID" <<< "$signature"
+          codesign --verify --strict --verbose=2 dist/WERAI-macos-arm64.dmg
+          xcrun stapler validate dist/WERAI.app
+          xcrun stapler validate dist/WERAI-macos-arm64.dmg
+          spctl --assess --type execute --verbose=4 dist/WERAI.app
 
       - name: Upload app
         uses: actions/upload-artifact@v4
         with:
           name: WERAI-macos-arm64
-          path: dist/WERAI-macos-arm64.zip
+          path: |
+            dist/WERAI-macos-arm64.zip
+            dist/WERAI-macos-arm64.dmg
           if-no-files-found: error
 
   publish-release:
@@ -77,4 +116,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$RELEASE_TAG" dist/WERAI-macos-arm64.zip --clobber
+        run: |
+          gh release upload "$RELEASE_TAG" \
+            dist/WERAI-macos-arm64.zip \
+            dist/WERAI-macos-arm64.dmg \
+            --clobber

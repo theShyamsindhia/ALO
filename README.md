@@ -187,9 +187,17 @@ input, and fragmented messages.
 
 Publishing a GitHub Release runs **Build Apple Silicon app** on an Apple Silicon GitHub
 runner. The workflow imports the repository's encrypted Developer ID certificate into an
-ephemeral keychain, enables the hardened runtime, verifies the signature and Team ID,
-and deletes that keychain before the job ends. Manual workflow dispatch remains available
-for signing diagnostics.
+ephemeral keychain, enables the hardened runtime, submits the app and disk image to Apple's
+notarization service, staples the approval tickets, and verifies Gatekeeper acceptance.
+Manual workflow dispatch remains available for signing diagnostics.
+
+The repository must provide `DEVELOPER_ID_P12_BASE64` and
+`DEVELOPER_ID_P12_PASSWORD` as Actions secrets, plus
+`APP_STORE_CONNECT_API_KEY_BASE64` as an Actions secret. Configure
+`WERAI_CODESIGN_IDENTITY`, `APPLE_TEAM_ID`, `APP_STORE_CONNECT_KEY_ID`, and
+`APP_STORE_CONNECT_ISSUER_ID` as Actions variables. Use an App Store Connect
+team key (Developer access or higher), because individual API keys cannot submit
+software to Apple's notarization service.
 
 To publish a downloadable build on the repository's **Releases** page:
 
@@ -201,9 +209,8 @@ To publish a downloadable build on the repository's **Releases** page:
    gh release create v0.9.0 --target main --generate-notes
    ```
 
-Publishing the release automatically attaches the Developer ID-signed
-`WERAI-macos-arm64.zip` to the release. The current workflow signs but does not yet submit
-the app to Apple's notarization service.
+Publishing the release automatically attaches notarized and stapled
+`WERAI-macos-arm64.zip` and `WERAI-macos-arm64.dmg` downloads to the release.
 
 If an older ad-hoc-signed copy appears enabled under **Privacy & Security → Screen &
 System Audio Recording** but still cannot start a room, remove the old WERAI entries,

@@ -22,7 +22,6 @@ mkdir -p dist
 binary="dist/werai"
 cli_archive="dist/werai-cli-macos-$archive_suffix.zip"
 app="dist/WERAI.app"
-app_archive="dist/WERAI-macos-$archive_suffix.zip"
 codesign_identity="${WERAI_CODESIGN_IDENTITY:--}"
 codesign_arguments=(--force --sign "$codesign_identity" --identifier in.werai.audio)
 if [[ "$codesign_identity" != "-" ]]; then
@@ -108,11 +107,6 @@ else
 fi
 codesign --verify --deep --strict --verbose=2 "$app"
 
-rm -f "$cli_archive" "$app_archive"
+rm -f "$cli_archive"
 ditto -c -k "$binary" "$cli_archive"
-(
-    cd dist
-    zip -qry "WERAI-macos-$archive_suffix.zip" WERAI.app
-)
-
-echo "Created $app_archive"
+./Scripts/create_distribution_archives.sh "$archive_suffix"
