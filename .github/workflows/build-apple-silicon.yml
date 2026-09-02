@@ -42,10 +42,9 @@ jobs:
             -P "$DEVELOPER_ID_P12_PASSWORD" \
             -T /usr/bin/codesign
           security set-key-partition-list \
-            -S apple: \
+            -S apple:,codesign: \
             -s \
             -k "$keychain_password" \
-            -l "$WERAI_CODESIGN_IDENTITY" \
             "$keychain_path"
           security list-keychains -d user -s "$keychain_path"
           security default-keychain -d user -s "$keychain_path"
