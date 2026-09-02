@@ -545,8 +545,8 @@ final class WERAIViewModel: ObservableObject {
     }
     var roomSyncLabel: String {
         if !hasBroadcaster { return "No broadcaster" }
-        if audioIsRendering { return "Synced" }
         if nowPlaying.isPlaying == false { return "Paused" }
+        if audioIsRendering { return "Synced" }
         return nowPlaying.isEmpty ? "Waiting for audio" : "Recovering audio…"
     }
     var canSelectVideo: Bool { isHost || roomHasVideo }
@@ -1213,9 +1213,8 @@ final class WERAIViewModel: ObservableObject {
         audioIsRendering: Bool,
         hasMedia: Bool
     ) -> Bool {
-        if audioIsRendering { return true }
         guard hasMedia else { return false }
-        return metadataIsPlaying ?? true
+        return metadataIsPlaying ?? audioIsRendering
     }
 }
 

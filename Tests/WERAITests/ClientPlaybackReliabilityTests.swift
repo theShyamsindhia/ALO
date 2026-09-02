@@ -34,7 +34,7 @@ struct ClientPlaybackReliabilityTests {
         #expect(RoomRemoteCommandCenter.effectivePlaybackState(
             metadataIsPlaying: false,
             streamIsActive: true
-        ) == true)
+        ) == false)
         #expect(RoomRemoteCommandCenter.effectivePlaybackState(
             metadataIsPlaying: false,
             streamIsActive: false
@@ -64,8 +64,8 @@ struct ClientPlaybackReliabilityTests {
         #expect(WERAIViewModel.renderingState(for: "Sharing system audio") == nil)
     }
 
-    @Test @MainActor func liveAudioOverridesStalePausedMetadata() {
-        #expect(WERAIViewModel.effectivePlaybackState(
+    @Test @MainActor func broadcasterMetadataIsAuthoritativeOverRenderedAudio() {
+        #expect(!WERAIViewModel.effectivePlaybackState(
             metadataIsPlaying: false,
             audioIsRendering: true,
             hasMedia: true

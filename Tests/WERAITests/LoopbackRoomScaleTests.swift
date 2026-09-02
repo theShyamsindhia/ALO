@@ -194,6 +194,8 @@ struct LoopbackRoomScaleTests {
         peer.setRoomPlayback(playing: false)
         #expect(commandReceived.wait(timeout: .now() + 2) == .success)
         #expect(requestedCommands.values == [.pause])
+        #expect(peer.resyncCommandCount == 0)
+        host.setNowPlaying(NowPlayingMedia(title: "Test source", isPlaying: false))
         #expect(waitUntil(timeout: 2) { peer.playbackStates.contains(false) })
         #expect(waitUntil(timeout: 2) { observer.roomPlaybackStates.contains(false) })
         #expect(waitUntil(timeout: 2) {
@@ -203,6 +205,8 @@ struct LoopbackRoomScaleTests {
         peer.setRoomPlayback(playing: true)
         #expect(commandReceived.wait(timeout: .now() + 2) == .success)
         #expect(requestedCommands.values == [.pause, .play])
+        #expect(peer.resyncCommandCount == 1)
+        host.setNowPlaying(NowPlayingMedia(title: "Test source", isPlaying: true))
         #expect(waitUntil(timeout: 2) { observer.playbackStates.contains(true) })
         #expect(waitUntil(timeout: 2) { peer.roomPlaybackStates.contains(true) })
         #expect(waitUntil(timeout: 2) {
@@ -215,10 +219,10 @@ struct LoopbackRoomScaleTests {
         #expect(peer.resyncCommandCount == 2)
         #expect(observer.resyncCommandCount == 2)
 
-        host.setNowPlaying(NowPlayingMedia(isPlaying: false))
+        host.setNowPlaying(NowPlayingMedia(title: "Test source", isPlaying: false))
         #expect(waitUntil(timeout: 2) { observer.playbackStates.last == false })
-        #expect(peer.resyncCommandCount == 2)
-        #expect(observer.resyncCommandCount == 2)
+        #expect(waitUntil(timeout: 2) { peer.resyncCommandCount == 3 })
+        #expect(observer.resyncCommandCount == 3)
     }
 
     @Test("Any participant can manually resync one Mac or the whole room")
@@ -265,6 +269,46 @@ struct LoopbackRoomScaleTests {
         let healthyCutover = try #require(healthyPeer.resyncCutovers.last)
         #expect(requesterCutover == targetCutover)
         #expect(targetCutover == healthyCutover)
+    }
+
+    @Test("Broadcaster system playback is the authoritative room state")
+    func broadcasterSystemPlaybackDrivesRoomWithoutALOCommand() throws {
+        let hostReady = DispatchSemaphore(value: 0)
+        let state = PortState()
+        let requestedCommands = LockedMediaCommands()
+        let host = HostServer(
+            roomName: "System playback source of truth \(UUID().uuidString)",
+            advertise: false,
+            listenerReadyHandler: { port in
+                state.set(port)
+                hostReady.signal()
+            },
+            playbackRequestHandler: { command in
+                requestedCommands.append(command)
+                return true
+            }
+        )
+        try host.start()
+        defer { host.stop() }
+        guard hostReady.wait(timeout: .now() + 3) == .success,
+              let hostPort = state.port
+        else { throw LoopbackTestError.hostDidNotStart }
+
+        let listener = HeadlessLoopbackPeer(index: 351)
+        try listener.start(hostPort: hostPort)
+        defer { listener.stop() }
+        guard listener.waitUntilJoined(timeout: 3) else { throw LoopbackTestError.peerDidNotJoin }
+
+        // These are NowPlayingMonitor updates caused by media keys acting on the
+        // broadcaster's player directly. No ALO command is involved.
+        host.setNowPlaying(NowPlayingMedia(title: "System source", isPlaying: false))
+        #expect(waitUntil(timeout: 2) { listener.roomPlaybackStates.last == false })
+        #expect(listener.resyncCommandCount == 1)
+
+        host.setNowPlaying(NowPlayingMedia(title: "System source", isPlaying: true))
+        #expect(waitUntil(timeout: 2) { listener.roomPlaybackStates.last == true })
+        #expect(waitUntil(timeout: 2) { listener.resyncCommandCount == 2 })
+        #expect(requestedCommands.values.isEmpty)
     }
 
     @Test("A rejected source command does not publish a false room state")
@@ -333,14 +377,24 @@ struct LoopbackRoomScaleTests {
         }
 
         host.sendRoomMediaCommand(.pause)
+        #expect(waitUntil(timeout: 2) { requestedCommands.values.count == 1 })
+        host.setNowPlaying(NowPlayingMedia(title: "Test source", isPlaying: false))
         #expect(waitUntil(timeout: 2) { observer.roomPlaybackStates.last == false })
         host.sendRoomMediaCommand(.play)
+        #expect(waitUntil(timeout: 2) { requestedCommands.values.count == 2 })
+        host.setNowPlaying(NowPlayingMedia(title: "Test source", isPlaying: true))
         #expect(waitUntil(timeout: 2) { observer.roomPlaybackStates.last == true })
         listener.sendMediaCommand(.pause)
+        #expect(waitUntil(timeout: 2) { requestedCommands.values.count == 3 })
+        host.setNowPlaying(NowPlayingMedia(title: "Test source", isPlaying: false))
         #expect(waitUntil(timeout: 2) { observer.roomPlaybackStates.last == false })
         listener.sendMediaCommand(.play)
+        #expect(waitUntil(timeout: 2) { requestedCommands.values.count == 4 })
+        host.setNowPlaying(NowPlayingMedia(title: "Test source", isPlaying: true))
         #expect(waitUntil(timeout: 2) { observer.roomPlaybackStates.last == true })
         host.sendRoomMediaCommand(.pause)
+        #expect(waitUntil(timeout: 2) { requestedCommands.values.count == 5 })
+        host.setNowPlaying(NowPlayingMedia(title: "Test source", isPlaying: false))
         #expect(waitUntil(timeout: 2) { observer.roomPlaybackStates.last == false })
 
         #expect(requestedCommands.values == [.pause, .play, .pause, .play, .pause])

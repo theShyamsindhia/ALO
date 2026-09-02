@@ -189,19 +189,37 @@ final class HostServer {
     func setNowPlaying(_ media: NowPlayingMedia) {
         queue.async { [weak self] in
             guard let self else { return }
-            let presentedMedia = self.roomPlaybackIsPlaying
-                ? media
-                : NowPlayingMedia(
-                    title: media.title,
-                    artist: media.artist,
-                    album: media.album,
-                    artworkData: media.artworkData,
-                    sourceURL: media.sourceURL,
-                    isPlaying: false
-                )
-            guard presentedMedia != self.nowPlaying else { return }
-            self.nowPlaying = presentedMedia
-            self.broadcast(ControlMessage(type: "now_playing", nowPlaying: presentedMedia))
+            let sourcePlaybackChanged = media.isPlaying.map {
+                $0 != self.roomPlaybackIsPlaying
+            } ?? false
+            if let sourceIsPlaying = media.isPlaying, sourcePlaybackChanged {
+                // The broadcaster's real macOS media session is the sole source
+                // of truth. ALO and listener controls only request a change; the
+                // room changes after Now Playing confirms what the source did.
+                self.roomPlaybackIsPlaying = sourceIsPlaying
+                self.packetizer.discardPendingSamples()
+            }
+            let presentedMedia = NowPlayingMedia(
+                title: media.title,
+                artist: media.artist,
+                album: media.album,
+                artworkData: media.artworkData,
+                sourceURL: media.sourceURL,
+                isPlaying: media.isPlaying ?? self.roomPlaybackIsPlaying
+            )
+            if presentedMedia != self.nowPlaying {
+                self.nowPlaying = presentedMedia
+                self.broadcast(ControlMessage(type: "now_playing", nowPlaying: presentedMedia))
+            }
+            if sourcePlaybackChanged {
+                self.broadcast(ControlMessage(
+                    type: "room_playback",
+                    isPlaying: self.roomPlaybackIsPlaying
+                ))
+                // A confirmed play always starts all receivers on the same fresh
+                // source position. Pause clears anything already scheduled.
+                self.broadcast(self.coordinatedResyncMessage())
+            }
         }
     }
 
@@ -439,32 +457,11 @@ final class HostServer {
     }
 
     private func applyRoomMediaCommand(_ command: RoomMediaCommand) -> Bool {
-        let sourceAccepted = playbackRequestHandler?(command) == true
-        let isPlaying: Bool
-        switch command {
-        case .play: isPlaying = true
-        case .pause: isPlaying = false
-        case .togglePlayPause: isPlaying = !roomPlaybackIsPlaying
-        case .nextTrack, .previousTrack:
-            return sourceAccepted
-        }
-        guard sourceAccepted else { return false }
-        roomPlaybackIsPlaying = isPlaying
-        if !isPlaying { packetizer.discardPendingSamples() }
-        nowPlaying = NowPlayingMedia(
-            title: nowPlaying.title,
-            artist: nowPlaying.artist,
-            album: nowPlaying.album,
-            artworkData: nowPlaying.artworkData,
-            sourceURL: nowPlaying.sourceURL,
-            isPlaying: isPlaying
-        )
-        broadcast(ControlMessage(type: "now_playing", nowPlaying: nowPlaying))
-        broadcast(ControlMessage(type: "room_playback", isPlaying: isPlaying))
-        // Pause discards queued sound immediately; play starts every receiver
-        // from the same future point in the captured stream.
-        broadcast(coordinatedResyncMessage())
-        return true
+        // Do not maintain a second, synthetic room state here. macOS may accept
+        // a media command without the player changing state. NowPlayingMonitor
+        // will call setNowPlaying only when the broadcaster's source actually
+        // pauses or plays, and that confirmed state is what listeners receive.
+        playbackRequestHandler?(command) == true
     }
 
     private func sendCoordinatedResync(

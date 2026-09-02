@@ -131,7 +131,7 @@ final class RoomRemoteCommandCenter {
     }
 
     static func effectivePlaybackState(metadataIsPlaying: Bool?, streamIsActive: Bool) -> Bool? {
-        streamIsActive ? true : metadataIsPlaying
+        metadataIsPlaying ?? (streamIsActive ? true : nil)
     }
 
     private static func replacingPlaybackState(
