@@ -14,6 +14,8 @@ final class HostServer {
         var name: String?
         var volume: Double = 1
         var isMuted = false
+        var recommendedPlayoutDelayNanos = RoomTiming.defaultPlayoutDelayNanos
+        var lastSyncReportNanos: UInt64?
 
         init(control: NWConnection) {
             self.control = control
@@ -30,6 +32,8 @@ final class HostServer {
     private var videoEnabled = false
     private var nowPlaying = NowPlayingMedia()
     private var mediaQueue = [RoomQueueItem]()
+    private var groupPlayoutDelayNanos = RoomTiming.defaultPlayoutDelayNanos
+    private var lastGroupDelayAdjustmentNanos: UInt64 = 0
 
     init(
         roomName: String,
@@ -238,6 +242,7 @@ final class HostServer {
                 client.control.send(content: data, completion: .contentProcessed { _ in })
             }
             sendQueue(to: client)
+            sendTiming(to: client)
 
         case "ping":
             guard let id = message.id, let clientNanos = message.clientNanos else { return }
@@ -250,6 +255,12 @@ final class HostServer {
             if let data = try? pong.encodedLine() {
                 client.control.send(content: data, completion: .contentProcessed { _ in })
             }
+
+        case "sync_report":
+            guard client.id != nil, let recommendation = message.playoutDelayNanos else { return }
+            client.recommendedPlayoutDelayNanos = RoomTiming.clampedPlayoutDelay(recommendation)
+            client.lastSyncReportNanos = MonotonicClock.nowNanos()
+            updateGroupTiming()
 
         case "chat":
             let trimmed = message.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -307,6 +318,7 @@ final class HostServer {
         client.video?.cancel()
         receiverCountHandler?(participantNames.count)
         broadcastPresence()
+        updateGroupTiming()
     }
 
     private var participantNames: [String] {
@@ -351,6 +363,45 @@ final class HostServer {
             mediaQueue: mediaQueue
         ).encodedLine() else { return }
         client.control.send(content: data, completion: .contentProcessed { _ in })
+    }
+
+    private func sendTiming(to client: Client) {
+        guard let data = try? ControlMessage(
+            type: "sync_timing",
+            playoutDelayNanos: groupPlayoutDelayNanos
+        ).encodedLine() else { return }
+        client.control.send(content: data, completion: .contentProcessed { _ in })
+    }
+
+    private func updateGroupTiming() {
+        let now = MonotonicClock.nowNanos()
+        let activeRecommendations = clients.values.compactMap { client -> UInt64? in
+            guard let reportedAt = client.lastSyncReportNanos,
+                  now >= reportedAt,
+                  now - reportedAt <= 5_000_000_000
+            else { return nil }
+            return client.recommendedPlayoutDelayNanos
+        }
+        let desired = activeRecommendations.max() ?? RoomTiming.defaultPlayoutDelayNanos
+
+        let next: UInt64
+        if desired > groupPlayoutDelayNanos {
+            next = desired
+        } else if desired < groupPlayoutDelayNanos,
+                  now - lastGroupDelayAdjustmentNanos >= 2_000_000_000 {
+            next = max(desired, groupPlayoutDelayNanos - 10_000_000)
+        } else {
+            return
+        }
+        guard next != groupPlayoutDelayNanos else { return }
+
+        groupPlayoutDelayNanos = next
+        lastGroupDelayAdjustmentNanos = now
+        broadcast(ControlMessage(
+            type: "sync_timing",
+            playoutDelayNanos: groupPlayoutDelayNanos
+        ))
+        print("Room timing adjusted to \(groupPlayoutDelayNanos / 1_000_000) ms.")
     }
 
     private func broadcastQueue() {

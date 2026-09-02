@@ -175,11 +175,24 @@ final class VideoDecoder {
     private var formatDescription: CMVideoFormatDescription?
     private var currentParameterSets: [Data] = []
     private var hasDecodedFrame = false
-
-    var clockOffsetNanos: Int64?
+    private let timingLock = NSLock()
+    private var clockOffsetNanos: Int64?
+    private var targetLatencyNanos = RoomTiming.defaultPlayoutDelayNanos
 
     init(imageHandler: @escaping ImageHandler) {
         self.imageHandler = imageHandler
+    }
+
+    func updateClockOffsetNanos(_ nanos: Int64) {
+        timingLock.lock()
+        clockOffsetNanos = nanos
+        timingLock.unlock()
+    }
+
+    func setTargetLatencyNanos(_ nanos: UInt64) {
+        timingLock.lock()
+        targetLatencyNanos = RoomTiming.clampedPlayoutDelay(nanos)
+        timingLock.unlock()
     }
 
     func accept(_ frame: VideoFrame) {
@@ -278,11 +291,15 @@ final class VideoDecoder {
     }
 
     private func present(_ image: CGImage, captureTimeNanos: UInt64) {
-        guard let offset = clockOffsetNanos else { return }
+        timingLock.lock()
+        let offset = clockOffsetNanos
+        let delay = targetLatencyNanos
+        timingLock.unlock()
+        guard let offset else { return }
         let localCapture = offset >= 0
             ? captureTimeNanos > UInt64(offset) ? captureTimeNanos - UInt64(offset) : 0
             : captureTimeNanos &+ UInt64(-offset)
-        let target = localCapture &+ SynchronizedPlayer.targetLatencyNanos
+        let target = localCapture &+ delay
         let now = MonotonicClock.nowNanos()
         if target <= now {
             imageHandler(image)

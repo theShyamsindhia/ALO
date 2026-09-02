@@ -81,6 +81,7 @@ public struct ControlMessage: Codable, Sendable {
     public let id: UInt64?
     public let clientNanos: UInt64?
     public let hostNanos: UInt64?
+    public let playoutDelayNanos: UInt64?
     public let sender: String?
     public let text: String?
     public let sentNanos: UInt64?
@@ -104,6 +105,7 @@ public struct ControlMessage: Codable, Sendable {
         id: UInt64? = nil,
         clientNanos: UInt64? = nil,
         hostNanos: UInt64? = nil,
+        playoutDelayNanos: UInt64? = nil,
         sender: String? = nil,
         text: String? = nil,
         sentNanos: UInt64? = nil,
@@ -126,6 +128,7 @@ public struct ControlMessage: Codable, Sendable {
         self.id = id
         self.clientNanos = clientNanos
         self.hostNanos = hostNanos
+        self.playoutDelayNanos = playoutDelayNanos
         self.sender = sender
         self.text = text
         self.sentNanos = sentNanos

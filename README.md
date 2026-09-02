@@ -88,11 +88,15 @@ new WERAI build does not silently become a different app in macOS privacy settin
 
 ## How synchronization works
 
-- Eight rapid clock samples are taken when a Mac joins; the lowest-latency samples are
-  combined to reject Wi-Fi spikes.
-- Group latency is intentionally 250 ms. Output-device latency is measured per Mac,
-  and long-running clock drift is corrected gradually by at most 0.2%.
-- Video uses the same capture timestamps and 250 ms target as audio, preserving lip sync.
+- Eight rapid clock samples are taken when a Mac joins, followed by a continuous sample
+  every second. A low-latency clock model estimates both offset and drift while rejecting
+  Wi-Fi spikes.
+- The room shares one adaptive playout target. It stays at a safe 250 ms on a healthy LAN
+  and grows only when the weakest active connection reports sustained jitter. Reductions
+  happen slowly so the room never snaps backward in time.
+- Output-device latency is measured per Mac. Remaining error is corrected 20 times per
+  second with a smoothed varispeed adjustment capped at 0.2%.
+- Video follows the same room target and capture timestamps as audio, preserving lip sync.
 - Audio uses about 1.54 Mb/s per receiving Mac. Video targets about 4 Mb/s at up to
   1280×720 and 30 fps using Apple’s hardware H.264 encoder.
 - Packet loss becomes a short silence rather than delaying every receiver.

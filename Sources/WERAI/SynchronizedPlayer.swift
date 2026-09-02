@@ -3,8 +3,6 @@ import Foundation
 import WERAICore
 
 final class SynchronizedPlayer {
-    static let targetLatencyNanos: UInt64 = 250_000_000
-
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private let varispeed = AVAudioUnitVarispeed()
@@ -15,6 +13,8 @@ final class SynchronizedPlayer {
     private var anchorCaptureNanos: UInt64?
     private var hasStarted = false
     private var outputLatencyNanos: UInt64 = 0
+    private var targetLatencyNanos = RoomTiming.defaultPlayoutDelayNanos
+    private var smoothedCorrection = 0.0
     private let playbackStarted: (() -> Void)?
 
     var clockOffsetNanos: Int64?
@@ -62,14 +62,25 @@ final class SynchronizedPlayer {
         let renderLocalNanos = MonotonicClock.ticksToNanos(renderTime.hostTime)
         let renderHostNanos = addSigned(renderLocalNanos, offset)
         let audibleHostNanos = renderHostNanos &+ outputLatencyNanos
-        guard audibleHostNanos >= anchorCaptureNanos + Self.targetLatencyNanos else { return }
-
-        let expectedFrames = Double(audibleHostNanos - anchorCaptureNanos - Self.targetLatencyNanos)
+        let timelineStart = anchorCaptureNanos &+ targetLatencyNanos
+        let expectedNanos = audibleHostNanos > timelineStart
+            ? audibleHostNanos - timelineStart
+            : 0
+        let expectedFrames = Double(expectedNanos)
             * Double(AudioPacket.sampleRate) / 1_000_000_000
         let actualFrame = Double(anchorFrameIndex) + Double(playerTime.sampleTime)
         let errorFrames = Double(anchorFrameIndex) + expectedFrames - actualFrame
-        let correction = max(-0.002, min(0.002, errorFrames / Double(AudioPacket.sampleRate) * 0.02))
-        varispeed.rate = Float(1 + correction)
+        let desiredCorrection = abs(errorFrames) < 24
+            ? 0
+            : max(-0.002, min(0.002, errorFrames / Double(AudioPacket.sampleRate) * 0.02))
+        smoothedCorrection += (desiredCorrection - smoothedCorrection) * 0.12
+        if abs(smoothedCorrection) < 0.000_005 {
+            smoothedCorrection = 0
+        }
+        let rate = Float(1 + smoothedCorrection)
+        if abs(varispeed.rate - rate) > 0.000_005 {
+            varispeed.rate = rate
+        }
     }
 
     private func drain() {
@@ -82,7 +93,7 @@ final class SynchronizedPlayer {
             }
 
             let desiredAudibleNanos = addSigned(packet.captureTimeNanos, -offset)
-                &+ Self.targetLatencyNanos
+                &+ targetLatencyNanos
             let desiredRenderNanos = desiredAudibleNanos > outputLatencyNanos
                 ? desiredAudibleNanos - outputLatencyNanos
                 : desiredAudibleNanos
@@ -104,7 +115,7 @@ final class SynchronizedPlayer {
                 anchorCaptureNanos = packet.captureTimeNanos
                 player.play(at: AVAudioTime(hostTime: MonotonicClock.nanosToTicks(desiredRenderNanos)))
                 hasStarted = true
-                print("Playback synchronized (\(Self.targetLatencyNanos / 1_000_000) ms network buffer).")
+                print("Playback synchronized (\(targetLatencyNanos / 1_000_000) ms room buffer).")
                 playbackStarted?()
             }
             expectedSequence = sequence &+ 1
@@ -117,6 +128,12 @@ final class SynchronizedPlayer {
         pending.removeAll()
         expectedSequence = nil
         hasStarted = false
+        smoothedCorrection = 0
+        varispeed.rate = 1
+    }
+
+    func setTargetLatencyNanos(_ nanos: UInt64) {
+        targetLatencyNanos = RoomTiming.clampedPlayoutDelay(nanos)
     }
 
     func setLevel(volume: Double, muted: Bool) {
@@ -130,7 +147,7 @@ final class SynchronizedPlayer {
         else { return }
 
         let nextRenderNanos = addSigned(next.captureTimeNanos, -offset)
-            &+ Self.targetLatencyNanos
+            &+ targetLatencyNanos
         guard nextRenderNanos <= MonotonicClock.nowNanos() + 50_000_000 else { return }
 
         let silence = [Int16](

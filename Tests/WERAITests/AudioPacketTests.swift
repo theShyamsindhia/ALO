@@ -132,6 +132,70 @@ struct AudioPacketTests {
         #expect(!clock.isReady)
     }
 
+    @Test func clockModelTracksContinuousDrift() throws {
+        let clock = ClockSynchronizer()
+        let baseOffset: UInt64 = 20_000_000
+
+        for index in 0..<24 {
+            let startedAt = 1_000_000_000 + UInt64(index) * 1_000_000_000
+            let ping = clock.makePing(at: startedAt)
+            let receivedAt = startedAt + 2_000_000
+            let midpoint = startedAt + 1_000_000
+            let driftingOffset = baseOffset + UInt64(index) * 20_000
+            let pong = ControlMessage(
+                type: "pong",
+                id: ping.id,
+                clientNanos: ping.clientNanos,
+                hostNanos: midpoint + driftingOffset
+            )
+            #expect(clock.acceptPong(pong, receivedAt: receivedAt))
+        }
+
+        #expect(clock.isReady)
+        #expect(clock.driftPartsPerMillion > 15)
+        #expect(clock.driftPartsPerMillion < 22)
+        let now = UInt64(24_001_000_000)
+        let later = now + 10_000_000_000
+        let projectedChange = (clock.offsetNanos(at: later) ?? 0) - (clock.offsetNanos(at: now) ?? 0)
+        #expect(projectedChange > 150_000)
+        #expect(projectedChange < 220_000)
+    }
+
+    @Test func roomTimingGrowsOnlyForUnstableNetwork() throws {
+        let stable = NetworkJitterEstimator()
+        let unstable = NetworkJitterEstimator()
+
+        for index in 0..<100 {
+            let capture = 1_000_000_000 + UInt64(index) * 5_000_000
+            stable.observe(
+                captureTimeNanos: capture,
+                receivedAt: capture + 5_000_000,
+                clockOffsetNanos: 0
+            )
+            unstable.observe(
+                captureTimeNanos: capture,
+                receivedAt: capture + 5_000_000 + UInt64(index % 20) * 3_000_000,
+                clockOffsetNanos: 0
+            )
+        }
+
+        #expect(stable.recommendedPlayoutDelayNanos(roundTripNanos: 4_000_000) == 250_000_000)
+        #expect(unstable.jitterNanos >= 45_000_000)
+        #expect(unstable.recommendedPlayoutDelayNanos(roundTripNanos: 20_000_000) > 250_000_000)
+        #expect(RoomTiming.clampedPlayoutDelay(1_000_000_000) == 600_000_000)
+    }
+
+    @Test func synchronizationReportsRoundTrip() throws {
+        let decoder = ControlLineDecoder()
+        let report = try ControlMessage(
+            type: "sync_report",
+            playoutDelayNanos: 315_000_000
+        ).encodedLine()
+
+        let decoded = decoder.append(report).first
+        #expect(decoded?.playoutDelayNanos == 315_000_000)
+    }
+
     @Test func videoFramesSurviveArbitraryStreamChunks() throws {
         let first = VideoFrame(
             captureTimeNanos: 99,

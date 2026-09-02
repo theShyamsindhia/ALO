@@ -16,6 +16,7 @@ final class Receiver {
     private let chatHandler: ((_ sender: String, _ text: String, _ sentNanos: UInt64) -> Void)?
     private let queueHandler: (([RoomQueueItem]) -> Void)?
     private let clock = ClockSynchronizer()
+    private let jitter = NetworkJitterEstimator()
     private let player: SynchronizedPlayer
     private let videoDecoder: VideoDecoder
     private var udpListener: NWListener?
@@ -30,6 +31,7 @@ final class Receiver {
     private var videoListenerReady = false
     private var audioConnections = [NWConnection]()
     private var videoConnections = [NWConnection]()
+    private var lastSyncReportNanos: UInt64 = 0
 
     init(
         requestedRoom: String?,
@@ -98,8 +100,12 @@ final class Receiver {
         self.videoListener = videoListener
 
         let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now() + 1, repeating: 1)
-        timer.setEventHandler { [weak self] in self?.player.maintainSync() }
+        timer.schedule(
+            deadline: .now() + .milliseconds(50),
+            repeating: .milliseconds(50),
+            leeway: .milliseconds(10)
+        )
+        timer.setEventHandler { [weak self] in self?.maintainTiming() }
         timer.resume()
         maintenanceTimer = timer
 
@@ -244,7 +250,7 @@ final class Receiver {
             self.send(self.clock.makePing(at: MonotonicClock.nowNanos()))
             burstCount += 1
             if burstCount == 8 {
-                timer.schedule(deadline: .now() + 2, repeating: 2)
+                timer.schedule(deadline: .now() + 1, repeating: 1)
             }
         }
         timer.resume()
@@ -264,8 +270,13 @@ final class Receiver {
                     switch message.type {
                     case "pong":
                         if self.clock.acceptPong(message, receivedAt: MonotonicClock.nowNanos()), self.clock.isReady {
-                            self.player.clockOffsetNanos = self.clock.offsetNanos
-                            self.videoDecoder.clockOffsetNanos = self.clock.offsetNanos
+                            self.updateClockEstimate()
+                        }
+                    case "sync_timing":
+                        if let delay = message.playoutDelayNanos {
+                            let clamped = RoomTiming.clampedPlayoutDelay(delay)
+                            self.player.setTargetLatencyNanos(clamped)
+                            self.videoDecoder.setTargetLatencyNanos(clamped)
                         }
                     case "presence":
                         self.participantsHandler?(message.participantDetails ?? [])
@@ -311,7 +322,17 @@ final class Receiver {
         func receiveNext() {
             connection.receiveMessage { [weak self] data, _, _, error in
                 if let data, let packet = AudioPacket(data: data) {
-                    self?.player.accept(packet)
+                    if let self {
+                        let now = MonotonicClock.nowNanos()
+                        if let offset = self.clock.offsetNanos(at: now), self.clock.isReady {
+                            self.jitter.observe(
+                                captureTimeNanos: packet.captureTimeNanos,
+                                receivedAt: now,
+                                clockOffsetNanos: offset
+                            )
+                        }
+                        self.player.accept(packet)
+                    }
                 }
                 if error == nil {
                     receiveNext()
@@ -319,6 +340,29 @@ final class Receiver {
             }
         }
         receiveNext()
+    }
+
+    private func maintainTiming() {
+        updateClockEstimate()
+        player.maintainSync()
+
+        let now = MonotonicClock.nowNanos()
+        guard clock.isReady, now - lastSyncReportNanos >= 1_000_000_000 else { return }
+        lastSyncReportNanos = now
+        send(ControlMessage(
+            type: "sync_report",
+            playoutDelayNanos: jitter.recommendedPlayoutDelayNanos(
+                roundTripNanos: clock.bestRoundTripNanos
+            )
+        ))
+    }
+
+    private func updateClockEstimate() {
+        guard clock.isReady,
+              let offset = clock.offsetNanos(at: MonotonicClock.nowNanos())
+        else { return }
+        player.clockOffsetNanos = offset
+        videoDecoder.updateClockOffsetNanos(offset)
     }
 
     private func receiveVideo(from connection: NWConnection) {
