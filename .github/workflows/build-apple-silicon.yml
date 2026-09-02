@@ -22,38 +22,17 @@ jobs:
         run: test "$(uname -m)" = "arm64"
 
       - name: Install Developer ID certificate
+        uses: apple-actions/import-codesign-certs@v7
+        with:
+          p12-file-base64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          p12-password: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+
+      - name: Verify signing identity
         env:
-          DEVELOPER_ID_P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
-          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
           WERAI_CODESIGN_IDENTITY: ${{ vars.WERAI_CODESIGN_IDENTITY }}
         run: |
-          test -n "$DEVELOPER_ID_P12_BASE64"
-          test -n "$DEVELOPER_ID_P12_PASSWORD"
           test -n "$WERAI_CODESIGN_IDENTITY"
-          certificate_path="$RUNNER_TEMP/developer-id.p12"
-          keychain_path="$RUNNER_TEMP/werai-signing.keychain-db"
-          keychain_password="$(openssl rand -hex 32)"
-          printf '%s' "$DEVELOPER_ID_P12_BASE64" | /usr/bin/base64 -D > "$certificate_path"
-          security create-keychain -p "$keychain_password" "$keychain_path"
-          security set-keychain-settings -lut 21_600 "$keychain_path"
-          security unlock-keychain -p "$keychain_password" "$keychain_path"
-          security import "$certificate_path" \
-            -k "$keychain_path" \
-            -P "$DEVELOPER_ID_P12_PASSWORD" \
-            -A \
-            -T /usr/bin/codesign
-          security set-key-partition-list \
-            -S apple:,codesign: \
-            -s \
-            -k "$keychain_password" \
-            "$keychain_path"
-          security list-keychains -d user -s "$keychain_path"
-          security default-keychain -d user -s "$keychain_path"
-          security find-identity -v -p codesigning "$keychain_path" \
-            | grep -F "$WERAI_CODESIGN_IDENTITY"
-          rm "$certificate_path"
-          echo "SIGNING_KEYCHAIN=$keychain_path" >> "$GITHUB_ENV"
-          echo "WERAI_SIGNING_KEYCHAIN=$keychain_path" >> "$GITHUB_ENV"
+          security find-identity -v -p codesigning | grep -F "$WERAI_CODESIGN_IDENTITY"
 
       - name: Build and package arm64 app
         env:
@@ -74,13 +53,6 @@ jobs:
           signature="$(codesign -dvvv dist/WERAI.app 2>&1)"
           grep -F "Authority=Developer ID Application:" <<< "$signature"
           grep -F "TeamIdentifier=$APPLE_TEAM_ID" <<< "$signature"
-
-      - name: Remove signing keychain
-        if: always()
-        run: |
-          if [[ -n "${SIGNING_KEYCHAIN:-}" ]]; then
-            security delete-keychain "$SIGNING_KEYCHAIN" || true
-          fi
 
       - name: Upload app
         uses: actions/upload-artifact@v4
