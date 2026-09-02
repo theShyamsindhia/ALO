@@ -38,6 +38,7 @@ jobs:
           security import "$certificate_path" \
             -k "$keychain_path" \
             -P "$DEVELOPER_ID_P12_PASSWORD" \
+            -A \
             -T /usr/bin/codesign \
             -T /usr/bin/security
           security set-key-partition-list \
@@ -46,8 +47,10 @@ jobs:
             -k "$keychain_password" \
             "$keychain_path"
           security list-keychains -d user -s "$keychain_path"
+          security default-keychain -d user -s "$keychain_path"
           rm "$certificate_path"
           echo "SIGNING_KEYCHAIN=$keychain_path" >> "$GITHUB_ENV"
+          echo "WERAI_SIGNING_KEYCHAIN=$keychain_path" >> "$GITHUB_ENV"
 
       - name: Build and package arm64 app
         env:

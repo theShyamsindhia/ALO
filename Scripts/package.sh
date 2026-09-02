@@ -27,7 +27,33 @@ codesign_identity="${WERAI_CODESIGN_IDENTITY:--}"
 codesign_arguments=(--force --sign "$codesign_identity" --identifier in.werai.audio)
 if [[ "$codesign_identity" != "-" ]]; then
     codesign_arguments+=(--options runtime --timestamp)
+    if [[ -n "${WERAI_SIGNING_KEYCHAIN:-}" ]]; then
+        codesign_arguments+=(--keychain "$WERAI_SIGNING_KEYCHAIN")
+    fi
 fi
+
+run_codesign() {
+    if [[ "$codesign_identity" == "-" ]]; then
+        command codesign "$@"
+        return
+    fi
+
+    command codesign "$@" &
+    local codesign_pid=$!
+    (
+        sleep "${WERAI_CODESIGN_TIMEOUT_SECONDS:-120}"
+        if kill -0 "$codesign_pid" 2>/dev/null; then
+            echo "codesign timed out while accessing the signing key or Apple timestamp service" >&2
+            kill -TERM "$codesign_pid" 2>/dev/null || true
+        fi
+    ) &
+    local watchdog_pid=$!
+    local codesign_status=0
+    wait "$codesign_pid" || codesign_status=$?
+    kill "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+    return "$codesign_status"
+}
 
 if [[ ${#architectures[@]} -eq 1 ]]; then
     cp ".build/${architectures[1]}-apple-macosx/release/werai" "$binary"
@@ -37,7 +63,9 @@ else
         .build/x86_64-apple-macosx/release/werai \
         -output "$binary"
 fi
-codesign "${codesign_arguments[@]}" "$binary"
+if [[ "$codesign_identity" == "-" ]]; then
+    run_codesign "${codesign_arguments[@]}" "$binary"
+fi
 
 icon_master="dist/AppIcon-1024.png"
 iconset="dist/AppIcon.iconset"
@@ -67,11 +95,11 @@ cp "$binary" "$app/Contents/MacOS/werai"
 cp Resources/Info.plist "$app/Contents/Info.plist"
 cp dist/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 if [[ "$codesign_identity" == "-" ]]; then
-    codesign "${codesign_arguments[@]}" \
+    run_codesign "${codesign_arguments[@]}" \
         --requirements Resources/WERAI.requirements \
         "$app"
 else
-    codesign "${codesign_arguments[@]}" "$app"
+    run_codesign "${codesign_arguments[@]}" "$app"
 fi
 codesign --verify --deep --strict --verbose=2 "$app"
 
