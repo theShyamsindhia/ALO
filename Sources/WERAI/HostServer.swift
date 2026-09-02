@@ -4,6 +4,16 @@ import WERAICore
 
 final class HostServer {
     static let serviceType = "_werai-audio._tcp"
+    enum AudioBackpressurePolicy {
+        case unbounded
+        case boundedLatest(maxInFlight: Int)
+    }
+    typealias OutboundSend = (
+        _ connection: NWConnection,
+        _ data: Data,
+        _ isComplete: Bool,
+        _ completion: @escaping (NWError?) -> Void
+    ) -> Void
 
     private final class Client {
         let control: NWConnection
@@ -16,6 +26,10 @@ final class HostServer {
         var isMuted = false
         var recommendedPlayoutDelayNanos = RoomTiming.defaultPlayoutDelayNanos
         var lastSyncReportNanos: UInt64?
+        var audioSendsInFlight = 0
+        var pendingAudio: Data?
+        var syncReport: PlaybackSyncReport?
+        var lastResyncCommandNanos: UInt64 = 0
 
         init(control: NWConnection) {
             self.control = control
@@ -26,6 +40,10 @@ final class HostServer {
     private let roomName: String
     private let statusHandler: ((String) -> Void)?
     private let receiverCountHandler: ((Int) -> Void)?
+    private let advertise: Bool
+    private let listenerReadyHandler: ((NWEndpoint.Port) -> Void)?
+    private let outboundSend: OutboundSend?
+    private let audioBackpressurePolicy: AudioBackpressurePolicy
     private let packetizer = AudioPacketizer()
     private var listener: NWListener?
     private var clients = [ObjectIdentifier: Client]()
@@ -38,21 +56,34 @@ final class HostServer {
     init(
         roomName: String,
         statusHandler: ((String) -> Void)? = nil,
-        receiverCountHandler: ((Int) -> Void)? = nil
+        receiverCountHandler: ((Int) -> Void)? = nil,
+        advertise: Bool = true,
+        listenerReadyHandler: ((NWEndpoint.Port) -> Void)? = nil,
+        outboundSend: OutboundSend? = nil,
+        audioBackpressurePolicy: AudioBackpressurePolicy = .boundedLatest(maxInFlight: 8)
     ) {
         self.roomName = roomName
         self.statusHandler = statusHandler
         self.receiverCountHandler = receiverCountHandler
+        self.advertise = advertise
+        self.listenerReadyHandler = listenerReadyHandler
+        self.outboundSend = outboundSend
+        self.audioBackpressurePolicy = audioBackpressurePolicy
     }
 
     func start() throws {
         let listener = try NWListener(using: .tcp, on: .any)
-        listener.service = NWListener.Service(name: roomName, type: Self.serviceType)
+        if advertise {
+            listener.service = NWListener.Service(name: roomName, type: Self.serviceType)
+        }
         listener.stateUpdateHandler = { state in
             switch state {
             case .ready:
                 print("Room \"\(self.roomName)\" is visible on the local network.")
                 self.statusHandler?("Room is visible on your local network")
+                if let port = listener.port {
+                    self.listenerReadyHandler?(port)
+                }
             case .failed(let error):
                 fputs("Host listener failed: \(error)\n", stderr)
                 self.statusHandler?("Could not open the room: \(error.localizedDescription)")
@@ -90,16 +121,11 @@ final class HostServer {
             )
             guard !packets.isEmpty else { return }
 
-            let audioConnections = self.clients.values.compactMap(\.audio)
+            let audioClients = self.clients.values.filter { $0.audio != nil }
             for packet in packets {
                 let data = packet.encoded()
-                for connection in audioConnections {
-                    connection.send(
-                        content: data,
-                        contentContext: .defaultMessage,
-                        isComplete: true,
-                        completion: .contentProcessed { _ in }
-                    )
+                for client in audioClients {
+                    self.sendAudio(data, to: client)
                 }
             }
         }
@@ -110,16 +136,11 @@ final class HostServer {
         queue.async { [weak self] in
             guard let self else { return }
             for connection in self.clients.values.compactMap(\.video) {
-                connection.send(
-                    content: data,
-                    contentContext: .defaultMessage,
-                    isComplete: true,
-                    completion: .contentProcessed { error in
-                        if let error {
-                            fputs("Video send failed: \(error)\n", stderr)
-                        }
+                self.send(data, over: connection, isComplete: true) { error in
+                    if let error {
+                        fputs("Video send failed: \(error)\n", stderr)
                     }
-                )
+                }
             }
         }
     }
@@ -206,6 +227,8 @@ final class HostServer {
             client.id = message.participantID ?? UUID().uuidString
             client.name = uniqueName(for: proposedName, client: client)
             client.audio?.cancel()
+            client.audioSendsInFlight = 0
+            client.pendingAudio = nil
             let connection = NWConnection(host: host, port: port, using: .udp)
             connection.stateUpdateHandler = { state in
                 if case .failed(let error) = state {
@@ -229,17 +252,17 @@ final class HostServer {
                 displayName: client.name,
                 participantID: client.id
             ).encodedLine() {
-                client.control.send(content: data, completion: .contentProcessed { _ in })
+                send(data, over: client.control)
             }
             broadcastPresence()
             if let data = try? ControlMessage(type: "media_state", videoEnabled: videoEnabled).encodedLine() {
-                client.control.send(content: data, completion: .contentProcessed { _ in })
+                send(data, over: client.control)
             }
             if let data = try? ControlMessage(
                 type: "now_playing",
                 nowPlaying: nowPlaying
             ).encodedLine() {
-                client.control.send(content: data, completion: .contentProcessed { _ in })
+                send(data, over: client.control)
             }
             sendQueue(to: client)
             sendTiming(to: client)
@@ -253,7 +276,7 @@ final class HostServer {
                 hostNanos: MonotonicClock.nowNanos()
             )
             if let data = try? pong.encodedLine() {
-                client.control.send(content: data, completion: .contentProcessed { _ in })
+                send(data, over: client.control)
             }
 
         case "sync_report":
@@ -306,6 +329,21 @@ final class HostServer {
                 volume: message.volume ?? client.volume,
                 muted: message.muted ?? client.isMuted
             )
+
+        case "sync_status":
+            guard message.participantID == client.id, let report = message.syncReport else { return }
+            let previousResyncCount = client.syncReport?.resyncCount ?? 0
+            let receiverAlreadyResynced = report.resyncCount > previousResyncCount
+            client.syncReport = report
+            let now = MonotonicClock.nowNanos()
+            if report.latenessNanos > SynchronizedPlayer.hardResyncThresholdNanos,
+               !receiverAlreadyResynced,
+               now - client.lastResyncCommandNanos > 2_000_000_000 {
+                client.lastResyncCommandNanos = now
+                if let data = try? ControlMessage(type: "resync").encodedLine() {
+                    send(data, over: client.control)
+                }
+            }
 
         default:
             break
@@ -362,7 +400,7 @@ final class HostServer {
             type: "queue_update",
             mediaQueue: mediaQueue
         ).encodedLine() else { return }
-        client.control.send(content: data, completion: .contentProcessed { _ in })
+        send(data, over: client.control)
     }
 
     private func sendTiming(to client: Client) {
@@ -370,7 +408,7 @@ final class HostServer {
             type: "sync_timing",
             playoutDelayNanos: groupPlayoutDelayNanos
         ).encodedLine() else { return }
-        client.control.send(content: data, completion: .contentProcessed { _ in })
+        send(data, over: client.control)
     }
 
     private func updateGroupTiming() {
@@ -435,7 +473,7 @@ final class HostServer {
             muted: muted
         )
         if let data = try? message.encodedLine() {
-            client.control.send(content: data, completion: .contentProcessed { _ in })
+            send(data, over: client.control)
         }
         broadcastPresence()
     }
@@ -443,7 +481,52 @@ final class HostServer {
     private func broadcast(_ message: ControlMessage) {
         guard let data = try? message.encodedLine() else { return }
         for client in clients.values where client.name != nil {
-            client.control.send(content: data, completion: .contentProcessed { _ in })
+            send(data, over: client.control)
+        }
+    }
+
+    private func send(
+        _ data: Data,
+        over connection: NWConnection,
+        isComplete: Bool = false,
+        completion: @escaping (NWError?) -> Void = { _ in }
+    ) {
+        if let outboundSend {
+            outboundSend(connection, data, isComplete, completion)
+        } else {
+            connection.send(
+                content: data,
+                contentContext: .defaultMessage,
+                isComplete: isComplete,
+                completion: .contentProcessed(completion)
+            )
+        }
+    }
+
+    private func sendAudio(_ data: Data, to client: Client) {
+        guard let connection = client.audio else { return }
+        switch audioBackpressurePolicy {
+        case .unbounded:
+            send(data, over: connection, isComplete: true)
+
+        case .boundedLatest(let maxInFlight):
+            guard client.audioSendsInFlight < max(1, maxInFlight) else {
+                // Audio timestamps define the shared timeline, so keeping an old queued
+                // packet is worse than replacing it with the newest available packet.
+                client.pendingAudio = data
+                return
+            }
+            client.audioSendsInFlight += 1
+            send(data, over: connection, isComplete: true) { [weak self, weak client] _ in
+                guard let self, let client else { return }
+                self.queue.async { [weak self, weak client] in
+                    guard let self, let client else { return }
+                    client.audioSendsInFlight = max(0, client.audioSendsInFlight - 1)
+                    guard let pending = client.pendingAudio else { return }
+                    client.pendingAudio = nil
+                    self.sendAudio(pending, to: client)
+                }
+            }
         }
     }
 }

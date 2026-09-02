@@ -3,6 +3,8 @@ import Foundation
 import WERAICore
 
 final class SynchronizedPlayer {
+    static let targetLatencyNanos = RoomTiming.defaultPlayoutDelayNanos
+    static let hardResyncThresholdNanos: UInt64 = 100_000_000
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private let varispeed = AVAudioUnitVarispeed()
@@ -16,6 +18,9 @@ final class SynchronizedPlayer {
     private var targetLatencyNanos = RoomTiming.defaultPlayoutDelayNanos
     private var smoothedCorrection = 0.0
     private let playbackStarted: (() -> Void)?
+    private var latestLatenessNanos: UInt64 = 0
+    private var latePacketCount: UInt64 = 0
+    private var resyncCount: UInt64 = 0
 
     var clockOffsetNanos: Int64?
 
@@ -70,6 +75,15 @@ final class SynchronizedPlayer {
             * Double(AudioPacket.sampleRate) / 1_000_000_000
         let actualFrame = Double(anchorFrameIndex) + Double(playerTime.sampleTime)
         let errorFrames = Double(anchorFrameIndex) + expectedFrames - actualFrame
+        let hardResyncFrames = Double(AudioPacket.sampleRate)
+            * Double(Self.hardResyncThresholdNanos) / 1_000_000_000
+        if errorFrames > hardResyncFrames {
+            latestLatenessNanos = UInt64(
+                errorFrames * 1_000_000_000 / Double(AudioPacket.sampleRate)
+            )
+            hardResynchronize()
+            return
+        }
         let desiredCorrection = abs(errorFrames) < 24
             ? 0
             : max(-0.002, min(0.002, errorFrames / Double(AudioPacket.sampleRate) * 0.02))
@@ -88,6 +102,10 @@ final class SynchronizedPlayer {
 
         while let sequence = expectedSequence {
             guard let packet = pending.removeValue(forKey: sequence) else {
+                if !hasStarted, let next = pending.values.min(by: { $0.sequence < $1.sequence }) {
+                    expectedSequence = next.sequence
+                    continue
+                }
                 concealMissingPacketIfNeeded(sequence: sequence, offset: offset)
                 return
             }
@@ -99,7 +117,17 @@ final class SynchronizedPlayer {
                 : desiredAudibleNanos
             let now = MonotonicClock.nowNanos()
 
+            if hasStarted, now > desiredRenderNanos + Self.hardResyncThresholdNanos {
+                latestLatenessNanos = now - desiredRenderNanos
+                latePacketCount &+= 1
+                hardResynchronize()
+                expectedSequence = sequence &+ 1
+                continue
+            }
+
             if !hasStarted, desiredRenderNanos <= now + 25_000_000 {
+                latestLatenessNanos = now > desiredRenderNanos ? now - desiredRenderNanos : 0
+                latePacketCount &+= 1
                 expectedSequence = sequence &+ 1
                 continue
             }
@@ -115,6 +143,7 @@ final class SynchronizedPlayer {
                 anchorCaptureNanos = packet.captureTimeNanos
                 player.play(at: AVAudioTime(hostTime: MonotonicClock.nanosToTicks(desiredRenderNanos)))
                 hasStarted = true
+                latestLatenessNanos = 0
                 print("Playback synchronized (\(targetLatencyNanos / 1_000_000) ms room buffer).")
                 playbackStarted?()
             }
@@ -130,6 +159,7 @@ final class SynchronizedPlayer {
         hasStarted = false
         smoothedCorrection = 0
         varispeed.rate = 1
+        latestLatenessNanos = 0
     }
 
     func setTargetLatencyNanos(_ nanos: UInt64) {
@@ -138,6 +168,32 @@ final class SynchronizedPlayer {
 
     func setLevel(volume: Double, muted: Bool) {
         player.volume = muted ? 0 : Float(min(max(volume, 0), 1))
+    }
+
+    func syncReport() -> PlaybackSyncReport {
+        PlaybackSyncReport(
+            measuredAtNanos: MonotonicClock.nowNanos(),
+            latenessNanos: latestLatenessNanos,
+            latePacketCount: latePacketCount,
+            resyncCount: resyncCount
+        )
+    }
+
+    func forceResync() {
+        hardResynchronize()
+    }
+
+    private func hardResynchronize() {
+        player.stop()
+        smoothedCorrection = 0
+        varispeed.rate = 1
+        anchorFrameIndex = nil
+        anchorCaptureNanos = nil
+        hasStarted = false
+        resyncCount &+= 1
+        if let next = pending.values.min(by: { $0.sequence < $1.sequence }) {
+            expectedSequence = next.sequence
+        }
     }
 
     private func concealMissingPacketIfNeeded(sequence: UInt32, offset: Int64) {

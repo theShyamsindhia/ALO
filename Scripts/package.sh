@@ -4,19 +4,34 @@ set -euo pipefail
 
 cd "${0:A:h}/.."
 
-swift build -c release --arch arm64
-swift build -c release --arch x86_64
+architectures=(arm64 x86_64)
+archive_suffix="universal"
+if [[ "${1:-}" == "--arm64-only" ]]; then
+    architectures=(arm64)
+    archive_suffix="arm64"
+elif [[ $# -gt 0 ]]; then
+    echo "Usage: $0 [--arm64-only]" >&2
+    exit 2
+fi
+
+for architecture in "${architectures[@]}"; do
+    swift build -c release --arch "$architecture"
+done
 mkdir -p dist
 
 binary="dist/werai"
-cli_archive="dist/werai-cli-macos-universal.zip"
+cli_archive="dist/werai-cli-macos-$archive_suffix.zip"
 app="dist/WERAI.app"
-app_archive="dist/WERAI-macos-universal.zip"
+app_archive="dist/WERAI-macos-$archive_suffix.zip"
 
-lipo -create \
-    .build/arm64-apple-macosx/release/werai \
-    .build/x86_64-apple-macosx/release/werai \
-    -output "$binary"
+if [[ ${#architectures[@]} -eq 1 ]]; then
+    cp ".build/${architectures[1]}-apple-macosx/release/werai" "$binary"
+else
+    lipo -create \
+        .build/arm64-apple-macosx/release/werai \
+        .build/x86_64-apple-macosx/release/werai \
+        -output "$binary"
+fi
 codesign --force --sign - "$binary"
 
 icon_master="dist/AppIcon-1024.png"
@@ -55,7 +70,7 @@ rm -f "$cli_archive" "$app_archive"
 ditto -c -k "$binary" "$cli_archive"
 (
     cd dist
-    zip -qry WERAI-macos-universal.zip WERAI.app
+    zip -qry "WERAI-macos-$archive_suffix.zip" WERAI.app
 )
 
 echo "Created $app_archive"

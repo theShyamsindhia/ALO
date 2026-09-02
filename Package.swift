@@ -26,7 +26,7 @@ let package = Package(
         ),
         .testTarget(
             name: "WERAITests",
-            dependencies: ["WERAICore"]
+            dependencies: ["WERAICore", "WERAI"]
         )
     ]
 )

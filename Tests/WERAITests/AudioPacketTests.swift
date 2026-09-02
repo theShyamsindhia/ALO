@@ -82,6 +82,24 @@ struct AudioPacketTests {
         #expect(messages[1].muted == true)
     }
 
+    @Test func playbackSyncTelemetryRoundTrip() throws {
+        let report = PlaybackSyncReport(
+            measuredAtNanos: 1_000,
+            latenessNanos: 125_000_000,
+            latePacketCount: 3,
+            resyncCount: 1
+        )
+        let data = try ControlMessage(
+            type: "sync_status",
+            participantID: "mac-a",
+            syncReport: report
+        ).encodedLine()
+        let decoded = ControlLineDecoder().append(data).first
+
+        #expect(decoded?.participantID == "mac-a")
+        #expect(decoded?.syncReport == report)
+    }
+
     @Test func nowPlayingArtworkRoundTrip() throws {
         let decoder = ControlLineDecoder()
         let nowPlaying = NowPlayingMedia(

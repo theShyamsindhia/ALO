@@ -68,6 +68,25 @@ public struct RoomQueueItem: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
+public struct PlaybackSyncReport: Codable, Sendable, Equatable {
+    public let measuredAtNanos: UInt64
+    public let latenessNanos: UInt64
+    public let latePacketCount: UInt64
+    public let resyncCount: UInt64
+
+    public init(
+        measuredAtNanos: UInt64,
+        latenessNanos: UInt64,
+        latePacketCount: UInt64,
+        resyncCount: UInt64
+    ) {
+        self.measuredAtNanos = measuredAtNanos
+        self.latenessNanos = latenessNanos
+        self.latePacketCount = latePacketCount
+        self.resyncCount = resyncCount
+    }
+}
+
 public struct ControlMessage: Codable, Sendable {
     public let type: String
     public let udpPort: UInt16?
@@ -91,6 +110,7 @@ public struct ControlMessage: Codable, Sendable {
     public let mediaQueue: [RoomQueueItem]?
     public let queueItem: RoomQueueItem?
     public let queueItemID: String?
+    public let syncReport: PlaybackSyncReport?
 
     public init(
         type: String,
@@ -114,7 +134,8 @@ public struct ControlMessage: Codable, Sendable {
         nowPlaying: NowPlayingMedia? = nil,
         mediaQueue: [RoomQueueItem]? = nil,
         queueItem: RoomQueueItem? = nil,
-        queueItemID: String? = nil
+        queueItemID: String? = nil,
+        syncReport: PlaybackSyncReport? = nil
     ) {
         self.type = type
         self.udpPort = udpPort
@@ -138,6 +159,7 @@ public struct ControlMessage: Codable, Sendable {
         self.mediaQueue = mediaQueue
         self.queueItem = queueItem
         self.queueItemID = queueItemID
+        self.syncReport = syncReport
     }
 
     public func encodedLine() throws -> Data {

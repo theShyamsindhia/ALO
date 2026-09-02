@@ -299,6 +299,8 @@ final class Receiver {
                         }
                     case "queue_update":
                         self.queueHandler?(message.mediaQueue ?? [])
+                    case "resync":
+                        self.player.forceResync()
                     default:
                         break
                     }
@@ -354,6 +356,11 @@ final class Receiver {
             playoutDelayNanos: jitter.recommendedPlayoutDelayNanos(
                 roundTripNanos: clock.bestRoundTripNanos
             )
+        ))
+        send(ControlMessage(
+            type: "sync_status",
+            participantID: participantID,
+            syncReport: player.syncReport()
         ))
     }
 

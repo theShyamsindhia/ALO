@@ -1,0 +1,37 @@
+name: Build Apple Silicon app
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-arm64:
+    runs-on: macos-15
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify Apple Silicon runner
+        run: test "$(uname -m)" = "arm64"
+
+      - name: Build and package arm64 app
+        run: ./Scripts/package.sh --arm64-only
+
+      - name: Verify app architecture
+        run: |
+          file dist/WERAI.app/Contents/MacOS/werai
+          lipo dist/WERAI.app/Contents/MacOS/werai -verify_arch arm64
+
+      - name: Upload app
+        uses: actions/upload-artifact@v4
+        with:
+          name: WERAI-macos-arm64
+          path: dist/WERAI-macos-arm64.zip
+          if-no-files-found: error
