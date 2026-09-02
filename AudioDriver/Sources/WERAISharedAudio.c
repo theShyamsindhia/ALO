@@ -107,6 +107,14 @@ void WERAISharedAudioClose(WERAISharedAudioBuffer *buffer) {
     if (buffer != NULL) munmap(buffer, kSharedSize);
 }
 
+void WERAISharedAudioBeginTimeline(WERAISharedAudioBuffer *buffer) {
+    if (buffer == NULL) return;
+    // Publish the reset before changing generation. Readers use generation as
+    // the release/acquire fence that makes the new frame origin visible.
+    __atomic_store_n(&buffer->latestFrameExclusive, 0, __ATOMIC_RELEASE);
+    __atomic_add_fetch(&buffer->generation, 1, __ATOMIC_RELEASE);
+}
+
 void WERAISharedAudioPublish(WERAISharedAudioBuffer *buffer, uint64_t firstFrame,
                              uint64_t firstHostTime, double hostTicksPerFrame,
                              const float *samples, uint32_t frameCount) {

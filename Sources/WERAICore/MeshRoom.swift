@@ -242,6 +242,7 @@ public struct MeshEnvelope: Codable, Sendable {
     public let room: RoomConfiguration?
     public let nodeID: String?
     public let displayName: String?
+    public let appVersion: String?
     public let events: [MeshRoomEvent]?
     public let event: MeshRoomEvent?
     public let versionVector: [String: UInt64]?
@@ -256,6 +257,7 @@ public struct MeshEnvelope: Codable, Sendable {
         room: RoomConfiguration? = nil,
         nodeID: String? = nil,
         displayName: String? = nil,
+        appVersion: String? = nil,
         events: [MeshRoomEvent]? = nil,
         event: MeshRoomEvent? = nil,
         versionVector: [String: UInt64]? = nil,
@@ -269,6 +271,7 @@ public struct MeshEnvelope: Codable, Sendable {
         self.room = room
         self.nodeID = nodeID
         self.displayName = displayName
+        self.appVersion = appVersion
         self.events = events
         self.event = event
         self.versionVector = versionVector

@@ -19,10 +19,6 @@ for architecture in "${architectures[@]}"; do
 done
 mkdir -p dist
 
-# Build the HAL plug-in and its one-time installer before signing the app. The
-# package is embedded so ALO can open it when the virtual output is missing.
-./Scripts/build_audio_installer.sh
-
 binary="dist/alo"
 cli_archive="dist/alo-cli-macos-$archive_suffix.zip"
 app="dist/ALO.app"
@@ -103,7 +99,6 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$binary" "$app/Contents/MacOS/alo"
 cp Resources/Info.plist "$app/Contents/Info.plist"
 cp dist/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
-cp dist/Install-ALO-Audio-Device.pkg "$app/Contents/Resources/Install-ALO-Audio-Device.pkg"
 if [[ "$codesign_identity" == "-" ]]; then
     run_codesign "${codesign_arguments[@]}" \
         --requirements Resources/WERAI.requirements \

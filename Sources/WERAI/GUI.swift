@@ -22,6 +22,7 @@ enum GUIApplication {
 @MainActor
 private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
     private let model = WERAIViewModel()
+    private let updater = AppUpdater()
     private var window: NSWindow?
     private var roomBarController: FloatingRoomWindowController?
     private var fullScreenVideoController: FullScreenVideoWindowController?
@@ -57,6 +58,10 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
             self?.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
         }
+        updater.updateAvailableHandler = { [weak self] version in self?.presentUpdate(version: version) }
+        updater.messageHandler = { [weak self] message in self?.presentUpdateMessage(message) }
+        model.peerVersionHandler = { [weak updater] version in updater?.observePeerVersion(version) }
+        updater.start()
 
         phaseObserver = model.$phase
             .removeDuplicates()
@@ -181,6 +186,13 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
             keyEquivalent: ""
         )
         appMenu.addItem(.separator())
+        let updateItem = appMenu.addItem(
+            withTitle: "Check for Updates…",
+            action: #selector(checkForUpdates(_:)),
+            keyEquivalent: ""
+        )
+        updateItem.target = self
+        appMenu.addItem(.separator())
         appMenu.addItem(
             withTitle: "Quit ALO",
             action: #selector(NSApplication.terminate(_:)),
@@ -188,6 +200,31 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
         )
         appMenuItem.submenu = appMenu
         NSApp.mainMenu = mainMenu
+    }
+
+    @objc private func checkForUpdates(_ sender: Any?) {
+        updater.checkForUpdates(userInitiated: true)
+    }
+
+    private func presentUpdate(version: String) {
+        let alert = NSAlert()
+        alert.messageText = "ALO \(version) is available"
+        alert.informativeText = "ALO will download only the GitHub release and verify its checksum, Developer ID signature, and notarization before installation."
+        alert.addButton(withTitle: "Install and Relaunch")
+        alert.addButton(withTitle: "Later")
+        alert.addButton(withTitle: "View Release")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: updater.installAvailableUpdate()
+        case .alertThirdButtonReturn: updater.openReleasePage()
+        default: break
+        }
+    }
+
+    private func presentUpdateMessage(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "ALO Updates"
+        alert.informativeText = message
+        alert.runModal()
     }
 }
 
@@ -365,6 +402,7 @@ private enum FloatingMetrics {
 
 @MainActor
 final class WERAIViewModel: ObservableObject {
+    var peerVersionHandler: (String) -> Void = { _ in }
     enum Mode: String, CaseIterable {
         case share = "Create Room"
         case listen = "Rooms"
@@ -401,7 +439,6 @@ final class WERAIViewModel: ObservableObject {
     @Published var statusText = "Ready"
     @Published var errorMessage: String?
     @Published var errorIsPermissionRelated = false
-    @Published var audioDeviceInstallRequired = false
     @Published var participants = [RoomParticipant]()
     @Published var messages = [RoomMessage]()
     @Published var draftMessage = ""
@@ -419,6 +456,7 @@ final class WERAIViewModel: ObservableObject {
     @Published var roomHasVideo = false
     @Published var nowPlaying = NowPlayingMedia()
     @Published var localNowPlaying = NowPlayingMedia()
+    @Published private(set) var audioIsRendering = false
     @Published var experience: Experience = .audio
     @Published var mediaSwitchBusy = false
     @Published var permissionNotice = false
@@ -499,6 +537,12 @@ final class WERAIViewModel: ObservableObject {
         return activeRoomConfiguration?.accessKey
     }
     var roomIsPlaying: Bool { nowPlaying.isEmpty ? false : nowPlaying.isPlaying ?? true }
+    var roomSyncLabel: String {
+        if !hasBroadcaster { return "No broadcaster" }
+        if nowPlaying.isPlaying == false { return "Paused" }
+        if audioIsRendering { return "Synced" }
+        return nowPlaying.isEmpty ? "Waiting for audio" : "Recovering audio…"
+    }
     var canSelectVideo: Bool { isHost || roomHasVideo }
     var floatingPanelHeight: CGFloat {
         if permissionNotice { return FloatingMetrics.permissionHeight }
@@ -588,6 +632,9 @@ final class WERAIViewModel: ObservableObject {
             statusHandler: { [weak self] status in
                 guard let self else { return }
                 self.statusText = status
+                if let rendering = Self.renderingState(for: status) {
+                    self.audioIsRendering = rendering
+                }
                 if self.phase == .starting, !self.isLeavingRoom { self.phase = .live }
                 self.updateLocalNowPlayingMonitor()
             },
@@ -598,9 +645,10 @@ final class WERAIViewModel: ObservableObject {
             chatHandler: chatCallback,
             queueHandler: queueCallback,
             videoHandler: videoCallback,
+            peerVersionHandler: { [weak self] version in self?.peerVersionHandler(version) },
             errorHandler: { [weak self] error in
                 guard let self else { return }
-                self.audioDeviceInstallRequired = (error as? ALOAudioSetupError) == .installRequired
+                self.errorIsPermissionRelated = self.isPermissionError(error)
                 self.phase = .failed
                 self.errorMessage = self.readable(error)
                 self.statusText = "Broadcast could not start"
@@ -641,7 +689,7 @@ final class WERAIViewModel: ObservableObject {
             return
         }
 
-        if selection == .video, !ensureVideoPermission() { return }
+        if selection == .video, !ensureRecordingPermission() { return }
         mediaSwitchBusy = true
         Task {
             do {
@@ -650,7 +698,7 @@ final class WERAIViewModel: ObservableObject {
                 floatingSection = selection == .video ? .video : .collapsed
                 statusText = selection == .video
                     ? "ALO Display is live · use Displays Settings to arrange it"
-                    : "Audio is in sync"
+                    : "Audio room active"
             } catch {
                 errorMessage = readable(error)
                 permissionNotice = isPermissionError(error)
@@ -679,12 +727,15 @@ final class WERAIViewModel: ObservableObject {
     }
 
     func toggleRoomPlayback() {
+        if roomIsPlaying { audioIsRendering = false }
         sendRoomMediaCommand(roomIsPlaying ? .pause : .play)
     }
 
     func toggleBroadcasting() {
         if isHost { meshSession?.stopBroadcasting() }
         else {
+            guard ensureRecordingPermission() else { return }
+            audioIsRendering = false
             stopLocalNowPlayingMonitor()
             meshSession?.beginBroadcasting()
         }
@@ -778,6 +829,7 @@ final class WERAIViewModel: ObservableObject {
     func playQueueItem(_ item: RoomQueueItem) {
         guard let url = validMediaURL(item.url) else { return }
         if !isHost {
+            guard ensureRecordingPermission() else { return }
             stopLocalNowPlayingMonitor()
             meshSession?.beginBroadcasting()
         }
@@ -856,7 +908,6 @@ final class WERAIViewModel: ObservableObject {
     func tryAgain() {
         errorMessage = nil
         errorIsPermissionRelated = false
-        audioDeviceInstallRequired = false
         phase = .idle
         statusText = "Ready"
         roomBrowser.restart()
@@ -887,23 +938,6 @@ final class WERAIViewModel: ObservableObject {
         }
     }
 
-    func installAudioDevice() {
-        let resourceName = "Install-ALO-Audio-Device"
-        let bundled = Bundle.main.url(forResource: resourceName, withExtension: "pkg")
-        let development = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appendingPathComponent("dist/\(resourceName).pkg")
-        let installer = bundled ?? (FileManager.default.fileExists(atPath: development.path) ? development : nil)
-        guard let installer else {
-            errorMessage = "The ALO Audio Device installer is missing. Download the DMG or installer package from the same ALO release."
-            return
-        }
-        if NSWorkspace.shared.open(installer) {
-            statusText = "Finish the installer, then reopen ALO"
-        } else {
-            errorMessage = "macOS could not open the ALO Audio Device installer."
-        }
-    }
-
     func restartApplication() {
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.createsNewApplicationInstance = true
@@ -924,11 +958,13 @@ final class WERAIViewModel: ObservableObject {
         meshSession?.stopImmediately()
     }
 
-    private func ensureVideoPermission() -> Bool {
+    private func ensureRecordingPermission() -> Bool {
         guard CGPreflightScreenCaptureAccess() else {
             permissionNotice = true
-            _ = CGRequestScreenCaptureAccess()
-            statusText = "Screen Recording permission is required only for video sharing"
+            let granted = CGRequestScreenCaptureAccess()
+            statusText = granted
+                ? "Recording access granted · restart ALO to begin broadcasting"
+                : "ALO needs Screen & System Audio Recording to broadcast"
             return false
         }
         permissionNotice = false
@@ -994,7 +1030,10 @@ final class WERAIViewModel: ObservableObject {
 
     private var nowPlayingCallback: (NowPlayingMedia) -> Void {
         { [weak self] media in
-            DispatchQueue.main.async { self?.nowPlaying = media }
+            DispatchQueue.main.async {
+                self?.nowPlaying = media
+                if media.isPlaying == false { self?.audioIsRendering = false }
+            }
         }
     }
 
@@ -1007,12 +1046,20 @@ final class WERAIViewModel: ObservableObject {
     private func handle(_ status: ReceiverStatus) {
         switch status {
         case .searching: statusText = "Looking for \(activeRoom ?? "the room")"
-        case .connected: statusText = "Aligning this Mac with the room"
+        case .connected:
+            audioIsRendering = false
+            statusText = "Aligning this Mac with the room"
         case .playing:
             phase = .live
+            audioIsRendering = true
             statusText = "Audio is in sync"
+        case .silent:
+            phase = .live
+            audioIsRendering = false
+            statusText = "Connected · waiting for audio"
         case .failed(let message):
             phase = .failed
+            audioIsRendering = false
             errorMessage = message
             statusText = "Connection lost"
         }
@@ -1034,7 +1081,6 @@ final class WERAIViewModel: ObservableObject {
         isLeavingRoom = false
         errorMessage = nil
         errorIsPermissionRelated = false
-        audioDeviceInstallRequired = false
         permissionNotice = false
         participants = []
         messages = []
@@ -1048,6 +1094,7 @@ final class WERAIViewModel: ObservableObject {
         roomHasVideo = false
         nowPlaying = NowPlayingMedia()
         localNowPlaying = NowPlayingMedia()
+        audioIsRendering = false
         experience = .audio
         draftMessage = ""
         floatingSection = .collapsed
@@ -1128,6 +1175,19 @@ final class WERAIViewModel: ObservableObject {
 
     private func isPermissionError(_ error: Error) -> Bool {
         RecordingErrorPresentation.isPermissionFailure(error)
+    }
+
+    static func renderingState(for status: String) -> Bool? {
+        if ["This Mac is playing in sync", "Listening in sync", "Audio is in sync"].contains(status) {
+            return true
+        }
+        if status.contains("waiting for audio")
+            || status.hasPrefix("Connecting")
+            || status.hasPrefix("Room open")
+            || status.hasPrefix("Taking over") {
+            return false
+        }
+        return nil
     }
 }
 
@@ -1360,16 +1420,16 @@ private struct WERAIView: View {
                     .foregroundStyle(Palette.muted)
                 }
                 VStack(alignment: .leading, spacing: 7) {
-                    Text("Allow video sharing in Screen Recording")
+                    Text("Allow audio and video sharing")
                         .font(.system(size: 19, weight: .semibold, design: .rounded))
                         .foregroundStyle(Palette.ink)
-                    Text("Audio rooms never need this permission. Turn ALO on in Privacy & Security → Screen & System Audio Recording, then restart ALO and turn video on again.")
+                    Text("Turn ALO on in Privacy & Security → Screen & System Audio Recording, then restart ALO. ALO captures system audio only while this Mac is broadcasting, and captures video only when you enable video sharing.")
                         .font(.system(size: 12, design: .rounded))
                         .foregroundStyle(Palette.secondary)
                         .lineSpacing(3)
                 }
                 HStack(spacing: 9) {
-                    Button("Open Screen Recording", action: model.openPrivacySettings)
+                    Button("Open Recording Settings", action: model.openPrivacySettings)
                         .buttonStyle(PillButtonStyle(filled: true))
                     Button("Restart ALO", action: model.restartApplication)
                         .buttonStyle(PillButtonStyle(filled: false))
@@ -1401,10 +1461,6 @@ private struct WERAIView: View {
                     .buttonStyle(PillButtonStyle(filled: true))
                 if model.errorIsPermissionRelated {
                     Button("Recording Settings", action: model.openPrivacySettings)
-                        .buttonStyle(PillButtonStyle(filled: false))
-                }
-                if model.audioDeviceInstallRequired {
-                    Button("Install Audio Device", action: model.installAudioDevice)
                         .buttonStyle(PillButtonStyle(filled: false))
                 }
             }
@@ -1623,14 +1679,12 @@ private struct FloatingRoomView: View {
                     .lineLimit(1)
                 HStack(spacing: 4) {
                     Circle()
-                        .fill(Palette.syncText)
+                        .fill(model.audioIsRendering ? Palette.syncText : Palette.secondary)
                         .frame(width: 5, height: 5)
                         .accessibilityHidden(true)
-                    Text(
-                        model.nowPlaying.title == nil
-                            ? "\(model.participants.count) listening · Synced"
-                            : "\(model.roomTitle) · Synced"
-                    )
+                    Text(model.nowPlaying.title == nil
+                        ? "\(model.participants.count) listening · \(model.roomSyncLabel)"
+                        : "\(model.roomTitle) · \(model.roomSyncLabel)")
                     .font(.system(size: 10, weight: .medium))
                     .foregroundStyle(Palette.detailText)
                     .lineLimit(1)
@@ -2222,15 +2276,15 @@ private struct FloatingRoomView: View {
                 .background(Palette.artworkFallback)
                 .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
             VStack(alignment: .leading, spacing: 4) {
-                Text("Video sharing needs Screen Recording")
+                Text("Broadcasting needs recording access")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(Palette.ink)
-                Text("Audio is unaffected. Enable ALO, restart it, then turn video on again.")
+                Text("Enable ALO for Screen & System Audio Recording, restart it, then broadcast again.")
                     .font(.system(size: 11))
                     .foregroundStyle(Palette.secondary)
             }
             Spacer()
-            Button("Screen Recording", action: model.openPrivacySettings)
+            Button("Recording Settings", action: model.openPrivacySettings)
                 .buttonStyle(PillButtonStyle(filled: true))
             Button("Restart", action: model.restartApplication)
                 .buttonStyle(PillButtonStyle(filled: false))

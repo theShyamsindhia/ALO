@@ -23,7 +23,7 @@ final class Receiver {
     private let player: SynchronizedPlayer
     private let videoDecoder: VideoDecoder
     private lazy var remoteCommandCenter = RoomRemoteCommandCenter { [weak self] command in
-        self?.sendRoomMediaCommand(command)
+        self?.sendRoomMediaCommand(command) ?? false
     }
     private var udpListener: NWListener?
     private var videoListener: NWListener?
@@ -33,6 +33,7 @@ final class Receiver {
     private var pingTimer: DispatchSourceTimer?
     private var maintenanceTimer: DispatchSourceTimer?
     private var hasChosenRoom = false
+    private var hasAuthenticatedControl = false
     private var audioListenerReady = false
     private var videoListenerReady = false
     private var audioConnections = [NWConnection]()
@@ -71,8 +72,8 @@ final class Receiver {
         self.player = try SynchronizedPlayer(
             outputDeviceUID: outputDeviceUID,
             outputDeviceID: outputDeviceID
-        ) {
-            statusHandler?(.playing)
+        ) { audible in
+            statusHandler?(audible ? .playing : .silent)
         }
         self.videoDecoder = VideoDecoder(imageHandler: videoHandler ?? { _ in })
     }
@@ -140,6 +141,7 @@ final class Receiver {
             browser = nil
             control?.cancel()
             control = nil
+            hasAuthenticatedControl = false
             udpListener?.cancel()
             udpListener = nil
             videoListener?.cancel()
@@ -191,9 +193,12 @@ final class Receiver {
         sendRoomMediaCommand(playing ? .play : .pause)
     }
 
-    func sendRoomMediaCommand(_ command: RoomMediaCommand) {
-        queue.async { [weak self] in
-            self?.send(ControlMessage(type: "media_command", mediaCommand: command))
+    @discardableResult
+    func sendRoomMediaCommand(_ command: RoomMediaCommand) -> Bool {
+        queue.sync {
+            guard control != nil, hasAuthenticatedControl else { return false }
+            send(ControlMessage(type: "media_command", mediaCommand: command))
+            return true
         }
     }
 
@@ -245,10 +250,6 @@ final class Receiver {
             switch state {
             case .ready:
                 print("Connected to \(endpoint).")
-                self.statusHandler?(.connected)
-                if self.capturesSystemMediaCommands {
-                    self.remoteCommandCenter.start(roomName: self.roomDisplayName)
-                }
                 self.sendJoin()
                 self.startPinging()
             case .failed(let error):
@@ -316,6 +317,11 @@ final class Receiver {
                     case "presence":
                         self.participantsHandler?(message.participantDetails ?? [])
                     case "welcome":
+                        self.hasAuthenticatedControl = true
+                        self.statusHandler?(.connected)
+                        if self.capturesSystemMediaCommands {
+                            self.remoteCommandCenter.start(roomName: self.roomDisplayName)
+                        }
                         if let id = message.participantID, let name = message.displayName {
                             self.identityHandler?(id, name)
                         }
@@ -358,6 +364,7 @@ final class Receiver {
         pingTimer = nil
         control?.cancel()
         control = nil
+        hasAuthenticatedControl = false
         controlDecoder = ControlLineDecoder()
         if capturesSystemMediaCommands { remoteCommandCenter.stop() }
         guard hasChosenRoom else { return }
@@ -456,5 +463,6 @@ enum ReceiverStatus: Equatable {
     case searching
     case connected
     case playing
+    case silent
     case failed(String)
 }

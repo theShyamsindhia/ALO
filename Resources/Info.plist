@@ -13,9 +13,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.12.0</string>
+    <string>0.12.1</string>
     <key>CFBundleVersion</key>
-    <string>21</string>
+    <string>22</string>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © 2026 Shyam Sindiya</string>
     <key>CFBundleIconFile</key>
@@ -26,10 +26,10 @@
     <string>public.app-category.music</string>
     <key>NSHighResolutionCapable</key>
     <true/>
-    <key>NSAudioCaptureUsageDescription</key>
-    <string>ALO captures this Mac's audio so its screen and sound can play in sync on nearby Macs.</string>
-    <key>NSScreenCaptureUsageDescription</key>
-    <string>When you explicitly enable video, ALO captures only ALO Display and streams it to the Macs in your room.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>ALO captures this Mac's system audio while it is broadcasting so nearby Macs can play it in sync.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>ALO uses Screen &amp; System Audio Recording for room audio; when you explicitly enable video, it also captures only ALO Display.</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>ALO finds and streams audio, shared screens, room messages, and current track artwork to Macs on your local network.</string>
     <key>NSBonjourServices</key>

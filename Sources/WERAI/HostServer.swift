@@ -127,7 +127,7 @@ final class HostServer {
             )
             guard !packets.isEmpty else { return }
             let audioClientEntries = self.clients.filter { $0.value.audio != nil }
-            if self.timingEligibleClients == nil, !audioClientEntries.isEmpty {
+            if self.timingEligibleClients == nil {
                 self.timingEligibleClients = Set(audioClientEntries.compactMap { identifier, client in
                     client.id != nil ? identifier : nil
                 })
@@ -560,11 +560,20 @@ final class HostServer {
                 return
             }
             client.audioSendsInFlight += 1
-            send(data, over: connection, isComplete: true) { [weak self, weak client] _ in
+            send(data, over: connection, isComplete: true) { [weak self, weak client] error in
                 guard let self, let client else { return }
                 self.queue.async { [weak self, weak client] in
                     guard let self, let client else { return }
                     client.audioSendsInFlight = max(0, client.audioSendsInFlight - 1)
+                    if let error {
+                        fputs("Audio send failed: \(error)\n", stderr)
+                        if client.audio === connection {
+                            connection.cancel()
+                            client.audio = nil
+                            client.pendingAudio = nil
+                        }
+                        return
+                    }
                     guard let pending = client.pendingAudio else { return }
                     client.pendingAudio = nil
                     self.sendAudio(pending, to: client)

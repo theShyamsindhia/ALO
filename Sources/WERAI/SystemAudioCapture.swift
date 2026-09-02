@@ -8,11 +8,21 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     typealias AudioHandler = (_ samples: [Int16], _ captureTimeNanos: UInt64) -> Void
 
     private let captureQueue = DispatchQueue(label: "in.werai.audio.capture", qos: .userInteractive)
+    private let stateLock = NSLock()
+    private let unexpectedStopHandler: (Error) -> Void
     private var stream: SCStream?
     private var audioHandler: AudioHandler?
+    private var stopping = false
+
+    init(unexpectedStopHandler: @escaping (Error) -> Void = { _ in }) {
+        self.unexpectedStopHandler = unexpectedStopHandler
+    }
 
     func start(audioHandler: @escaping AudioHandler) async throws {
-        self.audioHandler = audioHandler
+        stateLock.withLock {
+            stopping = false
+            self.audioHandler = audioHandler
+        }
 
         let content = try await SCShareableContent.excludingDesktopWindows(
             false,
@@ -40,12 +50,26 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
         try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: captureQueue)
         try await stream.startCapture()
-        self.stream = stream
+        let accepted = stateLock.withLock {
+            guard !stopping else { return false }
+            self.stream = stream
+            return true
+        }
+        guard accepted else {
+            try? await stream.stopCapture()
+            throw CancellationError()
+        }
     }
 
     func stop() async throws {
-        try await stream?.stopCapture()
-        stream = nil
+        let activeStream = stateLock.withLock {
+            stopping = true
+            let active = stream
+            stream = nil
+            audioHandler = nil
+            return active
+        }
+        try await activeStream?.stopCapture()
     }
 
     func stream(
@@ -59,11 +83,20 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         guard outputType == .audio,
               let samples = Self.int16StereoSamples(from: sampleBuffer)
         else { return }
-        audioHandler?(samples, captureNanos)
+        let handler = stateLock.withLock { stopping ? nil : audioHandler }
+        handler?(samples, captureNanos)
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         fputs("Screen and audio capture stopped: \(error.localizedDescription)\n", stderr)
+        let callback = stateLock.withLock { () -> ((Error) -> Void)? in
+            guard !stopping else { return nil }
+            stopping = true
+            self.stream = nil
+            audioHandler = nil
+            return unexpectedStopHandler
+        }
+        callback?(error)
     }
 
     private static func captureTimeNanos(for sampleBuffer: CMSampleBuffer) -> UInt64 {

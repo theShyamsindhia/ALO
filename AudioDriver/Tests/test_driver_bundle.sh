@@ -7,6 +7,8 @@ bundle="$repo_root/dist/ALORoom.driver"
 binary="$bundle/Contents/MacOS/ALORoom"
 test_binary="${TMPDIR:-/tmp}/werai-ring-test-$$"
 client_test_binary="${TMPDIR:-/tmp}/werai-client-abi-test-$$"
+ring_test_name="/alo-audio-ring-test-$$"
+client_test_name="/alo-audio-client-test-$$"
 trap 'rm -f "$test_binary" "$client_test_binary"' EXIT
 
 test "$(plutil -extract CFBundleIdentifier raw "$bundle/Contents/Info.plist")" = "in.werai.audio.driver"
@@ -19,6 +21,7 @@ file "$binary" | grep -q 'Mach-O universal binary'
 lipo "$binary" -verify_arch arm64 x86_64
 
 xcrun clang -std=c11 -O2 \
+  -DWERAI_SHARED_AUDIO_NAME=\"$ring_test_name\" \
   -I "$repo_root/AudioDriver/include" -I "$repo_root/AudioDriver/Sources" \
   "$repo_root/AudioDriver/Tests/ring_test.c" \
   "$repo_root/AudioDriver/Sources/WERAILoopbackRing.c" \
@@ -27,6 +30,8 @@ xcrun clang -std=c11 -O2 \
 "$test_binary"
 
 xcrun clang -std=c11 -O2 \
+  -DWERAI_SHARED_AUDIO_NAME=\"$client_test_name\" \
+  -DWERAI_NAME=\"$client_test_name\" \
   -I "$repo_root/AudioDriver/include" \
   -I "$repo_root/Sources/WERAISharedAudioClient/include" \
   "$repo_root/AudioDriver/Tests/client_abi_test.c" \

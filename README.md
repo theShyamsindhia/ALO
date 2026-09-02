@@ -33,11 +33,10 @@ on this Mac:
 - In an open room, choose **Broadcast** to share this Mac's system audio. Any member
   may take over broadcasting; leaving does not delete the room.
 
-The first Mac that broadcasts installs the bundled **ALO Audio Device** once. The
-installer needs an administrator password because macOS loads audio plug-ins from
-`/Library/Audio/Plug-Ins/HAL`. After installation, apps can select **ALO Room** as a
-normal speaker output; ALO reads that output directly and does not request Screen or
-System Audio Recording permission for audio.
+The first time a Mac broadcasts, macOS asks for **Screen & System Audio Recording**
+permission. ALO uses that permission for system audio only while that Mac is the active
+broadcaster. After granting it, restart ALO once. No separate speaker output or audio
+driver is installed.
 
 After the room connects, the setup window disappears and the room moves into the
 menu bar. Click the cat to reveal the compact controls; the same surface grows
@@ -59,6 +58,13 @@ floating bar. Its window button toggles the floating presentation at any time. O
 listening Macs, keyboard, Touch Bar, headphone, and Control Center
 play/pause/previous/next commands are forwarded to the active broadcaster; volume
 buttons continue to control the local Mac.
+ALO checks its GitHub Releases page shortly after launch and every six hours. Choose
+**ALO → Check for Updates…** at any time for a manual check. Room members also advertise
+their app version, so seeing a newer member triggers the same official-release check.
+Updates are never copied from another room member: ALO downloads the Apple Silicon ZIP
+from GitHub, verifies GitHub's SHA-256 digest, the `in.werai.audio` bundle identity,
+Developer ID team `R9QFK9NM3Y`, and Gatekeeper acceptance, then replaces and relaunches
+the app. macOS asks for administrator approval only when the app's folder requires it.
 The interface follows macOS accessibility preferences for reduced motion, reduced
 transparency, increased contrast, and the user-selected control accent.
 
@@ -85,14 +91,14 @@ On every other Mac:
 
 The room name is optional. Without one, a receiver joins the first room it finds.
 
-Audio-only rooms do not use ScreenCaptureKit and do not need Screen or System Audio
-Recording permission after **ALO Audio Device** is installed. ALO asks for **Screen &
-System Audio Recording** only when the active broadcaster explicitly enables the current
-video implementation. At that point ALO creates a 1920×1080 **ALO Display** that appears
+Broadcasting audio uses ScreenCaptureKit and needs **Screen & System Audio Recording**.
+ALO requests access when a member first chooses **Broadcast**, before claiming the room's
+media timeline. When the active broadcaster also enables video, ALO creates a 1920×1080
+**ALO Display** that appears
 in System Settings → Displays, captures that display only, and streams it to the room.
 Arrange it beside the physical displays and move the windows you want to share onto it.
 Every Mac may also ask for **Local Network** access.
-Grant video access in System Settings → Privacy & Security, then use **Restart ALO** if
+Grant recording access in System Settings → Privacy & Security, then use **Restart ALO** if
 macOS asks you to restart it.
 
 If the Screen Recording switch is already on but macOS still refuses access, quit old
@@ -106,10 +112,9 @@ feature is runtime-checked and fails cleanly if Apple changes or removes it. Rea
 display's pixels still uses ScreenCaptureKit and therefore intentionally requires the
 user's Screen Recording consent; the private display object itself exposes no framebuffer.
 
-When broadcasting stops, ALO restores the physical output that was selected before
-**ALO Room**. Restoration is compare-and-swap: if the user selected another output in
-the meantime, ALO preserves that newer choice. A small crash journal restores an output
-left routed to ALO when the app next launches.
+ALO leaves the selected physical output unchanged. It privately suppresses the original
+local render only after synchronized playback is ready, avoiding feedback without adding
+a device to the Sound picker.
 
 ## Share a ready binary
 
@@ -120,10 +125,6 @@ left routed to ALO when the app next launches.
 This produces `dist/ALO-macos-universal.zip` for Apple Silicon and Intel Macs. AirDrop
 or copy it to the other Macs, unzip it, and open ALO. If Gatekeeper quarantines an
 AirDropped ad-hoc-signed development build, build from source on that Mac.
-
-Packaging also creates `dist/Install-ALO-Audio-Device.pkg` and embeds the same installer
-inside the app. The release DMG places it next to `ALO.app`. Local development packages
-are unsigned unless `WERAI_INSTALLER_IDENTITY` names a valid installer identity.
 
 The packaged app uses a stable local designated requirement (`in.werai.audio`) so a
 new ALO build does not silently become a different app in macOS privacy settings.
@@ -208,6 +209,24 @@ Run the focused single-Mac mesh tests:
 swift test --filter MeshRoomTests
 ```
 
+For automated two-Mac QA without UI automation, save or join the room once in
+the app on each Mac, then run the signed app binary on either Mac:
+
+```sh
+/Applications/ALO.app/Contents/MacOS/alo room "Room Name"
+# Start as broadcaster when no one is sharing:
+/Applications/ALO.app/Contents/MacOS/alo room "Room Name" --broadcast
+# Join first, then claim the newer broadcaster epoch for a handoff test:
+/Applications/ALO.app/Contents/MacOS/alo room "Room Name" --take-over
+```
+
+This opens the same mesh control plane, receiver, clock synchronization, and
+audio renderer as the GUI. Lines prefixed with `ALO_QA` expose connection,
+playback, peer-version, and participant state for a test harness.
+Grant Screen & System Audio Recording from the GUI on that same Mac before using
+`--broadcast` or `--take-over`; macOS cannot complete the first consent prompt from
+an SSH-only session.
+
 This suite opens real loopback TCP listeners for three independent peers and verifies
 that the control mesh remains usable after the creator disconnects. It also checks
 public admission, successful private admission, rejection with a wrong private key,
@@ -271,31 +290,38 @@ Manual workflow dispatch remains available for signing diagnostics.
 The repository must provide `DEVELOPER_ID_P12_BASE64` and
 `DEVELOPER_ID_P12_PASSWORD` as Actions secrets, plus
 `APP_STORE_CONNECT_API_KEY_BASE64` as an Actions secret. Configure
-`WERAI_CODESIGN_IDENTITY`, `WERAI_INSTALLER_IDENTITY`, `APPLE_TEAM_ID`, `APP_STORE_CONNECT_KEY_ID`, and
+`WERAI_CODESIGN_IDENTITY`, `APPLE_TEAM_ID`, `APP_STORE_CONNECT_KEY_ID`, and
 `APP_STORE_CONNECT_ISSUER_ID` as Actions variables. Use an App Store Connect
 team key (Developer access or higher), because individual API keys cannot submit
-software to Apple's notarization service. The imported P12 must contain both the
-**Developer ID Application** and **Developer ID Installer** identities (including their
-private keys); the latter signs the one-time HAL plug-in package.
+software to Apple's notarization service. The imported P12 must contain the
+**Developer ID Application** identity and its private key.
 
 To publish a downloadable build on the repository's **Releases** page:
 
 1. Update `CFBundleShortVersionString` and `CFBundleVersion` in `Resources/Info.plist`.
 2. Commit and push the version change to `main`.
-3. Create a tag and publish a GitHub Release for that tag, either in GitHub or with:
+3. Create a tag matching `CFBundleShortVersionString` exactly, with an optional leading
+   `v`, and publish a GitHub Release for that tag. For example:
 
    ```sh
    gh release create v0.9.0 --target main --generate-notes
    ```
 
 Publishing the release automatically attaches notarized and stapled
-`ALO-macos-arm64.zip`, `ALO-macos-arm64.dmg`, and
-`Install-ALO-Audio-Device.pkg` downloads to the release.
+`ALO-macos-arm64.zip` and `ALO-macos-arm64.dmg` downloads to the release.
 
 If an older ad-hoc-signed copy appears enabled under **Privacy & Security → Screen &
 System Audio Recording** but still cannot start a room, remove the old ALO entries,
 install the newly signed release in `/Applications`, launch it, and grant recording access
 again. This one-time reset replaces the stale permission record created by the old build.
+
+ALO 0.12.1 and newer do not install or use the old `ALO Room` audio device. If a prior
+test build installed it, remove that one legacy copy in Terminal and restart Core Audio:
+
+```sh
+sudo /bin/rm -R /Library/Audio/Plug-Ins/HAL/ALORoom.driver
+sudo /usr/bin/killall coreaudiod
+```
 
 ## License
 

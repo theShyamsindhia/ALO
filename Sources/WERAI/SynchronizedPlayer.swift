@@ -19,9 +19,10 @@ final class SynchronizedPlayer {
     private var anchorCaptureNanos: UInt64?
     private var hasStarted = false
     private var outputLatencyNanos: UInt64 = 0
+    private var activeOutputDeviceID: AudioDeviceID?
     private var targetLatencyNanos = RoomTiming.defaultPlayoutDelayNanos
     private var smoothedCorrection = 0.0
-    private let playbackStarted: (() -> Void)?
+    private let playbackActivityChanged: ((Bool) -> Void)?
     private var latestLatenessNanos: UInt64 = 0
     private var latePacketCount: UInt64 = 0
     private var resyncCount: UInt64 = 0
@@ -30,6 +31,11 @@ final class SynchronizedPlayer {
     private var configurationObserver: NSObjectProtocol?
     private let configurationLock = NSLock()
     private var configurationChangePending = false
+    private var isRecoveringConfiguration = false
+    private var recoveryRetryNotBeforeNanos: UInt64 = 0
+    private var participantVolume: Double = 1
+    private var participantMuted = false
+    private var playbackIsAudible = false
     private(set) var configurationChangeCount: UInt64 = 0
 
     var clockOffsetNanos: Int64?
@@ -37,9 +43,9 @@ final class SynchronizedPlayer {
     init(
         outputDeviceUID: String? = nil,
         outputDeviceID: AudioDeviceID? = nil,
-        playbackStarted: (() -> Void)? = nil
+        playbackActivityChanged: ((Bool) -> Void)? = nil
     ) throws {
-        self.playbackStarted = playbackStarted
+        self.playbackActivityChanged = playbackActivityChanged
         self.outputDeviceUID = outputDeviceUID
         self.explicitOutputDeviceID = outputDeviceID
         guard let format = AVAudioFormat(
@@ -59,7 +65,7 @@ final class SynchronizedPlayer {
         try applyRequestedOutputDevice()
         engine.prepare()
         try engine.start()
-        refreshOutputLatency()
+        refreshOutputState()
         configurationObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange,
             object: engine,
@@ -74,7 +80,8 @@ final class SynchronizedPlayer {
     }
 
     func accept(_ packet: AudioPacket) {
-        lastPacketReceivedNanos = MonotonicClock.nowNanos()
+        let now = MonotonicClock.nowNanos()
+        lastPacketReceivedNanos = now
         pending[packet.sequence] = packet
         if expectedSequence == nil {
             expectedSequence = packet.sequence
@@ -85,6 +92,7 @@ final class SynchronizedPlayer {
     func maintainSync() {
         applyPendingAudioEngineConfigurationChange()
         drain()
+        updatePlaybackActivity(nowNanos: MonotonicClock.nowNanos())
         guard hasStarted else {
             playbackWatchdog.reset()
             return
@@ -192,7 +200,7 @@ final class SynchronizedPlayer {
                 hasStarted = true
                 latestLatenessNanos = 0
                 print("Playback synchronized (\(targetLatencyNanos / 1_000_000) ms room buffer).")
-                playbackStarted?()
+                updatePlaybackActivity(nowNanos: now)
             }
             expectedSequence = sequence &+ 1
         }
@@ -208,6 +216,7 @@ final class SynchronizedPlayer {
         varispeed.rate = 1
         latestLatenessNanos = 0
         lastPacketReceivedNanos = nil
+        setPlaybackAudible(false)
         playbackWatchdog.reset()
     }
 
@@ -216,7 +225,28 @@ final class SynchronizedPlayer {
     }
 
     func setLevel(volume: Double, muted: Bool) {
-        player.volume = muted ? 0 : Float(min(max(volume, 0), 1))
+        participantVolume = min(max(volume, 0), 1)
+        participantMuted = muted
+        applyOutputGain()
+    }
+
+    private func applyOutputGain() {
+        player.volume = participantMuted ? 0 : Float(participantVolume)
+        updatePlaybackActivity(nowNanos: MonotonicClock.nowNanos())
+    }
+
+    private func updatePlaybackActivity(nowNanos: UInt64) {
+        let gainIsAudible = player.volume > 0.0001
+        let streamIsRecent = lastPacketReceivedNanos.map {
+            nowNanos >= $0 && nowNanos - $0 <= 500_000_000
+        } ?? false
+        setPlaybackAudible(hasStarted && gainIsAudible && streamIsRecent)
+    }
+
+    private func setPlaybackAudible(_ audible: Bool) {
+        guard playbackIsAudible != audible else { return }
+        playbackIsAudible = audible
+        playbackActivityChanged?(audible)
     }
 
     func syncReport() -> PlaybackSyncReport {
@@ -234,17 +264,13 @@ final class SynchronizedPlayer {
 
     func handleAudioEngineConfigurationChange() {
         configurationChangeCount &+= 1
-        try? applyRequestedOutputDevice()
-        if !engine.isRunning {
-            engine.prepare()
-            try? engine.start()
-        }
-        refreshOutputLatency()
-        hardResynchronize()
+        recoverAudioEngine()
     }
 
     private func markAudioEngineConfigurationChanged() {
-        configurationLock.withLock { configurationChangePending = true }
+        configurationLock.withLock {
+            if !isRecoveringConfiguration { configurationChangePending = true }
+        }
     }
 
     private func applyPendingAudioEngineConfigurationChange() {
@@ -253,11 +279,93 @@ final class SynchronizedPlayer {
             configurationChangePending = false
             return pending
         }
-        if pending { handleAudioEngineConfigurationChange() }
+        guard pending else { return }
+        let now = MonotonicClock.nowNanos()
+        guard now >= recoveryRetryNotBeforeNanos else {
+            configurationLock.withLock { configurationChangePending = true }
+            return
+        }
+        let currentDeviceID = currentOutputDeviceID()
+        let currentLatencyNanos = measuredOutputLatencyNanos()
+        let deviceChanged = activeOutputDeviceID != currentDeviceID
+        let latencyChanged = Self.latencyChanged(
+            from: outputLatencyNanos,
+            to: currentLatencyNanos
+        )
+        // Core Audio also broadcasts configuration changes for unrelated private
+        // taps. Ignore those only when this engine's device and latency are intact.
+        if Self.shouldRecoverAfterConfigurationChange(
+            engineIsRunning: engine.isRunning,
+            deviceChanged: deviceChanged,
+            latencyChanged: latencyChanged
+        ) {
+            handleAudioEngineConfigurationChange()
+        }
     }
 
-    private func refreshOutputLatency() {
-        outputLatencyNanos = UInt64(max(0, engine.outputNode.presentationLatency) * 1_000_000_000)
+    static func shouldRecoverAfterConfigurationChange(
+        engineIsRunning: Bool,
+        deviceChanged: Bool,
+        latencyChanged: Bool
+    ) -> Bool {
+        !engineIsRunning || deviceChanged || latencyChanged
+    }
+
+    static func latencyChanged(from old: UInt64, to new: UInt64) -> Bool {
+        let difference = old > new ? old - new : new - old
+        return difference > 1_000_000
+    }
+
+    private func recoverAudioEngine() {
+        let shouldRecover = configurationLock.withLock {
+            guard !isRecoveringConfiguration else { return false }
+            isRecoveringConfiguration = true
+            configurationChangePending = false
+            return true
+        }
+        guard shouldRecover else { return }
+        defer {
+            configurationLock.withLock { isRecoveringConfiguration = false }
+        }
+
+        player.stop()
+        engine.stop()
+        hardResynchronize()
+        do {
+            try applyRequestedOutputDevice()
+            engine.prepare()
+            try engine.start()
+            refreshOutputState()
+            recoveryRetryNotBeforeNanos = 0
+        } catch {
+            fputs("Audio output recovery failed: \(error.localizedDescription)\n", stderr)
+            recoveryRetryNotBeforeNanos = MonotonicClock.nowNanos() + 500_000_000
+            configurationLock.withLock { configurationChangePending = true }
+        }
+    }
+
+    private func measuredOutputLatencyNanos() -> UInt64 {
+        UInt64(max(0, engine.outputNode.presentationLatency) * 1_000_000_000)
+    }
+
+    private func refreshOutputState() {
+        outputLatencyNanos = measuredOutputLatencyNanos()
+        activeOutputDeviceID = currentOutputDeviceID()
+    }
+
+    private func currentOutputDeviceID() -> AudioDeviceID? {
+        guard let audioUnit = engine.outputNode.audioUnit else { return nil }
+        var deviceID = AudioDeviceID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let status = AudioUnitGetProperty(
+            audioUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &deviceID,
+            &size
+        )
+        return status == noErr && deviceID != kAudioObjectUnknown ? deviceID : nil
     }
 
     private func applyRequestedOutputDevice() throws {

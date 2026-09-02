@@ -3,13 +3,6 @@ import Testing
 @testable import WERAI
 
 struct BroadcastAudioRouterTests {
-    @Test("Mesh broadcast reports a typed install requirement without invoking recording fallback")
-    func installRequiredError() {
-        let error = ALOAudioSetupError.installRequired
-        #expect(error.errorDescription?.contains("must be installed") == true)
-        #expect(error.errorDescription?.contains("Screen Recording") == false)
-    }
-
     @Test("Route activation and restoration preserve both physical defaults")
     func activateAndRestore() throws {
         let hardware = FakeAudioHardware(output: "physical", system: "alerts")

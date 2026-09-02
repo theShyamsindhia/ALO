@@ -242,6 +242,42 @@ struct LoopbackRoomScaleTests {
         #expect(joiningPeer.playoutDelays.last == establishedDelay)
     }
 
+    @Test("A room that starts empty does not let its first late joiner retime the active timeline")
+    func firstLateJoinerCannotRetimeActiveTimeline() throws {
+        let ready = DispatchSemaphore(value: 0)
+        let state = PortState()
+        let host = HostServer(
+            roomName: "Empty timing test \(UUID().uuidString)",
+            advertise: false,
+            listenerReadyHandler: { port in state.set(port); ready.signal() }
+        )
+        try host.start()
+        defer { host.stop() }
+        guard ready.wait(timeout: .now() + 3) == .success, let port = state.port else {
+            throw LoopbackTestError.hostDidNotStart
+        }
+
+        let samples = [Int16](
+            repeating: 0,
+            count: Int(AudioPacket.framesPerPacket) * Int(AudioPacket.channelCount)
+        )
+        host.acceptAudio(samples: samples, captureTimeNanos: MonotonicClock.nowNanos())
+
+        let peer = HeadlessLoopbackPeer(index: 103)
+        try peer.start(hostPort: port)
+        defer { peer.stop() }
+        guard peer.waitUntilJoined(timeout: 3) else { throw LoopbackTestError.peerDidNotJoin }
+        #expect(waitUntil(timeout: 2) {
+            peer.playoutDelays.last == RoomTiming.defaultPlayoutDelayNanos
+        })
+
+        peer.recommendPlayoutDelay(RoomTiming.maximumPlayoutDelayNanos)
+        peer.sendPing()
+        #expect(peer.waitForPong(timeout: 2))
+        Thread.sleep(forTimeInterval: 0.05)
+        #expect(peer.playoutDelays.last == RoomTiming.defaultPlayoutDelayNanos)
+    }
+
     private func runRoom(
         peerCount: Int,
         linkBitsPerSecond: UInt64?,

@@ -37,6 +37,14 @@ int main(void) {
     assert(!WERAISharedAudioRead(consumer, 41, frame, &hostTime));
     assert(WERAISharedAudioLatestFrame(consumer) == 342);
     assert(WERAISharedAudioLatestReadableFrame(consumer) == 86);
+    uint64_t generation = __atomic_load_n(&consumer->generation, __ATOMIC_ACQUIRE);
+    WERAISharedAudioBeginTimeline(producer);
+    assert(__atomic_load_n(&consumer->generation, __ATOMIC_ACQUIRE) == generation + 1);
+    assert(WERAISharedAudioLatestFrame(consumer) == 0);
+    assert(WERAISharedAudioLatestReadableFrame(consumer) == 0);
+    WERAISharedAudioPublish(producer, 0, 9000, 10.0, sharedSource, 300);
+    assert(WERAISharedAudioRead(consumer, 2, frame, &hostTime));
+    assert(hostTime == 9020);
     WERAISharedAudioClose(consumer);
     WERAISharedAudioClose(producer);
     shm_unlink(WERAI_SHARED_AUDIO_NAME);

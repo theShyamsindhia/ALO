@@ -50,6 +50,7 @@ final class MeshSession {
         chatHandler: @escaping (String, String, UInt64) -> Void,
         queueHandler: @escaping ([RoomQueueItem]) -> Void,
         videoHandler: @escaping (CGImage) -> Void,
+        peerVersionHandler: @escaping (String) -> Void = { _ in },
         errorHandler: @escaping (Error) -> Void = { _ in },
         replicaPersistenceHandler: @escaping (MeshRoomReplica) -> Void = { _ in }
     ) {
@@ -77,6 +78,9 @@ final class MeshSession {
             },
             participantsHandler: { participants in
                 DispatchQueue.main.async { relay.participants(participants) }
+            },
+            peerVersionHandler: { version in
+                DispatchQueue.main.async { peerVersionHandler(version) }
             }
         )
         relay.replica = { [weak self] in self?.apply($0) }
@@ -123,6 +127,7 @@ final class MeshSession {
     }
     func removeQueueItem(_ id: String) { control.publishQueueRemove(id) }
     func sendMediaCommand(_ command: RoomMediaCommand) {
+        guard replica.broadcaster != nil else { return }
         guard mediaCommandReady else { pendingMediaCommand = command; return }
         if let hostSession { hostSession.sendRoomMediaCommand(command) }
         else if let receiver { receiver.sendRoomMediaCommand(command) }
@@ -229,7 +234,6 @@ final class MeshSession {
                     hostSession = host
                     try await host.start(
                         roomName: broadcaster.mediaServiceName,
-                        audioSourcePolicy: .requireVirtualDevice,
                         participantID: nodeID,
                         statusHandler: statusHandler,
                         receiverCountHandler: { _ in },
@@ -244,6 +248,19 @@ final class MeshSession {
                         chatHandler: { _, _, _ in },
                         queueHandler: { _ in },
                         videoHandler: videoHandler,
+                        audioStoppedHandler: { [weak self, weak host] error in
+                            Task { @MainActor in
+                                guard let self, let host,
+                                      self.hostSession === host,
+                                      let current = self.replica.broadcaster,
+                                      current.nodeID == self.nodeID,
+                                      current.epoch == broadcaster.epoch
+                                else { return }
+                                self.intendsToBroadcast = false
+                                self.control.publishBroadcaster(active: false)
+                                self.statusHandler("Broadcast stopped: \(error.localizedDescription)")
+                            }
+                        },
                         videoStoppedHandler: { [weak self] _ in
                             guard let self,
                                   let current = self.replica.broadcaster,
@@ -264,7 +281,6 @@ final class MeshSession {
                     }
                     mediaCommandReady = true
                     flushPendingMediaCommand()
-                    statusHandler("Broadcasting this Mac · audio is in sync")
                 } else {
                     statusHandler("Connecting to the room broadcaster")
                     let receiver = try Receiver(
@@ -279,6 +295,7 @@ final class MeshSession {
                                 }
                             }
                             if status == .playing { self?.statusHandler("Listening in sync") }
+                            if status == .silent { self?.statusHandler("Connected · waiting for audio") }
                         },
                         identityHandler: { _, _ in },
                         participantsHandler: { _ in },

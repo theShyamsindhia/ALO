@@ -6,7 +6,6 @@ final class HostSession {
     private var host: HostServer?
     private var localReceiver: Receiver?
     private var audioSource: AudioSource?
-    private var audioRouter: BroadcastAudioRouter?
     private var videoCapture: ScreenVideoCapture?
     private var videoEncoder: VideoEncoder?
     private let virtualDisplayOwner: VirtualDisplayOwner
@@ -20,7 +19,6 @@ final class HostSession {
 
     func start(
         roomName: String,
-        audioSourcePolicy: AudioSourcePolicy = .requireVirtualDevice,
         participantID: String = UUID().uuidString,
         statusHandler: @escaping (String) -> Void,
         receiverCountHandler: @escaping (Int) -> Void,
@@ -32,28 +30,15 @@ final class HostSession {
         chatHandler: @escaping (_ sender: String, _ text: String, _ sentNanos: UInt64) -> Void,
         queueHandler: @escaping ([RoomQueueItem]) -> Void,
         videoHandler: @escaping (CGImage) -> Void,
+        audioStoppedHandler: @escaping (Error) -> Void = { _ in },
         videoStoppedHandler: @escaping (Error) -> Void = { _ in }
     ) async throws {
         do {
             self.videoStoppedHandler = videoStoppedHandler
             try Task.checkCancellation()
             statusHandler("Opening your room")
-            let router = BroadcastAudioRouter()
-            _ = router.recoverStaleRoute()
-            let virtualDeviceID = VirtualAudioDevice.deviceID()
-            var monitorOutputUID: String?
-            let source: AudioSource
-            if virtualDeviceID != nil {
-                statusHandler("Preparing ALO Room audio")
-                monitorOutputUID = try router.prepare()
-                audioRouter = router
-                source = VirtualAudioCapture()
-            } else if audioSourcePolicy == .allowScreenCaptureFallback {
-                statusHandler("ALO Room is not installed · using Screen Recording audio")
-                source = SystemAudioCapture()
-            } else {
-                throw ALOAudioSetupError.installRequired
-            }
+            statusHandler("Preparing system audio capture")
+            let source: AudioSource = SystemAudioCapture(unexpectedStopHandler: audioStoppedHandler)
             audioSource = source
             let playbackController = SystemPlaybackController()
             self.playbackController = playbackController
@@ -69,14 +54,39 @@ final class HostSession {
             self.host = host
             try Task.checkCancellation()
 
+            let nowPlayingMonitor = NowPlayingMonitor { [weak host] media in
+                host?.setNowPlaying(media)
+            }
+            nowPlayingMonitor.start()
+            self.nowPlayingMonitor = nowPlayingMonitor
+
+            statusHandler("Starting synchronized audio")
+            try await source.start { samples, captureTimeNanos in
+                host.acceptAudio(samples: samples, captureTimeNanos: captureTimeNanos)
+            }
+            try Task.checkCancellation()
+
+            guard #available(macOS 14.2, *) else {
+                throw WERAIError("ALO requires macOS 14.2 or newer.")
+            }
+            statusHandler("Synchronizing this Mac")
+            let muteTap = SourceMuteTap()
+            try await Task.detached(priority: .userInitiated) {
+                try muteTap.start()
+            }.value
+            self.muteTap = muteTap
+            try Task.checkCancellation()
+
+            statusHandler("Broadcasting this Mac · waiting for audio")
             let localReceiver = try Receiver(
                 requestedRoom: roomName,
-                outputDeviceUID: monitorOutputUID,
                 participantID: participantID,
                 capturesSystemMediaCommands: false,
                 statusHandler: { status in
                     if status == .playing {
                         statusHandler("This Mac is playing in sync")
+                    } else if status == .silent {
+                        statusHandler("Broadcasting this Mac · waiting for audio")
                     }
                 },
                 identityHandler: identityHandler,
@@ -91,40 +101,10 @@ final class HostSession {
             self.localReceiver = localReceiver
             try Task.checkCancellation()
 
-            let nowPlayingMonitor = NowPlayingMonitor { [weak host] media in
-                host?.setNowPlaying(media)
-            }
-            nowPlayingMonitor.start()
-            self.nowPlayingMonitor = nowPlayingMonitor
-
-            statusHandler("Starting synchronized audio")
-            try await source.start { samples, captureTimeNanos in
-                host.acceptAudio(samples: samples, captureTimeNanos: captureTimeNanos)
-            }
-            try Task.checkCancellation()
-            if virtualDeviceID != nil {
-                // Capture is ready before routing any application audio into the driver.
-                try router.activate()
-                statusHandler("Sharing through ALO Room · no recording permission needed")
-            }
-            try Task.checkCancellation()
-
             if initialVideoEnabled {
                 try await setVideoEnabled(true)
             }
-
-            if virtualDeviceID == nil {
-                guard #available(macOS 14.2, *) else {
-                    throw WERAIError("ALO requires macOS 14.2 or newer.")
-                }
-                statusHandler("Synchronizing this Mac")
-                let muteTap = SourceMuteTap()
-                try await Task.detached(priority: .userInitiated) {
-                    try muteTap.start()
-                }.value
-                self.muteTap = muteTap
-                statusHandler("Sharing system audio")
-            }
+            statusHandler("Sharing system audio")
         } catch {
             await stop()
             throw error
@@ -138,8 +118,6 @@ final class HostSession {
         muteTap = nil
         try? await audioSource?.stop()
         audioSource = nil
-        audioRouter?.restore()
-        audioRouter = nil
         await videoCapture?.stop()
         videoCapture = nil
         videoEncoder?.stop()
@@ -230,8 +208,6 @@ final class HostSession {
             muteTap.stop()
         }
         if let audioSource { Task { try? await audioSource.stop() } }
-        audioRouter?.restore()
-        audioRouter = nil
         localReceiver?.stop()
         nowPlayingMonitor?.stop()
         host?.setVideoEnabled(false)

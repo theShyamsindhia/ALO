@@ -25,9 +25,6 @@ cleanup() {
 trap cleanup EXIT
 
 ditto "$app" "$dmg_staging/ALO.app"
-if [[ -f dist/Install-ALO-Audio-Device.pkg ]]; then
-    cp dist/Install-ALO-Audio-Device.pkg "$dmg_staging/Install ALO Audio Device.pkg"
-fi
 ln -s /Applications "$dmg_staging/Applications"
 hdiutil create \
     -volname ALO \

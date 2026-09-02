@@ -30,6 +30,27 @@ enum WERAICommand {
                 let roomName = arguments.dropFirst().first
                 try runReceiver(roomName: roomName)
 
+            case "room":
+                let roomArguments = Array(arguments.dropFirst())
+                let flags = roomArguments.filter { $0.hasPrefix("--") }
+                let roomNames = roomArguments.filter { !$0.hasPrefix("--") }
+                let supportedFlags = Set(["--broadcast", "--take-over"])
+                guard flags.allSatisfy(supportedFlags.contains) else {
+                    throw WERAIError("Unknown room option. Run 'alo help'.")
+                }
+                guard roomNames.count <= 1 else {
+                    throw WERAIError("Pass at most one saved room ID or name.")
+                }
+                guard !(flags.contains("--broadcast") && flags.contains("--take-over")) else {
+                    throw WERAIError("Choose either --broadcast or --take-over, not both.")
+                }
+                let roomIDOrName = roomNames.first
+                try await runSavedRoom(
+                    roomIDOrName,
+                    broadcastInitially: roomArguments.contains("--broadcast"),
+                    takeOverAfterJoining: roomArguments.contains("--take-over")
+                )
+
             case "help", "--help", "-h":
                 printHelp()
 
@@ -87,6 +108,99 @@ enum WERAICommand {
         dispatchMain()
     }
 
+    /// Opens the same saved mesh room and receiver stack as the GUI without
+    /// requiring UI automation. This is useful for repeatable multi-Mac QA.
+    @MainActor
+    private static func runSavedRoom(
+        _ roomIDOrName: String?,
+        broadcastInitially: Bool,
+        takeOverAfterJoining: Bool
+    ) async throws {
+        let store = RoomStore()
+        let rooms = store.load()
+        let room = if let roomIDOrName {
+            rooms.first {
+                $0.id.caseInsensitiveCompare(roomIDOrName) == .orderedSame
+                    || $0.name.caseInsensitiveCompare(roomIDOrName) == .orderedSame
+            }
+        } else {
+            rooms.first
+        }
+        guard let room else {
+            throw WERAIError("That room is not saved on this Mac. Open or join it once in ALO first.")
+        }
+
+        let defaults = UserDefaults.standard
+        let nodeID: String
+        if let stored = defaults.string(forKey: "meshNodeID"), !stored.isEmpty {
+            nodeID = stored
+        } else {
+            nodeID = UUID().uuidString
+            defaults.set(nodeID, forKey: "meshNodeID")
+        }
+        let displayName: String
+        if let stored = defaults.string(forKey: "meshDeviceDisplayName"), !stored.isEmpty {
+            displayName = stored
+        } else {
+            displayName = DeviceDisplayName.generated(from: nodeID)
+            defaults.set(displayName, forKey: "meshDeviceDisplayName")
+        }
+
+        func report(_ value: String) {
+            print("ALO_QA status=\(value)")
+            fflush(stdout)
+            if value == "Sharing system audio" { broadcastReady = true }
+        }
+        var broadcastReady = false
+        var broadcastFailure: Error?
+        let session = MeshSession(
+            room: room,
+            nodeID: nodeID,
+            displayName: displayName,
+            initialEvents: store.loadEvents(roomID: room.id),
+            statusHandler: report,
+            identityHandler: { id, name in report("identity \(name) \(id)") },
+            participantsHandler: { report("participants \($0.count)") },
+            mediaStateHandler: { report("video \($0 ? "available" : "off")") },
+            nowPlayingHandler: { media in
+                report("media \(media.isPlaying == false ? "paused" : "playing-or-unknown")")
+            },
+            chatHandler: { _, _, _ in },
+            queueHandler: { _ in },
+            videoHandler: { _ in },
+            peerVersionHandler: { report("peer-version \($0)") },
+            errorHandler: { error in
+                broadcastFailure = error
+                report("error \(error.localizedDescription)")
+            },
+            replicaPersistenceHandler: { store.saveEvents($0.events, roomID: room.id) }
+        )
+        try session.start(broadcastInitially: broadcastInitially)
+        report("room-open \(room.name) \(room.id)")
+        if takeOverAfterJoining {
+            report("take-over scheduled")
+            try await Task.sleep(nanoseconds: 3_000_000_000)
+            session.beginBroadcasting()
+        }
+        if broadcastInitially || takeOverAfterJoining {
+            let deadline = ContinuousClock.now.advanced(by: .seconds(20))
+            while !broadcastReady, broadcastFailure == nil, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            if let broadcastFailure { throw broadcastFailure }
+            guard broadcastReady else {
+                throw WERAIError(
+                    "Broadcast did not become ready within 20 seconds. Open the GUI on this Mac "
+                    + "and grant Screen & System Audio Recording before headless QA."
+                )
+            }
+        }
+        while !Task.isCancelled {
+            try await Task.sleep(nanoseconds: 3_600_000_000_000)
+        }
+        await session.stop()
+    }
+
     private static func stayAlive(
         capturing: SystemAudioCapture,
         hosting: HostServer,
@@ -109,10 +223,15 @@ enum WERAICommand {
         Usage:
           alo host [room-name]     Stream this Mac's screen and system audio
           alo join [room-name]     Find and play a room on the local network
+          alo room [id-or-name] [--broadcast|--take-over]
+                                   Open a saved mesh room for headless QA
 
         Examples:
           alo host "Studio"
           alo join "Studio"
+          alo room "Studio"
+          alo room "Studio" --broadcast
+          alo room "Studio" --take-over
 
         Requirements: macOS 14.2 or newer; all Macs on the same local network.
         """)

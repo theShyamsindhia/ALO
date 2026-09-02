@@ -3,14 +3,14 @@ import MediaPlayer
 import WERAICore
 
 final class RoomRemoteCommandCenter {
-    private let handler: (RoomMediaCommand) -> Void
+    private let handler: (RoomMediaCommand) -> Bool
     private let lock = NSLock()
     private var targets = [(command: MPRemoteCommand, token: Any)]()
     private var roomName = "ALO Room"
     private var media = NowPlayingMedia()
     private var isRunning = false
 
-    init(handler: @escaping (RoomMediaCommand) -> Void) {
+    init(handler: @escaping (RoomMediaCommand) -> Bool) {
         self.handler = handler
     }
 
@@ -76,15 +76,11 @@ final class RoomRemoteCommandCenter {
             lock.unlock()
             return .noSuchContent
         }
-        let currentState = media.isPlaying ?? true
-        if let nextState = Self.playbackState(after: command, current: currentState) {
-            media = replacingPlaybackState(in: media, with: nextState)
-        }
         lock.unlock()
-
-        publishNowPlaying()
-        handler(command)
-        return .success
+        // Keep the current macOS Now Playing state until the broadcaster confirms
+        // the command by publishing authoritative metadata. This avoids showing a
+        // pause/play that never reached the room during a reconnect.
+        return handler(command) ? .success : .commandFailed
     }
 
     static func playbackState(after command: RoomMediaCommand, current: Bool) -> Bool? {
@@ -121,17 +117,4 @@ final class RoomRemoteCommandCenter {
         infoCenter.playbackState = isPlaying ? .playing : .paused
     }
 
-    private func replacingPlaybackState(
-        in media: NowPlayingMedia,
-        with isPlaying: Bool
-    ) -> NowPlayingMedia {
-        NowPlayingMedia(
-            title: media.title,
-            artist: media.artist,
-            album: media.album,
-            artworkData: media.artworkData,
-            sourceURL: media.sourceURL,
-            isPlaying: isPlaying
-        )
-    }
 }

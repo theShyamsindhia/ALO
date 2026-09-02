@@ -297,6 +297,32 @@ struct MeshRoomTests {
         #expect(waitUntil { a.participantCount == 2 && b.participantCount == 2 })
     }
 
+    @Test("Authenticated room peers advertise their app version")
+    func peerVersionDiscovery() throws {
+        let room = RoomConfiguration(name: "Version test", creatorPeerID: "a")
+        let ready = PortProbe()
+        let versions = VersionProbe()
+        let nodeA = MeshControlPlane(
+            room: room, nodeID: "a", displayName: "A", appVersion: "0.12.0",
+            replicaHandler: { _ in }, participantsHandler: { _ in },
+            peerVersionHandler: { versions.add($0) }
+        )
+        let nodeB = MeshControlPlane(
+            room: room, nodeID: "b", displayName: "B", appVersion: "0.12.1",
+            listenerReadyHandler: { ready.set($0) },
+            replicaHandler: { _ in }, participantsHandler: { _ in }
+        )
+        try nodeA.start(advertise: false)
+        try nodeB.start(advertise: false)
+        defer { nodeA.stop(); nodeB.stop() }
+        guard let port = ready.wait() else {
+            Issue.record("Mesh listener did not start")
+            return
+        }
+        nodeA.connectForTesting(to: .hostPort(host: "127.0.0.1", port: port))
+        #expect(waitUntil { versions.contains("0.12.1") })
+    }
+
     @Test("Private rooms admit only peers with the same room secret")
     func privateRoomAdmission() throws {
         let roomID = UUID().uuidString
@@ -502,4 +528,11 @@ private final class MeshProbe: @unchecked Sendable {
     var broadcasterID: String? { lock.withLock { replica.broadcaster?.nodeID } }
     func update(replica: MeshRoomReplica) { lock.withLock { self.replica = replica } }
     func update(participants: [RoomParticipant]) { lock.withLock { self.participants = participants } }
+}
+
+private final class VersionProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values = Set<String>()
+    func add(_ value: String) { lock.withLock { _ = values.insert(value) } }
+    func contains(_ value: String) -> Bool { lock.withLock { values.contains(value) } }
 }

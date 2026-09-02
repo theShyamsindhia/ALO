@@ -20,6 +20,12 @@ int main(void) {
     uint64_t hostTime = 0;
     assert(WERAISharedAudioClientRead(client, 1043, frame, &hostTime));
     assert(frame[0] == source[86] && frame[1] == source[87] && hostTime == 5086);
+    uint64_t generation = WERAISharedAudioClientGeneration(client);
+    WERAISharedAudioBeginTimeline(producer);
+    assert(WERAISharedAudioClientGeneration(client) == generation + 1);
+    assert(WERAISharedAudioClientLatestFrame(client) == 0);
+    WERAISharedAudioPublish(producer, 0, 8000, 2.0, source, 300);
+    assert(WERAISharedAudioClientLatestFrame(client) == 44);
     WERAISharedAudioClientClose(client);
     WERAISharedAudioClose(producer);
     shm_unlink(WERAI_SHARED_AUDIO_NAME);

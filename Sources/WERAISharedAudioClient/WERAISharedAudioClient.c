@@ -8,7 +8,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#ifndef WERAI_NAME
 #define WERAI_NAME "/alo-audio-frames-v2"
+#endif
 #define WERAI_MAGIC UINT64_C(0x5745524149415544)
 #define WERAI_VERSION 2u
 #define WERAI_CHANNELS 2u

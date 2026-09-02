@@ -10,6 +10,7 @@ final class MeshControlPlane {
         let decoder = MeshEnvelopeDecoder()
         var nodeID: String?
         var displayName: String?
+        var appVersion: String?
         let localNonce = UUID().uuidString
         var authenticated = false
 
@@ -25,6 +26,8 @@ final class MeshControlPlane {
     private let queue = DispatchQueue(label: "in.werai.mesh.control", qos: .userInteractive)
     private let replicaHandler: (MeshRoomReplica) -> Void
     private let participantsHandler: ([RoomParticipant]) -> Void
+    private let peerVersionHandler: (String) -> Void
+    private let appVersion: String
     private let listenerReadyHandler: ((NWEndpoint.Port) -> Void)?
     private var replica: MeshRoomReplica
     private var listener: NWListener?
@@ -48,14 +51,18 @@ final class MeshControlPlane {
         room: RoomConfiguration,
         nodeID: String,
         displayName: String,
+        appVersion: String = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0",
         initialEvents: [MeshRoomEvent] = [],
         listenerReadyHandler: ((NWEndpoint.Port) -> Void)? = nil,
         replicaHandler: @escaping (MeshRoomReplica) -> Void,
-        participantsHandler: @escaping ([RoomParticipant]) -> Void
+        participantsHandler: @escaping ([RoomParticipant]) -> Void,
+        peerVersionHandler: @escaping (String) -> Void = { _ in }
     ) {
         self.room = room
         self.nodeID = nodeID
         self.displayName = displayName
+        self.appVersion = appVersion
+        self.peerVersionHandler = peerVersionHandler
         self.replica = MeshRoomReplica(events: initialEvents)
         self.listenerReadyHandler = listenerReadyHandler
         self.replicaHandler = replicaHandler
@@ -72,6 +79,7 @@ final class MeshControlPlane {
                 "nodeID": nodeID,
                 "private": room.isPrivate ? "1" : "0",
                 "version": "1",
+                "appVersion": appVersion,
             ]
             if let accessProof { txtRecord["accessProof"] = accessProof }
             listener.service = NWListener.Service(
@@ -264,6 +272,7 @@ final class MeshControlPlane {
             room: publicRoom,
             nodeID: nodeID,
             displayName: displayName,
+            appVersion: appVersion,
             authNonce: room.isPrivate ? link.localNonce : nil
         )
     }
@@ -321,6 +330,7 @@ final class MeshControlPlane {
                   let remoteID = envelope.nodeID,
                   remoteID.utf8.count <= 128,
                   (envelope.displayName?.utf8.count ?? 0) <= 160,
+                  (envelope.appVersion?.utf8.count ?? 0) <= 64,
                   remoteID != nodeID
             else {
                 link.connection.cancel()
@@ -333,6 +343,7 @@ final class MeshControlPlane {
             }
             link.nodeID = remoteID
             link.displayName = envelope.displayName
+            link.appVersion = envelope.appVersion
             if room.isPrivate {
                 guard let nonce = envelope.authNonce, nonce.count <= 128,
                       let key = room.accessKey else { link.connection.cancel(); return }
@@ -521,6 +532,7 @@ final class MeshControlPlane {
         reconnectAttempts[remoteID] = 0
         reconnectWorkItems.removeValue(forKey: remoteID)?.cancel()
         lastSeenNanos[remoteID] = MonotonicClock.nowNanos()
+        if let version = link.appVersion { peerVersionHandler(version) }
         publishParticipants()
         send(MeshEnvelope(
             type: "sync",

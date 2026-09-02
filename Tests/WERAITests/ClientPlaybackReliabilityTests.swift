@@ -32,4 +32,27 @@ struct ClientPlaybackReliabilityTests {
         #expect(RoomRemoteCommandCenter.playbackState(after: .nextTrack, current: true) == nil)
         #expect(RoomRemoteCommandCenter.playbackState(after: .previousTrack, current: false) == nil)
     }
+
+    @Test func unrelatedAudioConfigurationChangesDoNotRestartAHealthyEngine() {
+        #expect(!SynchronizedPlayer.shouldRecoverAfterConfigurationChange(
+            engineIsRunning: true, deviceChanged: false, latencyChanged: false
+        ))
+        #expect(SynchronizedPlayer.shouldRecoverAfterConfigurationChange(
+            engineIsRunning: false, deviceChanged: false, latencyChanged: false
+        ))
+        #expect(SynchronizedPlayer.shouldRecoverAfterConfigurationChange(
+            engineIsRunning: true, deviceChanged: true, latencyChanged: false
+        ))
+        #expect(SynchronizedPlayer.shouldRecoverAfterConfigurationChange(
+            engineIsRunning: true, deviceChanged: false, latencyChanged: true
+        ))
+        #expect(!SynchronizedPlayer.latencyChanged(from: 10_000_000, to: 10_500_000))
+        #expect(SynchronizedPlayer.latencyChanged(from: 10_000_000, to: 12_000_000))
+    }
+
+    @Test @MainActor func unrelatedStatusTextDoesNotClearRenderingState() {
+        #expect(WERAIViewModel.renderingState(for: "This Mac is playing in sync") == true)
+        #expect(WERAIViewModel.renderingState(for: "Connecting to the room broadcaster") == false)
+        #expect(WERAIViewModel.renderingState(for: "Sharing system audio") == nil)
+    }
 }

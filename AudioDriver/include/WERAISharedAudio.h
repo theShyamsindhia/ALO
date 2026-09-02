@@ -6,7 +6,9 @@
 #include <stdint.h>
 
 // POSIX shared-memory names on macOS allow one leading slash and no path separators.
+#ifndef WERAI_SHARED_AUDIO_NAME
 #define WERAI_SHARED_AUDIO_NAME "/alo-audio-frames-v2"
+#endif
 #define WERAI_SHARED_AUDIO_MAGIC UINT64_C(0x5745524149415544)
 #define WERAI_SHARED_AUDIO_VERSION 2u
 #define WERAI_SHARED_AUDIO_CHANNELS 2u
@@ -43,6 +45,7 @@ typedef struct {
 WERAISharedAudioBuffer *WERAISharedAudioCreateProducer(void);
 WERAISharedAudioBuffer *WERAISharedAudioOpenConsumer(void);
 void WERAISharedAudioClose(WERAISharedAudioBuffer *buffer);
+void WERAISharedAudioBeginTimeline(WERAISharedAudioBuffer *buffer);
 void WERAISharedAudioPublish(WERAISharedAudioBuffer *buffer, uint64_t firstFrame,
                              uint64_t firstHostTime, double hostTicksPerFrame,
                              const float *samples, uint32_t frameCount);

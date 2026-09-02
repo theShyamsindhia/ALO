@@ -158,8 +158,8 @@ static bool									gStream_Output_IsActive			= true;
 
 static const Float32						kVolume_MinDB					= -96.0;
 static const Float32						kVolume_MaxDB					= 6.0;
-static Float32								gVolume_Input_Master_Value		= 0.0;
-static Float32								gVolume_Output_Master_Value		= 0.0;
+static Float32								gVolume_Input_Master_Value		= 1.0;
+static Float32								gVolume_Output_Master_Value		= 1.0;
 
 static bool									gMute_Input_Master_Value		= false;
 static bool									gMute_Output_Master_Value		= false;
@@ -2459,9 +2459,11 @@ static OSStatus	WERAIAudioDriver_GetDevicePropertyData(AudioServerPlugInDriverRe
 			break;
 		
 		case kAudioDevicePropertyIsHidden:
-			//	This returns whether or not the device is visible to clients.
+			//	ALO addresses this device directly by UID while broadcasting. Hide it
+			//	from normal system output pickers so users do not route audio into the
+			//	silent capture endpoint themselves.
 			FailWithAction(inDataSize < sizeof(UInt32), theAnswer = kAudioHardwareBadPropertySizeError, Done, "WERAIAudioDriver_GetDevicePropertyData: not enough space for the return value of kAudioDevicePropertyIsHidden for the device");
-			*((UInt32*)outData) = 0;
+			*((UInt32*)outData) = 1;
 			*outDataSize = sizeof(UInt32);
 			break;
 
@@ -3993,6 +3995,7 @@ static OSStatus	WERAIAudioDriver_StartIO(AudioServerPlugInDriverRef inDriver, Au
 		gDevice_NumberTimeStamps = 0;
 		gDevice_AnchorSampleTime = 0;
 		gDevice_AnchorHostTime = mach_absolute_time();
+		WERAISharedAudioBeginTimeline(gDevice_SharedAudio);
 	}
 	else
 	{

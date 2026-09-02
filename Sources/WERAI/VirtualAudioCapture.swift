@@ -49,6 +49,14 @@ final class VirtualAudioCapture: AudioSource {
             nextFrame = latest
             return
         }
+        // Some Core Audio clients restart their sample timeline at zero. Old
+        // drivers did not advance generation for that transition, so recover
+        // defensively instead of waiting minutes for the new timeline to catch
+        // up to the previous frame position.
+        if latest < nextFrame {
+            nextFrame = latest
+            return
+        }
         if latest > nextFrame &+ capacity { nextFrame = latest - capacity }
         let end = min(latest, nextFrame &+ maximumChunkFrames)
         guard end > nextFrame else { return }
