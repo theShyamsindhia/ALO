@@ -4,6 +4,9 @@ import WERAICore
 
 final class HostServer {
     static let serviceType = "_werai-audio._tcp"
+    /// Gives the reliable TCP control command time to reach every receiver before
+    /// the UDP audio packet that becomes the shared restart point.
+    static let coordinatedResyncLeadNanos: UInt64 = 500_000_000
     enum AudioBackpressurePolicy {
         case unbounded
         case boundedLatest(maxInFlight: Int)
@@ -53,6 +56,7 @@ final class HostServer {
     private var videoEnabled = false
     private var nowPlaying = NowPlayingMedia()
     private var roomPlaybackIsPlaying = true
+    private var lastAudioCaptureNanos: UInt64?
     private var mediaQueue = [RoomQueueItem]()
     private var groupPlayoutDelayNanos = RoomTiming.defaultPlayoutDelayNanos
     private var lastGroupDelayAdjustmentNanos: UInt64 = 0
@@ -125,7 +129,19 @@ final class HostServer {
 
     func acceptAudio(samples: [Int16], captureTimeNanos: UInt64) {
         queue.async { [weak self] in
-            guard let self, self.roomPlaybackIsPlaying else { return }
+            guard let self else { return }
+            let captureGap = lastAudioCaptureNanos.map {
+                captureTimeNanos > $0 ? captureTimeNanos - $0 : 0
+            }
+            lastAudioCaptureNanos = captureTimeNanos
+            guard roomPlaybackIsPlaying else { return }
+            if let captureGap, captureGap > 500_000_000 {
+                // System media keys can pause the source app directly on the
+                // broadcaster. When capture resumes, make it a fresh stream
+                // boundary instead of appending to the pre-pause timeline.
+                packetizer.discardPendingSamples()
+                broadcast(coordinatedResyncMessage(nowNanos: captureTimeNanos))
+            }
             let packets = self.packetizer.append(
                 samples: samples,
                 captureTimeNanos: captureTimeNanos
@@ -196,6 +212,17 @@ final class HostServer {
             else { return }
             self.applyLevel(to: client, volume: volume, muted: muted)
         }
+    }
+
+    /// Used by the broadcaster's own UI. This deliberately bypasses its
+    /// loopback receiver so controls cannot disappear during media reconnects.
+    @discardableResult
+    func sendRoomMediaCommand(_ command: RoomMediaCommand) -> Bool {
+        queue.sync { applyRoomMediaCommand(command) }
+    }
+
+    func requestResync(participantID: String? = nil) -> Bool {
+        queue.sync { sendCoordinatedResync(targetID: participantID) }
     }
 
     func removeQueueItem(id: String) {
@@ -369,30 +396,7 @@ final class HostServer {
                   let command = message.mediaCommand
                     ?? message.isPlaying.map({ $0 ? .play : .pause })
             else { return }
-            let sourceAccepted = playbackRequestHandler?(command) == true
-            let isPlaying: Bool
-            switch command {
-            case .play: isPlaying = true
-            case .pause: isPlaying = false
-            case .togglePlayPause: isPlaying = !roomPlaybackIsPlaying
-            case .nextTrack, .previousTrack:
-                guard sourceAccepted else { return }
-                return
-            }
-            roomPlaybackIsPlaying = isPlaying
-            if !isPlaying { packetizer.discardPendingSamples() }
-            nowPlaying = NowPlayingMedia(
-                title: nowPlaying.title,
-                artist: nowPlaying.artist,
-                album: nowPlaying.album,
-                artworkData: nowPlaying.artworkData,
-                sourceURL: nowPlaying.sourceURL,
-                isPlaying: isPlaying
-            )
-            broadcast(ControlMessage(type: "now_playing", nowPlaying: nowPlaying))
-            broadcast(ControlMessage(type: "room_playback", isPlaying: isPlaying))
-            // Pause discards queued sound immediately; play starts a fresh room-clock anchor.
-            broadcast(ControlMessage(type: "resync"))
+            _ = applyRoomMediaCommand(command)
 
         case "sync_status":
             guard message.participantID == client.id, let report = message.syncReport else { return }
@@ -404,7 +408,7 @@ final class HostServer {
                !receiverAlreadyResynced,
                now - client.lastResyncCommandNanos > 2_000_000_000 {
                 client.lastResyncCommandNanos = now
-                if let data = try? ControlMessage(type: "resync").encodedLine() {
+                if let data = try? coordinatedResyncMessage(nowNanos: now).encodedLine() {
                     send(data, over: client.control)
                 }
             }
@@ -414,18 +418,71 @@ final class HostServer {
             let now = MonotonicClock.nowNanos()
             guard now - client.lastManualResyncRequestNanos >= 750_000_000 else { return }
             client.lastManualResyncRequestNanos = now
-            guard let data = try? ControlMessage(type: "resync").encodedLine() else { return }
-            if let targetID = message.targetID {
-                guard let target = clients.values.first(where: { $0.id == targetID }) else { return }
-                send(data, over: target.control)
-            } else {
-                for target in clients.values where target.id != nil {
-                    send(data, over: target.control)
-                }
-            }
+            // A plain stop/start on each receiver races the TCP command against
+            // the UDP stream. Give every selected receiver one future capture
+            // timestamp so they all discard the same old audio and restart on
+            // the same packet, just as a new broadcast would.
+            _ = sendCoordinatedResync(targetID: message.targetID, nowNanos: now)
 
         default:
             break
+        }
+    }
+
+    private func coordinatedResyncMessage(
+        nowNanos: UInt64 = MonotonicClock.nowNanos()
+    ) -> ControlMessage {
+        ControlMessage(
+            type: "resync",
+            hostNanos: nowNanos &+ Self.coordinatedResyncLeadNanos
+        )
+    }
+
+    private func applyRoomMediaCommand(_ command: RoomMediaCommand) -> Bool {
+        let sourceAccepted = playbackRequestHandler?(command) == true
+        let isPlaying: Bool
+        switch command {
+        case .play: isPlaying = true
+        case .pause: isPlaying = false
+        case .togglePlayPause: isPlaying = !roomPlaybackIsPlaying
+        case .nextTrack, .previousTrack:
+            return sourceAccepted
+        }
+        guard sourceAccepted else { return false }
+        roomPlaybackIsPlaying = isPlaying
+        if !isPlaying { packetizer.discardPendingSamples() }
+        nowPlaying = NowPlayingMedia(
+            title: nowPlaying.title,
+            artist: nowPlaying.artist,
+            album: nowPlaying.album,
+            artworkData: nowPlaying.artworkData,
+            sourceURL: nowPlaying.sourceURL,
+            isPlaying: isPlaying
+        )
+        broadcast(ControlMessage(type: "now_playing", nowPlaying: nowPlaying))
+        broadcast(ControlMessage(type: "room_playback", isPlaying: isPlaying))
+        // Pause discards queued sound immediately; play starts every receiver
+        // from the same future point in the captured stream.
+        broadcast(coordinatedResyncMessage())
+        return true
+    }
+
+    private func sendCoordinatedResync(
+        targetID: String?,
+        nowNanos: UInt64 = MonotonicClock.nowNanos()
+    ) -> Bool {
+        guard let data = try? coordinatedResyncMessage(nowNanos: nowNanos).encodedLine() else { return false }
+        if let targetID {
+            guard let target = clients.values.first(where: { $0.id == targetID }) else { return false }
+            send(data, over: target.control)
+            return true
+        } else {
+            let targets = clients.values.filter { $0.id != nil }
+            guard !targets.isEmpty else { return false }
+            for target in targets {
+                send(data, over: target.control)
+            }
+            return true
         }
     }
 

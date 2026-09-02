@@ -733,8 +733,9 @@ final class WERAIViewModel: ObservableObject {
     }
 
     func toggleRoomPlayback() {
-        if roomIsPlaying { audioIsRendering = false }
-        sendRoomMediaCommand(roomIsPlaying ? .pause : .play)
+        if meshSession?.sendMediaCommand(.togglePlayPause) != true {
+            statusText = "Wait for the broadcaster connection, then try again"
+        }
     }
 
     func toggleBroadcasting() {
@@ -747,7 +748,7 @@ final class WERAIViewModel: ObservableObject {
     }
 
     func sendRoomMediaCommand(_ command: RoomMediaCommand) {
-        meshSession?.sendMediaCommand(command)
+        _ = meshSession?.sendMediaCommand(command)
     }
 
     func syncParticipant(_ participant: RoomParticipant) {

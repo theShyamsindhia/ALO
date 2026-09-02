@@ -3,7 +3,11 @@ import MediaPlayer
 import WERAICore
 
 final class RoomRemoteCommandCenter {
+    private static let ownershipLock = NSLock()
+    private static var activeOwnerID: UUID?
+
     private let handler: (RoomMediaCommand) -> Bool
+    private let ownerID = UUID()
     private let lock = NSLock()
     private var targets = [(command: MPRemoteCommand, token: Any)]()
     private var roomName = "ALO Room"
@@ -25,6 +29,8 @@ final class RoomRemoteCommandCenter {
         isRunning = true
         self.roomName = roomName
         lock.unlock()
+
+        Self.ownershipLock.withLock { Self.activeOwnerID = ownerID }
 
         let center = MPRemoteCommandCenter.shared()
         register(center.playCommand, command: .play)
@@ -76,8 +82,14 @@ final class RoomRemoteCommandCenter {
 
         for target in registeredTargets {
             target.command.removeTarget(target.token)
-            target.command.isEnabled = false
         }
+        let stillOwnsCommands = Self.ownershipLock.withLock { () -> Bool in
+            guard Self.activeOwnerID == ownerID else { return false }
+            Self.activeOwnerID = nil
+            return true
+        }
+        guard stillOwnsCommands else { return }
+        for target in registeredTargets { target.command.isEnabled = false }
         let infoCenter = MPNowPlayingInfoCenter.default()
         infoCenter.nowPlayingInfo = nil
         infoCenter.playbackState = .stopped
@@ -100,6 +112,9 @@ final class RoomRemoteCommandCenter {
             return .noSuchContent
         }
         lock.unlock()
+        guard Self.ownershipLock.withLock({ Self.activeOwnerID == ownerID }) else {
+            return .noSuchContent
+        }
         // Keep the current macOS Now Playing state until the broadcaster confirms
         // the command by publishing authoritative metadata. This avoids showing a
         // pause/play that never reached the room during a reconnect.

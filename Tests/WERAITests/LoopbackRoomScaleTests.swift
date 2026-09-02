@@ -170,9 +170,7 @@ struct LoopbackRoomScaleTests {
             playbackRequestHandler: { command in
                 requestedCommands.append(command)
                 commandReceived.signal()
-                // Room playback must remain authoritative even when macOS does not
-                // deliver play/pause to the source app.
-                return command == .nextTrack || command == .previousTrack
+                return true
             }
         )
         try host.start()
@@ -262,6 +260,94 @@ struct LoopbackRoomScaleTests {
                 && target.resyncCommandCount == 2
                 && healthyPeer.resyncCommandCount == 1
         })
+        let requesterCutover = try #require(requester.resyncCutovers.last)
+        let targetCutover = try #require(target.resyncCutovers.last)
+        let healthyCutover = try #require(healthyPeer.resyncCutovers.last)
+        #expect(requesterCutover == targetCutover)
+        #expect(targetCutover == healthyCutover)
+    }
+
+    @Test("A rejected source command does not publish a false room state")
+    func rejectedSourcePlaybackCommandLeavesRoomRunning() throws {
+        let hostReady = DispatchSemaphore(value: 0)
+        let state = PortState()
+        let host = HostServer(
+            roomName: "Rejected playback control \(UUID().uuidString)",
+            advertise: false,
+            listenerReadyHandler: { port in
+                state.set(port)
+                hostReady.signal()
+            },
+            playbackRequestHandler: { _ in false }
+        )
+        try host.start()
+        defer { host.stop() }
+        guard hostReady.wait(timeout: .now() + 3) == .success,
+              let hostPort = state.port
+        else { throw LoopbackTestError.hostDidNotStart }
+
+        let listener = HeadlessLoopbackPeer(index: 401)
+        try listener.start(hostPort: hostPort)
+        defer { listener.stop() }
+        guard listener.waitUntilJoined(timeout: 3) else { throw LoopbackTestError.peerDidNotJoin }
+        #expect(waitUntil(timeout: 2) { listener.roomPlaybackStates.last == true })
+
+        listener.sendMediaCommand(.pause)
+        Thread.sleep(forTimeInterval: 0.15)
+        #expect(listener.roomPlaybackStates.last == true)
+        #expect(listener.resyncCommandCount == 0)
+        #expect(host.sendRoomMediaCommand(.pause) == false)
+        #expect(listener.roomPlaybackStates.last == true)
+    }
+
+    @Test("Playback remains controllable when broadcaster and listener alternate commands")
+    func alternatingPlaybackControllersDoNotBreakRoomControl() throws {
+        let hostReady = DispatchSemaphore(value: 0)
+        let state = PortState()
+        let requestedCommands = LockedMediaCommands()
+        let host = HostServer(
+            roomName: "Alternating playback control \(UUID().uuidString)",
+            advertise: false,
+            listenerReadyHandler: { port in
+                state.set(port)
+                hostReady.signal()
+            },
+            playbackRequestHandler: { command in
+                requestedCommands.append(command)
+                return true
+            }
+        )
+        try host.start()
+        defer { host.stop() }
+        guard hostReady.wait(timeout: .now() + 3) == .success,
+              let hostPort = state.port
+        else { throw LoopbackTestError.hostDidNotStart }
+
+        let listener = HeadlessLoopbackPeer(index: 301)
+        let observer = HeadlessLoopbackPeer(index: 302)
+        try listener.start(hostPort: hostPort)
+        try observer.start(hostPort: hostPort)
+        defer { listener.stop(); observer.stop() }
+        guard listener.waitUntilJoined(timeout: 3), observer.waitUntilJoined(timeout: 3) else {
+            throw LoopbackTestError.peerDidNotJoin
+        }
+
+        host.sendRoomMediaCommand(.pause)
+        #expect(waitUntil(timeout: 2) { observer.roomPlaybackStates.last == false })
+        host.sendRoomMediaCommand(.play)
+        #expect(waitUntil(timeout: 2) { observer.roomPlaybackStates.last == true })
+        listener.sendMediaCommand(.pause)
+        #expect(waitUntil(timeout: 2) { observer.roomPlaybackStates.last == false })
+        listener.sendMediaCommand(.play)
+        #expect(waitUntil(timeout: 2) { observer.roomPlaybackStates.last == true })
+        host.sendRoomMediaCommand(.pause)
+        #expect(waitUntil(timeout: 2) { observer.roomPlaybackStates.last == false })
+
+        #expect(requestedCommands.values == [.pause, .play, .pause, .play, .pause])
+        #expect(listener.resyncCommandCount == 5)
+        #expect(observer.resyncCommandCount == 5)
+        #expect(listener.resyncCutovers.suffix(5).allSatisfy { $0 > 0 })
+        #expect(observer.resyncCutovers.suffix(5).allSatisfy { $0 > 0 })
     }
 
     @Test("An established listener can adapt timing after audio but a joiner cannot retime it")
@@ -514,6 +600,7 @@ private final class HeadlessLoopbackPeer {
     private var acceptedVideo = [NWConnection]()
     private var arrivals = [UInt32: PacketArrival]()
     private var receivedResyncCommands = 0
+    private var receivedResyncCutovers = [UInt64]()
     private var receivedPlaybackStates = [Bool]()
     private var receivedRoomPlaybackStates = [Bool]()
     private var receivedPlayoutDelays = [UInt64]()
@@ -526,6 +613,7 @@ private final class HeadlessLoopbackPeer {
     var packetCount: Int { queue.sync { arrivals.count } }
     var lastSequence: UInt32? { queue.sync { arrivals.keys.max() } }
     var resyncCommandCount: Int { queue.sync { receivedResyncCommands } }
+    var resyncCutovers: [UInt64] { queue.sync { receivedResyncCutovers } }
     var playbackStates: [Bool] { queue.sync { receivedPlaybackStates } }
     var roomPlaybackStates: [Bool] { queue.sync { receivedRoomPlaybackStates } }
     var playoutDelays: [UInt64] { queue.sync { receivedPlayoutDelays } }
@@ -677,6 +765,9 @@ private final class HeadlessLoopbackPeer {
                         self.pongReceived.signal()
                     } else if message.type == "resync" {
                         self.receivedResyncCommands += 1
+                        if let cutover = message.hostNanos {
+                            self.receivedResyncCutovers.append(cutover)
+                        }
                     } else if message.type == "sync_timing",
                               let delay = message.playoutDelayNanos {
                         self.receivedPlayoutDelays.append(delay)

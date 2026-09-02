@@ -4,6 +4,12 @@ import Network
 import WERAICore
 
 final class MeshControlPlane {
+    private struct PendingRoomAction {
+        let envelope: MeshEnvelope
+        let broadcasterID: String
+        let broadcasterEpoch: UInt64
+        var attempts: Int
+    }
     private final class Link {
         let connection: NWConnection
         let initiated: Bool
@@ -27,6 +33,8 @@ final class MeshControlPlane {
     private let replicaHandler: (MeshRoomReplica) -> Void
     private let participantsHandler: ([RoomParticipant]) -> Void
     private let peerVersionHandler: (String) -> Void
+    private let mediaCommandHandler: (RoomMediaCommand, String, UInt64) -> Bool
+    private let resyncRequestHandler: (String?, String, UInt64) -> Bool
     private let appVersion: String
     private let listenerReadyHandler: ((NWEndpoint.Port) -> Void)?
     private var replica: MeshRoomReplica
@@ -42,6 +50,10 @@ final class MeshControlPlane {
     private var lastSeenNanos = [String: UInt64]()
     private var reconnectAttempts = [String: Int]()
     private var reconnectWorkItems = [String: DispatchWorkItem]()
+    private var seenRoomActionIDs = Set<String>()
+    private var roomActionIDOrder = [String]()
+    private var acceptedRoomActionIDs = Set<String>()
+    private var pendingRoomActions = [String: PendingRoomAction]()
     private var isStopped = true
     private let heartbeatIntervalNanos: UInt64 = 400_000_000
     private let broadcasterLeaseNanos: UInt64 = 2_400_000_000
@@ -56,13 +68,17 @@ final class MeshControlPlane {
         listenerReadyHandler: ((NWEndpoint.Port) -> Void)? = nil,
         replicaHandler: @escaping (MeshRoomReplica) -> Void,
         participantsHandler: @escaping ([RoomParticipant]) -> Void,
-        peerVersionHandler: @escaping (String) -> Void = { _ in }
+        peerVersionHandler: @escaping (String) -> Void = { _ in },
+        mediaCommandHandler: @escaping (RoomMediaCommand, String, UInt64) -> Bool = { _, _, _ in true },
+        resyncRequestHandler: @escaping (String?, String, UInt64) -> Bool = { _, _, _ in true }
     ) {
         self.room = room
         self.nodeID = nodeID
         self.displayName = displayName
         self.appVersion = appVersion
         self.peerVersionHandler = peerVersionHandler
+        self.mediaCommandHandler = mediaCommandHandler
+        self.resyncRequestHandler = resyncRequestHandler
         self.replica = MeshRoomReplica(events: initialEvents)
         self.listenerReadyHandler = listenerReadyHandler
         self.replicaHandler = replicaHandler
@@ -132,6 +148,7 @@ final class MeshControlPlane {
             peers.removeAll()
             reconnectWorkItems.removeAll()
             reconnectAttempts.removeAll()
+            pendingRoomActions.removeAll()
         }
     }
 
@@ -141,6 +158,80 @@ final class MeshControlPlane {
 
     func publishQueueAdd(_ item: RoomQueueItem) { publish(kind: .queueAdd, queueItem: item) }
     func publishQueueRemove(_ id: String) { publish(kind: .queueRemove, queueItemID: id) }
+
+    @discardableResult
+    func publishMediaCommand(
+        _ command: RoomMediaCommand,
+        broadcasterID: String,
+        broadcasterEpoch: UInt64
+    ) -> Bool {
+        queue.sync {
+            guard let current = replica.broadcaster,
+                  current.nodeID == broadcasterID,
+                  current.epoch == broadcasterEpoch,
+                  broadcasterID == nodeID || !peers.isEmpty
+            else { return false }
+            let requestID = UUID().uuidString
+            _ = rememberRoomAction(roomActionKey(requestID, attempt: 1))
+            let envelope = MeshEnvelope(
+                type: "media_command",
+                nodeID: nodeID,
+                requestID: requestID,
+                broadcasterID: broadcasterID,
+                broadcasterEpoch: broadcasterEpoch,
+                mediaCommand: command,
+                actionAttempt: 1
+            )
+            if broadcasterID == nodeID {
+                return mediaCommandHandler(command, broadcasterID, broadcasterEpoch)
+            }
+            beginReliableRoomAction(
+                envelope,
+                requestID: requestID,
+                broadcasterID: broadcasterID,
+                broadcasterEpoch: broadcasterEpoch
+            )
+            broadcast(envelope)
+            return true
+        }
+    }
+
+    @discardableResult
+    func publishResyncRequest(
+        targetID: String?,
+        broadcasterID: String,
+        broadcasterEpoch: UInt64
+    ) -> Bool {
+        queue.sync {
+            guard let current = replica.broadcaster,
+                  current.nodeID == broadcasterID,
+                  current.epoch == broadcasterEpoch,
+                  broadcasterID == nodeID || !peers.isEmpty
+            else { return false }
+            let requestID = UUID().uuidString
+            _ = rememberRoomAction(roomActionKey(requestID, attempt: 1))
+            let envelope = MeshEnvelope(
+                type: "resync_request",
+                nodeID: nodeID,
+                requestID: requestID,
+                broadcasterID: broadcasterID,
+                broadcasterEpoch: broadcasterEpoch,
+                targetID: targetID,
+                actionAttempt: 1
+            )
+            if broadcasterID == nodeID {
+                return resyncRequestHandler(targetID, broadcasterID, broadcasterEpoch)
+            }
+            beginReliableRoomAction(
+                envelope,
+                requestID: requestID,
+                broadcasterID: broadcasterID,
+                broadcasterEpoch: broadcasterEpoch
+            )
+            broadcast(envelope)
+            return true
+        }
+    }
 
     func publishBroadcaster(active: Bool, mediaServiceName: String? = nil) {
         queue.async { [weak self] in
@@ -393,6 +484,86 @@ final class MeshControlPlane {
                let generation = envelope.heartbeatGeneration {
                 acceptHeartbeat(originID: originID, generation: generation, sequence: sequence, excluding: link)
             }
+        case "media_command":
+            guard let originID = envelope.nodeID,
+                  !originID.isEmpty,
+                  originID.utf8.count <= 128,
+                  let requestID = envelope.requestID,
+                  requestID.utf8.count <= 128,
+                  let attempt = envelope.actionAttempt,
+                  (1...20).contains(attempt),
+                  let broadcasterID = envelope.broadcasterID,
+                  let broadcasterEpoch = envelope.broadcasterEpoch,
+                  let command = envelope.mediaCommand,
+                  let current = replica.broadcaster,
+                  current.nodeID == broadcasterID,
+                  current.epoch == broadcasterEpoch
+            else { return }
+            let isNew = rememberRoomAction(roomActionKey(requestID, attempt: attempt))
+            if broadcasterID == nodeID {
+                let accepted = acceptedRoomActionIDs.contains(requestID)
+                    || mediaCommandHandler(command, broadcasterID, broadcasterEpoch)
+                if accepted {
+                    rememberAcceptedRoomAction(requestID)
+                    acknowledgeRoomAction(
+                        requestID: requestID,
+                        originID: originID,
+                        broadcasterID: broadcasterID,
+                        broadcasterEpoch: broadcasterEpoch
+                    )
+                }
+            }
+            // Normally every room member has a direct link. Forwarding also
+            // keeps controls working briefly while the mesh reconnects.
+            if isNew { broadcast(envelope, excluding: link) }
+        case "resync_request":
+            guard let originID = envelope.nodeID,
+                  !originID.isEmpty,
+                  originID.utf8.count <= 128,
+                  let requestID = envelope.requestID,
+                  requestID.utf8.count <= 128,
+                  let attempt = envelope.actionAttempt,
+                  (1...20).contains(attempt),
+                  let broadcasterID = envelope.broadcasterID,
+                  let broadcasterEpoch = envelope.broadcasterEpoch,
+                  let current = replica.broadcaster,
+                  current.nodeID == broadcasterID,
+                  current.epoch == broadcasterEpoch
+            else { return }
+            let isNew = rememberRoomAction(roomActionKey(requestID, attempt: attempt))
+            if broadcasterID == nodeID {
+                let accepted = acceptedRoomActionIDs.contains(requestID)
+                    || resyncRequestHandler(envelope.targetID, broadcasterID, broadcasterEpoch)
+                if accepted {
+                    rememberAcceptedRoomAction(requestID)
+                    acknowledgeRoomAction(
+                        requestID: requestID,
+                        originID: originID,
+                        broadcasterID: broadcasterID,
+                        broadcasterEpoch: broadcasterEpoch
+                    )
+                }
+            }
+            if isNew { broadcast(envelope, excluding: link) }
+        case "room_action_ack":
+            guard let ackOriginID = envelope.nodeID,
+                  !ackOriginID.isEmpty,
+                  ackOriginID.utf8.count <= 128,
+                  let requestID = envelope.requestID,
+                  requestID.utf8.count <= 128,
+                  let recipientID = envelope.targetID,
+                  let broadcasterID = envelope.broadcasterID,
+                  let broadcasterEpoch = envelope.broadcasterEpoch
+            else { return }
+            guard ackOriginID == broadcasterID else { return }
+            let isNew = rememberRoomAction("ack:\(requestID)")
+            if recipientID == nodeID,
+               let pending = pendingRoomActions[requestID],
+               pending.broadcasterID == broadcasterID,
+               pending.broadcasterEpoch == broadcasterEpoch {
+                pendingRoomActions.removeValue(forKey: requestID)
+            }
+            if isNew { broadcast(envelope, excluding: link) }
         default:
             break
         }
@@ -522,6 +693,106 @@ final class MeshControlPlane {
             MeshEnvelope(type: "heartbeat", nodeID: originID, heartbeatSequence: sequence, heartbeatGeneration: generation),
             excluding: source
         )
+    }
+
+    private func rememberRoomAction(_ requestID: String) -> Bool {
+        guard seenRoomActionIDs.insert(requestID).inserted else { return false }
+        roomActionIDOrder.append(requestID)
+        if roomActionIDOrder.count > 1_024 {
+            let expiredIDs = Array(roomActionIDOrder.prefix(256))
+            roomActionIDOrder.removeFirst(expiredIDs.count)
+            for expired in expiredIDs {
+                seenRoomActionIDs.remove(expired)
+            }
+        }
+        return true
+    }
+
+    private func roomActionKey(_ requestID: String, attempt: UInt64) -> String {
+        "action:\(requestID):\(attempt)"
+    }
+
+    private func rememberAcceptedRoomAction(_ requestID: String) {
+        if acceptedRoomActionIDs.count >= 2_048 {
+            acceptedRoomActionIDs.removeAll(keepingCapacity: true)
+        }
+        acceptedRoomActionIDs.insert(requestID)
+    }
+
+    private func beginReliableRoomAction(
+        _ envelope: MeshEnvelope,
+        requestID: String,
+        broadcasterID: String,
+        broadcasterEpoch: UInt64
+    ) {
+        pendingRoomActions[requestID] = PendingRoomAction(
+            envelope: envelope,
+            broadcasterID: broadcasterID,
+            broadcasterEpoch: broadcasterEpoch,
+            attempts: 1
+        )
+        scheduleRoomActionRetry(requestID)
+    }
+
+    private func scheduleRoomActionRetry(_ requestID: String) {
+        queue.asyncAfter(deadline: .now() + .milliseconds(250)) { [weak self] in
+            guard let self, !isStopped, var pending = pendingRoomActions[requestID] else { return }
+            guard let current = replica.broadcaster,
+                  current.nodeID == pending.broadcasterID,
+                  current.epoch == pending.broadcasterEpoch,
+                  pending.attempts < 20
+            else {
+                pendingRoomActions.removeValue(forKey: requestID)
+                return
+            }
+            pending.attempts += 1
+            pending = PendingRoomAction(
+                envelope: roomActionEnvelope(
+                    from: pending.envelope,
+                    attempt: UInt64(pending.attempts)
+                ),
+                broadcasterID: pending.broadcasterID,
+                broadcasterEpoch: pending.broadcasterEpoch,
+                attempts: pending.attempts
+            )
+            pendingRoomActions[requestID] = pending
+            _ = rememberRoomAction(
+                roomActionKey(requestID, attempt: UInt64(pending.attempts))
+            )
+            broadcast(pending.envelope)
+            scheduleRoomActionRetry(requestID)
+        }
+    }
+
+    private func roomActionEnvelope(from envelope: MeshEnvelope, attempt: UInt64) -> MeshEnvelope {
+        MeshEnvelope(
+            type: envelope.type,
+            nodeID: envelope.nodeID,
+            requestID: envelope.requestID,
+            broadcasterID: envelope.broadcasterID,
+            broadcasterEpoch: envelope.broadcasterEpoch,
+            mediaCommand: envelope.mediaCommand,
+            targetID: envelope.targetID,
+            actionAttempt: attempt
+        )
+    }
+
+    private func acknowledgeRoomAction(
+        requestID: String,
+        originID: String,
+        broadcasterID: String,
+        broadcasterEpoch: UInt64
+    ) {
+        let acknowledgement = MeshEnvelope(
+            type: "room_action_ack",
+            nodeID: nodeID,
+            requestID: requestID,
+            broadcasterID: broadcasterID,
+            broadcasterEpoch: broadcasterEpoch,
+            targetID: originID
+        )
+        _ = rememberRoomAction("ack:\(requestID)")
+        broadcast(acknowledgement)
     }
 
     private func completeAuthentication(_ link: Link, remoteID: String) {

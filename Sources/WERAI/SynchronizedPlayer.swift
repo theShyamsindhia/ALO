@@ -39,6 +39,7 @@ final class SynchronizedPlayer {
     private var participantMuted = false
     private var playbackIsActive = false
     private var roomPlaybackIsPlaying = true
+    private var resyncCutoverCaptureNanos: UInt64?
     private(set) var configurationChangeCount: UInt64 = 0
 
     var clockOffsetNanos: Int64?
@@ -84,6 +85,10 @@ final class SynchronizedPlayer {
 
     func accept(_ packet: AudioPacket) {
         guard roomPlaybackIsPlaying else { return }
+        if let cutover = resyncCutoverCaptureNanos {
+            guard packet.captureTimeNanos >= cutover else { return }
+            resyncCutoverCaptureNanos = nil
+        }
         let now = MonotonicClock.nowNanos()
         lastPacketReceivedNanos = now
         pending[packet.sequence] = packet
@@ -230,6 +235,7 @@ final class SynchronizedPlayer {
         varispeed.rate = 1
         latestLatenessNanos = 0
         lastPacketReceivedNanos = nil
+        resyncCutoverCaptureNanos = nil
         setPlaybackActive(false)
         playbackWatchdog.reset()
         driftRecovery.reset()
@@ -259,6 +265,7 @@ final class SynchronizedPlayer {
         smoothedCorrection = 0
         varispeed.rate = 1
         latestLatenessNanos = 0
+        resyncCutoverCaptureNanos = nil
         playbackWatchdog.reset()
         driftRecovery.reset()
         setPlaybackActive(false)
@@ -291,8 +298,31 @@ final class SynchronizedPlayer {
         )
     }
 
-    func forceResync() {
-        hardResynchronize()
+    func forceResync(atOrAfterCaptureNanos cutoverCaptureNanos: UInt64? = nil) {
+        guard let cutoverCaptureNanos else {
+            hardResynchronize()
+            return
+        }
+
+        // Unlike automatic drift correction, a user-requested room sync must
+        // not reuse any receiver-local backlog. Clear both already-scheduled
+        // and pending audio, then ignore the live stream until the broadcaster's
+        // shared future cutover timestamp arrives.
+        player.stop()
+        pending.removeAll()
+        expectedSequence = nil
+        anchorFrameIndex = nil
+        anchorCaptureNanos = nil
+        hasStarted = false
+        smoothedCorrection = 0
+        varispeed.rate = 1
+        latestLatenessNanos = 0
+        lastPacketReceivedNanos = nil
+        playbackWatchdog.reset()
+        driftRecovery.reset()
+        resyncCutoverCaptureNanos = cutoverCaptureNanos
+        resyncCount &+= 1
+        setPlaybackActive(false)
     }
 
     func handleAudioEngineConfigurationChange() {

@@ -23,7 +23,6 @@ final class MeshSession {
     private var appliedBroadcaster: MeshBroadcaster?
     private var transitionGeneration = 0
     private var intendsToBroadcast = false
-    private var pendingMediaCommand: RoomMediaCommand?
     private var mediaCommandReady = false
     private var transitionTask: Task<Void, Never>?
     private var isStopped = true
@@ -34,6 +33,8 @@ final class MeshSession {
     private final class CallbackRelay {
         var replica: (MeshRoomReplica) -> Void = { _ in }
         var participants: ([RoomParticipant]) -> Void = { _ in }
+        var mediaCommand: (RoomMediaCommand, String, UInt64) -> Bool = { _, _, _ in false }
+        var resyncRequest: (String?, String, UInt64) -> Bool = { _, _, _ in false }
     }
     private let callbackRelay: CallbackRelay
 
@@ -81,10 +82,42 @@ final class MeshSession {
             },
             peerVersionHandler: { version in
                 DispatchQueue.main.async { peerVersionHandler(version) }
+            },
+            mediaCommandHandler: { command, broadcasterID, broadcasterEpoch in
+                let accept = {
+                    MainActor.assumeIsolated {
+                        relay.mediaCommand(command, broadcasterID, broadcasterEpoch)
+                    }
+                }
+                if Thread.isMainThread { return accept() }
+                return DispatchQueue.main.sync(execute: accept)
+            },
+            resyncRequestHandler: { targetID, broadcasterID, broadcasterEpoch in
+                let accept = {
+                    MainActor.assumeIsolated {
+                        relay.resyncRequest(targetID, broadcasterID, broadcasterEpoch)
+                    }
+                }
+                if Thread.isMainThread { return accept() }
+                return DispatchQueue.main.sync(execute: accept)
             }
         )
         relay.replica = { [weak self] in self?.apply($0) }
         relay.participants = participantsHandler
+        relay.mediaCommand = { [weak self] command, broadcasterID, broadcasterEpoch in
+            self?.receiveMediaCommand(
+                command,
+                broadcasterID: broadcasterID,
+                broadcasterEpoch: broadcasterEpoch
+            ) ?? false
+        }
+        relay.resyncRequest = { [weak self] targetID, broadcasterID, broadcasterEpoch in
+            self?.receiveResyncRequest(
+                targetID: targetID,
+                broadcasterID: broadcasterID,
+                broadcasterEpoch: broadcasterEpoch
+            ) ?? false
+        }
     }
 
     func start(broadcastInitially: Bool) throws {
@@ -126,17 +159,36 @@ final class MeshSession {
         ))
     }
     func removeQueueItem(_ id: String) { control.publishQueueRemove(id) }
-    func sendMediaCommand(_ command: RoomMediaCommand) {
-        guard replica.broadcaster != nil else { return }
-        guard mediaCommandReady else { pendingMediaCommand = command; return }
-        if let hostSession { hostSession.sendRoomMediaCommand(command) }
-        else if let receiver { receiver.sendRoomMediaCommand(command) }
-        else { pendingMediaCommand = command; mediaCommandReady = false }
+    @discardableResult
+    func sendMediaCommand(_ command: RoomMediaCommand) -> Bool {
+        guard let broadcaster = replica.broadcaster else { return false }
+        if broadcaster.nodeID == nodeID {
+            return receiveMediaCommand(
+                command,
+                broadcasterID: broadcaster.nodeID,
+                broadcasterEpoch: broadcaster.epoch
+            )
+        }
+        return control.publishMediaCommand(
+            command,
+            broadcasterID: broadcaster.nodeID,
+            broadcasterEpoch: broadcaster.epoch
+        )
     }
     func requestResync(participantID: String? = nil) -> Bool {
-        if let hostSession { return hostSession.requestResync(participantID: participantID) }
-        if let receiver { return receiver.requestResync(participantID: participantID) }
-        return false
+        guard let broadcaster = replica.broadcaster else { return false }
+        if broadcaster.nodeID == nodeID {
+            return receiveResyncRequest(
+                targetID: participantID,
+                broadcasterID: broadcaster.nodeID,
+                broadcasterEpoch: broadcaster.epoch
+            )
+        }
+        return control.publishResyncRequest(
+            targetID: participantID,
+            broadcasterID: broadcaster.nodeID,
+            broadcasterEpoch: broadcaster.epoch
+        )
     }
     func setLocalLevel(volume: Double, muted: Bool) { receiver?.setLocalLevel(volume: volume, muted: muted) }
     func setParticipantLevel(id: String, volume: Double, muted: Bool) { hostSession?.setParticipantLevel(id: id, volume: volume, muted: muted) }
@@ -213,6 +265,7 @@ final class MeshSession {
 
     private func transition(to broadcaster: MeshBroadcaster?) {
         guard !isStopped else { return }
+        mediaCommandReady = false
         transitionGeneration += 1
         let generation = transitionGeneration
         let previousTransition = transitionTask
@@ -285,18 +338,25 @@ final class MeshSession {
                         return
                     }
                     mediaCommandReady = true
-                    flushPendingMediaCommand()
                 } else {
                     statusHandler("Connecting to the room broadcaster")
                     let receiver = try Receiver(
                         requestedRoom: broadcaster.mediaServiceName,
                         roomDisplayName: room.name,
                         participantID: nodeID,
+                        roomMediaCommandHandler: { [weak self] command in
+                            let send = {
+                                MainActor.assumeIsolated {
+                                    self?.sendMediaCommand(command) ?? false
+                                }
+                            }
+                            if Thread.isMainThread { return send() }
+                            return DispatchQueue.main.sync(execute: send)
+                        },
                         statusHandler: { [weak self] status in
                             if status == .connected {
                                 DispatchQueue.main.async {
                                     self?.mediaCommandReady = true
-                                    self?.flushPendingMediaCommand()
                                 }
                             }
                             if status == .playing { self?.statusHandler("Listening in sync") }
@@ -338,12 +398,31 @@ final class MeshSession {
         }
     }
 
-    private func flushPendingMediaCommand() {
-        guard let command = pendingMediaCommand else { return }
-        guard mediaCommandReady else { return }
-        pendingMediaCommand = nil
-        if let hostSession { hostSession.sendRoomMediaCommand(command) }
-        else if let receiver { receiver.sendRoomMediaCommand(command) }
-        else { pendingMediaCommand = command }
+    private func receiveMediaCommand(
+        _ command: RoomMediaCommand,
+        broadcasterID: String,
+        broadcasterEpoch: UInt64
+    ) -> Bool {
+        guard let broadcaster = replica.broadcaster,
+              broadcaster.nodeID == nodeID,
+              broadcaster.nodeID == broadcasterID,
+              broadcaster.epoch == broadcasterEpoch
+        else { return false }
+        guard mediaCommandReady, let hostSession else { return false }
+        return hostSession.sendRoomMediaCommand(command)
+    }
+
+    private func receiveResyncRequest(
+        targetID: String?,
+        broadcasterID: String,
+        broadcasterEpoch: UInt64
+    ) -> Bool {
+        guard let broadcaster = replica.broadcaster,
+              broadcaster.nodeID == nodeID,
+              broadcaster.nodeID == broadcasterID,
+              broadcaster.epoch == broadcasterEpoch
+        else { return false }
+        guard mediaCommandReady, let hostSession else { return false }
+        return hostSession.requestResync(participantID: targetID)
     }
 }

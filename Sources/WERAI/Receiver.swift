@@ -14,6 +14,7 @@ final class Receiver {
     private let roomDisplayName: String
     private let displayName: String
     private let capturesSystemMediaCommands: Bool
+    private let roomMediaCommandHandler: ((RoomMediaCommand) -> Bool)?
     private let participantID: String
     private let statusHandler: ((ReceiverStatus) -> Void)?
     private let identityHandler: ((_ id: String, _ name: String) -> Void)?
@@ -28,7 +29,9 @@ final class Receiver {
     private let videoDecoder: VideoDecoder
     private let playbackActivityRelay: PlaybackActivityRelay
     private lazy var remoteCommandCenter = RoomRemoteCommandCenter { [weak self] command in
-        self?.sendRoomMediaCommand(command) ?? false
+        guard let self else { return false }
+        if let roomMediaCommandHandler { return roomMediaCommandHandler(command) }
+        return sendRoomMediaCommand(command)
     }
     private var udpListener: NWListener?
     private var videoListener: NWListener?
@@ -52,6 +55,7 @@ final class Receiver {
         outputDeviceID: AudioDeviceID? = nil,
         participantID: String = UUID().uuidString,
         displayName: String? = nil,
+        roomMediaCommandHandler: ((RoomMediaCommand) -> Bool)? = nil,
         capturesSystemMediaCommands: Bool = true,
         statusHandler: ((ReceiverStatus) -> Void)? = nil,
         identityHandler: ((_ id: String, _ name: String) -> Void)? = nil,
@@ -66,6 +70,7 @@ final class Receiver {
         self.roomDisplayName = roomDisplayName ?? requestedRoom ?? "WERAI Room"
         self.participantID = participantID
         self.displayName = displayName ?? Host.current().localizedName ?? "Mac"
+        self.roomMediaCommandHandler = roomMediaCommandHandler
         self.capturesSystemMediaCommands = capturesSystemMediaCommands
         self.statusHandler = statusHandler
         self.identityHandler = identityHandler
@@ -370,7 +375,7 @@ final class Receiver {
                     case "queue_update":
                         self.queueHandler?(message.mediaQueue ?? [])
                     case "resync":
-                        self.player.forceResync()
+                        self.player.forceResync(atOrAfterCaptureNanos: message.hostNanos)
                     default:
                         break
                     }

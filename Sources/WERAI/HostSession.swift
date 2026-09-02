@@ -11,6 +11,7 @@ final class HostSession {
     private let virtualDisplayOwner: VirtualDisplayOwner
     private var nowPlayingMonitor: NowPlayingMonitor?
     private var playbackController: SystemPlaybackController?
+    private var shouldPauseSourceOnStop = false
     private var muteTap: AnyObject?
     private var videoStoppedHandler: (Error) -> Void = { _ in }
     init(virtualDisplayFactory: @escaping () throws -> VirtualDisplayManaging = { try VirtualDisplayManager() }) {
@@ -65,6 +66,7 @@ final class HostSession {
             try await source.start { samples, captureTimeNanos in
                 host.acceptAudio(samples: samples, captureTimeNanos: captureTimeNanos)
             }
+            shouldPauseSourceOnStop = true
             try Task.checkCancellation()
 
             guard #available(macOS 14.2, *) else {
@@ -113,6 +115,11 @@ final class HostSession {
     }
 
     func stop() async {
+        // Releasing broadcaster ownership must also stop the source application;
+        // otherwise a takeover leaves the old Mac playing locally after its
+        // capture and room route have been removed.
+        if shouldPauseSourceOnStop { _ = playbackController?.perform(.pause) }
+        shouldPauseSourceOnStop = false
         if #available(macOS 14.2, *), let muteTap = muteTap as? SourceMuteTap {
             muteTap.stop()
         }
@@ -149,12 +156,14 @@ final class HostSession {
         host?.setParticipantLevel(id: id, volume: volume, muted: muted)
     }
 
-    func sendRoomMediaCommand(_ command: RoomMediaCommand) {
-        localReceiver?.sendRoomMediaCommand(command)
+    @discardableResult
+    func sendRoomMediaCommand(_ command: RoomMediaCommand) -> Bool {
+        host?.sendRoomMediaCommand(command) ?? false
     }
 
     func requestResync(participantID: String? = nil) -> Bool {
-        localReceiver?.requestResync(participantID: participantID) ?? false
+        guard let host else { return false }
+        return host.requestResync(participantID: participantID)
     }
 
     func setVideoEnabled(_ enabled: Bool) async throws {
@@ -209,6 +218,8 @@ final class HostSession {
     }
 
     func stopImmediately() {
+        if shouldPauseSourceOnStop { _ = playbackController?.perform(.pause) }
+        shouldPauseSourceOnStop = false
         if #available(macOS 14.2, *), let muteTap = muteTap as? SourceMuteTap {
             muteTap.stop()
         }

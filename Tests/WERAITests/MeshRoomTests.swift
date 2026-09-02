@@ -323,6 +323,137 @@ struct MeshRoomTests {
         #expect(waitUntil { versions.contains("0.12.1") })
     }
 
+    @Test("Any mesh participant can send playback control to the current broadcaster")
+    func meshPlaybackControlReachesBroadcaster() throws {
+        let room = RoomConfiguration(name: "Playback command test", creatorPeerID: "a")
+        let ready = PortProbe()
+        let a = MeshProbe()
+        let b = MeshProbe()
+        let commands = MediaCommandProbe()
+        let nodeA = makeNode(room: room, id: "a", probe: a, ports: PortProbe())
+        let nodeB = MeshControlPlane(
+            room: room,
+            nodeID: "b",
+            displayName: "B",
+            listenerReadyHandler: { ready.set($0) },
+            replicaHandler: { b.update(replica: $0) },
+            participantsHandler: { b.update(participants: $0) },
+            mediaCommandHandler: { command, broadcasterID, epoch in
+                commands.add(command, broadcasterID: broadcasterID, epoch: epoch)
+                return true
+            }
+        )
+        try nodeA.start(advertise: false)
+        try nodeB.start(advertise: false)
+        defer { nodeA.stop(); nodeB.stop() }
+        guard let port = ready.wait() else {
+            Issue.record("Mesh listener did not start")
+            return
+        }
+        nodeA.connectForTesting(to: .hostPort(host: "127.0.0.1", port: port))
+        #expect(waitUntil { a.participantCount == 2 && b.participantCount == 2 })
+
+        nodeB.publishBroadcaster(active: true, mediaServiceName: "test-media")
+        #expect(waitUntil { a.broadcasterID == "b" && b.broadcasterID == "b" })
+        let epoch = try #require(a.broadcasterEpoch)
+        nodeA.publishMediaCommand(.pause, broadcasterID: "b", broadcasterEpoch: epoch)
+
+        #expect(waitUntil { commands.values == [.pause] })
+        #expect(commands.targetIDs == ["b"])
+        #expect(commands.epochs == [epoch])
+    }
+
+    @Test("Playback and Sync All survive a relayed mesh path")
+    func roomActionsReachBroadcasterThroughRelay() throws {
+        let room = RoomConfiguration(name: "Relayed control test", creatorPeerID: "a")
+        let a = MeshProbe()
+        let b = MeshProbe()
+        let c = MeshProbe()
+        let bReady = PortProbe()
+        let cReady = PortProbe()
+        let commands = MediaCommandProbe()
+        let resyncs = ResyncRequestProbe()
+        let nodeA = makeNode(room: room, id: "a", probe: a, ports: PortProbe())
+        let nodeB = makeNode(room: room, id: "b", probe: b, ports: bReady)
+        let nodeC = MeshControlPlane(
+            room: room,
+            nodeID: "c",
+            displayName: "C",
+            listenerReadyHandler: { cReady.set($0) },
+            replicaHandler: { c.update(replica: $0) },
+            participantsHandler: { c.update(participants: $0) },
+            mediaCommandHandler: { command, broadcasterID, epoch in
+                commands.add(command, broadcasterID: broadcasterID, epoch: epoch)
+                return true
+            },
+            resyncRequestHandler: { targetID, broadcasterID, epoch in
+                resyncs.add(targetID: targetID, broadcasterID: broadcasterID, epoch: epoch)
+                return true
+            }
+        )
+        try nodeA.start(advertise: false)
+        try nodeB.start(advertise: false)
+        try nodeC.start(advertise: false)
+        defer { nodeA.stop(); nodeB.stop(); nodeC.stop() }
+        guard let portB = bReady.wait(), let portC = cReady.wait() else {
+            Issue.record("Mesh listeners did not start")
+            return
+        }
+        nodeA.connectForTesting(to: .hostPort(host: "127.0.0.1", port: portB))
+        nodeB.connectForTesting(to: .hostPort(host: "127.0.0.1", port: portC))
+        #expect(waitUntil { a.participantCount == 2 && b.participantCount == 3 && c.participantCount == 2 })
+
+        nodeC.publishBroadcaster(active: true, mediaServiceName: "relayed-media")
+        #expect(waitUntil { a.broadcasterID == "c" && b.broadcasterID == "c" })
+        let epoch = try #require(a.broadcasterEpoch)
+        #expect(nodeA.publishMediaCommand(.pause, broadcasterID: "c", broadcasterEpoch: epoch))
+        #expect(nodeA.publishResyncRequest(targetID: nil, broadcasterID: "c", broadcasterEpoch: epoch))
+
+        #expect(waitUntil { commands.values == [.pause] })
+        #expect(waitUntil { resyncs.count == 1 })
+        #expect(resyncs.targetIDs == [nil])
+        Thread.sleep(forTimeInterval: 1.4)
+        #expect(commands.values == [.pause])
+        #expect(resyncs.count == 1)
+    }
+
+    @Test("Room controls retry until the broadcaster media session accepts them")
+    func roomActionAcknowledgementFollowsMediaAcceptance() throws {
+        let room = RoomConfiguration(name: "Control retry test", creatorPeerID: "a")
+        let a = MeshProbe()
+        let b = MeshProbe()
+        let ready = PortProbe()
+        let acceptance = RetryingCommandProbe()
+        let nodeA = makeNode(room: room, id: "a", probe: a, ports: PortProbe())
+        let nodeB = MeshControlPlane(
+            room: room,
+            nodeID: "b",
+            displayName: "B",
+            listenerReadyHandler: { ready.set($0) },
+            replicaHandler: { b.update(replica: $0) },
+            participantsHandler: { b.update(participants: $0) },
+            mediaCommandHandler: { command, _, _ in acceptance.handle(command) }
+        )
+        try nodeA.start(advertise: false)
+        try nodeB.start(advertise: false)
+        defer { nodeA.stop(); nodeB.stop() }
+        guard let port = ready.wait() else {
+            Issue.record("Mesh listener did not start")
+            return
+        }
+        nodeA.connectForTesting(to: .hostPort(host: "127.0.0.1", port: port))
+        #expect(waitUntil { a.participantCount == 2 })
+        nodeB.publishBroadcaster(active: true, mediaServiceName: "retry-media")
+        #expect(waitUntil { a.broadcasterID == "b" })
+        let epoch = try #require(a.broadcasterEpoch)
+
+        #expect(nodeA.publishMediaCommand(.pause, broadcasterID: "b", broadcasterEpoch: epoch))
+        #expect(waitUntil(timeout: 2) { acceptance.attemptCount >= 2 })
+        Thread.sleep(forTimeInterval: 0.7)
+        #expect(acceptance.attemptCount == 2)
+        #expect(acceptance.acceptedCommands == [.pause])
+    }
+
     @Test("Private rooms admit only peers with the same room secret")
     func privateRoomAdmission() throws {
         let roomID = UUID().uuidString
@@ -526,8 +657,46 @@ private final class MeshProbe: @unchecked Sendable {
     var chatCount: Int { lock.withLock { replica.chatEvents.count } }
     var chatTexts: [String?] { lock.withLock { replica.chatEvents.map(\.text) } }
     var broadcasterID: String? { lock.withLock { replica.broadcaster?.nodeID } }
+    var broadcasterEpoch: UInt64? { lock.withLock { replica.broadcaster?.epoch } }
     func update(replica: MeshRoomReplica) { lock.withLock { self.replica = replica } }
     func update(participants: [RoomParticipant]) { lock.withLock { self.participants = participants } }
+}
+
+private final class MediaCommandProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entries = [(RoomMediaCommand, String, UInt64)]()
+    var values: [RoomMediaCommand] { lock.withLock { entries.map(\.0) } }
+    var targetIDs: [String] { lock.withLock { entries.map(\.1) } }
+    var epochs: [UInt64] { lock.withLock { entries.map(\.2) } }
+    func add(_ command: RoomMediaCommand, broadcasterID: String, epoch: UInt64) {
+        lock.withLock { entries.append((command, broadcasterID, epoch)) }
+    }
+}
+
+private final class ResyncRequestProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entries = [(String?, String, UInt64)]()
+    var count: Int { lock.withLock { entries.count } }
+    var targetIDs: [String?] { lock.withLock { entries.map(\.0) } }
+    func add(targetID: String?, broadcasterID: String, epoch: UInt64) {
+        lock.withLock { entries.append((targetID, broadcasterID, epoch)) }
+    }
+}
+
+private final class RetryingCommandProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var attempts = 0
+    private var accepted = [RoomMediaCommand]()
+    var attemptCount: Int { lock.withLock { attempts } }
+    var acceptedCommands: [RoomMediaCommand] { lock.withLock { accepted } }
+    func handle(_ command: RoomMediaCommand) -> Bool {
+        lock.withLock {
+            attempts += 1
+            guard attempts >= 2 else { return false }
+            accepted.append(command)
+            return true
+        }
+    }
 }
 
 private final class VersionProbe: @unchecked Sendable {

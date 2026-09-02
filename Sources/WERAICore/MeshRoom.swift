@@ -251,6 +251,12 @@ public struct MeshEnvelope: Codable, Sendable {
     public let heartbeatGeneration: String?
     public let authNonce: String?
     public let authResponse: String?
+    public let requestID: String?
+    public let broadcasterID: String?
+    public let broadcasterEpoch: UInt64?
+    public let mediaCommand: RoomMediaCommand?
+    public let targetID: String?
+    public let actionAttempt: UInt64?
 
     public init(
         type: String,
@@ -265,7 +271,13 @@ public struct MeshEnvelope: Codable, Sendable {
         heartbeatSequence: UInt64? = nil,
         heartbeatGeneration: String? = nil,
         authNonce: String? = nil,
-        authResponse: String? = nil
+        authResponse: String? = nil,
+        requestID: String? = nil,
+        broadcasterID: String? = nil,
+        broadcasterEpoch: UInt64? = nil,
+        mediaCommand: RoomMediaCommand? = nil,
+        targetID: String? = nil,
+        actionAttempt: UInt64? = nil
     ) {
         self.type = type
         self.room = room
@@ -280,6 +292,12 @@ public struct MeshEnvelope: Codable, Sendable {
         self.heartbeatGeneration = heartbeatGeneration
         self.authNonce = authNonce
         self.authResponse = authResponse
+        self.requestID = requestID
+        self.broadcasterID = broadcasterID
+        self.broadcasterEpoch = broadcasterEpoch
+        self.mediaCommand = mediaCommand
+        self.targetID = targetID
+        self.actionAttempt = actionAttempt
     }
 
     public func encodedLine() throws -> Data {
