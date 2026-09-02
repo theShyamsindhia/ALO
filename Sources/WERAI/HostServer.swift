@@ -140,7 +140,7 @@ final class HostServer {
                 // broadcaster. When capture resumes, make it a fresh stream
                 // boundary instead of appending to the pre-pause timeline.
                 packetizer.discardPendingSamples()
-                broadcast(coordinatedResyncMessage(nowNanos: captureTimeNanos))
+                _ = sendCoordinatedResync(targetID: nil, nowNanos: captureTimeNanos)
             }
             let packets = self.packetizer.append(
                 samples: samples,
@@ -216,9 +216,10 @@ final class HostServer {
                     type: "room_playback",
                     isPlaying: self.roomPlaybackIsPlaying
                 ))
-                // A confirmed play always starts all receivers on the same fresh
-                // source position. Pause clears anything already scheduled.
-                self.broadcast(self.coordinatedResyncMessage())
+                // A confirmed play starts listeners on the same fresh source
+                // position. The broadcaster restarts naturally from room_playback;
+                // resetting its loopback output can leave its muted source inaudible.
+                _ = self.sendCoordinatedResync(targetID: nil)
             }
         }
     }
@@ -422,7 +423,8 @@ final class HostServer {
             let receiverAlreadyResynced = report.resyncCount > previousResyncCount
             client.syncReport = report
             let now = MonotonicClock.nowNanos()
-            if report.latenessNanos > SynchronizedPlayer.hardResyncThresholdNanos,
+            if client.id != localParticipantID,
+               report.latenessNanos > SynchronizedPlayer.hardResyncThresholdNanos,
                !receiverAlreadyResynced,
                now - client.lastResyncCommandNanos > 2_000_000_000 {
                 client.lastResyncCommandNanos = now

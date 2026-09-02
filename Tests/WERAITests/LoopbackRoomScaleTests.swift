@@ -275,9 +275,10 @@ struct LoopbackRoomScaleTests {
         #expect(requester.resyncCommandCount == 0)
     }
 
-    @Test("Broadcaster system playback is the authoritative room state")
-    func broadcasterSystemPlaybackDrivesRoomWithoutALOCommand() throws {
+    @Test("Listener playback controls never reset the broadcaster's local output")
+    func listenerPlaybackControlsDoNotResetBroadcasterOutput() throws {
         let hostReady = DispatchSemaphore(value: 0)
+        let commandReceived = DispatchSemaphore(value: 0)
         let state = PortState()
         let requestedCommands = LockedMediaCommands()
         let host = HostServer(
@@ -289,8 +290,10 @@ struct LoopbackRoomScaleTests {
             },
             playbackRequestHandler: { command in
                 requestedCommands.append(command)
+                commandReceived.signal()
                 return true
-            }
+            },
+            localParticipantID: "loopback-peer-351"
         )
         try host.start()
         defer { host.stop() }
@@ -298,21 +301,34 @@ struct LoopbackRoomScaleTests {
               let hostPort = state.port
         else { throw LoopbackTestError.hostDidNotStart }
 
-        let listener = HeadlessLoopbackPeer(index: 351)
+        let broadcasterOutput = HeadlessLoopbackPeer(index: 351)
+        let listener = HeadlessLoopbackPeer(index: 352)
+        try broadcasterOutput.start(hostPort: hostPort)
         try listener.start(hostPort: hostPort)
-        defer { listener.stop() }
-        guard listener.waitUntilJoined(timeout: 3) else { throw LoopbackTestError.peerDidNotJoin }
+        defer {
+            broadcasterOutput.stop()
+            listener.stop()
+        }
+        guard broadcasterOutput.waitUntilJoined(timeout: 3),
+              listener.waitUntilJoined(timeout: 3)
+        else { throw LoopbackTestError.peerDidNotJoin }
 
-        // These are NowPlayingMonitor updates caused by media keys acting on the
-        // broadcaster's player directly. No ALO command is involved.
+        listener.sendMediaCommand(.pause)
+        #expect(commandReceived.wait(timeout: .now() + 2) == .success)
         host.setNowPlaying(NowPlayingMedia(title: "System source", isPlaying: false))
+        #expect(waitUntil(timeout: 2) { broadcasterOutput.roomPlaybackStates.last == false })
         #expect(waitUntil(timeout: 2) { listener.roomPlaybackStates.last == false })
+        #expect(broadcasterOutput.resyncCommandCount == 0)
         #expect(listener.resyncCommandCount == 1)
 
+        listener.sendMediaCommand(.play)
+        #expect(commandReceived.wait(timeout: .now() + 2) == .success)
         host.setNowPlaying(NowPlayingMedia(title: "System source", isPlaying: true))
+        #expect(waitUntil(timeout: 2) { broadcasterOutput.roomPlaybackStates.last == true })
         #expect(waitUntil(timeout: 2) { listener.roomPlaybackStates.last == true })
         #expect(waitUntil(timeout: 2) { listener.resyncCommandCount == 2 })
-        #expect(requestedCommands.values.isEmpty)
+        #expect(broadcasterOutput.resyncCommandCount == 0)
+        #expect(requestedCommands.values == [.pause, .play])
     }
 
     @Test("A rejected source command does not publish a false room state")
