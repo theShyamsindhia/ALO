@@ -9,6 +9,7 @@ enum GUIApplication {
     private static var appDelegate: WERAIAppDelegate?
 
     static func run() {
+        _ = BroadcastAudioRouter().recoverStaleRoute()
         let application = NSApplication.shared
         let delegate = WERAIAppDelegate()
         appDelegate = delegate
@@ -27,9 +28,13 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
     private var statusMenuController: WERAIStatusMenuController?
     private var phaseObserver: AnyCancellable?
     private var fullScreenObserver: AnyCancellable?
+    private var videoPinnedObserver: AnyCancellable?
+    private var videoFullScreenToggleObserver: AnyCancellable?
     private var floatingBarObserver: AnyCancellable?
+    private var terminationSignalSources = [DispatchSourceSignal]()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        installTerminationSignalHandlers()
         installMainMenu()
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1_040, height: 720),
@@ -65,6 +70,18 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.async { self?.updateFullScreenVideo(enabled) }
             }
 
+        videoPinnedObserver = model.$videoViewerPinned
+            .removeDuplicates()
+            .sink { [weak self] pinned in
+                DispatchQueue.main.async { self?.fullScreenVideoController?.setPinned(pinned) }
+            }
+
+        videoFullScreenToggleObserver = model.$videoFullScreenToggle
+            .dropFirst()
+            .sink { [weak self] _ in
+                DispatchQueue.main.async { self?.fullScreenVideoController?.toggleFullScreen() }
+            }
+
         floatingBarObserver = model.$floatingBarHidden
             .removeDuplicates()
             .sink { [weak self] hidden in
@@ -96,6 +113,19 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
         model.stopImmediately()
     }
 
+    private func installTerminationSignalHandlers() {
+        for signalNumber in [SIGTERM, SIGINT] {
+            signal(signalNumber, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .main)
+            source.setEventHandler { [weak self] in
+                self?.model.stopImmediately()
+                NSApp.terminate(nil)
+            }
+            source.resume()
+            terminationSignalSources.append(source)
+        }
+    }
+
     private func updateWindows(for phase: WERAIViewModel.Phase) {
         if phase == .live {
             window?.orderOut(nil)
@@ -119,9 +149,11 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if fullScreenVideoController == nil {
-            fullScreenVideoController = FullScreenVideoWindowController(model: model)
+            fullScreenVideoController = FullScreenVideoWindowController(model: model) { [weak model] in
+                model?.exitVideoFullscreen()
+            }
         }
-        roomBarController?.close()
+        fullScreenVideoController?.setPinned(model.videoViewerPinned)
         fullScreenVideoController?.show()
     }
 
@@ -334,8 +366,8 @@ private enum FloatingMetrics {
 @MainActor
 final class WERAIViewModel: ObservableObject {
     enum Mode: String, CaseIterable {
-        case share = "Start"
-        case listen = "Join"
+        case share = "Create Room"
+        case listen = "Rooms"
     }
 
     enum Phase: Equatable {
@@ -358,14 +390,18 @@ final class WERAIViewModel: ObservableObject {
         case video
     }
 
-    @Published var mode: Mode = .share
+    @Published var mode: Mode = .listen
     @Published var phase: Phase = .idle
     @Published var roomName = "My Room"
-    @Published var nearbyRooms = [String]()
-    @Published var selectedRoom: String?
+    @Published var nearbyRooms = [NearbyRoom]()
+    @Published var savedRooms = [RoomConfiguration]()
+    @Published var selectedRoomID: String?
+    @Published var createPrivateRoom = false
+    @Published var privateRoomKey = ""
     @Published var statusText = "Ready"
     @Published var errorMessage: String?
     @Published var errorIsPermissionRelated = false
+    @Published var audioDeviceInstallRequired = false
     @Published var participants = [RoomParticipant]()
     @Published var messages = [RoomMessage]()
     @Published var draftMessage = ""
@@ -376,39 +412,59 @@ final class WERAIViewModel: ObservableObject {
     @Published var queueNotice: String?
     @Published var videoFrame: CGImage?
     @Published var videoFullscreen = false
-    @Published var currentUserName = Host.current().localizedName ?? "This Mac"
+    @Published var videoViewerPinned = false
+    @Published var videoFullScreenToggle = 0
+    @Published var currentUserName = "This Mac"
     @Published var currentParticipantID: String?
     @Published var roomHasVideo = false
     @Published var nowPlaying = NowPlayingMedia()
     @Published var localNowPlaying = NowPlayingMedia()
     @Published var experience: Experience = .audio
-    @Published var shareVideoOnStart = false
     @Published var mediaSwitchBusy = false
     @Published var permissionNotice = false
     @Published var floatingSection: FloatingSection = .collapsed
     @Published var floatingBarHidden: Bool
     @Published private(set) var menuBarPopoverVisible = false
 
-    private var roomBrowser: RoomBrowser!
-    private var hostSession: HostSession?
-    private var receiver: Receiver?
+    private var roomBrowser: MeshRoomBrowser!
+    private var meshSession: MeshSession?
+    private let roomStore = RoomStore()
+    private let nodeID: String
     private var localNowPlayingMonitor: NowPlayingMonitor?
     private var incomingMessagePreviewTask: Task<Void, Never>?
     private var activeRoom: String?
+    private var activeRoomConfiguration: RoomConfiguration?
+    private var isLeavingRoom = false
     private static let floatingBarPreferenceKey = "floatingBarHidden"
 
     init() {
         let defaults = UserDefaults.standard
+        if let stored = defaults.string(forKey: "meshNodeID") {
+            nodeID = stored
+        } else {
+            let generated = UUID().uuidString
+            defaults.set(generated, forKey: "meshNodeID")
+            nodeID = generated
+        }
+        if let savedName = defaults.string(forKey: "meshDeviceDisplayName"), !savedName.isEmpty {
+            currentUserName = savedName
+        } else {
+            let generatedName = DeviceDisplayName.generated(from: nodeID)
+            defaults.set(generatedName, forKey: "meshDeviceDisplayName")
+            currentUserName = generatedName
+        }
+        savedRooms = roomStore.load()
         floatingBarHidden = defaults.object(forKey: Self.floatingBarPreferenceKey) == nil
             ? true
             : defaults.bool(forKey: Self.floatingBarPreferenceKey)
-        roomBrowser = RoomBrowser(
+        selectedRoomID = savedRooms.first?.id
+        roomBrowser = MeshRoomBrowser(
             updateHandler: { [weak self] rooms in
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.nearbyRooms = rooms
-                    if self.selectedRoom == nil || !rooms.contains(self.selectedRoom ?? "") {
-                        self.selectedRoom = rooms.first
+                    if self.selectedRoomID == nil || !self.roomChoices.contains(where: { $0.id == self.selectedRoomID }) {
+                        self.selectedRoomID = rooms.first?.id ?? self.savedRooms.first?.id
                     }
                 }
             },
@@ -421,9 +477,27 @@ final class WERAIViewModel: ObservableObject {
 
     var normalizedRoomName: String { roomName.trimmingCharacters(in: .whitespacesAndNewlines) }
     var canStartSharing: Bool { phase == .idle && !normalizedRoomName.isEmpty }
-    var canJoin: Bool { phase == .idle && selectedRoom != nil }
-    var roomTitle: String { activeRoom ?? selectedRoom ?? normalizedRoomName }
-    var isHost: Bool { hostSession != nil }
+    var canJoin: Bool { phase == .idle && selectedRoomID != nil }
+    var roomTitle: String { activeRoom ?? selectedRoomConfiguration?.name ?? normalizedRoomName }
+    var isHost: Bool { meshSession?.isBroadcasting == true }
+    var hasBroadcaster: Bool { meshSession?.hasBroadcaster == true }
+    var selectedRoomConfiguration: RoomConfiguration? {
+        guard let id = selectedRoomID else { return nil }
+        if let saved = savedRooms.first(where: { $0.id == id }) { return saved }
+        guard let nearby = nearbyRooms.first(where: { $0.id == id }) else { return nil }
+        return RoomConfiguration(id: nearby.id, name: nearby.name, isPrivate: nearby.isPrivate)
+    }
+    var roomChoices: [RoomConfiguration] {
+        var result = savedRooms
+        for nearby in nearbyRooms where !result.contains(where: { $0.id == nearby.id }) {
+            result.append(RoomConfiguration(id: nearby.id, name: nearby.name, isPrivate: nearby.isPrivate))
+        }
+        return result
+    }
+    var activePrivateInviteKey: String? {
+        guard activeRoomConfiguration?.isPrivate == true else { return nil }
+        return activeRoomConfiguration?.accessKey
+    }
     var roomIsPlaying: Bool { nowPlaying.isEmpty ? false : nowPlaying.isPlaying ?? true }
     var canSelectVideo: Bool { isHost || roomHasVideo }
     var floatingPanelHeight: CGFloat {
@@ -440,88 +514,120 @@ final class WERAIViewModel: ObservableObject {
         }
     }
 
-    func setSetupVideo(_ enabled: Bool) {
-        guard enabled else {
-            shareVideoOnStart = false
-            return
-        }
-        guard ensureVideoPermission() else { return }
-        shareVideoOnStart = true
-    }
-
     func startSharing() {
         guard canStartSharing else { return }
-        if shareVideoOnStart, !ensureVideoPermission() { return }
         resetRoomState()
-        let room = normalizedRoomName
-        activeRoom = room
-        phase = .starting
-        statusText = "Starting synchronized audio"
-        roomBrowser.stop()
-
-        let session = HostSession()
-        hostSession = session
-        Task {
-            do {
-                try await session.start(
-                    roomName: room,
-                    statusHandler: { [weak self] status in
-                        DispatchQueue.main.async { self?.statusText = status }
-                    },
-                    receiverCountHandler: { _ in },
-                    initialVideoEnabled: shareVideoOnStart,
-                    identityHandler: identityCallback,
-                    participantsHandler: participantCallback,
-                    mediaStateHandler: mediaStateCallback,
-                    nowPlayingHandler: nowPlayingCallback,
-                    chatHandler: chatCallback,
-                    queueHandler: queueCallback,
-                    videoHandler: videoCallback
-                )
-                phase = .live
-                experience = shareVideoOnStart ? .video : .audio
-                statusText = "Audio is in sync"
-            } catch {
-                phase = .failed
-                errorIsPermissionRelated = isPermissionError(error)
-                errorMessage = readable(error)
-                statusText = "Could not start the room"
-                hostSession = nil
-                roomBrowser.start()
-            }
-        }
+        let room = RoomConfiguration(
+            name: normalizedRoomName,
+            creatorPeerID: nodeID,
+            isPrivate: createPrivateRoom,
+            accessKey: createPrivateRoom ? UUID().uuidString : nil
+        )
+        do { try roomStore.save(room); savedRooms = roomStore.load() }
+        catch { errorMessage = "Could not save the room: \(error.localizedDescription)"; return }
+        open(room, broadcastInitially: false)
     }
 
     func joinSelectedRoom() {
-        guard canJoin, let room = selectedRoom else { return }
-        resetRoomState()
-        activeRoom = room
-        phase = .starting
-        statusText = "Connecting to \(room)"
-        roomBrowser.stop()
-
-        do {
-            let receiver = try Receiver(
-                requestedRoom: room,
-                statusHandler: { [weak self] status in
-                    DispatchQueue.main.async { self?.handle(status) }
-                },
-                identityHandler: identityCallback,
-                participantsHandler: participantCallback,
-                mediaStateHandler: mediaStateCallback,
-                nowPlayingHandler: nowPlayingCallback,
-                chatHandler: chatCallback,
-                queueHandler: queueCallback,
-                videoHandler: videoCallback
+        guard canJoin, let room = selectedRoomConfiguration else { return }
+        if room.isPrivate {
+            let enteredKey = privateRoomKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let key = room.accessKey ?? (enteredKey.isEmpty ? nil : enteredKey) else {
+                errorMessage = "Enter this private room's invite key."
+                return
+            }
+            if let advertisedProof = nearbyRooms.first(where: { $0.id == room.id })?.accessProof,
+               MeshControlPlane.makeAccessProof(roomID: room.id, accessKey: key) != advertisedProof {
+                errorMessage = "That invite key does not match this private room."
+                return
+            }
+            let unlocked = RoomConfiguration(
+                id: room.id,
+                name: room.name,
+                creatorPeerID: room.creatorPeerID,
+                isPrivate: true,
+                accessKey: key
             )
-            self.receiver = receiver
-            try receiver.start()
-            startLocalNowPlayingMonitor()
+            try? roomStore.save(unlocked)
+            savedRooms = roomStore.load()
+            open(unlocked, broadcastInitially: false)
+        } else { open(room, broadcastInitially: false) }
+    }
+
+    func forgetRoom(roomID: String) {
+        do {
+            try roomStore.forget(roomID: roomID)
+            savedRooms = roomStore.load()
+            if selectedRoomID == roomID {
+                selectedRoomID = nearbyRooms.first?.id ?? savedRooms.first?.id
+            }
         } catch {
+            errorMessage = "Could not forget the room: \(error.localizedDescription)"
+        }
+    }
+
+    func copyPrivateInviteKey() {
+        guard let key = activePrivateInviteKey else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(key, forType: .string)
+        statusText = "Private room invite key copied"
+    }
+
+    private func open(_ room: RoomConfiguration, broadcastInitially: Bool) {
+        resetRoomState()
+        activeRoom = room.name
+        activeRoomConfiguration = room
+        phase = .starting
+        statusText = "Opening \(room.name)"
+        roomBrowser.stop()
+        let session = MeshSession(
+            room: room,
+            nodeID: nodeID,
+            displayName: currentUserName,
+            initialEvents: roomStore.loadEvents(roomID: room.id),
+            statusHandler: { [weak self] status in
+                guard let self else { return }
+                self.statusText = status
+                if self.phase == .starting, !self.isLeavingRoom { self.phase = .live }
+                self.updateLocalNowPlayingMonitor()
+            },
+            identityHandler: identityCallback,
+            participantsHandler: participantCallback,
+            mediaStateHandler: mediaStateCallback,
+            nowPlayingHandler: nowPlayingCallback,
+            chatHandler: chatCallback,
+            queueHandler: queueCallback,
+            videoHandler: videoCallback,
+            errorHandler: { [weak self] error in
+                guard let self else { return }
+                self.audioDeviceInstallRequired = (error as? ALOAudioSetupError) == .installRequired
+                self.phase = .failed
+                self.errorMessage = self.readable(error)
+                self.statusText = "Broadcast could not start"
+                self.stopLocalNowPlayingMonitor()
+                Task {
+                    await self.meshSession?.stop()
+                    self.meshSession = nil
+                    self.roomBrowser.start()
+                }
+            },
+            replicaPersistenceHandler: { [weak self] replica in
+                self?.roomStore.saveEvents(replica.events, roomID: room.id)
+            }
+        )
+        meshSession = session
+        do {
+            try session.start(broadcastInitially: broadcastInitially)
+            try? roomStore.save(room)
+            savedRooms = roomStore.load()
+            phase = .live
+            statusText = broadcastInitially ? "Starting this Mac's broadcast" : "Room open"
+            updateLocalNowPlayingMonitor()
+        } catch {
+            meshSession = nil
             phase = .failed
-            errorIsPermissionRelated = isPermissionError(error)
             errorMessage = readable(error)
-            statusText = "Could not join the room"
+            statusText = "Could not open the room"
             roomBrowser.start()
         }
     }
@@ -539,10 +645,12 @@ final class WERAIViewModel: ObservableObject {
         mediaSwitchBusy = true
         Task {
             do {
-                try await hostSession?.setVideoEnabled(selection == .video)
+                try await meshSession?.setVideoEnabled(selection == .video)
                 experience = selection
                 floatingSection = selection == .video ? .video : .collapsed
-                statusText = selection == .video ? "Screen and audio are in sync" : "Audio is in sync"
+                statusText = selection == .video
+                    ? "ALO Display is live · use Displays Settings to arrange it"
+                    : "Audio is in sync"
             } catch {
                 errorMessage = readable(error)
                 permissionNotice = isPermissionError(error)
@@ -554,9 +662,9 @@ final class WERAIViewModel: ObservableObject {
     func setParticipantVolume(_ participant: RoomParticipant, volume: Double) {
         updateParticipant(participant.id, volume: volume, muted: participant.isMuted)
         if isHost {
-            hostSession?.setParticipantLevel(id: participant.id, volume: volume, muted: participant.isMuted)
+            meshSession?.setParticipantLevel(id: participant.id, volume: volume, muted: participant.isMuted)
         } else if participant.id == currentParticipantID {
-            receiver?.setLocalLevel(volume: volume, muted: participant.isMuted)
+            meshSession?.setLocalLevel(volume: volume, muted: participant.isMuted)
         }
     }
 
@@ -564,9 +672,9 @@ final class WERAIViewModel: ObservableObject {
         let muted = !participant.isMuted
         updateParticipant(participant.id, volume: participant.volume, muted: muted)
         if isHost {
-            hostSession?.setParticipantLevel(id: participant.id, volume: participant.volume, muted: muted)
+            meshSession?.setParticipantLevel(id: participant.id, volume: participant.volume, muted: muted)
         } else if participant.id == currentParticipantID {
-            receiver?.setLocalLevel(volume: participant.volume, muted: muted)
+            meshSession?.setLocalLevel(volume: participant.volume, muted: muted)
         }
     }
 
@@ -574,12 +682,16 @@ final class WERAIViewModel: ObservableObject {
         sendRoomMediaCommand(roomIsPlaying ? .pause : .play)
     }
 
-    func sendRoomMediaCommand(_ command: RoomMediaCommand) {
-        if let hostSession {
-            hostSession.sendRoomMediaCommand(command)
-        } else {
-            receiver?.sendRoomMediaCommand(command)
+    func toggleBroadcasting() {
+        if isHost { meshSession?.stopBroadcasting() }
+        else {
+            stopLocalNowPlayingMonitor()
+            meshSession?.beginBroadcasting()
         }
+    }
+
+    func sendRoomMediaCommand(_ command: RoomMediaCommand) {
+        meshSession?.sendMediaCommand(command)
     }
 
     func hideFloatingBar() {
@@ -610,7 +722,7 @@ final class WERAIViewModel: ObservableObject {
     func sendMessage() {
         let text = draftMessage.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
-        if let hostSession { hostSession.sendChat(text) } else { receiver?.sendChat(text) }
+        meshSession?.sendChat(text)
         draftMessage = ""
     }
 
@@ -656,11 +768,7 @@ final class WERAIViewModel: ObservableObject {
 
     func removeQueueItem(_ item: RoomQueueItem) {
         guard canRemoveQueueItem(item) else { return }
-        if isHost {
-            hostSession?.removeQueueItem(id: item.id)
-        } else {
-            receiver?.removeQueueItem(id: item.id)
-        }
+        meshSession?.removeQueueItem(item.id)
     }
 
     func canRemoveQueueItem(_ item: RoomQueueItem) -> Bool {
@@ -668,9 +776,13 @@ final class WERAIViewModel: ObservableObject {
     }
 
     func playQueueItem(_ item: RoomQueueItem) {
-        guard isHost, let url = validMediaURL(item.url) else { return }
+        guard let url = validMediaURL(item.url) else { return }
+        if !isHost {
+            stopLocalNowPlayingMonitor()
+            meshSession?.beginBroadcasting()
+        }
         if NSWorkspace.shared.open(url) {
-            hostSession?.removeQueueItem(id: item.id)
+            meshSession?.removeQueueItem(item.id)
             queueNotice = "Opened \(item.title) on this Mac."
         } else {
             queueNotice = "Could not open that media link."
@@ -716,22 +828,27 @@ final class WERAIViewModel: ObservableObject {
         videoFullscreen = true
     }
 
+    func toggleVideoViewerPinned() {
+        videoViewerPinned.toggle()
+    }
+
+    func toggleVideoWindowFullScreen() {
+        guard videoFullscreen else { return }
+        videoFullScreenToggle &+= 1
+    }
+
     func exitVideoFullscreen() {
         videoFullscreen = false
     }
 
     func stop() {
+        isLeavingRoom = true
         phase = .starting
         statusText = "Leaving the room"
-        if let hostSession {
-            Task {
-                await hostSession.stop()
-                self.hostSession = nil
-                finishStopping()
-            }
-        } else {
-            receiver?.stop()
-            receiver = nil
+        stopLocalNowPlayingMonitor()
+        Task {
+            await meshSession?.stop()
+            meshSession = nil
             finishStopping()
         }
     }
@@ -739,6 +856,7 @@ final class WERAIViewModel: ObservableObject {
     func tryAgain() {
         errorMessage = nil
         errorIsPermissionRelated = false
+        audioDeviceInstallRequired = false
         phase = .idle
         statusText = "Ready"
         roomBrowser.restart()
@@ -751,7 +869,6 @@ final class WERAIViewModel: ObservableObject {
 
     func dismissPermissionNotice() {
         permissionNotice = false
-        shareVideoOnStart = false
     }
 
     func openPrivacySettings() {
@@ -759,6 +876,32 @@ final class WERAIViewModel: ObservableObject {
             string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
         ) else { return }
         NSWorkspace.shared.open(url)
+    }
+
+    func openDisplaysSettings() {
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.Displays-Settings.extension"
+        ) else { return }
+        if NSWorkspace.shared.open(url) {
+            statusText = "Arrange ALO Display beside your physical screens"
+        }
+    }
+
+    func installAudioDevice() {
+        let resourceName = "Install-ALO-Audio-Device"
+        let bundled = Bundle.main.url(forResource: resourceName, withExtension: "pkg")
+        let development = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("dist/\(resourceName).pkg")
+        let installer = bundled ?? (FileManager.default.fileExists(atPath: development.path) ? development : nil)
+        guard let installer else {
+            errorMessage = "The ALO Audio Device installer is missing. Download the DMG or installer package from the same ALO release."
+            return
+        }
+        if NSWorkspace.shared.open(installer) {
+            statusText = "Finish the installer, then reopen ALO"
+        } else {
+            errorMessage = "macOS could not open the ALO Audio Device installer."
+        }
     }
 
     func restartApplication() {
@@ -776,15 +919,16 @@ final class WERAIViewModel: ObservableObject {
     }
 
     func stopImmediately() {
-        localNowPlayingMonitor?.stop()
-        hostSession?.stopImmediately()
-        receiver?.stop()
+        isLeavingRoom = true
+        stopLocalNowPlayingMonitor()
+        meshSession?.stopImmediately()
     }
 
     private func ensureVideoPermission() -> Bool {
         guard CGPreflightScreenCaptureAccess() else {
             permissionNotice = true
             _ = CGRequestScreenCaptureAccess()
+            statusText = "Screen Recording permission is required only for video sharing"
             return false
         }
         permissionNotice = false
@@ -886,10 +1030,11 @@ final class WERAIViewModel: ObservableObject {
     }
 
     private func resetRoomState() {
-        localNowPlayingMonitor?.stop()
-        localNowPlayingMonitor = nil
+        stopLocalNowPlayingMonitor()
+        isLeavingRoom = false
         errorMessage = nil
         errorIsPermissionRelated = false
+        audioDeviceInstallRequired = false
         permissionNotice = false
         participants = []
         messages = []
@@ -927,6 +1072,7 @@ final class WERAIViewModel: ObservableObject {
 
     private func finishStopping() {
         activeRoom = nil
+        activeRoomConfiguration = nil
         resetRoomState()
         phase = .idle
         statusText = "Ready"
@@ -934,7 +1080,7 @@ final class WERAIViewModel: ObservableObject {
     }
 
     private func startLocalNowPlayingMonitor() {
-        localNowPlayingMonitor?.stop()
+        guard localNowPlayingMonitor == nil else { return }
         let monitor = NowPlayingMonitor { [weak self] media in
             DispatchQueue.main.async { self?.localNowPlaying = media }
         }
@@ -942,12 +1088,21 @@ final class WERAIViewModel: ObservableObject {
         localNowPlayingMonitor = monitor
     }
 
-    private func addQueueItem(_ item: RoomQueueItem) {
-        if let hostSession {
-            hostSession.addQueueItem(item)
-        } else {
-            receiver?.addQueueItem(item)
+    private func stopLocalNowPlayingMonitor() {
+        localNowPlayingMonitor?.stop()
+        localNowPlayingMonitor = nil
+    }
+
+    private func updateLocalNowPlayingMonitor() {
+        guard phase == .live, !isLeavingRoom, meshSession != nil, !isHost else {
+            stopLocalNowPlayingMonitor()
+            return
         }
+        startLocalNowPlayingMonitor()
+    }
+
+    private func addQueueItem(_ item: RoomQueueItem) {
+        meshSession?.addQueueItem(item)
     }
 
     private func validMediaURL(_ value: String?) -> URL? {
@@ -1008,7 +1163,7 @@ private struct WERAIView: View {
                     .foregroundStyle(Palette.secondary)
                     .lineSpacing(3)
                     .frame(maxWidth: 360, alignment: .leading)
-                Text("LOCAL · PRIVATE · FREE")
+                Text("LOCAL · PEER-TO-PEER · FREE")
                     .font(.system(size: 10, weight: .semibold, design: .monospaced))
                     .tracking(1.1)
                     .foregroundStyle(Palette.muted)
@@ -1024,101 +1179,155 @@ private struct WERAIView: View {
     }
 
     private var setupConsole: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Image(systemName: model.mode == .share ? "waveform" : "dot.radiowaves.left.and.right")
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(Palette.accent)
-                if model.mode == .share {
+        VStack(spacing: 14) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(model.mode == .share ? "Create a room" : "Your rooms")
+                        .font(.system(size: 18, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Palette.ink)
+                    Text(model.mode == .share ? "Create the group first. Anyone can broadcast afterward." : "Nearby and previously joined rooms")
+                        .font(.system(size: 11, design: .rounded))
+                        .foregroundStyle(Palette.secondary)
+                }
+                Spacer()
+                Button(model.mode == .share ? "Back to rooms" : "Create room") {
+                    withAnimation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.86)) {
+                        model.mode = model.mode == .share ? .listen : .share
+                    }
+                }
+                .buttonStyle(PillButtonStyle(filled: model.mode == .listen))
+            }
+
+            if model.mode == .share {
+                VStack(spacing: 12) {
                     TextField("Room name", text: $model.roomName)
                         .textFieldStyle(.plain)
                         .font(.system(size: 17, weight: .medium, design: .rounded))
                         .foregroundStyle(Palette.ink)
                         .focused($roomNameFocused)
                         .onSubmit(model.startSharing)
-                } else {
-                    roomMenu
-                }
-                Spacer(minLength: 8)
-                Button(model.mode == .share ? "Start" : "Join") {
-                    model.mode == .share ? model.startSharing() : model.joinSelectedRoom()
-                }
-                .buttonStyle(PillButtonStyle(filled: true))
-                .disabled(model.mode == .share ? !model.canStartSharing : !model.canJoin)
-            }
-            .padding(.horizontal, 18)
-            .frame(height: 64)
-            .background(Palette.composer)
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(
-                        roomNameFocused ? Palette.controlAccent : Palette.strokeStrong,
-                        lineWidth: roomNameFocused ? 2 : 1
-                    )
-            )
+                        .padding(.horizontal, 16)
+                        .frame(height: 52)
+                        .background(Palette.composer)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 14).stroke(roomNameFocused ? Palette.controlAccent : Palette.strokeStrong, lineWidth: roomNameFocused ? 2 : 1))
 
-            HStack(spacing: 6) {
-                setupModeButton(.share, icon: "waveform")
-                setupModeButton(.listen, icon: "hifispeaker.2")
-                Divider().frame(height: 20).padding(.horizontal, 8)
-                if model.mode == .share {
+                    HStack(spacing: 8) {
                     Button {
-                        model.setSetupVideo(!model.shareVideoOnStart)
+                        model.createPrivateRoom.toggle()
                     } label: {
                         Label(
-                            model.shareVideoOnStart ? "Screen on" : "Audio only",
-                            systemImage: model.shareVideoOnStart ? "rectangle.fill.on.rectangle.fill" : "rectangle.on.rectangle"
+                            model.createPrivateRoom ? "Private" : "Public",
+                            systemImage: model.createPrivateRoom ? "lock.fill" : "person.3.fill"
                         )
                     }
-                    .buttonStyle(ToolButtonStyle(active: model.shareVideoOnStart))
-                } else {
-                    Label("Choose a nearby room", systemImage: "wifi")
-                        .font(.system(size: 11, weight: .medium, design: .rounded))
-                        .foregroundStyle(Palette.secondary)
-                        .padding(.horizontal, 10)
+                    .buttonStyle(ToolButtonStyle(active: model.createPrivateRoom))
+                        Spacer()
+                        Button("Create room", action: model.startSharing)
+                            .buttonStyle(PillButtonStyle(filled: true))
+                            .disabled(!model.canStartSharing)
+                    }
                 }
-                Spacer()
-                Text(model.mode == .share && model.shareVideoOnStart ? "SCREEN + AUDIO" : "AUDIO")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .tracking(0.7)
-                    .foregroundStyle(Palette.muted)
+            } else {
+                roomList
             }
-            .padding(.horizontal, 16)
-            .frame(height: 58)
         }
-        .padding(10)
+        .padding(18)
         .glass(cornerRadius: 24)
     }
 
-    private func setupModeButton(_ mode: WERAIViewModel.Mode, icon: String) -> some View {
-        Button {
-            withAnimation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.86)) {
-                model.mode = mode
+    private var roomList: some View {
+        VStack(spacing: 10) {
+            ScrollView {
+                LazyVStack(spacing: 8) {
+                    if model.roomChoices.isEmpty {
+                        VStack(spacing: 8) {
+                            Image(systemName: "dot.radiowaves.left.and.right")
+                                .font(.system(size: 22))
+                                .foregroundStyle(Palette.accent)
+                            Text("Looking for rooms on your network…")
+                                .font(.system(size: 12, design: .rounded))
+                                .foregroundStyle(Palette.secondary)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 150)
+                    } else {
+                        ForEach(model.roomChoices) { room in roomCard(room) }
+                    }
+                }
+                .padding(2)
             }
-        } label: {
-            Label(mode.rawValue, systemImage: icon)
+            .frame(maxHeight: 270)
+
+            if model.selectedRoomConfiguration?.isPrivate == true,
+               model.selectedRoomConfiguration?.accessKey == nil {
+                TextField("Private room invite key", text: $model.privateRoomKey)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .padding(.horizontal, 14)
+                    .frame(height: 42)
+                    .background(Palette.composer)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+            HStack {
+                Text("Rooms stay saved on this Mac")
+                    .font(.system(size: 10, design: .rounded))
+                    .foregroundStyle(Palette.muted)
+                Spacer()
+                Button("Open room", action: model.joinSelectedRoom)
+                    .buttonStyle(PillButtonStyle(filled: true))
+                    .disabled(!model.canJoin)
+            }
         }
-        .buttonStyle(ToolButtonStyle(active: model.mode == mode))
     }
 
-    private var roomMenu: some View {
-        Menu {
-            ForEach(model.nearbyRooms, id: \.self) { room in
-                Button(room) { model.selectedRoom = room }
+    private func roomCard(_ room: RoomConfiguration) -> some View {
+        let nearby = model.nearbyRooms.first(where: { $0.id == room.id })
+        let saved = model.savedRooms.contains(where: { $0.id == room.id })
+        let selected = model.selectedRoomID == room.id
+        return HStack(spacing: 12) {
+            Button {
+                model.selectedRoomID = room.id
+                model.privateRoomKey = ""
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: room.isPrivate ? "lock.fill" : "person.3.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(selected ? Palette.selectedControlText : Palette.accent)
+                        .frame(width: 34, height: 34)
+                        .background(selected ? Palette.controlAccent : Palette.accentSoft)
+                        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(room.name)
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .foregroundStyle(Palette.ink)
+                        Text(nearby.map { "Nearby · \($0.peerCount) \($0.peerCount == 1 ? "person" : "people")" } ?? "Saved on this Mac")
+                            .font(.system(size: 10, design: .rounded))
+                            .foregroundStyle(nearby == nil ? Palette.secondary : Palette.accentText)
+                    }
+                    Spacer()
+                    Image(systemName: selected ? "checkmark.circle.fill" : "chevron.right")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(selected ? Palette.controlAccent : Palette.muted)
+                }
+                .contentShape(Rectangle())
             }
-        } label: {
-            HStack {
-                Text(model.selectedRoom ?? (model.nearbyRooms.isEmpty ? "Looking for rooms…" : "Choose a room"))
-                    .font(.system(size: 17, weight: .medium, design: .rounded))
-                    .foregroundStyle(Palette.ink)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(Palette.muted)
+            .buttonStyle(.plain)
+
+            if saved {
+                Button { model.forgetRoom(roomID: room.id) } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(Palette.secondary)
+                }
+                .buttonStyle(FlatToolButtonStyle(active: false))
+                .help("Forget this room on this Mac")
             }
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
+        .padding(.horizontal, 12)
+        .frame(height: 58)
+        .background(selected ? Palette.accentSoft.opacity(0.7) : Palette.composer)
+        .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 15).stroke(selected ? Palette.controlAccent.opacity(0.5) : Palette.strokeStrong, lineWidth: 1))
     }
 
     private var progressView: some View {
@@ -1151,16 +1360,16 @@ private struct WERAIView: View {
                     .foregroundStyle(Palette.muted)
                 }
                 VStack(alignment: .leading, spacing: 7) {
-                    Text("Allow screen sharing once")
+                    Text("Allow video sharing in Screen Recording")
                         .font(.system(size: 19, weight: .semibold, design: .rounded))
                         .foregroundStyle(Palette.ink)
-                    Text("Audio will keep playing. Turn ALO on in Screen & System Audio Recording, then restart ALO. Future audio/video switches happen instantly.")
+                    Text("Audio rooms never need this permission. Turn ALO on in Privacy & Security → Screen & System Audio Recording, then restart ALO and turn video on again.")
                         .font(.system(size: 12, design: .rounded))
                         .foregroundStyle(Palette.secondary)
                         .lineSpacing(3)
                 }
                 HStack(spacing: 9) {
-                    Button("Open Settings", action: model.openPrivacySettings)
+                    Button("Open Screen Recording", action: model.openPrivacySettings)
                         .buttonStyle(PillButtonStyle(filled: true))
                     Button("Restart ALO", action: model.restartApplication)
                         .buttonStyle(PillButtonStyle(filled: false))
@@ -1192,6 +1401,10 @@ private struct WERAIView: View {
                     .buttonStyle(PillButtonStyle(filled: true))
                 if model.errorIsPermissionRelated {
                     Button("Recording Settings", action: model.openPrivacySettings)
+                        .buttonStyle(PillButtonStyle(filled: false))
+                }
+                if model.audioDeviceInstallRequired {
+                    Button("Install Audio Device", action: model.installAudioDevice)
                         .buttonStyle(PillButtonStyle(filled: false))
                 }
             }
@@ -1323,6 +1536,13 @@ private struct FloatingRoomView: View {
     private var roomBar: some View {
         HStack(spacing: 8) {
             roomIdentity
+
+            roomBarButton(
+                icon: model.isHost ? "dot.radiowaves.left.and.right" : "waveform.badge.mic",
+                activeIcon: "dot.radiowaves.left.and.right",
+                active: model.isHost,
+                help: model.isHost ? "Stop broadcasting this Mac" : (model.hasBroadcaster ? "Take over room audio" : "Broadcast this Mac")
+            ) { model.toggleBroadcasting() }
 
             roomBarButton(
                 icon: model.roomIsPlaying ? "pause.fill" : "play.fill",
@@ -1847,6 +2067,22 @@ private struct FloatingRoomView: View {
         VStack(spacing: 0) {
             panelHeader(title: "People", detail: "Each Mac has its own level")
             Divider().opacity(0.42)
+            if model.activePrivateInviteKey != nil {
+                HStack(spacing: 8) {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Palette.accent)
+                    Text("Private room")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Palette.ink)
+                    Spacer()
+                    Button("Copy invite key", action: model.copyPrivateInviteKey)
+                        .buttonStyle(PillButtonStyle(filled: false))
+                }
+                .padding(.horizontal, 12)
+                .frame(height: 44)
+                Divider().opacity(0.42)
+            }
             ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(model.participants) { participant in
@@ -1949,15 +2185,22 @@ private struct FloatingRoomView: View {
                     .tracking(0.5)
                 Spacer()
                 Button(model.isHost ? "Stop sharing" : "Audio only") {
+                    model.exitVideoFullscreen()
                     model.selectExperience(.audio)
                 }
                 .buttonStyle(VideoOverlayButtonStyle())
                 Button(action: model.enterVideoFullscreen) {
-                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    Image(systemName: "macwindow")
                 }
                 .buttonStyle(VideoControlButtonStyle())
-                .help("Enter full screen")
-                .accessibilityLabel("Enter full screen")
+                .help("Open video window")
+                .accessibilityLabel("Open video window")
+                Button(action: model.openDisplaysSettings) {
+                    Image(systemName: "display.2")
+                }
+                .buttonStyle(VideoControlButtonStyle())
+                .help("Arrange ALO Display")
+                .accessibilityLabel("Open Displays Settings")
                 Button(action: model.collapseFloatingBar) {
                     Image(systemName: "chevron.down")
                 }
@@ -1979,15 +2222,15 @@ private struct FloatingRoomView: View {
                 .background(Palette.artworkFallback)
                 .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
             VStack(alignment: .leading, spacing: 4) {
-                Text("Allow screen sharing once")
+                Text("Video sharing needs Screen Recording")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(Palette.ink)
-                Text("Audio keeps playing. Enable ALO in Privacy & Security, then restart it.")
+                Text("Audio is unaffected. Enable ALO, restart it, then turn video on again.")
                     .font(.system(size: 11))
                     .foregroundStyle(Palette.secondary)
             }
             Spacer()
-            Button("Settings", action: model.openPrivacySettings)
+            Button("Screen Recording", action: model.openPrivacySettings)
                 .buttonStyle(PillButtonStyle(filled: true))
             Button("Restart", action: model.restartApplication)
                 .buttonStyle(PillButtonStyle(filled: false))
@@ -2249,16 +2492,33 @@ private struct FullScreenVideoView: View {
                     .lineLimit(1)
                 Spacer()
                 Button(model.isHost ? "Stop sharing" : "Audio only") {
-                    model.exitVideoFullscreen()
                     model.selectExperience(.audio)
                 }
                 .buttonStyle(VideoOverlayButtonStyle())
-                Button(action: model.exitVideoFullscreen) {
-                    Image(systemName: "arrow.down.right.and.arrow.up.left")
+                Button(action: model.toggleVideoViewerPinned) {
+                    Image(systemName: model.videoViewerPinned ? "pin.fill" : "pin")
                 }
                 .buttonStyle(VideoControlButtonStyle())
-                .help("Exit full screen")
-                .accessibilityLabel("Exit full screen")
+                .help(model.videoViewerPinned ? "Unpin from desktops" : "Keep on every desktop")
+                .accessibilityLabel(model.videoViewerPinned ? "Unpin video window" : "Pin video window")
+                Button(action: model.openDisplaysSettings) {
+                    Image(systemName: "display.2")
+                }
+                .buttonStyle(VideoControlButtonStyle())
+                .help("Arrange ALO Display")
+                .accessibilityLabel("Open Displays Settings")
+                Button(action: model.toggleVideoWindowFullScreen) {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                }
+                .buttonStyle(VideoControlButtonStyle())
+                .help("Toggle full screen")
+                .accessibilityLabel("Toggle full screen")
+                Button(action: model.exitVideoFullscreen) {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(VideoControlButtonStyle())
+                .help("Close video window")
+                .accessibilityLabel("Close video window")
             }
             .foregroundStyle(Color.white.opacity(0.92))
             .padding(.horizontal, 14)
@@ -2276,40 +2536,60 @@ private struct FullScreenVideoView: View {
 }
 
 @MainActor
-private final class FullScreenVideoWindowController {
+private final class FullScreenVideoWindowController: NSObject, NSWindowDelegate {
     private let window: FullScreenVideoWindow
+    private let closeHandler: () -> Void
 
-    init(model: WERAIViewModel) {
-        let frame = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1_440, height: 900)
+    init(model: WERAIViewModel, closeHandler: @escaping () -> Void) {
+        self.closeHandler = closeHandler
+        let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1_440, height: 900)
+        let frame = NSRect(
+            x: screen.midX - 480,
+            y: screen.midY - 300,
+            width: 960,
+            height: 600
+        )
         window = FullScreenVideoWindow(
             contentRect: frame,
-            styleMask: [.borderless],
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
+        super.init()
+        window.delegate = self
+        window.title = "Shared video · \(model.roomTitle)"
+        window.titlebarAppearsTransparent = true
+        window.minSize = NSSize(width: 520, height: 320)
         window.isOpaque = true
         window.backgroundColor = .black
-        window.level = .mainMenu + 1
-        window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary, .ignoresCycle]
+        window.collectionBehavior = [.fullScreenPrimary]
         window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: FullScreenVideoView(model: model))
     }
 
     func show() {
-        if let screen = NSScreen.main {
-            window.setFrame(screen.frame, display: true)
-        }
-        window.alphaValue = 0
+        guard !window.isVisible else { window.makeKeyAndOrderFront(nil); return }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.2
-            window.animator().alphaValue = 1
-        }
     }
 
     func close() {
         window.orderOut(nil)
+    }
+
+    func toggleFullScreen() {
+        window.toggleFullScreen(nil)
+    }
+
+    func setPinned(_ pinned: Bool) {
+        window.level = pinned ? .floating : .normal
+        window.collectionBehavior = pinned
+            ? [.canJoinAllSpaces, .fullScreenAuxiliary]
+            : [.fullScreenPrimary]
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        closeHandler()
     }
 }
 

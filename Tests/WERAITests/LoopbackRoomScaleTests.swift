@@ -119,7 +119,7 @@ struct LoopbackRoomScaleTests {
         #expect(!inactiveLaterCheck)
     }
 
-    @Test("Playback controls update the room without interrupting receiver audio")
+    @Test("Participant play and pause requests force every receiver to resynchronize")
     func participantControlsHostPlayback() throws {
         let hostReady = DispatchSemaphore(value: 0)
         let commandReceived = DispatchSemaphore(value: 0)
@@ -160,29 +160,31 @@ struct LoopbackRoomScaleTests {
         #expect(commandReceived.wait(timeout: .now() + 2) == .success)
         #expect(requestedCommands.values == [.pause])
         #expect(waitUntil(timeout: 2) { peer.playbackStates.contains(false) })
-        #expect(peer.resyncCommandCount == 0)
-        #expect(observer.resyncCommandCount == 0)
+        #expect(waitUntil(timeout: 2) {
+            peer.resyncCommandCount == 1 && observer.resyncCommandCount == 1
+        })
 
         peer.setRoomPlayback(playing: true)
         #expect(commandReceived.wait(timeout: .now() + 2) == .success)
         #expect(requestedCommands.values == [.pause, .play])
         #expect(waitUntil(timeout: 2) { observer.playbackStates.contains(true) })
-        #expect(peer.resyncCommandCount == 0)
-        #expect(observer.resyncCommandCount == 0)
+        #expect(waitUntil(timeout: 2) {
+            peer.resyncCommandCount == 2 && observer.resyncCommandCount == 2
+        })
 
         peer.sendMediaCommand(.nextTrack)
         #expect(commandReceived.wait(timeout: .now() + 2) == .success)
         #expect(requestedCommands.values == [.pause, .play, .nextTrack])
-        #expect(peer.resyncCommandCount == 0)
-        #expect(observer.resyncCommandCount == 0)
+        #expect(peer.resyncCommandCount == 2)
+        #expect(observer.resyncCommandCount == 2)
 
         host.setNowPlaying(NowPlayingMedia(isPlaying: false))
         #expect(waitUntil(timeout: 2) { observer.playbackStates.last == false })
-        #expect(peer.resyncCommandCount == 0)
-        #expect(observer.resyncCommandCount == 0)
+        #expect(peer.resyncCommandCount == 2)
+        #expect(observer.resyncCommandCount == 2)
     }
 
-    @Test("A joining listener cannot retime an active room")
+    @Test("An established listener can adapt timing after audio but a joiner cannot retime it")
     func joiningListenerKeepsEstablishedRoomTiming() throws {
         let hostReady = DispatchSemaphore(value: 0)
         let state = PortState()
@@ -214,6 +216,15 @@ struct LoopbackRoomScaleTests {
         host.acceptAudio(samples: samples, captureTimeNanos: MonotonicClock.nowNanos())
         #expect(waitUntil(timeout: 2) { existingPeer.packetCount == 1 })
 
+        let establishedDelay = min(
+            RoomTiming.maximumPlayoutDelayNanos,
+            RoomTiming.defaultPlayoutDelayNanos + 40_000_000
+        )
+        existingPeer.recommendPlayoutDelay(establishedDelay)
+        existingPeer.sendPing()
+        #expect(existingPeer.waitForPong(timeout: 2))
+        #expect(waitUntil(timeout: 2) { existingPeer.playoutDelays.last == establishedDelay })
+
         let joiningPeer = HeadlessLoopbackPeer(index: 102)
         try joiningPeer.start(hostPort: hostPort)
         defer { joiningPeer.stop() }
@@ -221,14 +232,14 @@ struct LoopbackRoomScaleTests {
             throw LoopbackTestError.peerDidNotJoin
         }
         #expect(waitUntil(timeout: 2) {
-            joiningPeer.playoutDelays.last == RoomTiming.defaultPlayoutDelayNanos
+            joiningPeer.playoutDelays.last == establishedDelay
         })
 
         joiningPeer.recommendPlayoutDelay(RoomTiming.maximumPlayoutDelayNanos)
         joiningPeer.sendPing()
         #expect(joiningPeer.waitForPong(timeout: 2))
-        #expect(existingPeer.playoutDelays.last == RoomTiming.defaultPlayoutDelayNanos)
-        #expect(joiningPeer.playoutDelays.last == RoomTiming.defaultPlayoutDelayNanos)
+        #expect(existingPeer.playoutDelays.last == establishedDelay)
+        #expect(joiningPeer.playoutDelays.last == establishedDelay)
     }
 
     private func runRoom(

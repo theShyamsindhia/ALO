@@ -77,21 +77,23 @@ final class RoomRemoteCommandCenter {
             return .noSuchContent
         }
         let currentState = media.isPlaying ?? true
-        switch command {
-        case .play:
-            media = replacingPlaybackState(in: media, with: true)
-        case .pause:
-            media = replacingPlaybackState(in: media, with: false)
-        case .togglePlayPause:
-            media = replacingPlaybackState(in: media, with: !currentState)
-        case .nextTrack, .previousTrack:
-            break
+        if let nextState = Self.playbackState(after: command, current: currentState) {
+            media = replacingPlaybackState(in: media, with: nextState)
         }
         lock.unlock()
 
         publishNowPlaying()
         handler(command)
         return .success
+    }
+
+    static func playbackState(after command: RoomMediaCommand, current: Bool) -> Bool? {
+        switch command {
+        case .play: true
+        case .pause: false
+        case .togglePlayPause: !current
+        case .nextTrack, .previousTrack: nil
+        }
     }
 
     private func publishNowPlaying() {

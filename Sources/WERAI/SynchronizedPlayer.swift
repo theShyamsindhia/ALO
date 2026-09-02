@@ -1,4 +1,6 @@
 import AVFoundation
+import AudioToolbox
+import CoreAudio
 import Foundation
 import WERAICore
 
@@ -9,6 +11,8 @@ final class SynchronizedPlayer {
     private let player = AVAudioPlayerNode()
     private let varispeed = AVAudioUnitVarispeed()
     private let format: AVAudioFormat
+    private let outputDeviceUID: String?
+    private let explicitOutputDeviceID: AudioDeviceID?
     private var pending = [UInt32: AudioPacket]()
     private var expectedSequence: UInt32?
     private var anchorFrameIndex: UInt64?
@@ -23,11 +27,21 @@ final class SynchronizedPlayer {
     private var resyncCount: UInt64 = 0
     private var lastPacketReceivedNanos: UInt64?
     private var playbackWatchdog = PlaybackWatchdog()
+    private var configurationObserver: NSObjectProtocol?
+    private let configurationLock = NSLock()
+    private var configurationChangePending = false
+    private(set) var configurationChangeCount: UInt64 = 0
 
     var clockOffsetNanos: Int64?
 
-    init(playbackStarted: (() -> Void)? = nil) throws {
+    init(
+        outputDeviceUID: String? = nil,
+        outputDeviceID: AudioDeviceID? = nil,
+        playbackStarted: (() -> Void)? = nil
+    ) throws {
         self.playbackStarted = playbackStarted
+        self.outputDeviceUID = outputDeviceUID
+        self.explicitOutputDeviceID = outputDeviceID
         guard let format = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: Double(AudioPacket.sampleRate),
@@ -42,9 +56,21 @@ final class SynchronizedPlayer {
         engine.attach(varispeed)
         engine.connect(player, to: varispeed, format: format)
         engine.connect(varispeed, to: engine.mainMixerNode, format: format)
+        try applyRequestedOutputDevice()
         engine.prepare()
         try engine.start()
-        outputLatencyNanos = UInt64(max(0, engine.outputNode.presentationLatency) * 1_000_000_000)
+        refreshOutputLatency()
+        configurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: nil
+        ) { [weak self] _ in
+            self?.markAudioEngineConfigurationChanged()
+        }
+    }
+
+    deinit {
+        if let configurationObserver { NotificationCenter.default.removeObserver(configurationObserver) }
     }
 
     func accept(_ packet: AudioPacket) {
@@ -57,6 +83,7 @@ final class SynchronizedPlayer {
     }
 
     func maintainSync() {
+        applyPendingAudioEngineConfigurationChange()
         drain()
         guard hasStarted else {
             playbackWatchdog.reset()
@@ -203,6 +230,95 @@ final class SynchronizedPlayer {
 
     func forceResync() {
         hardResynchronize()
+    }
+
+    func handleAudioEngineConfigurationChange() {
+        configurationChangeCount &+= 1
+        try? applyRequestedOutputDevice()
+        if !engine.isRunning {
+            engine.prepare()
+            try? engine.start()
+        }
+        refreshOutputLatency()
+        hardResynchronize()
+    }
+
+    private func markAudioEngineConfigurationChanged() {
+        configurationLock.withLock { configurationChangePending = true }
+    }
+
+    private func applyPendingAudioEngineConfigurationChange() {
+        let pending = configurationLock.withLock {
+            let pending = configurationChangePending
+            configurationChangePending = false
+            return pending
+        }
+        if pending { handleAudioEngineConfigurationChange() }
+    }
+
+    private func refreshOutputLatency() {
+        outputLatencyNanos = UInt64(max(0, engine.outputNode.presentationLatency) * 1_000_000_000)
+    }
+
+    private func applyRequestedOutputDevice() throws {
+        guard let deviceID = Self.selectedOutputDeviceID(
+            explicitID: explicitOutputDeviceID,
+            uid: outputDeviceUID,
+            resolver: Self.audioDeviceID(forUID:)
+        ) else { return }
+        guard let audioUnit = engine.outputNode.audioUnit else {
+            throw WERAIError("Could not access the selected audio output.")
+        }
+        var mutableID = deviceID
+        let status = AudioUnitSetProperty(
+            audioUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &mutableID,
+            UInt32(MemoryLayout<AudioDeviceID>.size)
+        )
+        guard status == noErr else {
+            throw WERAIError("Could not select audio output device (OSStatus \(status)).")
+        }
+    }
+
+    static func selectedOutputDeviceID(
+        explicitID: AudioDeviceID?,
+        uid: String?,
+        resolver: (String) -> AudioDeviceID?
+    ) -> AudioDeviceID? {
+        explicitID ?? uid.flatMap(resolver)
+    }
+
+    private static func audioDeviceID(forUID uid: String) -> AudioDeviceID? {
+        var uidValue: CFString = uid as CFString
+        var deviceID = AudioDeviceID(kAudioObjectUnknown)
+        let status = withUnsafeMutablePointer(to: &uidValue) { uidPointer in
+            withUnsafeMutablePointer(to: &deviceID) { devicePointer in
+                var translated = AudioValueTranslation(
+                    mInputData: UnsafeMutableRawPointer(uidPointer),
+                    mInputDataSize: UInt32(MemoryLayout<CFString>.size),
+                    mOutputData: UnsafeMutableRawPointer(devicePointer),
+                    mOutputDataSize: UInt32(MemoryLayout<AudioDeviceID>.size)
+                )
+                var address = AudioObjectPropertyAddress(
+                    mSelector: kAudioHardwarePropertyDeviceForUID,
+                    mScope: kAudioObjectPropertyScopeGlobal,
+                    mElement: kAudioObjectPropertyElementMain
+                )
+                var size = UInt32(MemoryLayout<AudioValueTranslation>.size)
+                return AudioObjectGetPropertyData(
+                    AudioObjectID(kAudioObjectSystemObject),
+                    &address,
+                    0,
+                    nil,
+                    &size,
+                    &translated
+                )
+            }
+        }
+        return status == noErr && deviceID != kAudioObjectUnknown ? deviceID : nil
     }
 
     private func hardResynchronize() {

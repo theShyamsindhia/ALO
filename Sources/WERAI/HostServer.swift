@@ -53,7 +53,9 @@ final class HostServer {
     private var mediaQueue = [RoomQueueItem]()
     private var groupPlayoutDelayNanos = RoomTiming.defaultPlayoutDelayNanos
     private var lastGroupDelayAdjustmentNanos: UInt64 = 0
-    private var isGroupTimingLocked = false
+    // Nil until the first audio packet. Once the timeline is active, only clients
+    // already joined at that instant may influence its adaptive shared delay.
+    private var timingEligibleClients: Set<ObjectIdentifier>?
 
     init(
         roomName: String,
@@ -124,9 +126,14 @@ final class HostServer {
                 captureTimeNanos: captureTimeNanos
             )
             guard !packets.isEmpty else { return }
-            self.isGroupTimingLocked = true
+            let audioClientEntries = self.clients.filter { $0.value.audio != nil }
+            if self.timingEligibleClients == nil, !audioClientEntries.isEmpty {
+                self.timingEligibleClients = Set(audioClientEntries.compactMap { identifier, client in
+                    client.id != nil ? identifier : nil
+                })
+            }
 
-            let audioClients = self.clients.values.filter { $0.audio != nil }
+            let audioClients = audioClientEntries.map(\.value)
             for packet in packets {
                 let data = packet.encoded()
                 for client in audioClients {
@@ -357,6 +364,9 @@ final class HostServer {
                 isPlaying: isPlaying
             )
             broadcast(ControlMessage(type: "now_playing", nowPlaying: nowPlaying))
+            // A deliberate play/pause action is also the room's manual recovery path.
+            // Metadata-only playback updates must not trigger this reset.
+            broadcast(ControlMessage(type: "resync"))
 
         case "sync_status":
             guard message.participantID == client.id, let report = message.syncReport else { return }
@@ -380,6 +390,7 @@ final class HostServer {
 
     private func removeClient(_ identifier: ObjectIdentifier) {
         guard let client = clients.removeValue(forKey: identifier) else { return }
+        timingEligibleClients?.remove(identifier)
         client.audio?.cancel()
         client.video?.cancel()
         receiverCountHandler?(participantNames.count)
@@ -440,15 +451,18 @@ final class HostServer {
     }
 
     private func updateGroupTiming() {
-        guard !isGroupTimingLocked else { return }
         let now = MonotonicClock.nowNanos()
-        let activeRecommendations = clients.values.compactMap { client -> UInt64? in
+        let activeRecommendations = clients.compactMap { identifier, client -> UInt64? in
+            if let timingEligibleClients, !timingEligibleClients.contains(identifier) { return nil }
             guard let reportedAt = client.lastSyncReportNanos,
                   now >= reportedAt,
                   now - reportedAt <= 5_000_000_000
             else { return nil }
             return client.recommendedPlayoutDelayNanos
         }
+        // Once audio has established a timeline, losing the original reporters
+        // must not make later joiners indirectly pull that timeline backward.
+        if timingEligibleClients != nil, activeRecommendations.isEmpty { return }
         let desired = activeRecommendations.max() ?? RoomTiming.defaultPlayoutDelayNanos
 
         let next: UInt64

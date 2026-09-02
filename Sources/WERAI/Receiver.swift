@@ -1,4 +1,5 @@
 import CoreGraphics
+import CoreAudio
 import Foundation
 import Network
 import WERAICore
@@ -6,9 +7,10 @@ import WERAICore
 final class Receiver {
     private let queue = DispatchQueue(label: "in.werai.receiver.network", qos: .userInteractive)
     private let requestedRoom: String?
+    private let roomDisplayName: String
     private let displayName: String
     private let capturesSystemMediaCommands: Bool
-    private let participantID = UUID().uuidString
+    private let participantID: String
     private let statusHandler: ((ReceiverStatus) -> Void)?
     private let identityHandler: ((_ id: String, _ name: String) -> Void)?
     private let participantsHandler: (([RoomParticipant]) -> Void)?
@@ -39,6 +41,10 @@ final class Receiver {
 
     init(
         requestedRoom: String?,
+        roomDisplayName: String? = nil,
+        outputDeviceUID: String? = nil,
+        outputDeviceID: AudioDeviceID? = nil,
+        participantID: String = UUID().uuidString,
         displayName: String? = nil,
         capturesSystemMediaCommands: Bool = true,
         statusHandler: ((ReceiverStatus) -> Void)? = nil,
@@ -51,6 +57,8 @@ final class Receiver {
         videoHandler: ((CGImage) -> Void)? = nil
     ) throws {
         self.requestedRoom = requestedRoom
+        self.roomDisplayName = roomDisplayName ?? requestedRoom ?? "WERAI Room"
+        self.participantID = participantID
         self.displayName = displayName ?? Host.current().localizedName ?? "Mac"
         self.capturesSystemMediaCommands = capturesSystemMediaCommands
         self.statusHandler = statusHandler
@@ -60,7 +68,10 @@ final class Receiver {
         self.nowPlayingHandler = nowPlayingHandler
         self.chatHandler = chatHandler
         self.queueHandler = queueHandler
-        self.player = try SynchronizedPlayer {
+        self.player = try SynchronizedPlayer(
+            outputDeviceUID: outputDeviceUID,
+            outputDeviceID: outputDeviceID
+        ) {
             statusHandler?(.playing)
         }
         self.videoDecoder = VideoDecoder(imageHandler: videoHandler ?? { _ in })
@@ -186,6 +197,11 @@ final class Receiver {
         }
     }
 
+    func updateNowPlaying(_ media: NowPlayingMedia) {
+        guard capturesSystemMediaCommands else { return }
+        queue.async { [weak self] in self?.remoteCommandCenter.update(media) }
+    }
+
     private func startBrowsingWhenReady() {
         guard audioListenerReady, videoListenerReady, browser == nil else { return }
         startBrowsing()
@@ -231,15 +247,14 @@ final class Receiver {
                 print("Connected to \(endpoint).")
                 self.statusHandler?(.connected)
                 if self.capturesSystemMediaCommands {
-                    self.remoteCommandCenter.start(roomName: self.requestedRoom ?? "ALO Room")
+                    self.remoteCommandCenter.start(roomName: self.roomDisplayName)
                 }
                 self.sendJoin()
                 self.startPinging()
             case .failed(let error):
                 fputs("Room connection failed: \(error)\n", stderr)
                 self.statusHandler?(.failed(error.localizedDescription))
-                self.hasChosenRoom = false
-                self.startBrowsing()
+                self.handleControlDisconnect()
             default:
                 break
             }
@@ -332,8 +347,23 @@ final class Receiver {
             }
             if !isComplete, error == nil {
                 self.receiveControl()
+            } else {
+                self.handleControlDisconnect()
             }
         }
+    }
+
+    private func handleControlDisconnect() {
+        pingTimer?.cancel()
+        pingTimer = nil
+        control?.cancel()
+        control = nil
+        controlDecoder = ControlLineDecoder()
+        if capturesSystemMediaCommands { remoteCommandCenter.stop() }
+        guard hasChosenRoom else { return }
+        hasChosenRoom = false
+        statusHandler?(.searching)
+        startBrowsing()
     }
 
     private func receiveAudio(from connection: NWConnection) {

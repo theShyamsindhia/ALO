@@ -1,0 +1,10 @@
+#!/bin/zsh
+
+set -euo pipefail
+
+# Core Audio discovers HAL plug-ins when coreaudiod restarts. The service is
+# relaunched automatically by launchd; existing playback applications may need
+# to reopen their audio output once.
+/usr/bin/killall coreaudiod >/dev/null 2>&1 || true
+
+exit 0

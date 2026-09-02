@@ -2,13 +2,17 @@
 
 Free, synchronized system audio with optional screen sharing for Macs on the same local network.
 
-ALO creates a private local room with synchronized 48 kHz stereo audio, optional
-screen sharing, current album artwork, a per-Mac mixer, participant presence, and
-group chat. Everyone can also add media links or a detected current track to a shared
-room queue; the host opens the selected item so its audio remains the synchronized
-source. Audio uses timestamped PCM over UDP; hardware-encoded H.264 video, chat,
-queue updates, artwork, and presence use TCP. Every Mac—including the source—plays
-against the same 250 ms monotonic-clock timeline.
+ALO creates a persistent local group with synchronized 48 kHz stereo audio, optional
+an arrangeable video display, current album artwork, a per-Mac mixer, participant presence, group
+chat, and a shared media queue. There is no permanent host: any member can begin
+broadcasting, and the room remains available when its creator leaves. Exactly one Mac
+broadcasts media at a time while every connected Mac replicates the room's control,
+chat, and queue state.
+
+Rooms are public on the local network by default. A creator can instead make a private
+room protected by an invite key. Saved room details appear again when the app opens;
+private invite keys are stored in the macOS Keychain, while recent chat and durable
+queue state are stored locally.
 
 ## Requirements
 
@@ -20,10 +24,20 @@ Bluetooth output is not recommended because its latency can change while playing
 
 ## Run the Mac app
 
-Open `dist/ALO.app`, then choose one role:
+Open `dist/ALO.app`. The first screen lists nearby rooms and rooms previously saved
+on this Mac:
 
-- **Start a room** on the Mac whose system audio you want to send. Screen sharing is off by default.
-- **Join a room** on every other Mac, then choose the nearby room.
+- Select a nearby or saved room to rejoin it.
+- Choose **Create Room** for a new public room, or enable **Private** to generate an
+  invite-key-protected room.
+- In an open room, choose **Broadcast** to share this Mac's system audio. Any member
+  may take over broadcasting; leaving does not delete the room.
+
+The first Mac that broadcasts installs the bundled **ALO Audio Device** once. The
+installer needs an administrator password because macOS loads audio plug-ins from
+`/Library/Audio/Plug-Ins/HAL`. After installation, apps can select **ALO Room** as a
+normal speaker output; ALO reads that output directly and does not request Screen or
+System Audio Recording permission for audio.
 
 After the room connects, the setup window disappears and the room moves into the
 menu bar. Click the cat to reveal the compact controls; the same surface grows
@@ -32,18 +46,21 @@ menu-bar icon marks unread chat without leaving another window on screen. The op
 floating bar can be restored from the window control and remains above your other apps
 and across macOS Spaces. In either presentation,
 the queue owns its media-link field, chat owns its message composer, and people owns the
-per-Mac mixer. Video can expand in the surface or enter a screen-filling view, then return
-to the controls without interrupting audio. Unread chat is also shown on the message control.
-When the source player publishes track information, the host sends
-the title, artist, and album artwork to every Mac. Screen sharing remains off by
-default. Guests can control their own output, while the host can control every Mac.
+per-Mac mixer. Incoming video can expand in the surface or open in its own resizable,
+minimizable window. That window supports native macOS fullscreen and can stay pinned
+above normal windows across Spaces without interrupting audio. Unread chat is also shown
+on the message control.
+When the source player publishes track information, the active broadcaster sends
+the title, artist, and album artwork to every Mac. Video sharing remains off by
+default. Members control their own output, while shared transport actions are applied
+by the active broadcaster and replicated to the group.
 The menu-bar cat provides the complete room experience without requiring the
-floating bar. Its window button toggles the floating presentation at any time. On joined client
-Macs, keyboard, Touch Bar, headphone, and Control Center play/pause/previous/next
-commands are forwarded to the host; volume buttons continue to control the local Mac.
+floating bar. Its window button toggles the floating presentation at any time. On
+listening Macs, keyboard, Touch Bar, headphone, and Control Center
+play/pause/previous/next commands are forwarded to the active broadcaster; volume
+buttons continue to control the local Mac.
 The interface follows macOS accessibility preferences for reduced motion, reduced
-transparency, and increased contrast while keeping ALO's cobalt accent legible in
-light and dark appearances.
+transparency, increased contrast, and the user-selected control accent.
 
 ## Build it
 
@@ -68,22 +85,31 @@ On every other Mac:
 
 The room name is optional. Without one, a receiver joins the first room it finds.
 
-Audio-only rooms ask only for the system-audio access needed by macOS. ALO asks for
-**Screen & System Audio Recording** only when the host first enables video. Every Mac may
-also ask for **Local Network** access. Grant access in System Settings → Privacy &
-Security, then use **Restart ALO** if macOS asks you to restart it.
+Audio-only rooms do not use ScreenCaptureKit and do not need Screen or System Audio
+Recording permission after **ALO Audio Device** is installed. ALO asks for **Screen &
+System Audio Recording** only when the active broadcaster explicitly enables the current
+video implementation. At that point ALO creates a 1920×1080 **ALO Display** that appears
+in System Settings → Displays, captures that display only, and streams it to the room.
+Arrange it beside the physical displays and move the windows you want to share onto it.
+Every Mac may also ask for **Local Network** access.
+Grant video access in System Settings → Privacy & Security, then use **Restart ALO** if
+macOS asks you to restart it.
 
 If the Screen Recording switch is already on but macOS still refuses access, quit old
 copies of ALO, turn the switch off and on once, and restart the current app. Do not
 keep numbered copies such as `ALO 2.app` or `ALO 3.app` in Applications; macOS can
 retain stale privacy records for those development builds.
 
-ALO retains the legacy `in.werai.audio` bundle identifier so existing recording grants
-and rooms remain compatible. Remove the old `WERAI.app` when installing `ALO.app`; do
-not keep both applications installed at once.
+ALO Display uses the same private `CGVirtualDisplay` mechanism used by several remote-
+display apps because macOS does not publish a third-party virtual-display API. The
+feature is runtime-checked and fails cleanly if Apple changes or removes it. Reading the
+display's pixels still uses ScreenCaptureKit and therefore intentionally requires the
+user's Screen Recording consent; the private display object itself exposes no framebuffer.
 
-Press Control-C on the source to stop streaming. macOS then removes the private audio
-tap and restores normal direct playback.
+When broadcasting stops, ALO restores the physical output that was selected before
+**ALO Room**. Restoration is compare-and-swap: if the user selected another output in
+the meantime, ALO preserves that newer choice. A small crash journal restores an output
+left routed to ALO when the app next launches.
 
 ## Share a ready binary
 
@@ -95,8 +121,38 @@ This produces `dist/ALO-macos-universal.zip` for Apple Silicon and Intel Macs. A
 or copy it to the other Macs, unzip it, and open ALO. If Gatekeeper quarantines an
 AirDropped ad-hoc-signed development build, build from source on that Mac.
 
+Packaging also creates `dist/Install-ALO-Audio-Device.pkg` and embeds the same installer
+inside the app. The release DMG places it next to `ALO.app`. Local development packages
+are unsigned unless `WERAI_INSTALLER_IDENTITY` names a valid installer identity.
+
 The packaged app uses a stable local designated requirement (`in.werai.audio`) so a
 new ALO build does not silently become a different app in macOS privacy settings.
+
+## Mesh room architecture
+
+ALO separates room coordination from the high-rate media stream:
+
+- Every member advertises and discovers the room over Bonjour and maintains direct
+  TCP control links to the other members. A deterministic peer-ID rule prevents two
+  duplicate links between the same pair of Macs.
+- Chat, queue changes, playback metadata, video state, and broadcaster ownership are
+  immutable room events. Peers deduplicate events, exchange per-peer version vectors,
+  and gossip missing entries until their replicas converge.
+- The current broadcaster sends timestamped audio and video directly to all listeners.
+  This keeps one shared media timeline without making the room creator a permanent
+  server. If the broadcaster leaves, the room stays connected and silent until any
+  remaining member chooses **Broadcast**.
+- Concurrent attempts to take over broadcasting are resolved deterministically, so all
+  replicas settle on the same source. A later take-over supersedes the prior claim.
+- Queue removals are replicated as tombstones, so an old add event cannot resurrect a
+  removed item after a temporarily disconnected peer returns.
+- Each Mac retains durable queue state and up to 500 chat messages from the last seven
+  days. Transient broadcaster ownership is deliberately not restored after relaunch.
+
+Public rooms are discoverable and joinable by devices on the LAN. Private rooms require
+the same room ID and invite key; peers prove possession during the control handshake.
+Private admission prevents an uninvited ALO peer from joining, but room traffic is not
+yet end-to-end encrypted, so use both room types only on a trusted local network.
 
 ## How synchronization works
 
@@ -111,10 +167,10 @@ new ALO build does not silently become a different app in macOS privacy settings
 - Each receiver watches the audio render clock while packets are still arriving. If a
   CPU spike stops that clock for 250 ms, or pushes playback more than 100 ms ahead or
   behind the room timeline, it flushes stale scheduled audio and re-anchors itself.
-- Play and pause in the room bar are shared controls. A participant's request is sent
-  to the host Mac, applied to its active system media player, and rebroadcast to the room.
-- Joined clients publish the room as their active macOS Now Playing session, allowing
-  system and accessory transport buttons to use the same host-authoritative command path.
+- Play and pause in the room bar are shared controls. A member's request is sent to the
+  current broadcaster, applied to its active system media player, and rebroadcast to the room.
+- Listening Macs publish the room as their active macOS Now Playing session, allowing
+  system and accessory transport buttons to use the same broadcaster-authoritative command path.
 - Video follows the same room target and capture timestamps as audio, preserving lip sync.
 - Audio uses about 1.54 Mb/s per receiving Mac. Video targets about 4 Mb/s at up to
   1280×720 and 30 fps using Apple’s hardware H.264 encoder.
@@ -146,6 +202,19 @@ Run the realistic single-Mac room test:
 swift test --filter LoopbackRoomScaleTests
 ```
 
+Run the focused single-Mac mesh tests:
+
+```sh
+swift test --filter MeshRoomTests
+```
+
+This suite opens real loopback TCP listeners for three independent peers and verifies
+that the control mesh remains usable after the creator disconnects. It also checks
+public admission, successful private admission, rejection with a wrong private key,
+replica/version-vector convergence, concurrent broadcaster conflict resolution, queue
+tombstones, and bounded chat/queue persistence. It does not advertise on the LAN,
+capture audio, prompt for recording permission, or write test credentials to Keychain.
+
 The loopback suite starts the real host plus headless TCP and UDP peers on one Mac. It
 compares an unconstrained room, one receiver on a constrained link, eight receivers
 with unbounded buffering, and eight receivers with bounded buffering. It also exercises
@@ -175,15 +244,15 @@ Change one control at a time and compare it with the unbounded baseline in
 - `PlaybackWatchdog.stallThresholdNanos` controls how long an active receiver's render
   clock may stop before it re-anchors. `activePacketWindowNanos` prevents an intentionally
   paused source from being mistaken for a stalled client.
-- Play and pause update the room's controls and source player without resetting receiver
-  audio pipelines. Resynchronization is driven only by measured lateness or a stalled
-  local render clock.
+- Every accepted play or pause command broadcasts an explicit hard-resync command. This
+  makes the menu-bar, floating-bar, and hardware media controls a manual recovery path:
+  pause and play once to re-anchor every receiver to the shared capture timeline.
 - `HostServer`'s `boundedLatest(maxInFlight:)` default controls how many packets each
   receiver may have outstanding before stale pending audio is replaced.
 - `linkBitsPerSecond`, peer count, callback count, and callback cadence in
   `LoopbackRoomScaleTests` define repeatable congestion scenarios.
 
-After tuning, run both focused suites at least twice, followed by `swift test`. A useful
+After tuning, run all three focused suites at least twice, followed by `swift test`. A useful
 change should keep the direct eight-peer control lossless, reduce packet age and audible
 lateness in the constrained eight-peer case, and avoid excessive hard resynchronizations.
 
@@ -202,10 +271,12 @@ Manual workflow dispatch remains available for signing diagnostics.
 The repository must provide `DEVELOPER_ID_P12_BASE64` and
 `DEVELOPER_ID_P12_PASSWORD` as Actions secrets, plus
 `APP_STORE_CONNECT_API_KEY_BASE64` as an Actions secret. Configure
-`WERAI_CODESIGN_IDENTITY`, `APPLE_TEAM_ID`, `APP_STORE_CONNECT_KEY_ID`, and
+`WERAI_CODESIGN_IDENTITY`, `WERAI_INSTALLER_IDENTITY`, `APPLE_TEAM_ID`, `APP_STORE_CONNECT_KEY_ID`, and
 `APP_STORE_CONNECT_ISSUER_ID` as Actions variables. Use an App Store Connect
 team key (Developer access or higher), because individual API keys cannot submit
-software to Apple's notarization service.
+software to Apple's notarization service. The imported P12 must contain both the
+**Developer ID Application** and **Developer ID Installer** identities (including their
+private keys); the latter signs the one-time HAL plug-in package.
 
 To publish a downloadable build on the repository's **Releases** page:
 
@@ -218,10 +289,11 @@ To publish a downloadable build on the repository's **Releases** page:
    ```
 
 Publishing the release automatically attaches notarized and stapled
-`ALO-macos-arm64.zip` and `ALO-macos-arm64.dmg` downloads to the release.
+`ALO-macos-arm64.zip`, `ALO-macos-arm64.dmg`, and
+`Install-ALO-Audio-Device.pkg` downloads to the release.
 
 If an older ad-hoc-signed copy appears enabled under **Privacy & Security → Screen &
-System Audio Recording** but still cannot start a room, remove the old ALO or WERAI entries,
+System Audio Recording** but still cannot start a room, remove the old ALO entries,
 install the newly signed release in `/Applications`, launch it, and grant recording access
 again. This one-time reset replaces the stale permission record created by the old build.
 

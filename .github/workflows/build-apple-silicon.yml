@@ -12,7 +12,7 @@ permissions:
 jobs:
   build-arm64:
     runs-on: macos-15
-    timeout-minutes: 20
+    timeout-minutes: 75
 
     steps:
       - name: Check out repository
@@ -30,16 +30,20 @@ jobs:
       - name: Verify signing identity
         env:
           WERAI_CODESIGN_IDENTITY: ${{ vars.WERAI_CODESIGN_IDENTITY }}
+          WERAI_INSTALLER_IDENTITY: ${{ vars.WERAI_INSTALLER_IDENTITY }}
         run: |
           test -n "$WERAI_CODESIGN_IDENTITY"
+          test -n "$WERAI_INSTALLER_IDENTITY"
           security find-identity -v -p codesigning | grep -F "$WERAI_CODESIGN_IDENTITY"
+          security find-identity -v -p basic | grep -F "$WERAI_INSTALLER_IDENTITY"
 
       - name: Build and package arm64 app
         env:
           WERAI_CODESIGN_IDENTITY: ${{ vars.WERAI_CODESIGN_IDENTITY }}
+          WERAI_INSTALLER_IDENTITY: ${{ vars.WERAI_INSTALLER_IDENTITY }}
         run: ./Scripts/package.sh --arm64-only
 
-      - name: Notarize and staple app and disk image
+      - name: Notarize and staple installer, app, and disk image
         env:
           APP_STORE_CONNECT_API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
           APP_STORE_CONNECT_KEY_ID: ${{ vars.APP_STORE_CONNECT_KEY_ID }}
@@ -52,6 +56,20 @@ jobs:
           api_key_path="$RUNNER_TEMP/AuthKey_$APP_STORE_CONNECT_KEY_ID.p8"
           trap 'rm -f "$api_key_path"' EXIT
           printf '%s' "$APP_STORE_CONNECT_API_KEY_BASE64" | /usr/bin/base64 -D > "$api_key_path"
+
+          xcrun notarytool submit dist/Install-ALO-Audio-Device.pkg \
+            --key "$api_key_path" \
+            --key-id "$APP_STORE_CONNECT_KEY_ID" \
+            --issuer "$APP_STORE_CONNECT_ISSUER_ID" \
+            --wait \
+            --timeout 15m
+          xcrun stapler staple dist/Install-ALO-Audio-Device.pkg
+
+          cp dist/Install-ALO-Audio-Device.pkg \
+            dist/ALO.app/Contents/Resources/Install-ALO-Audio-Device.pkg
+          codesign --force --options runtime --timestamp \
+            --sign "$WERAI_CODESIGN_IDENTITY" dist/ALO.app
+          ./Scripts/create_distribution_archives.sh arm64
 
           xcrun notarytool submit dist/ALO-macos-arm64.zip \
             --key "$api_key_path" \
@@ -79,14 +97,20 @@ jobs:
           test -n "$APPLE_TEAM_ID"
           file dist/ALO.app/Contents/MacOS/alo
           lipo dist/ALO.app/Contents/MacOS/alo -verify_arch arm64
+          pkgutil --expand-full dist/Install-ALO-Audio-Device.pkg "$RUNNER_TEMP/alo-audio-pkg"
+          driver_binary="$RUNNER_TEMP/alo-audio-pkg/Payload/Library/Audio/Plug-Ins/HAL/ALORoom.driver/Contents/MacOS/ALORoom"
+          lipo "$driver_binary" -verify_arch arm64 x86_64
           codesign --verify --deep --strict --verbose=2 dist/ALO.app
           signature="$(codesign -dvvv dist/ALO.app 2>&1)"
           grep -F "Authority=Developer ID Application:" <<< "$signature"
           grep -F "TeamIdentifier=$APPLE_TEAM_ID" <<< "$signature"
           codesign --verify --strict --verbose=2 dist/ALO-macos-arm64.dmg
+          pkgutil --check-signature dist/Install-ALO-Audio-Device.pkg | grep -F 'Developer ID Installer:'
           xcrun stapler validate dist/ALO.app
+          xcrun stapler validate dist/Install-ALO-Audio-Device.pkg
           xcrun stapler validate dist/ALO-macos-arm64.dmg
           spctl --assess --type execute --verbose=4 dist/ALO.app
+          spctl --assess --type install --verbose=4 dist/Install-ALO-Audio-Device.pkg
 
       - name: Upload app
         uses: actions/upload-artifact@v4
@@ -95,6 +119,7 @@ jobs:
           path: |
             dist/ALO-macos-arm64.zip
             dist/ALO-macos-arm64.dmg
+            dist/Install-ALO-Audio-Device.pkg
           if-no-files-found: error
 
   publish-release:
@@ -120,4 +145,5 @@ jobs:
           gh release upload "$RELEASE_TAG" \
             dist/ALO-macos-arm64.zip \
             dist/ALO-macos-arm64.dmg \
+            dist/Install-ALO-Audio-Device.pkg \
             --clobber
