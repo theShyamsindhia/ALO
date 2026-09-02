@@ -9,6 +9,7 @@ final class HostSession {
     private var videoCapture: ScreenVideoCapture?
     private var videoEncoder: VideoEncoder?
     private var nowPlayingMonitor: NowPlayingMonitor?
+    private var playbackController: SystemPlaybackController?
     private var muteTap: AnyObject?
 
     func start(
@@ -26,10 +27,15 @@ final class HostSession {
     ) async throws {
         do {
             statusHandler("Opening your room")
+            let playbackController = SystemPlaybackController()
+            self.playbackController = playbackController
             let host = HostServer(
                 roomName: roomName,
                 statusHandler: statusHandler,
-                receiverCountHandler: receiverCountHandler
+                receiverCountHandler: receiverCountHandler,
+                playbackRequestHandler: { [weak playbackController] playing in
+                    playbackController?.setPlaying(playing) ?? false
+                }
             )
             try host.start()
             self.host = host
@@ -98,6 +104,7 @@ final class HostSession {
         videoEncoder = nil
         nowPlayingMonitor?.stop()
         nowPlayingMonitor = nil
+        playbackController = nil
         localReceiver?.stop()
         localReceiver = nil
         host?.stop()
@@ -118,6 +125,10 @@ final class HostSession {
 
     func setParticipantLevel(id: String, volume: Double, muted: Bool) {
         host?.setParticipantLevel(id: id, volume: volume, muted: muted)
+    }
+
+    func setRoomPlayback(playing: Bool) {
+        localReceiver?.setRoomPlayback(playing: playing)
     }
 
     func setVideoEnabled(_ enabled: Bool) async throws {

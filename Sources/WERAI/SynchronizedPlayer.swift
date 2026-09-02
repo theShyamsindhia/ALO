@@ -21,6 +21,8 @@ final class SynchronizedPlayer {
     private var latestLatenessNanos: UInt64 = 0
     private var latePacketCount: UInt64 = 0
     private var resyncCount: UInt64 = 0
+    private var lastPacketReceivedNanos: UInt64?
+    private var playbackWatchdog = PlaybackWatchdog()
 
     var clockOffsetNanos: Int64?
 
@@ -46,6 +48,7 @@ final class SynchronizedPlayer {
     }
 
     func accept(_ packet: AudioPacket) {
+        lastPacketReceivedNanos = MonotonicClock.nowNanos()
         pending[packet.sequence] = packet
         if expectedSequence == nil {
             expectedSequence = packet.sequence
@@ -55,13 +58,30 @@ final class SynchronizedPlayer {
 
     func maintainSync() {
         drain()
-        guard hasStarted,
-              let offset = clockOffsetNanos,
+        guard hasStarted else {
+            playbackWatchdog.reset()
+            return
+        }
+
+        let now = MonotonicClock.nowNanos()
+        let renderTime = player.lastRenderTime
+        let playerTime = renderTime.flatMap { player.playerTime(forNodeTime: $0) }
+        if playbackWatchdog.shouldResynchronize(
+            sampleTime: playerTime?.sampleTime,
+            nowNanos: now,
+            lastPacketReceivedNanos: lastPacketReceivedNanos
+        ) {
+            latestLatenessNanos = max(latestLatenessNanos, Self.hardResyncThresholdNanos)
+            hardResynchronize()
+            return
+        }
+
+        guard let offset = clockOffsetNanos,
               let anchorFrameIndex,
               let anchorCaptureNanos,
-              let renderTime = player.lastRenderTime,
+              let renderTime,
               renderTime.isHostTimeValid,
-              let playerTime = player.playerTime(forNodeTime: renderTime)
+              let playerTime
         else { return }
 
         let renderLocalNanos = MonotonicClock.ticksToNanos(renderTime.hostTime)
@@ -77,9 +97,9 @@ final class SynchronizedPlayer {
         let errorFrames = Double(anchorFrameIndex) + expectedFrames - actualFrame
         let hardResyncFrames = Double(AudioPacket.sampleRate)
             * Double(Self.hardResyncThresholdNanos) / 1_000_000_000
-        if errorFrames > hardResyncFrames {
+        if abs(errorFrames) > hardResyncFrames {
             latestLatenessNanos = UInt64(
-                errorFrames * 1_000_000_000 / Double(AudioPacket.sampleRate)
+                abs(errorFrames) * 1_000_000_000 / Double(AudioPacket.sampleRate)
             )
             hardResynchronize()
             return
@@ -160,6 +180,8 @@ final class SynchronizedPlayer {
         smoothedCorrection = 0
         varispeed.rate = 1
         latestLatenessNanos = 0
+        lastPacketReceivedNanos = nil
+        playbackWatchdog.reset()
     }
 
     func setTargetLatencyNanos(_ nanos: UInt64) {
@@ -190,6 +212,7 @@ final class SynchronizedPlayer {
         anchorFrameIndex = nil
         anchorCaptureNanos = nil
         hasStarted = false
+        playbackWatchdog.reset()
         resyncCount &+= 1
         if let next = pending.values.min(by: { $0.sequence < $1.sequence }) {
             expectedSequence = next.sequence
@@ -238,5 +261,48 @@ final class SynchronizedPlayer {
             return value &+ UInt64(delta)
         }
         return value > UInt64(-delta) ? value - UInt64(-delta) : 0
+    }
+}
+
+struct PlaybackWatchdog {
+    static let stallThresholdNanos: UInt64 = 250_000_000
+    static let activePacketWindowNanos: UInt64 = 500_000_000
+
+    private var lastSampleTime: Int64?
+    private var lastProgressNanos: UInt64?
+
+    mutating func shouldResynchronize(
+        sampleTime: Int64?,
+        nowNanos: UInt64,
+        lastPacketReceivedNanos: UInt64?
+    ) -> Bool {
+        guard let lastPacketReceivedNanos,
+              nowNanos >= lastPacketReceivedNanos,
+              nowNanos - lastPacketReceivedNanos <= Self.activePacketWindowNanos
+        else {
+            reset()
+            return false
+        }
+
+        if let sampleTime, lastSampleTime != sampleTime {
+            lastSampleTime = sampleTime
+            lastProgressNanos = nowNanos
+            return false
+        }
+        if lastProgressNanos == nil {
+            lastSampleTime = sampleTime
+            lastProgressNanos = nowNanos
+            return false
+        }
+        guard nowNanos - (lastProgressNanos ?? nowNanos) >= Self.stallThresholdNanos else {
+            return false
+        }
+        lastProgressNanos = nowNanos
+        return true
+    }
+
+    mutating func reset() {
+        lastSampleTime = nil
+        lastProgressNanos = nil
     }
 }

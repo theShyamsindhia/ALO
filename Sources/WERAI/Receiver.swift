@@ -169,6 +169,12 @@ final class Receiver {
         }
     }
 
+    func setRoomPlayback(playing: Bool) {
+        queue.async { [weak self] in
+            self?.send(ControlMessage(type: "set_playback", isPlaying: playing))
+        }
+    }
+
     private func startBrowsingWhenReady() {
         guard audioListenerReady, videoListenerReady, browser == nil else { return }
         startBrowsing()

@@ -96,6 +96,11 @@ new WERAI build does not silently become a different app in macOS privacy settin
   happen slowly so the room never snaps backward in time.
 - Output-device latency is measured per Mac. Remaining error is corrected 20 times per
   second with a smoothed varispeed adjustment capped at 0.2%.
+- Each receiver watches the audio render clock while packets are still arriving. If a
+  CPU spike stops that clock for 250 ms, or pushes playback more than 100 ms ahead or
+  behind the room timeline, it flushes stale scheduled audio and re-anchors itself.
+- Play and pause in the room bar are shared controls. A participant's request is sent
+  to the host Mac, applied to its active system media player, and rebroadcast to the room.
 - Video follows the same room target and capture timestamps as audio, preserving lip sync.
 - Audio uses about 1.54 Mb/s per receiving Mac. Video targets about 4 Mb/s at up to
   1280×720 and 30 fps using Apple’s hardware H.264 encoder.
@@ -130,8 +135,9 @@ swift test --filter LoopbackRoomScaleTests
 The loopback suite starts the real host plus headless TCP and UDP peers on one Mac. It
 compares an unconstrained room, one receiver on a constrained link, eight receivers
 with unbounded buffering, and eight receivers with bounded buffering. It also exercises
-late-playback detection, receiver telemetry, and automatic hard resynchronization. It
-does not need Screen Recording permission or additional Macs.
+late-playback detection, receiver telemetry, CPU-stall recovery, shared play/pause
+control, and automatic hard resynchronization. It does not need Screen Recording
+permission or additional Macs.
 
 Useful output from the loopback test includes:
 
@@ -152,6 +158,9 @@ Change one control at a time and compare it with the unbounded baseline in
   `timingStepNanos` control the adaptive shared room buffer.
 - `SynchronizedPlayer.hardResyncThresholdNanos` controls when gradual varispeed
   correction gives way to a hard re-anchor.
+- `PlaybackWatchdog.stallThresholdNanos` controls how long an active receiver's render
+  clock may stop before it re-anchors. `activePacketWindowNanos` prevents an intentionally
+  paused source from being mistaken for a stalled client.
 - `HostServer`'s `boundedLatest(maxInFlight:)` default controls how many packets each
   receiver may have outstanding before stale pending audio is replaced.
 - `linkBitsPerSecond`, peer count, callback count, and callback cadence in

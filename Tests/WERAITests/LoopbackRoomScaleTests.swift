@@ -80,6 +80,81 @@ struct LoopbackRoomScaleTests {
         #expect(report.resyncCount == 1)
     }
 
+    @Test("Render watchdog detects CPU stalls but ignores an inactive source")
+    func renderWatchdogDetectsCPUStall() {
+        var watchdog = PlaybackWatchdog()
+        let start: UInt64 = 1_000_000_000
+
+        let initialCheck = watchdog.shouldResynchronize(
+            sampleTime: 2_400,
+            nowNanos: start,
+            lastPacketReceivedNanos: start
+        )
+        let beforeThreshold = watchdog.shouldResynchronize(
+            sampleTime: 2_400,
+            nowNanos: start + 200_000_000,
+            lastPacketReceivedNanos: start + 200_000_000
+        )
+        let afterThreshold = watchdog.shouldResynchronize(
+            sampleTime: 2_400,
+            nowNanos: start + 300_000_000,
+            lastPacketReceivedNanos: start + 300_000_000
+        )
+        #expect(!initialCheck)
+        #expect(!beforeThreshold)
+        #expect(afterThreshold)
+
+        watchdog.reset()
+        let inactiveInitialCheck = watchdog.shouldResynchronize(
+            sampleTime: nil,
+            nowNanos: start,
+            lastPacketReceivedNanos: start
+        )
+        let inactiveLaterCheck = watchdog.shouldResynchronize(
+            sampleTime: nil,
+            nowNanos: start + 800_000_000,
+            lastPacketReceivedNanos: start
+        )
+        #expect(!inactiveInitialCheck)
+        #expect(!inactiveLaterCheck)
+    }
+
+    @Test("Participant play and pause requests are executed and rebroadcast by the host")
+    func participantControlsHostPlayback() throws {
+        let hostReady = DispatchSemaphore(value: 0)
+        let commandReceived = DispatchSemaphore(value: 0)
+        let state = PortState()
+        let requestedState = LockedPlaybackState()
+        let host = HostServer(
+            roomName: "Playback control test \(UUID().uuidString)",
+            advertise: false,
+            listenerReadyHandler: { port in
+                state.set(port)
+                hostReady.signal()
+            },
+            playbackRequestHandler: { playing in
+                requestedState.set(playing)
+                commandReceived.signal()
+                return true
+            }
+        )
+        try host.start()
+        defer { host.stop() }
+        guard hostReady.wait(timeout: .now() + 3) == .success,
+              let hostPort = state.port
+        else { throw LoopbackTestError.hostDidNotStart }
+
+        let peer = HeadlessLoopbackPeer(index: 99)
+        try peer.start(hostPort: hostPort)
+        defer { peer.stop() }
+        guard peer.waitUntilJoined(timeout: 3) else { throw LoopbackTestError.peerDidNotJoin }
+
+        peer.setRoomPlayback(playing: false)
+        #expect(commandReceived.wait(timeout: .now() + 2) == .success)
+        #expect(requestedState.value == false)
+        #expect(waitUntil(timeout: 2) { peer.playbackStates.contains(false) })
+    }
+
     private func runRoom(
         peerCount: Int,
         linkBitsPerSecond: UInt64?,
@@ -235,6 +310,7 @@ private final class HeadlessLoopbackPeer {
     private var acceptedVideo = [NWConnection]()
     private var arrivals = [UInt32: PacketArrival]()
     private var receivedResyncCommands = 0
+    private var receivedPlaybackStates = [Bool]()
 
     init(index: Int) {
         self.index = index
@@ -244,6 +320,7 @@ private final class HeadlessLoopbackPeer {
     var packetCount: Int { queue.sync { arrivals.count } }
     var lastSequence: UInt32? { queue.sync { arrivals.keys.max() } }
     var resyncCommandCount: Int { queue.sync { receivedResyncCommands } }
+    var playbackStates: [Bool] { queue.sync { receivedPlaybackStates } }
 
     func start(hostPort: NWEndpoint.Port) throws {
         let udp = try NWListener(using: .udp, on: .any)
@@ -301,6 +378,12 @@ private final class HeadlessLoopbackPeer {
                     resyncCount: 0
                 )
             ))
+        }
+    }
+
+    func setRoomPlayback(playing: Bool) {
+        queue.async { [weak self] in
+            self?.send(ControlMessage(type: "set_playback", isPlaying: playing))
         }
     }
 
@@ -362,6 +445,9 @@ private final class HeadlessLoopbackPeer {
                         self.clock.acceptPong(message, receivedAt: MonotonicClock.nowNanos())
                     } else if message.type == "resync" {
                         self.receivedResyncCommands += 1
+                    } else if message.type == "now_playing",
+                              let isPlaying = message.nowPlaying?.isPlaying {
+                        self.receivedPlaybackStates.append(isPlaying)
                     }
                 }
             }
@@ -404,6 +490,23 @@ private final class HeadlessLoopbackPeer {
     private func send(_ message: ControlMessage) {
         guard let data = try? message.encodedLine() else { return }
         control?.send(content: data, completion: .contentProcessed { _ in })
+    }
+}
+
+private final class LockedPlaybackState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValue: Bool?
+
+    var value: Bool? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedValue
+    }
+
+    func set(_ value: Bool) {
+        lock.lock()
+        storedValue = value
+        lock.unlock()
     }
 }
 

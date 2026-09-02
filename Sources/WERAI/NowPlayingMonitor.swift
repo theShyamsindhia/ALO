@@ -83,7 +83,8 @@ final class NowPlayingMonitor {
             artworkData: normalizedArtwork(
                 information["kMRMediaRemoteNowPlayingInfoArtworkData"] as? Data
             ),
-            sourceURL: firstWebURL(information)
+            sourceURL: firstWebURL(information),
+            isPlaying: playbackState(information["kMRMediaRemoteNowPlayingInfoPlaybackRate"])
         )
         guard !media.isEmpty else { return }
         publish(media)
@@ -125,7 +126,8 @@ final class NowPlayingMonitor {
             artist: clean(information["Artist"] as? String),
             album: clean(information["Album"] as? String),
             artworkData: trackID.flatMap { artworkCache[$0] },
-            sourceURL: trackID.map { "https://open.spotify.com/track/\($0)" }
+            sourceURL: trackID.map { "https://open.spotify.com/track/\($0)" },
+            isPlaying: playbackState(information["Player State"])
         )
         publish(media)
         if let trackID, media.artworkData == nil {
@@ -139,7 +141,8 @@ final class NowPlayingMonitor {
             title: clean(information["Name"] as? String),
             artist: clean(information["Artist"] as? String),
             album: clean(information["Album"] as? String),
-            sourceURL: firstWebURL(information)
+            sourceURL: firstWebURL(information),
+            isPlaying: playbackState(information["Player State"])
         ))
     }
 
@@ -172,7 +175,8 @@ final class NowPlayingMonitor {
                         artist: media.artist,
                         album: media.album,
                         artworkData: artwork,
-                        sourceURL: media.sourceURL
+                        sourceURL: media.sourceURL,
+                        isPlaying: media.isPlaying
                     ))
                 }
             }.resume()
@@ -188,6 +192,16 @@ final class NowPlayingMonitor {
     private func clean(_ value: String?) -> String? {
         let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return trimmed.isEmpty ? nil : String(trimmed.prefix(180))
+    }
+
+    private func playbackState(_ value: Any?) -> Bool? {
+        if let rate = value as? NSNumber { return rate.doubleValue > 0 }
+        guard let state = value as? String else { return nil }
+        switch state.lowercased() {
+        case "playing", "play": return true
+        case "paused", "stopped", "pause", "stop": return false
+        default: return nil
+        }
     }
 
     private func firstWebURL(_ information: NSDictionary) -> String? {
@@ -239,5 +253,31 @@ final class NowPlayingMonitor {
         )
         guard CGImageDestinationFinalize(destination), output.length <= 180_000 else { return nil }
         return output as Data
+    }
+}
+
+final class SystemPlaybackController {
+    private typealias SendCommand = @convention(c) (Int, CFDictionary?) -> Bool
+    private let frameworkHandle: UnsafeMutableRawPointer?
+    private let sendCommand: SendCommand?
+
+    init() {
+        let path = "/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote"
+        let handle = dlopen(path, RTLD_LAZY)
+        frameworkHandle = handle
+        if let handle, let symbol = dlsym(handle, "MRMediaRemoteSendCommand") {
+            sendCommand = unsafeBitCast(symbol, to: SendCommand.self)
+        } else {
+            sendCommand = nil
+        }
+    }
+
+    deinit {
+        if let frameworkHandle { dlclose(frameworkHandle) }
+    }
+
+    func setPlaying(_ playing: Bool) -> Bool {
+        // MediaRemote command values: play = 0, pause = 1.
+        sendCommand?(playing ? 0 : 1, nil) ?? false
     }
 }

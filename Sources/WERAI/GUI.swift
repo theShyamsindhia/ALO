@@ -240,6 +240,7 @@ final class WERAIViewModel: ObservableObject {
     var canJoin: Bool { phase == .idle && selectedRoom != nil }
     var roomTitle: String { activeRoom ?? selectedRoom ?? normalizedRoomName }
     var isHost: Bool { hostSession != nil }
+    var roomIsPlaying: Bool { nowPlaying.isEmpty ? false : nowPlaying.isPlaying ?? true }
     var canSelectVideo: Bool { isHost || roomHasVideo }
     var floatingPanelHeight: CGFloat {
         if permissionNotice { return FloatingMetrics.permissionHeight }
@@ -377,6 +378,15 @@ final class WERAIViewModel: ObservableObject {
             hostSession?.setParticipantLevel(id: participant.id, volume: participant.volume, muted: muted)
         } else if participant.id == currentParticipantID {
             receiver?.setLocalLevel(volume: participant.volume, muted: muted)
+        }
+    }
+
+    func toggleRoomPlayback() {
+        let shouldPlay = !roomIsPlaying
+        if let hostSession {
+            hostSession.setRoomPlayback(playing: shouldPlay)
+        } else {
+            receiver?.setRoomPlayback(playing: shouldPlay)
         }
     }
 
@@ -1038,6 +1048,13 @@ private struct FloatingRoomView: View {
     private var roomBar: some View {
         HStack(spacing: 8) {
             roomIdentity
+
+            roomBarButton(
+                icon: model.roomIsPlaying ? "pause.fill" : "play.fill",
+                active: false,
+                help: model.roomIsPlaying ? "Pause for everyone" : "Play for everyone"
+            ) { model.toggleRoomPlayback() }
+            .keyboardShortcut(.space, modifiers: [])
 
             roomBarButton(
                 icon: "music.note.list",

@@ -20,19 +20,22 @@ public struct NowPlayingMedia: Codable, Sendable, Equatable {
     public let album: String?
     public let artworkData: Data?
     public let sourceURL: String?
+    public let isPlaying: Bool?
 
     public init(
         title: String? = nil,
         artist: String? = nil,
         album: String? = nil,
         artworkData: Data? = nil,
-        sourceURL: String? = nil
+        sourceURL: String? = nil,
+        isPlaying: Bool? = nil
     ) {
         self.title = title
         self.artist = artist
         self.album = album
         self.artworkData = artworkData
         self.sourceURL = sourceURL
+        self.isPlaying = isPlaying
     }
 
     public var isEmpty: Bool {
@@ -111,6 +114,7 @@ public struct ControlMessage: Codable, Sendable {
     public let queueItem: RoomQueueItem?
     public let queueItemID: String?
     public let syncReport: PlaybackSyncReport?
+    public let isPlaying: Bool?
 
     public init(
         type: String,
@@ -135,7 +139,8 @@ public struct ControlMessage: Codable, Sendable {
         mediaQueue: [RoomQueueItem]? = nil,
         queueItem: RoomQueueItem? = nil,
         queueItemID: String? = nil,
-        syncReport: PlaybackSyncReport? = nil
+        syncReport: PlaybackSyncReport? = nil,
+        isPlaying: Bool? = nil
     ) {
         self.type = type
         self.udpPort = udpPort
@@ -160,6 +165,7 @@ public struct ControlMessage: Codable, Sendable {
         self.queueItem = queueItem
         self.queueItemID = queueItemID
         self.syncReport = syncReport
+        self.isPlaying = isPlaying
     }
 
     public func encodedLine() throws -> Data {

@@ -44,6 +44,7 @@ final class HostServer {
     private let listenerReadyHandler: ((NWEndpoint.Port) -> Void)?
     private let outboundSend: OutboundSend?
     private let audioBackpressurePolicy: AudioBackpressurePolicy
+    private let playbackRequestHandler: ((Bool) -> Bool)?
     private let packetizer = AudioPacketizer()
     private var listener: NWListener?
     private var clients = [ObjectIdentifier: Client]()
@@ -60,7 +61,8 @@ final class HostServer {
         advertise: Bool = true,
         listenerReadyHandler: ((NWEndpoint.Port) -> Void)? = nil,
         outboundSend: OutboundSend? = nil,
-        audioBackpressurePolicy: AudioBackpressurePolicy = .boundedLatest(maxInFlight: 8)
+        audioBackpressurePolicy: AudioBackpressurePolicy = .boundedLatest(maxInFlight: 8),
+        playbackRequestHandler: ((Bool) -> Bool)? = nil
     ) {
         self.roomName = roomName
         self.statusHandler = statusHandler
@@ -69,6 +71,7 @@ final class HostServer {
         self.listenerReadyHandler = listenerReadyHandler
         self.outboundSend = outboundSend
         self.audioBackpressurePolicy = audioBackpressurePolicy
+        self.playbackRequestHandler = playbackRequestHandler
     }
 
     func start() throws {
@@ -329,6 +332,21 @@ final class HostServer {
                 volume: message.volume ?? client.volume,
                 muted: message.muted ?? client.isMuted
             )
+
+        case "set_playback":
+            guard client.id != nil,
+                  let isPlaying = message.isPlaying,
+                  playbackRequestHandler?(isPlaying) == true
+            else { return }
+            nowPlaying = NowPlayingMedia(
+                title: nowPlaying.title,
+                artist: nowPlaying.artist,
+                album: nowPlaying.album,
+                artworkData: nowPlaying.artworkData,
+                sourceURL: nowPlaying.sourceURL,
+                isPlaying: isPlaying
+            )
+            broadcast(ControlMessage(type: "now_playing", nowPlaying: nowPlaying))
 
         case "sync_status":
             guard message.participantID == client.id, let report = message.syncReport else { return }
