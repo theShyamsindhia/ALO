@@ -77,7 +77,7 @@ final class HostSession {
             }
 
             guard #available(macOS 14.2, *) else {
-                throw WERAIError("WERAI requires macOS 14.2 or newer.")
+                throw WERAIError("ALO requires macOS 14.2 or newer.")
             }
             statusHandler("Synchronizing this Mac")
             let muteTap = SourceMuteTap()

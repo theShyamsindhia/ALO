@@ -10,9 +10,9 @@ if [[ "$archive_suffix" != "arm64" && "$archive_suffix" != "universal" ]]; then
     exit 2
 fi
 
-app="dist/WERAI.app"
-zip_archive="dist/WERAI-macos-$archive_suffix.zip"
-dmg_archive="dist/WERAI-macos-$archive_suffix.dmg"
+app="dist/ALO.app"
+zip_archive="dist/ALO-macos-$archive_suffix.zip"
+dmg_archive="dist/ALO-macos-$archive_suffix.dmg"
 test -d "$app"
 
 rm -f "$zip_archive" "$dmg_archive"
@@ -24,10 +24,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-ditto "$app" "$dmg_staging/WERAI.app"
+ditto "$app" "$dmg_staging/ALO.app"
 ln -s /Applications "$dmg_staging/Applications"
 hdiutil create \
-    -volname WERAI \
+    -volname ALO \
     -srcfolder "$dmg_staging" \
     -ov \
     -format UDZO \

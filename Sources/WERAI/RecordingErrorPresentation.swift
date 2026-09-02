@@ -49,7 +49,7 @@ enum RecordingErrorPresentation {
         guard isPermissionFailure(error, screenCaptureAccess: screenCaptureAccess) else {
             return error.localizedDescription
         }
-        return "macOS denied recording access to this copy of WERAI. If WERAI already looks enabled, remove its old entry in Recording settings, add the installed app again, then restart WERAI."
+        return "macOS denied recording access to this copy of ALO. If ALO already looks enabled, remove its old entry in Recording settings, add the installed app again, then restart ALO."
     }
 
     private static func errorChain(startingAt error: Error) -> [NSError] {

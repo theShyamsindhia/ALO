@@ -37,7 +37,7 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "WERAI"
+        window.title = "ALO"
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.backgroundColor = .windowBackgroundColor
@@ -144,13 +144,13 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(appMenuItem)
         let appMenu = NSMenu()
         appMenu.addItem(
-            withTitle: "About WERAI",
+            withTitle: "About ALO",
             action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
             keyEquivalent: ""
         )
         appMenu.addItem(.separator())
         appMenu.addItem(
-            withTitle: "Quit WERAI",
+            withTitle: "Quit ALO",
             action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q"
         )
@@ -174,11 +174,11 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
         statusItem.button?.image = NSImage(
-            systemSymbolName: "waveform.circle.fill",
-            accessibilityDescription: "WERAI"
+            systemSymbolName: "cat.fill",
+            accessibilityDescription: "ALO"
         )
         statusItem.button?.image?.isTemplate = true
-        statusItem.button?.toolTip = "WERAI"
+        statusItem.button?.toolTip = "ALO"
         if let button = statusItem.button {
             button.target = self
             button.action = #selector(togglePopover)
@@ -273,7 +273,7 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
 
     private func updateBadge(count: Int) {
         badgeView.isHidden = count == 0
-        let detail = count == 0 ? "WERAI" : "WERAI · \(count) unread message\(count == 1 ? "" : "s")"
+        let detail = count == 0 ? "ALO" : "ALO · \(count) unread message\(count == 1 ? "" : "s")"
         statusItem.button?.toolTip = detail
         statusItem.button?.setAccessibilityLabel(detail)
     }
@@ -281,8 +281,8 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
     private func updatePhase(_ phase: WERAIViewModel.Phase) {
         if phase != .live { closePopover() }
         statusItem.button?.image = NSImage(
-            systemSymbolName: phase == .live ? "waveform.circle.fill" : "waveform.circle",
-            accessibilityDescription: "WERAI"
+            systemSymbolName: phase == .live ? "cat.fill" : "cat",
+            accessibilityDescription: "ALO"
         )
         statusItem.button?.image?.isTemplate = true
     }
@@ -767,7 +767,7 @@ final class WERAIViewModel: ObservableObject {
         NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: configuration) { _, error in
             DispatchQueue.main.async {
                 if let error {
-                    self.errorMessage = "Could not restart WERAI: \(error.localizedDescription)"
+                    self.errorMessage = "Could not restart ALO: \(error.localizedDescription)"
                 } else {
                     NSApp.terminate(nil)
                 }
@@ -1154,7 +1154,7 @@ private struct WERAIView: View {
                     Text("Allow screen sharing once")
                         .font(.system(size: 19, weight: .semibold, design: .rounded))
                         .foregroundStyle(Palette.ink)
-                    Text("Audio will keep playing. Turn WERAI on in Screen & System Audio Recording, then restart WERAI. Future audio/video switches happen instantly.")
+                    Text("Audio will keep playing. Turn ALO on in Screen & System Audio Recording, then restart ALO. Future audio/video switches happen instantly.")
                         .font(.system(size: 12, design: .rounded))
                         .foregroundStyle(Palette.secondary)
                         .lineSpacing(3)
@@ -1162,7 +1162,7 @@ private struct WERAIView: View {
                 HStack(spacing: 9) {
                     Button("Open Settings", action: model.openPrivacySettings)
                         .buttonStyle(PillButtonStyle(filled: true))
-                    Button("Restart WERAI", action: model.restartApplication)
+                    Button("Restart ALO", action: model.restartApplication)
                         .buttonStyle(PillButtonStyle(filled: false))
                 }
             }
@@ -1182,7 +1182,7 @@ private struct WERAIView: View {
                 Text("The room couldn’t start")
                     .font(.system(size: 20, weight: .semibold, design: .rounded))
                     .foregroundStyle(Palette.ink)
-                Text(model.errorMessage ?? "Something interrupted WERAI.")
+                Text(model.errorMessage ?? "Something interrupted ALO.")
                     .font(.system(size: 12, design: .rounded))
                     .foregroundStyle(Palette.secondary)
                     .frame(maxWidth: 410, alignment: .leading)
@@ -1422,7 +1422,7 @@ private struct FloatingRoomView: View {
         if presentation == .floating {
             identity
                 .overlay(WindowDragRegion().accessibilityHidden(true))
-                .help("Drag to move WERAI")
+                .help("Drag to move ALO")
         } else {
             identity
         }
@@ -1982,7 +1982,7 @@ private struct FloatingRoomView: View {
                 Text("Allow screen sharing once")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(Palette.ink)
-                Text("Audio keeps playing. Enable WERAI in Privacy & Security, then restart it.")
+                Text("Audio keeps playing. Enable ALO in Privacy & Security, then restart it.")
                     .font(.system(size: 11))
                     .foregroundStyle(Palette.secondary)
             }
@@ -2461,7 +2461,10 @@ private enum Palette {
     static let ink = Color(nsColor: .labelColor)
     static let secondary = Color(nsColor: .secondaryLabelColor)
     static let muted = Color(nsColor: .tertiaryLabelColor)
-    static let controlAccent = Color(nsColor: .controlAccentColor)
+    static let controlAccent = adaptive(
+        light: NSColor(red: 0.08, green: 0.34, blue: 0.70, alpha: 1),
+        dark: NSColor(red: 0.29, green: 0.61, blue: 0.93, alpha: 1)
+    )
     static let selectedControlText = Color(nsColor: .selectedControlTextColor)
     static let controlIcon = Color(nsColor: .labelColor)
     static let composer = Color(nsColor: .textBackgroundColor).opacity(0.9)
@@ -2474,15 +2477,12 @@ private enum Palette {
         light: NSColor(white: 1, alpha: 0.5),
         dark: NSColor(white: 1, alpha: 0.16)
     )
-    static let accent = adaptive(
-        light: NSColor(red: 0.25, green: 0.46, blue: 0.33, alpha: 1),
-        dark: NSColor(red: 0.48, green: 0.72, blue: 0.55, alpha: 1)
-    )
+    static let accent = controlAccent
     static let accentText = adaptive(
-        light: NSColor(red: 0.12, green: 0.32, blue: 0.20, alpha: 1),
-        dark: NSColor(red: 0.72, green: 0.90, blue: 0.76, alpha: 1),
-        highContrastLight: NSColor(red: 0.04, green: 0.24, blue: 0.12, alpha: 1),
-        highContrastDark: NSColor(red: 0.82, green: 1.0, blue: 0.86, alpha: 1)
+        light: NSColor(red: 0.05, green: 0.25, blue: 0.58, alpha: 1),
+        dark: NSColor(red: 0.68, green: 0.83, blue: 1.0, alpha: 1),
+        highContrastLight: NSColor(red: 0.02, green: 0.16, blue: 0.43, alpha: 1),
+        highContrastDark: NSColor(red: 0.80, green: 0.90, blue: 1.0, alpha: 1)
     )
     static let syncText = accentText
     static let detailText = adaptive(
@@ -2493,18 +2493,18 @@ private enum Palette {
     )
     static let accentDark = accentText
     static let accentSoft = adaptive(
-        light: NSColor(red: 0.78, green: 0.84, blue: 0.74, alpha: 1),
-        dark: NSColor(red: 0.16, green: 0.25, blue: 0.19, alpha: 1)
+        light: NSColor(red: 0.82, green: 0.88, blue: 0.97, alpha: 1),
+        dark: NSColor(red: 0.08, green: 0.13, blue: 0.25, alpha: 1)
     )
     static let artworkFallback = accentSoft
     static let blueSoft = adaptive(
-        light: NSColor(red: 0.69, green: 0.76, blue: 0.78, alpha: 1),
-        dark: NSColor(red: 0.16, green: 0.22, blue: 0.24, alpha: 1)
+        light: NSColor(red: 0.72, green: 0.82, blue: 0.95, alpha: 1),
+        dark: NSColor(red: 0.10, green: 0.16, blue: 0.31, alpha: 1)
     )
-    static let video = Color(red: 0.075, green: 0.078, blue: 0.073)
+    static let video = Color(red: 0.055, green: 0.070, blue: 0.12)
     static let red = Color(nsColor: .systemRed)
     static let redSoft = Color(nsColor: .systemRed).opacity(0.16)
-    static let shadow = Color.black.opacity(0.15)
+    static let shadow = Color(red: 0.025, green: 0.055, blue: 0.12).opacity(0.18)
 
     private static func adaptive(
         light: NSColor,

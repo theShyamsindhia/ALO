@@ -8,7 +8,7 @@ let package = Package(
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "werai", targets: ["WERAI"])
+        .executable(name: "alo", targets: ["WERAI"])
     ],
     targets: [
         .target(name: "WERAICore"),

@@ -1,8 +1,8 @@
-# WERAI
+# ALO
 
 Free, synchronized system audio with optional screen sharing for Macs on the same local network.
 
-WERAI creates a private local room with synchronized 48 kHz stereo audio, optional
+ALO creates a private local room with synchronized 48 kHz stereo audio, optional
 screen sharing, current album artwork, a per-Mac mixer, participant presence, and
 group chat. Everyone can also add media links or a detected current track to a shared
 room queue; the host opens the selected item so its audio remains the synchronized
@@ -20,13 +20,13 @@ Bluetooth output is not recommended because its latency can change while playing
 
 ## Run the Mac app
 
-Open `dist/WERAI.app`, then choose one role:
+Open `dist/ALO.app`, then choose one role:
 
 - **Start a room** on the Mac whose system audio you want to send. Screen sharing is off by default.
 - **Join a room** on every other Mac, then choose the nearby room.
 
 After the room connects, the setup window disappears and the room moves into the
-menu bar. Click the waveform to reveal the compact controls; the same surface grows
+menu bar. Click the cat to reveal the compact controls; the same surface grows
 downward only when chat, queue, people, or video is requested. A red indicator on the
 menu-bar icon marks unread chat without leaving another window on screen. The optional
 floating bar can be restored from the window control and remains above your other apps
@@ -37,12 +37,13 @@ to the controls without interrupting audio. Unread chat is also shown on the mes
 When the source player publishes track information, the host sends
 the title, artist, and album artwork to every Mac. Screen sharing remains off by
 default. Guests can control their own output, while the host can control every Mac.
-The menu-bar waveform provides the complete room experience without requiring the
+The menu-bar cat provides the complete room experience without requiring the
 floating bar. Its window button toggles the floating presentation at any time. On joined client
 Macs, keyboard, Touch Bar, headphone, and Control Center play/pause/previous/next
 commands are forwarded to the host; volume buttons continue to control the local Mac.
 The interface follows macOS accessibility preferences for reduced motion, reduced
-transparency, increased contrast, and the user-selected control accent.
+transparency, and increased contrast while keeping ALO's cobalt accent legible in
+light and dark appearances.
 
 ## Build it
 
@@ -56,26 +57,30 @@ swift build -c release
 The terminal interface remains available. On the source Mac:
 
 ```sh
-./werai host "My Room"
+./alo host "My Room"
 ```
 
 On every other Mac:
 
 ```sh
-./werai join "My Room"
+./alo join "My Room"
 ```
 
 The room name is optional. Without one, a receiver joins the first room it finds.
 
-Audio-only rooms ask only for the system-audio access needed by macOS. WERAI asks for
+Audio-only rooms ask only for the system-audio access needed by macOS. ALO asks for
 **Screen & System Audio Recording** only when the host first enables video. Every Mac may
 also ask for **Local Network** access. Grant access in System Settings → Privacy &
-Security, then use **Restart WERAI** if macOS asks you to restart it.
+Security, then use **Restart ALO** if macOS asks you to restart it.
 
 If the Screen Recording switch is already on but macOS still refuses access, quit old
-copies of WERAI, turn the switch off and on once, and restart the current app. Do not
-keep numbered copies such as `WERAI 2.app` or `WERAI 3.app` in Applications; macOS can
+copies of ALO, turn the switch off and on once, and restart the current app. Do not
+keep numbered copies such as `ALO 2.app` or `ALO 3.app` in Applications; macOS can
 retain stale privacy records for those development builds.
+
+ALO retains the legacy `in.werai.audio` bundle identifier so existing recording grants
+and rooms remain compatible. Remove the old `WERAI.app` when installing `ALO.app`; do
+not keep both applications installed at once.
 
 Press Control-C on the source to stop streaming. macOS then removes the private audio
 tap and restores normal direct playback.
@@ -86,12 +91,12 @@ tap and restores normal direct playback.
 ./Scripts/package.sh
 ```
 
-This produces `dist/WERAI-macos-universal.zip` for Apple Silicon and Intel Macs. AirDrop
-or copy it to the other Macs, unzip it, and open WERAI. If Gatekeeper quarantines an
+This produces `dist/ALO-macos-universal.zip` for Apple Silicon and Intel Macs. AirDrop
+or copy it to the other Macs, unzip it, and open ALO. If Gatekeeper quarantines an
 AirDropped ad-hoc-signed development build, build from source on that Mac.
 
 The packaged app uses a stable local designated requirement (`in.werai.audio`) so a
-new WERAI build does not silently become a different app in macOS privacy settings.
+new ALO build does not silently become a different app in macOS privacy settings.
 
 ## How synchronization works
 
@@ -170,9 +175,9 @@ Change one control at a time and compare it with the unbounded baseline in
 - `PlaybackWatchdog.stallThresholdNanos` controls how long an active receiver's render
   clock may stop before it re-anchors. `activePacketWindowNanos` prevents an intentionally
   paused source from being mistaken for a stalled client.
-- Every accepted play or pause command broadcasts an explicit hard-resync command. This
-  makes the menu-bar, floating-bar, and hardware media controls a manual recovery path:
-  pause and play once to re-anchor every receiver to the shared capture timeline.
+- Play and pause update the room's controls and source player without resetting receiver
+  audio pipelines. Resynchronization is driven only by measured lateness or a stalled
+  local render clock.
 - `HostServer`'s `boundedLatest(maxInFlight:)` default controls how many packets each
   receiver may have outstanding before stale pending audio is replaced.
 - `linkBitsPerSecond`, peer count, callback count, and callback cadence in
@@ -213,10 +218,10 @@ To publish a downloadable build on the repository's **Releases** page:
    ```
 
 Publishing the release automatically attaches notarized and stapled
-`WERAI-macos-arm64.zip` and `WERAI-macos-arm64.dmg` downloads to the release.
+`ALO-macos-arm64.zip` and `ALO-macos-arm64.dmg` downloads to the release.
 
 If an older ad-hoc-signed copy appears enabled under **Privacy & Security → Screen &
-System Audio Recording** but still cannot start a room, remove the old WERAI entries,
+System Audio Recording** but still cannot start a room, remove the old ALO or WERAI entries,
 install the newly signed release in `/Applications`, launch it, and grant recording access
 again. This one-time reset replaces the stale permission record created by the old build.
 

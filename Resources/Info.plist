@@ -5,17 +5,17 @@
     <key>CFBundleIdentifier</key>
     <string>in.werai.audio</string>
     <key>CFBundleDisplayName</key>
-    <string>WERAI</string>
+    <string>ALO</string>
     <key>CFBundleName</key>
-    <string>WERAI</string>
+    <string>ALO</string>
     <key>CFBundleExecutable</key>
-    <string>werai</string>
+    <string>alo</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.10.5</string>
+    <string>0.11.0</string>
     <key>CFBundleVersion</key>
-    <string>18</string>
+    <string>19</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>
@@ -25,11 +25,11 @@
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSAudioCaptureUsageDescription</key>
-    <string>WERAI captures this Mac's audio so its screen and sound can play in sync on nearby Macs.</string>
+    <string>ALO captures this Mac's audio so its screen and sound can play in sync on nearby Macs.</string>
     <key>NSScreenCaptureUsageDescription</key>
-    <string>WERAI shares this Mac's screen with the nearby Macs in your room.</string>
+    <string>ALO shares this Mac's screen with the nearby Macs in your room.</string>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>WERAI finds and streams audio, shared screens, room messages, and current track artwork to Macs on your local network.</string>
+    <string>ALO finds and streams audio, shared screens, room messages, and current track artwork to Macs on your local network.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_werai-audio._tcp</string>

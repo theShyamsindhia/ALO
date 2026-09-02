@@ -19,9 +19,9 @@ for architecture in "${architectures[@]}"; do
 done
 mkdir -p dist
 
-binary="dist/werai"
-cli_archive="dist/werai-cli-macos-$archive_suffix.zip"
-app="dist/WERAI.app"
+binary="dist/alo"
+cli_archive="dist/alo-cli-macos-$archive_suffix.zip"
+app="dist/ALO.app"
 codesign_identity="${WERAI_CODESIGN_IDENTITY:--}"
 codesign_arguments=(--force --sign "$codesign_identity" --identifier in.werai.audio)
 if [[ "$codesign_identity" != "-" ]]; then
@@ -60,21 +60,21 @@ run_codesign() {
 }
 
 if [[ ${#architectures[@]} -eq 1 ]]; then
-    cp ".build/${architectures[1]}-apple-macosx/release/werai" "$binary"
+    cp ".build/${architectures[1]}-apple-macosx/release/alo" "$binary"
 else
     lipo -create \
-        .build/arm64-apple-macosx/release/werai \
-        .build/x86_64-apple-macosx/release/werai \
+        .build/arm64-apple-macosx/release/alo \
+        .build/x86_64-apple-macosx/release/alo \
         -output "$binary"
 fi
 if [[ "$codesign_identity" == "-" ]]; then
     run_codesign "${codesign_arguments[@]}" "$binary"
 fi
 
-icon_master="dist/AppIcon-1024.png"
+icon_master="Resources/ALOLogo-1024.png"
 iconset="dist/AppIcon.iconset"
 mkdir -p "$iconset"
-swift Scripts/make_icon.swift "$icon_master"
+test -f "$icon_master"
 
 for specification in \
     "16 icon_16x16.png" \
@@ -95,7 +95,7 @@ done
 iconutil -c icns "$iconset" -o dist/AppIcon.icns
 
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp "$binary" "$app/Contents/MacOS/werai"
+cp "$binary" "$app/Contents/MacOS/alo"
 cp Resources/Info.plist "$app/Contents/Info.plist"
 cp dist/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 if [[ "$codesign_identity" == "-" ]]; then

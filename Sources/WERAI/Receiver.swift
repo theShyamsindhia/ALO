@@ -115,7 +115,7 @@ final class Receiver {
         timer.resume()
         maintenanceTimer = timer
 
-        print("Looking for WERAI rooms…")
+        print("Looking for ALO rooms…")
         statusHandler?(.searching)
     }
 
@@ -231,7 +231,7 @@ final class Receiver {
                 print("Connected to \(endpoint).")
                 self.statusHandler?(.connected)
                 if self.capturesSystemMediaCommands {
-                    self.remoteCommandCenter.start(roomName: self.requestedRoom ?? "WERAI Room")
+                    self.remoteCommandCenter.start(roomName: self.requestedRoom ?? "ALO Room")
                 }
                 self.sendJoin()
                 self.startPinging()

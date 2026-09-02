@@ -23,7 +23,7 @@ enum WERAICommand {
 
             switch command {
             case "host":
-                let roomName = arguments.dropFirst().first ?? Host.current().localizedName ?? "WERAI Room"
+                let roomName = arguments.dropFirst().first ?? Host.current().localizedName ?? "ALO Room"
                 try await runHost(roomName: roomName)
 
             case "join":
@@ -34,10 +34,10 @@ enum WERAICommand {
                 printHelp()
 
             default:
-                throw WERAIError("Unknown command \"\(command)\". Run 'werai help'.")
+                throw WERAIError("Unknown command \"\(command)\". Run 'alo help'.")
             }
         } catch {
-            fputs("werai: \(error.localizedDescription)\n", stderr)
+            fputs("alo: \(error.localizedDescription)\n", stderr)
             exit(1)
         }
     }
@@ -104,15 +104,15 @@ enum WERAICommand {
 
     private static func printHelp() {
         print("""
-        WERAI — free, synchronized Mac-to-Mac screen and audio over local Wi-Fi
+        ALO — free, synchronized Mac-to-Mac screen and audio over local Wi-Fi
 
         Usage:
-          werai host [room-name]   Stream this Mac's screen and system audio
-          werai join [room-name]   Find and play a room on the local network
+          alo host [room-name]     Stream this Mac's screen and system audio
+          alo join [room-name]     Find and play a room on the local network
 
         Examples:
-          werai host "Studio"
-          werai join "Studio"
+          alo host "Studio"
+          alo join "Studio"
 
         Requirements: macOS 14.2 or newer; all Macs on the same local network.
         """)

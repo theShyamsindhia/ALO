@@ -6,7 +6,7 @@ final class RoomRemoteCommandCenter {
     private let handler: (RoomMediaCommand) -> Void
     private let lock = NSLock()
     private var targets = [(command: MPRemoteCommand, token: Any)]()
-    private var roomName = "WERAI Room"
+    private var roomName = "ALO Room"
     private var media = NowPlayingMedia()
     private var isRunning = false
 

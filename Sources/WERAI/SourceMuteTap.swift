@@ -11,13 +11,13 @@ final class SourceMuteTap {
     func start() throws {
         guard tapID == kAudioObjectUnknown else { return }
         guard let ownProcessID = Self.audioObjectID(forPID: getpid()) else {
-            throw WERAIError("WERAI could not identify its own Core Audio process.")
+            throw WERAIError("ALO could not identify its own Core Audio process.")
         }
 
         let tapDescription = CATapDescription(
             stereoGlobalTapButExcludeProcesses: [ownProcessID]
         )
-        tapDescription.name = "WERAI synchronized source"
+        tapDescription.name = "ALO synchronized source"
         tapDescription.isPrivate = true
         tapDescription.muteBehavior = .mutedWhenTapped
 
@@ -30,7 +30,7 @@ final class SourceMuteTap {
 
         do {
             let aggregateDescription: [String: Any] = [
-                kAudioAggregateDeviceNameKey: "WERAI Private Audio Device",
+                kAudioAggregateDeviceNameKey: "ALO Private Audio Device",
                 kAudioAggregateDeviceUIDKey: "in.werai.audio.\(UUID().uuidString)",
                 kAudioAggregateDeviceIsPrivateKey: true
             ]
