@@ -31,6 +31,14 @@ struct ClientPlaybackReliabilityTests {
         #expect(RoomRemoteCommandCenter.playbackState(after: .togglePlayPause, current: false) == true)
         #expect(RoomRemoteCommandCenter.playbackState(after: .nextTrack, current: true) == nil)
         #expect(RoomRemoteCommandCenter.playbackState(after: .previousTrack, current: false) == nil)
+        #expect(RoomRemoteCommandCenter.effectivePlaybackState(
+            metadataIsPlaying: false,
+            streamIsActive: true
+        ) == true)
+        #expect(RoomRemoteCommandCenter.effectivePlaybackState(
+            metadataIsPlaying: false,
+            streamIsActive: false
+        ) == false)
     }
 
     @Test func unrelatedAudioConfigurationChangesDoNotRestartAHealthyEngine() {
@@ -54,5 +62,23 @@ struct ClientPlaybackReliabilityTests {
         #expect(WERAIViewModel.renderingState(for: "This Mac is playing in sync") == true)
         #expect(WERAIViewModel.renderingState(for: "Connecting to the room broadcaster") == false)
         #expect(WERAIViewModel.renderingState(for: "Sharing system audio") == nil)
+    }
+
+    @Test @MainActor func liveAudioOverridesStalePausedMetadata() {
+        #expect(WERAIViewModel.effectivePlaybackState(
+            metadataIsPlaying: false,
+            audioIsRendering: true,
+            hasMedia: true
+        ))
+        #expect(!WERAIViewModel.effectivePlaybackState(
+            metadataIsPlaying: false,
+            audioIsRendering: false,
+            hasMedia: true
+        ))
+        #expect(!WERAIViewModel.effectivePlaybackState(
+            metadataIsPlaying: true,
+            audioIsRendering: false,
+            hasMedia: false
+        ))
     }
 }

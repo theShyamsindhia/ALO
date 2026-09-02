@@ -7,7 +7,9 @@ final class RoomRemoteCommandCenter {
     private let lock = NSLock()
     private var targets = [(command: MPRemoteCommand, token: Any)]()
     private var roomName = "ALO Room"
+    private var metadataMedia = NowPlayingMedia()
     private var media = NowPlayingMedia()
+    private var streamIsActive = false
     private var isRunning = false
 
     init(handler: @escaping (RoomMediaCommand) -> Bool) {
@@ -35,7 +37,28 @@ final class RoomRemoteCommandCenter {
 
     func update(_ media: NowPlayingMedia) {
         lock.lock()
-        self.media = media
+        metadataMedia = media
+        self.media = Self.replacingPlaybackState(
+            in: media,
+            with: Self.effectivePlaybackState(
+                metadataIsPlaying: media.isPlaying,
+                streamIsActive: streamIsActive
+            )
+        )
+        lock.unlock()
+        publishNowPlaying()
+    }
+
+    func updatePlaybackActivity(_ active: Bool) {
+        lock.lock()
+        streamIsActive = active
+        media = Self.replacingPlaybackState(
+            in: metadataMedia,
+            with: Self.effectivePlaybackState(
+                metadataIsPlaying: metadataMedia.isPlaying,
+                streamIsActive: active
+            )
+        )
         lock.unlock()
         publishNowPlaying()
     }
@@ -90,6 +113,24 @@ final class RoomRemoteCommandCenter {
         case .togglePlayPause: !current
         case .nextTrack, .previousTrack: nil
         }
+    }
+
+    static func effectivePlaybackState(metadataIsPlaying: Bool?, streamIsActive: Bool) -> Bool? {
+        streamIsActive ? true : metadataIsPlaying
+    }
+
+    private static func replacingPlaybackState(
+        in media: NowPlayingMedia,
+        with isPlaying: Bool?
+    ) -> NowPlayingMedia {
+        NowPlayingMedia(
+            title: media.title,
+            artist: media.artist,
+            album: media.album,
+            artworkData: media.artworkData,
+            sourceURL: media.sourceURL,
+            isPlaying: isPlaying
+        )
     }
 
     private func publishNowPlaying() {

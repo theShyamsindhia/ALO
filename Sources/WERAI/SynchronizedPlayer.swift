@@ -35,7 +35,7 @@ final class SynchronizedPlayer {
     private var recoveryRetryNotBeforeNanos: UInt64 = 0
     private var participantVolume: Double = 1
     private var participantMuted = false
-    private var playbackIsAudible = false
+    private var playbackIsActive = false
     private(set) var configurationChangeCount: UInt64 = 0
 
     var clockOffsetNanos: Int64?
@@ -216,7 +216,7 @@ final class SynchronizedPlayer {
         varispeed.rate = 1
         latestLatenessNanos = 0
         lastPacketReceivedNanos = nil
-        setPlaybackAudible(false)
+        setPlaybackActive(false)
         playbackWatchdog.reset()
     }
 
@@ -236,17 +236,16 @@ final class SynchronizedPlayer {
     }
 
     private func updatePlaybackActivity(nowNanos: UInt64) {
-        let gainIsAudible = player.volume > 0.0001
         let streamIsRecent = lastPacketReceivedNanos.map {
             nowNanos >= $0 && nowNanos - $0 <= 500_000_000
         } ?? false
-        setPlaybackAudible(hasStarted && gainIsAudible && streamIsRecent)
+        setPlaybackActive(hasStarted && streamIsRecent)
     }
 
-    private func setPlaybackAudible(_ audible: Bool) {
-        guard playbackIsAudible != audible else { return }
-        playbackIsAudible = audible
-        playbackActivityChanged?(audible)
+    private func setPlaybackActive(_ active: Bool) {
+        guard playbackIsActive != active else { return }
+        playbackIsActive = active
+        playbackActivityChanged?(active)
     }
 
     func syncReport() -> PlaybackSyncReport {

@@ -536,11 +536,17 @@ final class WERAIViewModel: ObservableObject {
         guard activeRoomConfiguration?.isPrivate == true else { return nil }
         return activeRoomConfiguration?.accessKey
     }
-    var roomIsPlaying: Bool { nowPlaying.isEmpty ? false : nowPlaying.isPlaying ?? true }
+    var roomIsPlaying: Bool {
+        Self.effectivePlaybackState(
+            metadataIsPlaying: nowPlaying.isPlaying,
+            audioIsRendering: audioIsRendering,
+            hasMedia: !nowPlaying.isEmpty
+        )
+    }
     var roomSyncLabel: String {
         if !hasBroadcaster { return "No broadcaster" }
-        if nowPlaying.isPlaying == false { return "Paused" }
         if audioIsRendering { return "Synced" }
+        if nowPlaying.isPlaying == false { return "Paused" }
         return nowPlaying.isEmpty ? "Waiting for audio" : "Recovering audio…"
     }
     var canSelectVideo: Bool { isHost || roomHasVideo }
@@ -1030,10 +1036,7 @@ final class WERAIViewModel: ObservableObject {
 
     private var nowPlayingCallback: (NowPlayingMedia) -> Void {
         { [weak self] media in
-            DispatchQueue.main.async {
-                self?.nowPlaying = media
-                if media.isPlaying == false { self?.audioIsRendering = false }
-            }
+            DispatchQueue.main.async { self?.nowPlaying = media }
         }
     }
 
@@ -1188,6 +1191,16 @@ final class WERAIViewModel: ObservableObject {
             return false
         }
         return nil
+    }
+
+    static func effectivePlaybackState(
+        metadataIsPlaying: Bool?,
+        audioIsRendering: Bool,
+        hasMedia: Bool
+    ) -> Bool {
+        if audioIsRendering { return true }
+        guard hasMedia else { return false }
+        return metadataIsPlaying ?? true
     }
 }
 

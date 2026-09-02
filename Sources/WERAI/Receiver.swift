@@ -5,6 +5,10 @@ import Network
 import WERAICore
 
 final class Receiver {
+    private final class PlaybackActivityRelay {
+        var handler: (Bool) -> Void = { _ in }
+    }
+
     private let queue = DispatchQueue(label: "in.werai.receiver.network", qos: .userInteractive)
     private let requestedRoom: String?
     private let roomDisplayName: String
@@ -22,6 +26,7 @@ final class Receiver {
     private let jitter = NetworkJitterEstimator()
     private let player: SynchronizedPlayer
     private let videoDecoder: VideoDecoder
+    private let playbackActivityRelay: PlaybackActivityRelay
     private lazy var remoteCommandCenter = RoomRemoteCommandCenter { [weak self] command in
         self?.sendRoomMediaCommand(command) ?? false
     }
@@ -69,13 +74,22 @@ final class Receiver {
         self.nowPlayingHandler = nowPlayingHandler
         self.chatHandler = chatHandler
         self.queueHandler = queueHandler
+        let playbackActivityRelay = PlaybackActivityRelay()
+        self.playbackActivityRelay = playbackActivityRelay
         self.player = try SynchronizedPlayer(
             outputDeviceUID: outputDeviceUID,
             outputDeviceID: outputDeviceID
-        ) { audible in
-            statusHandler?(audible ? .playing : .silent)
+        ) { active in
+            playbackActivityRelay.handler(active)
         }
         self.videoDecoder = VideoDecoder(imageHandler: videoHandler ?? { _ in })
+        playbackActivityRelay.handler = { [weak self] active in
+            guard let self else { return }
+            self.statusHandler?(active ? .playing : .silent)
+            if self.capturesSystemMediaCommands {
+                self.remoteCommandCenter.updatePlaybackActivity(active)
+            }
+        }
     }
 
     func start() throws {
