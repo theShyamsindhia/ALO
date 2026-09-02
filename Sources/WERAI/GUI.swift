@@ -1630,12 +1630,16 @@ private struct WERAIView: View {
 
     private var versionLabel: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-        return "ALO / V\(version ?? "DEV")"
+        return "V\(version ?? "DEV")"
     }
 
     var body: some View {
         ZStack {
-            AmbientBackground(isLive: model.phase == .live)
+            if model.phase == .idle {
+                LandingPalette.background
+            } else {
+                AmbientBackground(isLive: model.phase == .live)
+            }
             switch model.phase {
             case .idle: idleView
             case .starting: progressView
@@ -1645,156 +1649,176 @@ private struct WERAIView: View {
             if model.permissionNotice { permissionOverlay }
         }
         .frame(minWidth: 860, minHeight: 600)
-        .tint(Palette.controlAccent)
+        .tint(LandingPalette.accent)
+        .preferredColorScheme(.light)
         .ignoresSafeArea()
     }
 
     private var idleView: some View {
-        HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 18) {
-                Rectangle()
-                    .fill(Palette.controlAccent)
-                    .frame(width: 46, height: 4)
-                Text("LISTEN\nTOGETHER.")
-                    .font(.system(size: 44, weight: .black, design: .default))
-                    .tracking(-1.8)
-                    .lineSpacing(-5)
-                    .foregroundStyle(Palette.ink)
-                Text("One room for synchronized sound, conversation, and an optional shared screen.")
-                    .font(.system(size: 13, weight: .regular, design: .default))
-                    .foregroundStyle(Palette.secondary)
-                    .lineSpacing(3)
-                    .frame(maxWidth: 330, alignment: .leading)
-                Text("\(versionLabel)  /  LOCAL  /  P2P  /  FREE")
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .tracking(0.7)
-                    .foregroundStyle(Palette.accentText)
-                    .padding(.top, 10)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
+        HStack(spacing: 18) {
             setupConsole
-                .frame(width: 510)
+                .frame(width: 282)
+
+            LandingArtworkSlideshow()
+                .aspectRatio(1, contentMode: .fit)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
         }
-        .padding(.horizontal, 72)
-        .padding(.top, 34)
+        .padding(.top, 40)
+        .padding(.horizontal, 20)
+        .padding(.bottom, 20)
     }
 
     private var setupConsole: some View {
-        VStack(spacing: 0) {
+        VStack(alignment: .leading, spacing: 0) {
             HStack {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(model.mode == .share ? "Create a room" : "Your rooms")
-                        .font(.system(size: 17, weight: .bold, design: .default))
-                        .foregroundStyle(Palette.ink)
-                    Text(model.mode == .share ? "Create the group first. Anyone can broadcast afterward." : "Nearby and previously joined rooms")
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundStyle(Palette.secondary)
-                }
+                Text("ALO")
+                    .font(.system(size: 14, weight: .bold))
                 Spacer()
                 Button(action: model.editDeviceIdentity) {
                     Image(systemName: model.currentDeviceIcon)
+                        .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(Color.white)
-                        .frame(width: 30, height: 30)
+                        .frame(width: 24, height: 24)
                         .background(Color.deviceIdentity(model.currentDeviceColorHex))
                         .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
                 .help("Customize \(model.currentUserName)")
-                Button(model.mode == .share ? "Back to rooms" : "Create room") {
-                    withAnimation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.86)) {
-                        model.mode = model.mode == .share ? .listen : .share
-                    }
-                }
-                .buttonStyle(LandingButtonStyle(filled: model.mode == .listen))
+                Text(versionLabel)
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundStyle(LandingPalette.secondary)
             }
-            .padding(16)
+            .padding(.bottom, 44)
 
-            Rectangle()
-                .fill(Palette.strokeStrong)
-                .frame(height: 1)
-
-            Group {
-                if model.mode == .share {
-                    VStack(spacing: 12) {
-                        TextField("Room name", text: $model.roomName)
-                            .textFieldStyle(.plain)
-                            .font(.system(size: 16, weight: .medium, design: .default))
-                            .foregroundStyle(Palette.ink)
-                            .focused($roomNameFocused)
-                            .onSubmit(model.startSharing)
-                            .padding(.horizontal, 14)
-                            .frame(height: 48)
-                            .background(Palette.composer)
-                            .overlay(Rectangle().stroke(roomNameFocused ? Palette.controlAccent : Palette.strokeStrong, lineWidth: roomNameFocused ? 2 : 1))
-
-                        HStack(spacing: 8) {
-                            Button {
-                                model.createPrivateRoom.toggle()
-                            } label: {
-                                Label(
-                                    model.createPrivateRoom ? "Private" : "Public",
-                                    systemImage: model.createPrivateRoom ? "lock.fill" : "person.3.fill"
-                                )
-                            }
-                            .buttonStyle(LandingButtonStyle(filled: model.createPrivateRoom))
-                            Spacer()
-                            Button("Create room", action: model.startSharing)
-                                .buttonStyle(LandingButtonStyle(filled: true))
-                                .disabled(!model.canStartSharing)
-                        }
-                    }
-                } else {
-                    roomList
-                }
+            if model.mode == .share {
+                createRoomPanel
+            } else {
+                roomList
             }
-            .padding(16)
+
+            Spacer(minLength: 24)
+
+            Text("LOCAL  /  P2P  /  FREE")
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .tracking(0.6)
+                .foregroundStyle(LandingPalette.muted)
         }
-        .background(Palette.opaqueSurface.opacity(0.9))
-        .overlay(Rectangle().stroke(Palette.strokeStrong, lineWidth: 1.5))
+        .padding(.horizontal, 10)
+        .foregroundStyle(LandingPalette.ink)
+    }
+
+    private var createRoomPanel: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Create a room")
+                    .font(.system(size: 17, weight: .semibold))
+                Text("Name it now. Anyone inside can broadcast later.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(LandingPalette.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(alignment: .leading, spacing: 7) {
+                Text("ROOM NAME")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .tracking(0.6)
+                    .foregroundStyle(LandingPalette.secondary)
+                TextField("Night room", text: $model.roomName)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(LandingPalette.ink)
+                    .focused($roomNameFocused)
+                    .onSubmit(model.startSharing)
+                    .padding(.horizontal, 12)
+                    .frame(height: 42)
+                    .background(LandingPalette.field)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(roomNameFocused ? LandingPalette.accent : LandingPalette.line, lineWidth: 1)
+                    )
+            }
+
+            HStack(spacing: 6) {
+                Button("Public") { model.createPrivateRoom = false }
+                    .buttonStyle(LandingChoiceButtonStyle(active: !model.createPrivateRoom))
+                Button("Private") { model.createPrivateRoom = true }
+                    .buttonStyle(LandingChoiceButtonStyle(active: model.createPrivateRoom))
+            }
+
+            Button("Create room", action: model.startSharing)
+                .buttonStyle(LandingPrimaryButtonStyle())
+                .disabled(!model.canStartSharing)
+
+            Button {
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) {
+                    model.mode = .listen
+                }
+            } label: {
+                Label("Back to rooms", systemImage: "arrow.left")
+            }
+            .buttonStyle(LandingLinkButtonStyle())
+        }
     }
 
     private var roomList: some View {
-        VStack(spacing: 10) {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Join a room")
+                .font(.system(size: 17, weight: .semibold))
+            Text("Nearby and previously joined")
+                .font(.system(size: 11))
+                .foregroundStyle(LandingPalette.secondary)
+                .padding(.top, 4)
+                .padding(.bottom, 14)
+
             ScrollView {
-                LazyVStack(spacing: 8) {
+                LazyVStack(spacing: 0) {
                     if model.roomChoices.isEmpty {
-                        VStack(spacing: 8) {
-                            Image(systemName: "dot.radiowaves.left.and.right")
-                                .font(.system(size: 22))
-                                .foregroundStyle(Palette.accent)
-                            Text("Looking for rooms on your network…")
-                                .font(.system(size: 12, design: .rounded))
-                                .foregroundStyle(Palette.secondary)
+                        VStack(alignment: .leading, spacing: 7) {
+                            Text("Looking nearby…")
+                                .font(.system(size: 12, weight: .medium))
+                            Text("Rooms you join will stay here.")
+                                .font(.system(size: 10))
+                                .foregroundStyle(LandingPalette.secondary)
                         }
-                        .frame(maxWidth: .infinity, minHeight: 150)
+                        .frame(maxWidth: .infinity, minHeight: 96, alignment: .leading)
                     } else {
                         ForEach(model.roomChoices) { room in roomCard(room) }
                     }
                 }
-                .padding(2)
             }
-            .frame(maxHeight: 270)
+            .frame(maxHeight: 300)
 
             if model.selectedRoomConfiguration?.isPrivate == true,
                model.selectedRoomConfiguration?.accessKey == nil {
-                TextField("Private room invite key", text: $model.privateRoomKey)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
-                    .padding(.horizontal, 14)
-                    .frame(height: 42)
-                    .background(Palette.composer)
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                VStack(alignment: .leading, spacing: 8) {
+                    TextField("Private room invite key", text: $model.privateRoomKey)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .padding(.horizontal, 12)
+                        .frame(height: 40)
+                        .background(LandingPalette.field)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .stroke(LandingPalette.line, lineWidth: 1)
+                        )
+                    Button("Open private room", action: model.joinSelectedRoom)
+                        .buttonStyle(LandingPrimaryButtonStyle())
+                        .disabled(!model.canJoin)
+                }
+                .padding(.top, 12)
             }
-            HStack {
-                Text("Rooms stay saved on this Mac")
-                    .font(.system(size: 10, design: .rounded))
-                    .foregroundStyle(Palette.muted)
-                Spacer()
-                Button("Open room", action: model.joinSelectedRoom)
-                    .buttonStyle(LandingButtonStyle(filled: true))
-                    .disabled(!model.canJoin)
+
+            Button {
+                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) {
+                    model.mode = .share
+                }
+            } label: {
+                Label("Create a room", systemImage: "plus")
             }
+            .buttonStyle(LandingLinkButtonStyle(accented: true))
+            .padding(.top, 18)
         }
     }
 
@@ -1802,48 +1826,58 @@ private struct WERAIView: View {
         let nearby = model.nearbyRooms.first(where: { $0.id == room.id })
         let saved = model.savedRooms.contains(where: { $0.id == room.id })
         let selected = model.selectedRoomID == room.id
+        let needsInviteKey = room.isPrivate && room.accessKey == nil
         return HStack(spacing: 12) {
             Button {
                 model.selectedRoomID = room.id
                 model.privateRoomKey = ""
             } label: {
-                HStack(spacing: 12) {
-                    Image(systemName: room.isPrivate ? "lock.fill" : "person.3.fill")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(selected ? Palette.selectedControlText : Palette.accent)
-                        .frame(width: 34, height: 34)
-                        .background(selected ? Palette.controlAccent : Palette.accentSoft)
+                HStack(spacing: 9) {
+                    Circle()
+                        .fill(nearby == nil ? LandingPalette.muted : LandingPalette.accent)
+                        .frame(width: 6, height: 6)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(room.name)
-                            .font(.system(size: 13, weight: .bold, design: .default))
-                            .foregroundStyle(Palette.ink)
+                        HStack(spacing: 5) {
+                            Text(room.name)
+                                .font(.system(size: 12, weight: .semibold))
+                            if room.isPrivate {
+                                Image(systemName: "lock.fill")
+                                    .font(.system(size: 8, weight: .semibold))
+                            }
+                        }
                         Text(nearby.map { "Nearby · \($0.peerCount) \($0.peerCount == 1 ? "person" : "people")" } ?? "Saved on this Mac")
-                            .font(.system(size: 10, weight: .medium, design: .monospaced))
-                            .foregroundStyle(nearby == nil ? Palette.secondary : Palette.accentText)
+                            .font(.system(size: 9, weight: .medium, design: .monospaced))
+                            .foregroundStyle(LandingPalette.secondary)
                     }
-                    Spacer()
-                    Image(systemName: selected ? "checkmark.circle.fill" : "chevron.right")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(selected ? Palette.controlAccent : Palette.muted)
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
+            Spacer(minLength: 4)
+
+            Button(needsInviteKey ? "Unlock" : "Join") {
+                model.selectedRoomID = room.id
+                model.privateRoomKey = ""
+                if !needsInviteKey { model.joinSelectedRoom() }
+            }
+            .buttonStyle(LandingRoomButtonStyle(active: selected))
+
             if saved {
                 Button { model.forgetRoom(roomID: room.id) } label: {
                     Image(systemName: "trash")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(Palette.secondary)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundStyle(LandingPalette.muted)
                 }
-                .buttonStyle(FlatToolButtonStyle(active: false))
+                .buttonStyle(.plain)
+                .frame(width: 18, height: 28)
                 .help("Forget this room on this Mac")
             }
         }
-        .padding(.horizontal, 12)
-        .frame(height: 56)
-        .background(selected ? Palette.accentSoft.opacity(0.7) : Palette.composer)
-        .overlay(Rectangle().stroke(selected ? Palette.controlAccent : Palette.strokeStrong, lineWidth: selected ? 1.5 : 1))
+        .padding(.horizontal, 8)
+        .frame(height: 52)
+        .background(selected ? LandingPalette.selection : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     private var progressView: some View {
@@ -2818,22 +2852,64 @@ private struct FlatToolButtonStyle: ButtonStyle {
     }
 }
 
-private struct LandingButtonStyle: ButtonStyle {
-    let filled: Bool
+private struct LandingPrimaryButtonStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(Color.white)
+            .frame(maxWidth: .infinity)
+            .frame(height: 40)
+            .background(LandingPalette.ink)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .scaleEffect(!reduceMotion && configuration.isPressed ? 0.98 : 1)
+            .opacity(isEnabled ? (configuration.isPressed ? 0.86 : 1) : 0.34)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+private struct LandingChoiceButtonStyle: ButtonStyle {
+    let active: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 10, weight: .bold, design: .monospaced))
-            .textCase(.uppercase)
-            .foregroundStyle(filled ? Palette.selectedControlText : Palette.ink)
-            .padding(.horizontal, 14)
-            .frame(height: 34)
-            .background(filled ? Palette.controlAccent : Palette.messageSurface)
-            .overlay(Rectangle().stroke(Palette.strokeStrong, lineWidth: 1.5))
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(active ? LandingPalette.ink : LandingPalette.secondary)
+            .padding(.horizontal, 12)
+            .frame(height: 30)
+            .background(active ? LandingPalette.selection : LandingPalette.field)
+            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .scaleEffect(!reduceMotion && configuration.isPressed ? 0.97 : 1)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+private struct LandingLinkButtonStyle: ButtonStyle {
+    var accented = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(accented ? LandingPalette.accent : LandingPalette.secondary)
+            .opacity(configuration.isPressed ? 0.58 : 1)
             .offset(y: !reduceMotion && configuration.isPressed ? 1 : 0)
-            .opacity(configuration.isPressed ? 0.84 : 1)
             .animation(reduceMotion ? nil : .easeOut(duration: 0.1), value: configuration.isPressed)
+    }
+}
+
+private struct LandingRoomButtonStyle: ButtonStyle {
+    let active: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+            .textCase(.uppercase)
+            .foregroundStyle(active ? LandingPalette.accent : LandingPalette.ink)
+            .opacity(configuration.isPressed ? 0.5 : 1)
     }
 }
 
@@ -3336,6 +3412,94 @@ private struct AmbientBackground: View {
     }
 }
 
+private struct LandingArtworkSlideshow: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var currentIndex = 0
+    private let timer = Timer.publish(every: 8, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        let artworkURLs = LandingArtworkCatalog.imageURLs
+        ZStack {
+            if artworkURLs.isEmpty {
+                LandingPalette.selection
+            } else {
+                ForEach([currentIndex], id: \.self) { index in
+                    if let image = LandingArtworkCache.shared.image(for: artworkURLs[index]) {
+                        Image(nsImage: image)
+                            .resizable()
+                            .scaledToFill()
+                            .transition(.opacity)
+                    }
+                }
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(LandingPalette.line, lineWidth: 1)
+        )
+        .onReceive(timer) { _ in
+            guard !reduceMotion, NSApp.isActive, artworkURLs.count > 1 else { return }
+            let nextIndex = (currentIndex + 1) % artworkURLs.count
+            _ = LandingArtworkCache.shared.image(for: artworkURLs[nextIndex])
+            withAnimation(.easeInOut(duration: 1.1)) {
+                currentIndex = nextIndex
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("ALO artwork slideshow")
+    }
+}
+
+private enum LandingArtworkCatalog {
+    private static let filenames = [
+        "12-rice-path.jpg",
+        "08-picnic.jpg",
+        "09-red-hood.jpg",
+        "01-cloud-path.jpg",
+        "02-stadium.jpg",
+        "03-field-walk.jpg",
+        "04-gathering.jpg",
+        "05-birds-garden.jpg",
+        "06-ocean-hill.jpg",
+        "07-garden-chairs.jpg",
+        "10-garden-work.jpg",
+        "11-flock.jpg",
+        "13-rice-house.jpg",
+        "14-circuit.jpg",
+    ]
+
+    static let imageURLs: [URL] = {
+        let fileManager = FileManager.default
+        let packagedDirectory = Bundle.main.resourceURL?.appendingPathComponent("LandingArt", isDirectory: true)
+        let developmentDirectory = URL(fileURLWithPath: fileManager.currentDirectoryPath, isDirectory: true)
+            .appendingPathComponent("Resources/LandingArt", isDirectory: true)
+
+        for directory in [packagedDirectory, developmentDirectory].compactMap({ $0 }) {
+            let urls = filenames.map { directory.appendingPathComponent($0) }
+            if urls.allSatisfy({ fileManager.fileExists(atPath: $0.path) }) { return urls }
+        }
+        return []
+    }()
+}
+
+@MainActor
+private final class LandingArtworkCache {
+    static let shared = LandingArtworkCache()
+    private let images: NSCache<NSURL, NSImage> = {
+        let cache = NSCache<NSURL, NSImage>()
+        cache.countLimit = 3
+        return cache
+    }()
+
+    func image(for url: URL) -> NSImage? {
+        if let cached = images.object(forKey: url as NSURL) { return cached }
+        guard let image = NSImage(contentsOf: url) else { return nil }
+        images.setObject(image, forKey: url as NSURL)
+        return image
+    }
+}
+
 private struct WaveformGlyph: View {
     let active: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -3456,6 +3620,17 @@ private extension View {
     func glass(cornerRadius: CGFloat) -> some View {
         modifier(AdaptiveSurface(cornerRadius: cornerRadius, elevated: true))
     }
+}
+
+private enum LandingPalette {
+    static let background = Color.white
+    static let ink = Color(red: 0.075, green: 0.08, blue: 0.07)
+    static let secondary = Color(red: 0.39, green: 0.41, blue: 0.37)
+    static let muted = Color(red: 0.64, green: 0.66, blue: 0.61)
+    static let line = Color(red: 0.89, green: 0.90, blue: 0.87)
+    static let field = Color(red: 0.965, green: 0.97, blue: 0.95)
+    static let selection = Color(red: 0.92, green: 0.95, blue: 0.84)
+    static let accent = Color(red: 0.20, green: 0.39, blue: 0.22)
 }
 
 private enum Palette {
