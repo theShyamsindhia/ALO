@@ -25,9 +25,11 @@ jobs:
         env:
           DEVELOPER_ID_P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
           DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+          WERAI_CODESIGN_IDENTITY: ${{ vars.WERAI_CODESIGN_IDENTITY }}
         run: |
           test -n "$DEVELOPER_ID_P12_BASE64"
           test -n "$DEVELOPER_ID_P12_PASSWORD"
+          test -n "$WERAI_CODESIGN_IDENTITY"
           certificate_path="$RUNNER_TEMP/developer-id.p12"
           keychain_path="$RUNNER_TEMP/werai-signing.keychain-db"
           keychain_password="$(openssl rand -hex 32)"
@@ -38,16 +40,17 @@ jobs:
           security import "$certificate_path" \
             -k "$keychain_path" \
             -P "$DEVELOPER_ID_P12_PASSWORD" \
-            -A \
-            -T /usr/bin/codesign \
-            -T /usr/bin/security
+            -T /usr/bin/codesign
           security set-key-partition-list \
-            -S apple-tool:,apple: \
+            -S apple: \
             -s \
             -k "$keychain_password" \
+            -l "$WERAI_CODESIGN_IDENTITY" \
             "$keychain_path"
           security list-keychains -d user -s "$keychain_path"
           security default-keychain -d user -s "$keychain_path"
+          security find-identity -v -p codesigning "$keychain_path" \
+            | grep -F "$WERAI_CODESIGN_IDENTITY"
           rm "$certificate_path"
           echo "SIGNING_KEYCHAIN=$keychain_path" >> "$GITHUB_ENV"
           echo "WERAI_SIGNING_KEYCHAIN=$keychain_path" >> "$GITHUB_ENV"
