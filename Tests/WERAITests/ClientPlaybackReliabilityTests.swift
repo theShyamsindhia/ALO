@@ -4,6 +4,37 @@ import Testing
 @testable import WERAICore
 
 struct ClientPlaybackReliabilityTests {
+    @Test @MainActor func videoControlStartsAudioAndVideoWhenNoBroadcasterVideoExists() {
+        #expect(WERAIViewModel.videoControlIntent(
+            isLive: true,
+            isHost: false,
+            roomHasVideo: false,
+            experience: .audio,
+            mediaSwitchBusy: false
+        ) == .beginAudioAndVideoBroadcast)
+        #expect(WERAIViewModel.videoControlIntent(
+            isLive: true,
+            isHost: true,
+            roomHasVideo: false,
+            experience: .audio,
+            mediaSwitchBusy: false
+        ) == .enableVideo)
+        #expect(WERAIViewModel.videoControlIntent(
+            isLive: true,
+            isHost: false,
+            roomHasVideo: true,
+            experience: .audio,
+            mediaSwitchBusy: false
+        ) == .showViewer)
+        #expect(WERAIViewModel.videoControlIntent(
+            isLive: true,
+            isHost: false,
+            roomHasVideo: true,
+            experience: .video,
+            mediaSwitchBusy: false
+        ) == .toggleViewer)
+    }
+
     @Test func explicitOutputDeviceTakesPrecedenceOverUID() {
         var resolutions = 0
         let selected = SynchronizedPlayer.selectedOutputDeviceID(

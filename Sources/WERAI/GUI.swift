@@ -428,6 +428,14 @@ final class WERAIViewModel: ObservableObject {
         case video
     }
 
+    enum VideoControlIntent: Equatable {
+        case unavailable
+        case toggleViewer
+        case showViewer
+        case enableVideo
+        case beginAudioAndVideoBroadcast
+    }
+
     @Published var mode: Mode = .listen
     @Published var phase: Phase = .idle
     @Published var roomName = "My Room"
@@ -466,6 +474,8 @@ final class WERAIViewModel: ObservableObject {
 
     private var roomBrowser: MeshRoomBrowser!
     private var meshSession: MeshSession?
+    private var requestedVideoBroadcast = false
+    private var videoBroadcastTimeoutTask: Task<Void, Never>?
     private let roomStore = RoomStore()
     private let nodeID: String
     private var localNowPlayingMonitor: NowPlayingMonitor?
@@ -549,7 +559,28 @@ final class WERAIViewModel: ObservableObject {
         if audioIsRendering { return "Synced" }
         return nowPlaying.isEmpty ? "Waiting for audio" : "Recovering audio…"
     }
-    var canSelectVideo: Bool { isHost || roomHasVideo }
+    var canSelectVideo: Bool { phase == .live && meshSession != nil }
+    var videoControlHelp: String {
+        if mediaSwitchBusy { return "Preparing audio and video broadcast" }
+        switch videoControlIntent {
+        case .unavailable: return "Video is unavailable while the room opens"
+        case .toggleViewer, .showViewer: return "View shared video"
+        case .enableVideo: return "Broadcast video with room audio"
+        case .beginAudioAndVideoBroadcast:
+            return hasBroadcaster
+                ? "Take over and broadcast audio and video"
+                : "Broadcast audio and video"
+        }
+    }
+    var videoControlIntent: VideoControlIntent {
+        Self.videoControlIntent(
+            isLive: phase == .live && meshSession != nil,
+            isHost: isHost,
+            roomHasVideo: roomHasVideo,
+            experience: experience,
+            mediaSwitchBusy: mediaSwitchBusy
+        )
+    }
     var floatingPanelHeight: CGFloat {
         if permissionNotice { return FloatingMetrics.permissionHeight }
         switch floatingSection {
@@ -658,6 +689,10 @@ final class WERAIViewModel: ObservableObject {
                 self.errorIsPermissionRelated = permissionRelated
                 self.phase = .live
                 self.audioIsRendering = false
+                self.mediaSwitchBusy = false
+                self.requestedVideoBroadcast = false
+                self.videoBroadcastTimeoutTask?.cancel()
+                self.videoBroadcastTimeoutTask = nil
                 self.permissionNotice = permissionRelated
                 self.errorMessage = permissionRelated ? nil : self.readable(error)
                 self.statusText = permissionRelated
@@ -697,6 +732,7 @@ final class WERAIViewModel: ObservableObject {
 
         if selection == .video, !ensureScreenRecordingPermission() { return }
         mediaSwitchBusy = true
+        if selection == .video { statusText = "Preparing ALO Display and video capture" }
         Task {
             do {
                 try await meshSession?.setVideoEnabled(selection == .video)
@@ -708,8 +744,45 @@ final class WERAIViewModel: ObservableObject {
             } catch {
                 errorMessage = readable(error)
                 permissionNotice = isPermissionError(error)
+                statusText = permissionNotice
+                    ? "Recording access is needed to broadcast video"
+                    : "Video broadcast could not start: \(readable(error))"
             }
             mediaSwitchBusy = false
+        }
+    }
+
+    static func videoControlIntent(
+        isLive: Bool,
+        isHost: Bool,
+        roomHasVideo: Bool,
+        experience: Experience,
+        mediaSwitchBusy: Bool
+    ) -> VideoControlIntent {
+        guard isLive, !mediaSwitchBusy else { return .unavailable }
+        if roomHasVideo { return experience == .video ? .toggleViewer : .showViewer }
+        return isHost ? .enableVideo : .beginAudioAndVideoBroadcast
+    }
+
+    private func beginAudioAndVideoBroadcast() {
+        guard !mediaSwitchBusy, ensureScreenRecordingPermission(), let meshSession else { return }
+        mediaSwitchBusy = true
+        requestedVideoBroadcast = true
+        audioIsRendering = false
+        stopLocalNowPlayingMonitor()
+        statusText = hasBroadcaster
+            ? "Taking over room audio and preparing ALO Display"
+            : "Starting audio and video broadcast"
+        meshSession.beginBroadcasting(videoEnabled: true)
+        videoBroadcastTimeoutTask?.cancel()
+        videoBroadcastTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 20_000_000_000)
+            guard !Task.isCancelled, let self, self.requestedVideoBroadcast else { return }
+            self.requestedVideoBroadcast = false
+            self.mediaSwitchBusy = false
+            self.statusText = "Video broadcast did not start · try again"
+            self.errorMessage = "ALO could not finish taking over audio and starting ALO Display."
+            self.videoBroadcastTimeoutTask = nil
         }
     }
 
@@ -739,6 +812,7 @@ final class WERAIViewModel: ObservableObject {
     }
 
     func toggleBroadcasting() {
+        guard !mediaSwitchBusy else { return }
         if isHost { meshSession?.stopBroadcasting() }
         else {
             audioIsRendering = false
@@ -884,10 +958,15 @@ final class WERAIViewModel: ObservableObject {
     }
 
     func toggleVideoFromFloatingBar() {
-        if experience == .video, roomHasVideo {
+        switch videoControlIntent {
+        case .toggleViewer:
             toggleFloatingVideo()
-        } else {
+        case .showViewer, .enableVideo:
             selectExperience(.video)
+        case .beginAudioAndVideoBroadcast:
+            beginAudioAndVideoBroadcast()
+        case .unavailable:
+            break
         }
     }
 
@@ -1012,6 +1091,15 @@ final class WERAIViewModel: ObservableObject {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.roomHasVideo = enabled
+                if enabled, self.requestedVideoBroadcast {
+                    self.requestedVideoBroadcast = false
+                    self.mediaSwitchBusy = false
+                    self.videoBroadcastTimeoutTask?.cancel()
+                    self.videoBroadcastTimeoutTask = nil
+                    self.experience = .video
+                    self.floatingSection = .video
+                    self.statusText = "Audio and ALO Display are live"
+                }
                 if !enabled {
                     self.videoFullscreen = false
                     self.videoFrame = nil
@@ -1110,6 +1198,10 @@ final class WERAIViewModel: ObservableObject {
         videoFrame = nil
         videoFullscreen = false
         roomHasVideo = false
+        requestedVideoBroadcast = false
+        mediaSwitchBusy = false
+        videoBroadcastTimeoutTask?.cancel()
+        videoBroadcastTimeoutTask = nil
         nowPlaying = NowPlayingMedia()
         localNowPlaying = NowPlayingMedia()
         audioIsRendering = false
@@ -1640,6 +1732,7 @@ private struct FloatingRoomView: View {
                 icon: model.isHost ? "dot.radiowaves.left.and.right" : "waveform.badge.mic",
                 activeIcon: "dot.radiowaves.left.and.right",
                 active: model.isHost,
+                disabled: model.mediaSwitchBusy,
                 help: model.isHost ? "Stop broadcasting this Mac" : (model.hasBroadcaster ? "Take over room audio" : "Broadcast this Mac")
             ) { model.toggleBroadcasting() }
 
@@ -1675,11 +1768,11 @@ private struct FloatingRoomView: View {
             .keyboardShortcut("2", modifiers: .command)
 
             roomBarButton(
-                icon: "rectangle.on.rectangle",
+                icon: model.mediaSwitchBusy ? "hourglass" : "rectangle.on.rectangle",
                 activeIcon: "rectangle.fill.on.rectangle.fill",
                 active: model.floatingSection == .video || model.experience == .video,
                 disabled: !model.canSelectVideo || model.mediaSwitchBusy,
-                help: model.isHost ? "Share or view screen" : "View shared screen"
+                help: model.videoControlHelp
             ) { model.toggleVideoFromFloatingBar() }
             .keyboardShortcut("3", modifiers: .command)
 

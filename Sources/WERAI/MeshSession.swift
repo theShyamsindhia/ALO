@@ -23,6 +23,7 @@ final class MeshSession {
     private var appliedBroadcaster: MeshBroadcaster?
     private var transitionGeneration = 0
     private var intendsToBroadcast = false
+    private var intendsToBroadcastVideo = false
     private var mediaCommandReady = false
     private var transitionTask: Task<Void, Never>?
     private var isStopped = true
@@ -133,14 +134,16 @@ final class MeshSession {
         else { statusHandler("Room open · waiting for a broadcaster") }
     }
 
-    func beginBroadcasting() {
+    func beginBroadcasting(videoEnabled: Bool = false) {
         intendsToBroadcast = true
+        intendsToBroadcastVideo = videoEnabled
         let service = "WERAI-\(room.id.prefix(8))-\(nodeID.prefix(8))"
         control.publishBroadcaster(active: true, mediaServiceName: service)
     }
 
     func stopBroadcasting() {
         intendsToBroadcast = false
+        intendsToBroadcastVideo = false
         guard let broadcaster = replica.broadcaster, broadcaster.nodeID == nodeID else { return }
         control.publishVideo(false, broadcasterID: nodeID, broadcasterEpoch: broadcaster.epoch)
         control.publishBroadcaster(active: false)
@@ -203,6 +206,7 @@ final class MeshSession {
             if enabled { try? await hostSession.setVideoEnabled(false) }
             return
         }
+        intendsToBroadcastVideo = enabled
         control.publishVideo(enabled, broadcasterID: nodeID, broadcasterEpoch: broadcaster.epoch)
     }
 
@@ -210,6 +214,7 @@ final class MeshSession {
         guard !isStopped else { return }
         isStopped = true
         intendsToBroadcast = false
+        intendsToBroadcastVideo = false
         if let broadcaster = replica.broadcaster, broadcaster.nodeID == nodeID {
             control.publishVideo(false, broadcasterID: nodeID, broadcasterEpoch: broadcaster.epoch)
             control.publishBroadcaster(active: false)
@@ -231,6 +236,7 @@ final class MeshSession {
         guard !isStopped else { return }
         isStopped = true
         intendsToBroadcast = false
+        intendsToBroadcastVideo = false
         transitionGeneration += 1
         transitionTask?.cancel()
         transitionTask = nil
@@ -289,13 +295,14 @@ final class MeshSession {
                 if broadcaster.nodeID == nodeID {
                     statusHandler("Taking over room audio")
                     let host = HostSession()
+                    let initialVideoEnabled = intendsToBroadcastVideo
                     hostSession = host
                     try await host.start(
                         roomName: broadcaster.mediaServiceName,
                         participantID: nodeID,
                         statusHandler: statusHandler,
                         receiverCountHandler: { _ in },
-                        initialVideoEnabled: false,
+                        initialVideoEnabled: initialVideoEnabled,
                         identityHandler: { _, _ in },
                         participantsHandler: { _ in },
                         mediaStateHandler: mediaStateHandler,
@@ -325,6 +332,7 @@ final class MeshSession {
                                   current.nodeID == self.nodeID,
                                   current.epoch == broadcaster.epoch
                             else { return }
+                            self.intendsToBroadcastVideo = false
                             self.control.publishVideo(
                                 false,
                                 broadcasterID: self.nodeID,
@@ -336,6 +344,15 @@ final class MeshSession {
                           replica.broadcaster?.nodeID == nodeID else {
                         await host.stop()
                         return
+                    }
+                    if initialVideoEnabled,
+                       let current = replica.broadcaster,
+                       current.nodeID == nodeID {
+                        control.publishVideo(
+                            true,
+                            broadcasterID: nodeID,
+                            broadcasterEpoch: current.epoch
+                        )
                     }
                     mediaCommandReady = true
                 } else {
