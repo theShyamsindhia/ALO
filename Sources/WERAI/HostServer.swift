@@ -53,6 +53,7 @@ final class HostServer {
     private var mediaQueue = [RoomQueueItem]()
     private var groupPlayoutDelayNanos = RoomTiming.defaultPlayoutDelayNanos
     private var lastGroupDelayAdjustmentNanos: UInt64 = 0
+    private var isGroupTimingLocked = false
 
     init(
         roomName: String,
@@ -123,6 +124,7 @@ final class HostServer {
                 captureTimeNanos: captureTimeNanos
             )
             guard !packets.isEmpty else { return }
+            self.isGroupTimingLocked = true
 
             let audioClients = self.clients.values.filter { $0.audio != nil }
             for packet in packets {
@@ -438,6 +440,7 @@ final class HostServer {
     }
 
     private func updateGroupTiming() {
+        guard !isGroupTimingLocked else { return }
         let now = MonotonicClock.nowNanos()
         let activeRecommendations = clients.values.compactMap { client -> UInt64? in
             guard let reportedAt = client.lastSyncReportNanos,

@@ -182,6 +182,55 @@ struct LoopbackRoomScaleTests {
         #expect(observer.resyncCommandCount == 0)
     }
 
+    @Test("A joining listener cannot retime an active room")
+    func joiningListenerKeepsEstablishedRoomTiming() throws {
+        let hostReady = DispatchSemaphore(value: 0)
+        let state = PortState()
+        let host = HostServer(
+            roomName: "Stable timing test \(UUID().uuidString)",
+            advertise: false,
+            listenerReadyHandler: { port in
+                state.set(port)
+                hostReady.signal()
+            }
+        )
+        try host.start()
+        defer { host.stop() }
+        guard hostReady.wait(timeout: .now() + 3) == .success,
+              let hostPort = state.port
+        else { throw LoopbackTestError.hostDidNotStart }
+
+        let existingPeer = HeadlessLoopbackPeer(index: 101)
+        try existingPeer.start(hostPort: hostPort)
+        defer { existingPeer.stop() }
+        guard existingPeer.waitUntilJoined(timeout: 3) else {
+            throw LoopbackTestError.peerDidNotJoin
+        }
+
+        let samples = [Int16](
+            repeating: 0,
+            count: Int(AudioPacket.framesPerPacket) * Int(AudioPacket.channelCount)
+        )
+        host.acceptAudio(samples: samples, captureTimeNanos: MonotonicClock.nowNanos())
+        #expect(waitUntil(timeout: 2) { existingPeer.packetCount == 1 })
+
+        let joiningPeer = HeadlessLoopbackPeer(index: 102)
+        try joiningPeer.start(hostPort: hostPort)
+        defer { joiningPeer.stop() }
+        guard joiningPeer.waitUntilJoined(timeout: 3) else {
+            throw LoopbackTestError.peerDidNotJoin
+        }
+        #expect(waitUntil(timeout: 2) {
+            joiningPeer.playoutDelays.last == RoomTiming.defaultPlayoutDelayNanos
+        })
+
+        joiningPeer.recommendPlayoutDelay(RoomTiming.maximumPlayoutDelayNanos)
+        joiningPeer.sendPing()
+        #expect(joiningPeer.waitForPong(timeout: 2))
+        #expect(existingPeer.playoutDelays.last == RoomTiming.defaultPlayoutDelayNanos)
+        #expect(joiningPeer.playoutDelays.last == RoomTiming.defaultPlayoutDelayNanos)
+    }
+
     private func runRoom(
         peerCount: Int,
         linkBitsPerSecond: UInt64?,
@@ -328,6 +377,7 @@ private final class HeadlessLoopbackPeer {
     private let queue: DispatchQueue
     private let index: Int
     private let joined = DispatchSemaphore(value: 0)
+    private let pongReceived = DispatchSemaphore(value: 0)
     private let clock = ClockSynchronizer()
     private let controlDecoder = ControlLineDecoder()
     private var udpListener: NWListener?
@@ -338,6 +388,7 @@ private final class HeadlessLoopbackPeer {
     private var arrivals = [UInt32: PacketArrival]()
     private var receivedResyncCommands = 0
     private var receivedPlaybackStates = [Bool]()
+    private var receivedPlayoutDelays = [UInt64]()
 
     init(index: Int) {
         self.index = index
@@ -348,6 +399,7 @@ private final class HeadlessLoopbackPeer {
     var lastSequence: UInt32? { queue.sync { arrivals.keys.max() } }
     var resyncCommandCount: Int { queue.sync { receivedResyncCommands } }
     var playbackStates: [Bool] { queue.sync { receivedPlaybackStates } }
+    var playoutDelays: [UInt64] { queue.sync { receivedPlayoutDelays } }
 
     func start(hostPort: NWEndpoint.Port) throws {
         let udp = try NWListener(using: .udp, on: .any)
@@ -389,6 +441,16 @@ private final class HeadlessLoopbackPeer {
         queue.async { [weak self] in
             guard let self else { return }
             self.send(self.clock.makePing(at: MonotonicClock.nowNanos()))
+        }
+    }
+
+    func waitForPong(timeout: TimeInterval) -> Bool {
+        pongReceived.wait(timeout: .now() + timeout) == .success
+    }
+
+    func recommendPlayoutDelay(_ nanos: UInt64) {
+        queue.async { [weak self] in
+            self?.send(ControlMessage(type: "sync_report", playoutDelayNanos: nanos))
         }
     }
 
@@ -477,8 +539,12 @@ private final class HeadlessLoopbackPeer {
                         self.joined.signal()
                     } else if message.type == "pong" {
                         self.clock.acceptPong(message, receivedAt: MonotonicClock.nowNanos())
+                        self.pongReceived.signal()
                     } else if message.type == "resync" {
                         self.receivedResyncCommands += 1
+                    } else if message.type == "sync_timing",
+                              let delay = message.playoutDelayNanos {
+                        self.receivedPlayoutDelays.append(delay)
                     } else if message.type == "now_playing",
                               let isPlaying = message.nowPlaying?.isPlaying {
                         self.receivedPlaybackStates.append(isPlaying)

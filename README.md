@@ -103,9 +103,9 @@ new ALO build does not silently become a different app in macOS privacy settings
 - Eight rapid clock samples are taken when a Mac joins, followed by a continuous sample
   every second. A low-latency clock model estimates both offset and drift while rejecting
   Wi-Fi spikes.
-- The room shares one adaptive playout target. It stays at a safe 250 ms on a healthy LAN
-  and grows only when the weakest active connection reports sustained jitter. Reductions
-  happen slowly so the room never snaps backward in time.
+- The room establishes one shared playout target before audio begins. Once streaming starts,
+  that timeline is locked, so a joining Mac adopts the room's timing instead of interrupting
+  everyone already listening.
 - Output-device latency is measured per Mac. Remaining error is corrected 20 times per
   second with a smoothed varispeed adjustment capped at 0.2%.
 - Each receiver watches the audio render clock while packets are still arriving. If a
@@ -169,7 +169,7 @@ Change one control at a time and compare it with the unbounded baseline in
 `LoopbackRoomScaleTests`:
 
 - `RoomTiming.defaultPlayoutDelayNanos`, `maximumPlayoutDelayNanos`, and
-  `timingStepNanos` control the adaptive shared room buffer.
+  `timingStepNanos` control the initial shared room buffer before its timeline locks.
 - `SynchronizedPlayer.hardResyncThresholdNanos` controls when gradual varispeed
   correction gives way to a hard re-anchor.
 - `PlaybackWatchdog.stallThresholdNanos` controls how long an active receiver's render
