@@ -142,9 +142,9 @@ struct RoomMessage: Identifiable, Equatable {
 }
 
 private enum FloatingMetrics {
-    static let width: CGFloat = 680
-    static let barHeight: CGFloat = 68
-    static let cornerRadius: CGFloat = 26
+    static let width: CGFloat = 520
+    static let barHeight: CGFloat = 58
+    static let cornerRadius: CGFloat = 22
     static let separatorHeight: CGFloat = 1
     static let expansionDuration: TimeInterval = 0.24
     static let chatHeight: CGFloat = 380
@@ -1036,32 +1036,8 @@ private struct FloatingRoomView: View {
     }
 
     private var roomBar: some View {
-        HStack(spacing: 10) {
-            artworkTile
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(model.nowPlaying.title ?? model.roomTitle)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Palette.ink)
-                    .lineLimit(1)
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(Palette.syncText)
-                        .frame(width: 5, height: 5)
-                        .accessibilityHidden(true)
-                    Text(
-                        model.nowPlaying.title == nil
-                            ? "\(model.participants.count) listening · Synced"
-                            : "\(model.roomTitle) · Synced"
-                    )
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(Palette.detailText)
-                    .lineLimit(1)
-                }
-            }
-            .frame(width: 250, alignment: .leading)
-
-            Spacer(minLength: 4)
+        HStack(spacing: 8) {
+            roomIdentity
 
             roomBarButton(
                 icon: "music.note.list",
@@ -1103,17 +1079,48 @@ private struct FloatingRoomView: View {
                 Image(systemName: "xmark")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Palette.red)
-                    .frame(width: 32, height: 34)
+                    .frame(width: 30, height: 32)
             }
             .buttonStyle(FlatToolButtonStyle(active: false))
             .help("Leave room")
             .accessibilityLabel("Leave room")
         }
-        .padding(.horizontal, 10)
+        .padding(.horizontal, 8)
         .frame(width: FloatingMetrics.width, height: FloatingMetrics.barHeight)
         .onChange(of: model.floatingSection) { _, section in
             composerFocused = section == .chat
         }
+    }
+
+    private var roomIdentity: some View {
+        HStack(spacing: 9) {
+            artworkTile
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(model.nowPlaying.title ?? model.roomTitle)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Palette.ink)
+                    .lineLimit(1)
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(Palette.syncText)
+                        .frame(width: 5, height: 5)
+                        .accessibilityHidden(true)
+                    Text(
+                        model.nowPlaying.title == nil
+                            ? "\(model.participants.count) listening · Synced"
+                            : "\(model.roomTitle) · Synced"
+                    )
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(Palette.detailText)
+                    .lineLimit(1)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .overlay(WindowDragRegion().accessibilityHidden(true))
+        .help("Drag to move WERAI")
     }
 
     private var artworkTile: some View {
@@ -1126,15 +1133,15 @@ private struct FloatingRoomView: View {
                 ZStack {
                     Palette.artworkFallback
                     Image(systemName: "music.note")
-                        .font(.system(size: 16, weight: .medium))
+                        .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(Palette.accentText)
                 }
             }
         }
-        .frame(width: 44, height: 44)
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .frame(width: 38, height: 38)
+        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
                 .stroke(Palette.stroke, lineWidth: 1)
         )
         .accessibilityLabel(model.nowPlaying.title.map { "Album artwork for \($0)" } ?? "Audio room")
@@ -1156,7 +1163,7 @@ private struct FloatingRoomView: View {
                     .symbolRenderingMode(.monochrome)
                     .contentTransition(.symbolEffect(.replace))
                     .foregroundStyle(active ? Palette.selectedControlText : Palette.controlIcon)
-                    .frame(width: 36, height: 34)
+                    .frame(width: 34, height: 32)
                     .contentShape(Rectangle())
                 if badge > 0 {
                     Text(badge > 99 ? "99+" : "\(badge)")
@@ -1646,6 +1653,26 @@ private struct VideoOverlayButtonStyle: ButtonStyle {
     }
 }
 
+private struct WindowDragRegion: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        DragView()
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    private final class DragView: NSView {
+        override var mouseDownCanMoveWindow: Bool { true }
+
+        override func mouseDown(with event: NSEvent) {
+            window?.performDrag(with: event)
+        }
+
+        override func resetCursorRects() {
+            addCursorRect(bounds, cursor: .openHand)
+        }
+    }
+}
+
 private final class FloatingRoomPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
@@ -1678,7 +1705,8 @@ private final class FloatingRoomWindowController {
         panel.isFloatingPanel = true
         panel.hidesOnDeactivate = false
         panel.becomesKeyOnlyIfNeeded = true
-        panel.isMovableByWindowBackground = true
+        panel.isMovable = true
+        panel.isMovableByWindowBackground = false
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         panel.animationBehavior = .none
