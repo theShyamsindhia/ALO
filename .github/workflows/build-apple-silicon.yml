@@ -21,11 +21,22 @@ jobs:
       - name: Verify Apple Silicon runner
         run: test "$(uname -m)" = "arm64"
 
-      - name: Install Developer ID certificate
+      - name: Install Developer ID Application certificate
+        id: import-application-certificate
         uses: apple-actions/import-codesign-certs@v7
         with:
+          keychain: signing_temp
           p12-file-base64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
           p12-password: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+
+      - name: Install Developer ID Installer certificate
+        uses: apple-actions/import-codesign-certs@v7
+        with:
+          keychain: signing_temp
+          create-keychain: false
+          keychain-password: ${{ steps.import-application-certificate.outputs.keychain-password }}
+          p12-file-base64: ${{ secrets.DEVELOPER_ID_INSTALLER_P12_BASE64 }}
+          p12-password: ${{ secrets.DEVELOPER_ID_INSTALLER_P12_PASSWORD }}
 
       - name: Verify signing identity
         env:
