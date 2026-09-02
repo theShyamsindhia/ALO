@@ -3,10 +3,9 @@ import Foundation
 import ScreenCaptureKit
 
 enum RecordingErrorPresentation {
-    private static let opaqueCaptureStartCodes: Set<Int> = [
+    private static let opaqueScreenCaptureStartCodes: Set<Int> = [
         SCStreamError.Code.failedToStart.rawValue,
-        SCStreamError.Code.internalError.rawValue,
-        SCStreamError.Code.failedToStartAudioCapture.rawValue
+        SCStreamError.Code.internalError.rawValue
     ]
 
     private static let permissionPhrases = [
@@ -23,11 +22,12 @@ enum RecordingErrorPresentation {
     ) -> Bool {
         for error in errorChain(startingAt: error) {
             if error.domain == SCStreamErrorDomain {
-                if error.code == SCStreamError.Code.userDeclined.rawValue {
+                if error.code == SCStreamError.Code.userDeclined.rawValue
+                    || error.code == SCStreamError.Code.failedToStartAudioCapture.rawValue {
                     return true
                 }
-                if opaqueCaptureStartCodes.contains(error.code) {
-                    // ScreenCaptureKit can return only a generic start/audio failure when TCC
+                if opaqueScreenCaptureStartCodes.contains(error.code) {
+                    // ScreenCaptureKit can return only a generic stream-start failure when TCC
                     // rejects a newly installed copy whose signing identity no longer matches the
                     // permission entry shown in System Settings.
                     if !screenCaptureAccess { return true }
@@ -49,7 +49,7 @@ enum RecordingErrorPresentation {
         guard isPermissionFailure(error, screenCaptureAccess: screenCaptureAccess) else {
             return error.localizedDescription
         }
-        return "macOS denied recording access to this copy of ALO. If ALO already looks enabled, remove its old entry in Recording settings, add the installed app again, then restart ALO."
+        return "macOS denied recording access to ALO. For audio, enable ALO under System Audio Recording Only (or Screen & System Audio Recording). Video sharing requires Screen & System Audio Recording. Then restart ALO once."
     }
 
     private static func errorChain(startingAt error: Error) -> [NSError] {

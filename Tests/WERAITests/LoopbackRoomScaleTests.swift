@@ -119,6 +119,41 @@ struct LoopbackRoomScaleTests {
         #expect(!inactiveLaterCheck)
     }
 
+    @Test("Listener re-anchors after sustained post-spike drift")
+    func listenerReanchorsAfterSustainedPostSpikeDrift() {
+        var recovery = PlaybackDriftRecovery()
+        let delayed = SynchronizedPlayer.sustainedDriftThresholdNanos + 30_000_000
+
+        let firstDelayedCheck = recovery.shouldResynchronize(latenessNanos: delayed)
+        let secondDelayedCheck = recovery.shouldResynchronize(latenessNanos: delayed)
+        let thirdDelayedCheck = recovery.shouldResynchronize(latenessNanos: delayed)
+        #expect(!firstDelayedCheck)
+        #expect(!secondDelayedCheck)
+        #expect(thirdDelayedCheck)
+
+        // A single delayed observation after recovery must not cause a resync loop.
+        let postRecoveryDelay = recovery.shouldResynchronize(latenessNanos: delayed)
+        let recoveredCheck = recovery.shouldResynchronize(latenessNanos: 2_000_000)
+        let newDelay = recovery.shouldResynchronize(latenessNanos: delayed)
+        #expect(!postRecoveryDelay)
+        #expect(!recoveredCheck)
+        #expect(!newDelay)
+    }
+
+    @Test("One busy listener cannot retime a three-device room")
+    func oneBusyListenerCannotRetimeRoom() {
+        let normal = RoomTiming.defaultPlayoutDelayNanos
+        let delayed = RoomTiming.maximumPlayoutDelayNanos
+
+        #expect(HostServer.consensusPlayoutDelay([normal]) == normal)
+        #expect(HostServer.consensusPlayoutDelay([delayed]) == delayed)
+        // The broadcaster's loopback receiver is excluded before this calculation,
+        // so a one-listener room still follows its only remote recommendation.
+        #expect(HostServer.consensusPlayoutDelay([normal, delayed]) == normal)
+        #expect(HostServer.consensusPlayoutDelay([normal, normal, delayed]) == normal)
+        #expect(HostServer.consensusPlayoutDelay([normal, delayed, delayed]) == delayed)
+    }
+
     @Test("Participant play and pause requests force every receiver to resynchronize")
     func participantControlsHostPlayback() throws {
         let hostReady = DispatchSemaphore(value: 0)

@@ -48,7 +48,8 @@ final class HostSession {
                 receiverCountHandler: receiverCountHandler,
                 playbackRequestHandler: { [weak playbackController] command in
                     playbackController?.perform(command) ?? false
-                }
+                },
+                localParticipantID: participantID
             )
             try host.start()
             self.host = host

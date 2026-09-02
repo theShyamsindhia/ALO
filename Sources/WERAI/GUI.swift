@@ -654,16 +654,16 @@ final class WERAIViewModel: ObservableObject {
             peerVersionHandler: { [weak self] version in self?.peerVersionHandler(version) },
             errorHandler: { [weak self] error in
                 guard let self else { return }
-                self.errorIsPermissionRelated = self.isPermissionError(error)
-                self.phase = .failed
-                self.errorMessage = self.readable(error)
-                self.statusText = "Broadcast could not start"
-                self.stopLocalNowPlayingMonitor()
-                Task {
-                    await self.meshSession?.stop()
-                    self.meshSession = nil
-                    self.roomBrowser.start()
-                }
+                let permissionRelated = self.isPermissionError(error)
+                self.errorIsPermissionRelated = permissionRelated
+                self.phase = .live
+                self.audioIsRendering = false
+                self.permissionNotice = permissionRelated
+                self.errorMessage = permissionRelated ? nil : self.readable(error)
+                self.statusText = permissionRelated
+                    ? "Recording access is needed to broadcast"
+                    : "Broadcast could not start: \(self.readable(error))"
+                self.updateLocalNowPlayingMonitor()
             },
             replicaPersistenceHandler: { [weak self] replica in
                 self?.roomStore.saveEvents(replica.events, roomID: room.id)
@@ -695,7 +695,7 @@ final class WERAIViewModel: ObservableObject {
             return
         }
 
-        if selection == .video, !ensureRecordingPermission() { return }
+        if selection == .video, !ensureScreenRecordingPermission() { return }
         mediaSwitchBusy = true
         Task {
             do {
@@ -740,7 +740,6 @@ final class WERAIViewModel: ObservableObject {
     func toggleBroadcasting() {
         if isHost { meshSession?.stopBroadcasting() }
         else {
-            guard ensureRecordingPermission() else { return }
             audioIsRendering = false
             stopLocalNowPlayingMonitor()
             meshSession?.beginBroadcasting()
@@ -835,7 +834,6 @@ final class WERAIViewModel: ObservableObject {
     func playQueueItem(_ item: RoomQueueItem) {
         guard let url = validMediaURL(item.url) else { return }
         if !isHost {
-            guard ensureRecordingPermission() else { return }
             stopLocalNowPlayingMonitor()
             meshSession?.beginBroadcasting()
         }
@@ -964,7 +962,7 @@ final class WERAIViewModel: ObservableObject {
         meshSession?.stopImmediately()
     }
 
-    private func ensureRecordingPermission() -> Bool {
+    private func ensureScreenRecordingPermission() -> Bool {
         guard CGPreflightScreenCaptureAccess() else {
             permissionNotice = true
             let granted = CGRequestScreenCaptureAccess()
@@ -1433,10 +1431,10 @@ private struct WERAIView: View {
                     .foregroundStyle(Palette.muted)
                 }
                 VStack(alignment: .leading, spacing: 7) {
-                    Text("Allow audio and video sharing")
+                    Text("Allow broadcasting")
                         .font(.system(size: 19, weight: .semibold, design: .rounded))
                         .foregroundStyle(Palette.ink)
-                    Text("Turn ALO on in Privacy & Security → Screen & System Audio Recording, then restart ALO. ALO captures system audio only while this Mac is broadcasting, and captures video only when you enable video sharing.")
+                    Text("For audio, turn ALO on under System Audio Recording Only (or Screen & System Audio Recording). Video sharing requires Screen & System Audio Recording. Then restart ALO once.")
                         .font(.system(size: 12, design: .rounded))
                         .foregroundStyle(Palette.secondary)
                         .lineSpacing(3)
@@ -2292,7 +2290,7 @@ private struct FloatingRoomView: View {
                 Text("Broadcasting needs recording access")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(Palette.ink)
-                Text("Enable ALO for Screen & System Audio Recording, restart it, then broadcast again.")
+                Text("Enable ALO under System Audio Recording Only (or Screen & System Audio Recording), restart once, then broadcast again.")
                     .font(.system(size: 11))
                     .foregroundStyle(Palette.secondary)
             }

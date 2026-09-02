@@ -45,6 +45,7 @@ final class HostServer {
     private let outboundSend: OutboundSend?
     private let audioBackpressurePolicy: AudioBackpressurePolicy
     private let playbackRequestHandler: ((RoomMediaCommand) -> Bool)?
+    private let localParticipantID: String?
     private let packetizer = AudioPacketizer()
     private var listener: NWListener?
     private var clients = [ObjectIdentifier: Client]()
@@ -65,7 +66,8 @@ final class HostServer {
         listenerReadyHandler: ((NWEndpoint.Port) -> Void)? = nil,
         outboundSend: OutboundSend? = nil,
         audioBackpressurePolicy: AudioBackpressurePolicy = .boundedLatest(maxInFlight: 8),
-        playbackRequestHandler: ((RoomMediaCommand) -> Bool)? = nil
+        playbackRequestHandler: ((RoomMediaCommand) -> Bool)? = nil,
+        localParticipantID: String? = nil
     ) {
         self.roomName = roomName
         self.statusHandler = statusHandler
@@ -75,6 +77,7 @@ final class HostServer {
         self.outboundSend = outboundSend
         self.audioBackpressurePolicy = audioBackpressurePolicy
         self.playbackRequestHandler = playbackRequestHandler
+        self.localParticipantID = localParticipantID
     }
 
     func start() throws {
@@ -454,6 +457,7 @@ final class HostServer {
         let now = MonotonicClock.nowNanos()
         let activeRecommendations = clients.compactMap { identifier, client -> UInt64? in
             if let timingEligibleClients, !timingEligibleClients.contains(identifier) { return nil }
+            if client.id == localParticipantID { return nil }
             guard let reportedAt = client.lastSyncReportNanos,
                   now >= reportedAt,
                   now - reportedAt <= 5_000_000_000
@@ -463,7 +467,7 @@ final class HostServer {
         // Once audio has established a timeline, losing the original reporters
         // must not make later joiners indirectly pull that timeline backward.
         if timingEligibleClients != nil, activeRecommendations.isEmpty { return }
-        let desired = activeRecommendations.max() ?? RoomTiming.defaultPlayoutDelayNanos
+        let desired = Self.consensusPlayoutDelay(activeRecommendations)
 
         let next: UInt64
         if desired > groupPlayoutDelayNanos {
@@ -483,6 +487,15 @@ final class HostServer {
             playoutDelayNanos: groupPlayoutDelayNanos
         ))
         print("Room timing adjusted to \(groupPlayoutDelayNanos / 1_000_000) ms.")
+    }
+
+    /// A single CPU-starved listener must not add latency to every healthy Mac.
+    /// The lower median requires a majority to agree before the shared buffer grows,
+    /// while a one-listener room can still adapt to that listener's network.
+    static func consensusPlayoutDelay(_ recommendations: [UInt64]) -> UInt64 {
+        guard !recommendations.isEmpty else { return RoomTiming.defaultPlayoutDelayNanos }
+        let sorted = recommendations.map(RoomTiming.clampedPlayoutDelay).sorted()
+        return sorted[(sorted.count - 1) / 2]
     }
 
     private func broadcastQueue() {

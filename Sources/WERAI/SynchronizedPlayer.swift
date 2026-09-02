@@ -7,6 +7,7 @@ import WERAICore
 final class SynchronizedPlayer {
     static let targetLatencyNanos = RoomTiming.defaultPlayoutDelayNanos
     static let hardResyncThresholdNanos: UInt64 = 100_000_000
+    static let sustainedDriftThresholdNanos: UInt64 = 20_000_000
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private let varispeed = AVAudioUnitVarispeed()
@@ -28,6 +29,7 @@ final class SynchronizedPlayer {
     private var resyncCount: UInt64 = 0
     private var lastPacketReceivedNanos: UInt64?
     private var playbackWatchdog = PlaybackWatchdog()
+    private var driftRecovery = PlaybackDriftRecovery()
     private var configurationObserver: NSObjectProtocol?
     private let configurationLock = NSLock()
     private var configurationChangePending = false
@@ -130,12 +132,18 @@ final class SynchronizedPlayer {
             * Double(AudioPacket.sampleRate) / 1_000_000_000
         let actualFrame = Double(anchorFrameIndex) + Double(playerTime.sampleTime)
         let errorFrames = Double(anchorFrameIndex) + expectedFrames - actualFrame
+        let absoluteErrorNanos = UInt64(
+            abs(errorFrames) * 1_000_000_000 / Double(AudioPacket.sampleRate)
+        )
         let hardResyncFrames = Double(AudioPacket.sampleRate)
             * Double(Self.hardResyncThresholdNanos) / 1_000_000_000
         if abs(errorFrames) > hardResyncFrames {
-            latestLatenessNanos = UInt64(
-                abs(errorFrames) * 1_000_000_000 / Double(AudioPacket.sampleRate)
-            )
+            latestLatenessNanos = absoluteErrorNanos
+            hardResynchronize()
+            return
+        }
+        if driftRecovery.shouldResynchronize(latenessNanos: absoluteErrorNanos) {
+            latestLatenessNanos = absoluteErrorNanos
             hardResynchronize()
             return
         }
@@ -218,6 +226,7 @@ final class SynchronizedPlayer {
         lastPacketReceivedNanos = nil
         setPlaybackActive(false)
         playbackWatchdog.reset()
+        driftRecovery.reset()
     }
 
     func setTargetLatencyNanos(_ nanos: UInt64) {
@@ -436,6 +445,7 @@ final class SynchronizedPlayer {
         anchorCaptureNanos = nil
         hasStarted = false
         playbackWatchdog.reset()
+        driftRecovery.reset()
         resyncCount &+= 1
         if let next = pending.values.min(by: { $0.sequence < $1.sequence }) {
             expectedSequence = next.sequence
@@ -484,6 +494,27 @@ final class SynchronizedPlayer {
             return value &+ UInt64(delta)
         }
         return value > UInt64(-delta) ? value - UInt64(-delta) : 0
+    }
+}
+
+struct PlaybackDriftRecovery {
+    static let requiredConsecutiveChecks = 3
+
+    private var consecutiveLateChecks = 0
+
+    mutating func shouldResynchronize(latenessNanos: UInt64) -> Bool {
+        guard latenessNanos >= SynchronizedPlayer.sustainedDriftThresholdNanos else {
+            reset()
+            return false
+        }
+        consecutiveLateChecks += 1
+        guard consecutiveLateChecks >= Self.requiredConsecutiveChecks else { return false }
+        reset()
+        return true
+    }
+
+    mutating func reset() {
+        consecutiveLateChecks = 0
     }
 }
 

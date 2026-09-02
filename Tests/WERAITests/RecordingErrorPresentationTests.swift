@@ -14,10 +14,20 @@ struct RecordingErrorPresentationTests {
         #expect(RecordingErrorPresentation.isPermissionFailure(error, screenCaptureAccess: true))
     }
 
-    @Test func recognizesOpaqueAudioStartFailureWhenTCCPreflightFails() {
+    @Test func recognizesOpaqueAudioStartFailureIndependentlyOfScreenPermission() {
         let error = NSError(
             domain: SCStreamErrorDomain,
             code: SCStreamError.Code.failedToStartAudioCapture.rawValue
+        )
+
+        #expect(RecordingErrorPresentation.isPermissionFailure(error, screenCaptureAccess: false))
+        #expect(RecordingErrorPresentation.isPermissionFailure(error, screenCaptureAccess: true))
+    }
+
+    @Test func opaqueScreenStartFailureUsesScreenPreflight() {
+        let error = NSError(
+            domain: SCStreamErrorDomain,
+            code: SCStreamError.Code.failedToStart.rawValue
         )
 
         #expect(RecordingErrorPresentation.isPermissionFailure(error, screenCaptureAccess: false))
@@ -51,6 +61,6 @@ struct RecordingErrorPresentationTests {
         )
 
         #expect(RecordingErrorPresentation.isPermissionFailure(wrapper, screenCaptureAccess: true))
-        #expect(RecordingErrorPresentation.message(for: wrapper, screenCaptureAccess: true).contains("old entry"))
+        #expect(RecordingErrorPresentation.message(for: wrapper, screenCaptureAccess: true).contains("System Audio Recording Only"))
     }
 }

@@ -322,12 +322,13 @@ final class MeshSession {
                     await hostSession?.stop()
                     hostSession = nil
                     control.publishBroadcaster(active: false)
+                    statusHandler("Media connection failed: \(error.localizedDescription)")
                     errorHandler(error)
                 } else {
                     receiver?.stop()
                     receiver = nil
+                    statusHandler("Media connection failed: \(error.localizedDescription)")
                 }
-                statusHandler("Media connection failed: \(error.localizedDescription)")
             }
         }
     }
