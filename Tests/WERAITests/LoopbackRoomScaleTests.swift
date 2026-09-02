@@ -119,7 +119,7 @@ struct LoopbackRoomScaleTests {
         #expect(!inactiveLaterCheck)
     }
 
-    @Test("Participant play and pause requests force every receiver to resynchronize")
+    @Test("Playback controls update the room without interrupting receiver audio")
     func participantControlsHostPlayback() throws {
         let hostReady = DispatchSemaphore(value: 0)
         let commandReceived = DispatchSemaphore(value: 0)
@@ -160,28 +160,26 @@ struct LoopbackRoomScaleTests {
         #expect(commandReceived.wait(timeout: .now() + 2) == .success)
         #expect(requestedCommands.values == [.pause])
         #expect(waitUntil(timeout: 2) { peer.playbackStates.contains(false) })
-        #expect(waitUntil(timeout: 2) {
-            peer.resyncCommandCount == 1 && observer.resyncCommandCount == 1
-        })
+        #expect(peer.resyncCommandCount == 0)
+        #expect(observer.resyncCommandCount == 0)
 
         peer.setRoomPlayback(playing: true)
         #expect(commandReceived.wait(timeout: .now() + 2) == .success)
         #expect(requestedCommands.values == [.pause, .play])
         #expect(waitUntil(timeout: 2) { observer.playbackStates.contains(true) })
-        #expect(waitUntil(timeout: 2) {
-            peer.resyncCommandCount == 2 && observer.resyncCommandCount == 2
-        })
+        #expect(peer.resyncCommandCount == 0)
+        #expect(observer.resyncCommandCount == 0)
 
         peer.sendMediaCommand(.nextTrack)
         #expect(commandReceived.wait(timeout: .now() + 2) == .success)
         #expect(requestedCommands.values == [.pause, .play, .nextTrack])
-        #expect(peer.resyncCommandCount == 2)
-        #expect(observer.resyncCommandCount == 2)
+        #expect(peer.resyncCommandCount == 0)
+        #expect(observer.resyncCommandCount == 0)
 
         host.setNowPlaying(NowPlayingMedia(isPlaying: false))
-        #expect(waitUntil(timeout: 2) {
-            peer.resyncCommandCount == 3 && observer.resyncCommandCount == 3
-        })
+        #expect(waitUntil(timeout: 2) { observer.playbackStates.last == false })
+        #expect(peer.resyncCommandCount == 0)
+        #expect(observer.resyncCommandCount == 0)
     }
 
     private func runRoom(
