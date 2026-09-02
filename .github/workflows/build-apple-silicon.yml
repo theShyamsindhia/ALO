@@ -1,9 +1,6 @@
 name: Build Apple Silicon app
 
 on:
-  push:
-    branches:
-      - main
   release:
     types:
       - published
@@ -24,13 +21,57 @@ jobs:
       - name: Verify Apple Silicon runner
         run: test "$(uname -m)" = "arm64"
 
+      - name: Install Developer ID certificate
+        env:
+          DEVELOPER_ID_P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          test -n "$DEVELOPER_ID_P12_BASE64"
+          test -n "$DEVELOPER_ID_P12_PASSWORD"
+          certificate_path="$RUNNER_TEMP/developer-id.p12"
+          keychain_path="$RUNNER_TEMP/werai-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 32)"
+          printf '%s' "$DEVELOPER_ID_P12_BASE64" | /usr/bin/base64 -D > "$certificate_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21_600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" \
+            -k "$keychain_path" \
+            -P "$DEVELOPER_ID_P12_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list \
+            -S apple-tool:,apple: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+          rm "$certificate_path"
+          echo "SIGNING_KEYCHAIN=$keychain_path" >> "$GITHUB_ENV"
+
       - name: Build and package arm64 app
+        env:
+          WERAI_CODESIGN_IDENTITY: ${{ vars.WERAI_CODESIGN_IDENTITY }}
         run: ./Scripts/package.sh --arm64-only
 
-      - name: Verify app architecture
+      - name: Verify app architecture and Developer ID signature
+        env:
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
         run: |
+          test -n "$APPLE_TEAM_ID"
           file dist/WERAI.app/Contents/MacOS/werai
           lipo dist/WERAI.app/Contents/MacOS/werai -verify_arch arm64
+          codesign --verify --deep --strict --verbose=2 dist/WERAI.app
+          signature="$(codesign -dvvv dist/WERAI.app 2>&1)"
+          grep -F "Authority=Developer ID Application:" <<< "$signature"
+          grep -F "TeamIdentifier=$APPLE_TEAM_ID" <<< "$signature"
+
+      - name: Remove signing keychain
+        if: always()
+        run: |
+          if [[ -n "${SIGNING_KEYCHAIN:-}" ]]; then
+            security delete-keychain "$SIGNING_KEYCHAIN" || true
+          fi
 
       - name: Upload app
         uses: actions/upload-artifact@v4

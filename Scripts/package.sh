@@ -23,6 +23,11 @@ binary="dist/werai"
 cli_archive="dist/werai-cli-macos-$archive_suffix.zip"
 app="dist/WERAI.app"
 app_archive="dist/WERAI-macos-$archive_suffix.zip"
+codesign_identity="${WERAI_CODESIGN_IDENTITY:--}"
+codesign_arguments=(--force --sign "$codesign_identity" --identifier in.werai.audio)
+if [[ "$codesign_identity" != "-" ]]; then
+    codesign_arguments+=(--options runtime --timestamp)
+fi
 
 if [[ ${#architectures[@]} -eq 1 ]]; then
     cp ".build/${architectures[1]}-apple-macosx/release/werai" "$binary"
@@ -32,7 +37,7 @@ else
         .build/x86_64-apple-macosx/release/werai \
         -output "$binary"
 fi
-codesign --force --sign - "$binary"
+codesign "${codesign_arguments[@]}" "$binary"
 
 icon_master="dist/AppIcon-1024.png"
 iconset="dist/AppIcon.iconset"
@@ -61,10 +66,14 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$binary" "$app/Contents/MacOS/werai"
 cp Resources/Info.plist "$app/Contents/Info.plist"
 cp dist/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
-codesign --force --deep --sign - \
-    --identifier in.werai.audio \
-    --requirements Resources/WERAI.requirements \
-    "$app"
+if [[ "$codesign_identity" == "-" ]]; then
+    codesign "${codesign_arguments[@]}" \
+        --requirements Resources/WERAI.requirements \
+        "$app"
+else
+    codesign "${codesign_arguments[@]}" "$app"
+fi
+codesign --verify --deep --strict --verbose=2 "$app"
 
 rm -f "$cli_archive" "$app_archive"
 ditto -c -k "$binary" "$cli_archive"

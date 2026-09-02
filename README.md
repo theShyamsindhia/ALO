@@ -185,9 +185,11 @@ input, and fragmented messages.
 
 ## GitHub builds and releases
 
-Every push to `main` runs **Build Apple Silicon app** on an Apple Silicon GitHub runner.
-The resulting `WERAI-macos-arm64.zip` is available from the workflow run's **Artifacts**
-section.
+Publishing a GitHub Release runs **Build Apple Silicon app** on an Apple Silicon GitHub
+runner. The workflow imports the repository's encrypted Developer ID certificate into an
+ephemeral keychain, enables the hardened runtime, verifies the signature and Team ID,
+and deletes that keychain before the job ends. Manual workflow dispatch remains available
+for signing diagnostics.
 
 To publish a downloadable build on the repository's **Releases** page:
 
@@ -199,9 +201,14 @@ To publish a downloadable build on the repository's **Releases** page:
    gh release create v0.9.0 --target main --generate-notes
    ```
 
-Publishing the release triggers the same arm64 build and automatically attaches
-`WERAI-macos-arm64.zip` to the release. The app is ad-hoc signed for local distribution;
-it is not notarized with an Apple Developer ID.
+Publishing the release automatically attaches the Developer ID-signed
+`WERAI-macos-arm64.zip` to the release. The current workflow signs but does not yet submit
+the app to Apple's notarization service.
+
+If an older ad-hoc-signed copy appears enabled under **Privacy & Security → Screen &
+System Audio Recording** but still cannot start a room, remove the old WERAI entries,
+install the newly signed release in `/Applications`, launch it, and grant recording access
+again. This one-time reset replaces the stale permission record created by the old build.
 
 ## License
 

@@ -350,6 +350,7 @@ final class WERAIViewModel: ObservableObject {
     @Published var selectedRoom: String?
     @Published var statusText = "Ready"
     @Published var errorMessage: String?
+    @Published var errorIsPermissionRelated = false
     @Published var participants = [RoomParticipant]()
     @Published var messages = [RoomMessage]()
     @Published var draftMessage = ""
@@ -462,6 +463,7 @@ final class WERAIViewModel: ObservableObject {
                 statusText = "Audio is in sync"
             } catch {
                 phase = .failed
+                errorIsPermissionRelated = isPermissionError(error)
                 errorMessage = readable(error)
                 statusText = "Could not start the room"
                 hostSession = nil
@@ -497,6 +499,7 @@ final class WERAIViewModel: ObservableObject {
             startLocalNowPlayingMonitor()
         } catch {
             phase = .failed
+            errorIsPermissionRelated = isPermissionError(error)
             errorMessage = readable(error)
             statusText = "Could not join the room"
             roomBrowser.start()
@@ -710,6 +713,7 @@ final class WERAIViewModel: ObservableObject {
 
     func tryAgain() {
         errorMessage = nil
+        errorIsPermissionRelated = false
         phase = .idle
         statusText = "Ready"
         roomBrowser.restart()
@@ -857,6 +861,7 @@ final class WERAIViewModel: ObservableObject {
         localNowPlayingMonitor?.stop()
         localNowPlayingMonitor = nil
         errorMessage = nil
+        errorIsPermissionRelated = false
         permissionNotice = false
         participants = []
         messages = []
@@ -917,17 +922,11 @@ final class WERAIViewModel: ObservableObject {
     }
 
     private func readable(_ error: Error) -> String {
-        if isPermissionError(error) {
-            return "macOS has not activated the required recording permission for this running copy of WERAI."
-        }
-        return error.localizedDescription
+        RecordingErrorPresentation.message(for: error)
     }
 
     private func isPermissionError(_ error: Error) -> Bool {
-        let message = error.localizedDescription
-        return message.localizedCaseInsensitiveContains("capture")
-            || message.localizedCaseInsensitiveContains("permission")
-            || message.localizedCaseInsensitiveContains("declined")
+        RecordingErrorPresentation.isPermissionFailure(error)
     }
 }
 
@@ -1145,8 +1144,10 @@ private struct WERAIView: View {
             HStack(spacing: 9) {
                 Button("Try again", action: model.tryAgain)
                     .buttonStyle(PillButtonStyle(filled: true))
-                Button("Privacy Settings", action: model.openPrivacySettings)
-                    .buttonStyle(PillButtonStyle(filled: false))
+                if model.errorIsPermissionRelated {
+                    Button("Recording Settings", action: model.openPrivacySettings)
+                        .buttonStyle(PillButtonStyle(filled: false))
+                }
             }
         }
         .padding(28)
