@@ -1223,6 +1223,11 @@ private struct WERAIView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var roomNameFocused: Bool
 
+    private var versionLabel: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        return "ALO / V\(version ?? "DEV")"
+    }
+
     var body: some View {
         ZStack {
             AmbientBackground(isLive: model.phase == .live)
@@ -1235,26 +1240,31 @@ private struct WERAIView: View {
             if model.permissionNotice { permissionOverlay }
         }
         .frame(minWidth: 860, minHeight: 600)
+        .tint(Palette.controlAccent)
         .ignoresSafeArea()
     }
 
     private var idleView: some View {
         HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 14) {
-                Text("Listen together.")
-                    .font(.system(size: 38, weight: .semibold, design: .rounded))
-                    .tracking(-1.2)
+            VStack(alignment: .leading, spacing: 18) {
+                Rectangle()
+                    .fill(Palette.controlAccent)
+                    .frame(width: 46, height: 4)
+                Text("LISTEN\nTOGETHER.")
+                    .font(.system(size: 44, weight: .black, design: .default))
+                    .tracking(-1.8)
+                    .lineSpacing(-5)
                     .foregroundStyle(Palette.ink)
                 Text("One room for synchronized sound, conversation, and an optional shared screen.")
-                    .font(.system(size: 14, weight: .regular, design: .rounded))
+                    .font(.system(size: 13, weight: .regular, design: .default))
                     .foregroundStyle(Palette.secondary)
                     .lineSpacing(3)
-                    .frame(maxWidth: 360, alignment: .leading)
-                Text("LOCAL · PEER-TO-PEER · FREE")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .tracking(1.1)
-                    .foregroundStyle(Palette.muted)
-                    .padding(.top, 8)
+                    .frame(maxWidth: 330, alignment: .leading)
+                Text("\(versionLabel)  /  LOCAL  /  P2P  /  FREE")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .tracking(0.7)
+                    .foregroundStyle(Palette.accentText)
+                    .padding(.top, 10)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
@@ -1266,14 +1276,14 @@ private struct WERAIView: View {
     }
 
     private var setupConsole: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 0) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(model.mode == .share ? "Create a room" : "Your rooms")
-                        .font(.system(size: 18, weight: .semibold, design: .rounded))
+                        .font(.system(size: 17, weight: .bold, design: .default))
                         .foregroundStyle(Palette.ink)
                     Text(model.mode == .share ? "Create the group first. Anyone can broadcast afterward." : "Nearby and previously joined rooms")
-                        .font(.system(size: 11, design: .rounded))
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
                         .foregroundStyle(Palette.secondary)
                 }
                 Spacer()
@@ -1282,45 +1292,52 @@ private struct WERAIView: View {
                         model.mode = model.mode == .share ? .listen : .share
                     }
                 }
-                .buttonStyle(PillButtonStyle(filled: model.mode == .listen))
+                .buttonStyle(LandingButtonStyle(filled: model.mode == .listen))
             }
+            .padding(16)
 
-            if model.mode == .share {
-                VStack(spacing: 12) {
-                    TextField("Room name", text: $model.roomName)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 17, weight: .medium, design: .rounded))
-                        .foregroundStyle(Palette.ink)
-                        .focused($roomNameFocused)
-                        .onSubmit(model.startSharing)
-                        .padding(.horizontal, 16)
-                        .frame(height: 52)
-                        .background(Palette.composer)
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 14).stroke(roomNameFocused ? Palette.controlAccent : Palette.strokeStrong, lineWidth: roomNameFocused ? 2 : 1))
+            Rectangle()
+                .fill(Palette.strokeStrong)
+                .frame(height: 1)
 
-                    HStack(spacing: 8) {
-                    Button {
-                        model.createPrivateRoom.toggle()
-                    } label: {
-                        Label(
-                            model.createPrivateRoom ? "Private" : "Public",
-                            systemImage: model.createPrivateRoom ? "lock.fill" : "person.3.fill"
-                        )
+            Group {
+                if model.mode == .share {
+                    VStack(spacing: 12) {
+                        TextField("Room name", text: $model.roomName)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 16, weight: .medium, design: .default))
+                            .foregroundStyle(Palette.ink)
+                            .focused($roomNameFocused)
+                            .onSubmit(model.startSharing)
+                            .padding(.horizontal, 14)
+                            .frame(height: 48)
+                            .background(Palette.composer)
+                            .overlay(Rectangle().stroke(roomNameFocused ? Palette.controlAccent : Palette.strokeStrong, lineWidth: roomNameFocused ? 2 : 1))
+
+                        HStack(spacing: 8) {
+                            Button {
+                                model.createPrivateRoom.toggle()
+                            } label: {
+                                Label(
+                                    model.createPrivateRoom ? "Private" : "Public",
+                                    systemImage: model.createPrivateRoom ? "lock.fill" : "person.3.fill"
+                                )
+                            }
+                            .buttonStyle(LandingButtonStyle(filled: model.createPrivateRoom))
+                            Spacer()
+                            Button("Create room", action: model.startSharing)
+                                .buttonStyle(LandingButtonStyle(filled: true))
+                                .disabled(!model.canStartSharing)
+                        }
                     }
-                    .buttonStyle(ToolButtonStyle(active: model.createPrivateRoom))
-                        Spacer()
-                        Button("Create room", action: model.startSharing)
-                            .buttonStyle(PillButtonStyle(filled: true))
-                            .disabled(!model.canStartSharing)
-                    }
+                } else {
+                    roomList
                 }
-            } else {
-                roomList
             }
+            .padding(16)
         }
-        .padding(18)
-        .glass(cornerRadius: 24)
+        .background(Palette.opaqueSurface.opacity(0.9))
+        .overlay(Rectangle().stroke(Palette.strokeStrong, lineWidth: 1.5))
     }
 
     private var roomList: some View {
@@ -1361,7 +1378,7 @@ private struct WERAIView: View {
                     .foregroundStyle(Palette.muted)
                 Spacer()
                 Button("Open room", action: model.joinSelectedRoom)
-                    .buttonStyle(PillButtonStyle(filled: true))
+                    .buttonStyle(LandingButtonStyle(filled: true))
                     .disabled(!model.canJoin)
             }
         }
@@ -1382,13 +1399,12 @@ private struct WERAIView: View {
                         .foregroundStyle(selected ? Palette.selectedControlText : Palette.accent)
                         .frame(width: 34, height: 34)
                         .background(selected ? Palette.controlAccent : Palette.accentSoft)
-                        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
                     VStack(alignment: .leading, spacing: 3) {
                         Text(room.name)
-                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .font(.system(size: 13, weight: .bold, design: .default))
                             .foregroundStyle(Palette.ink)
                         Text(nearby.map { "Nearby · \($0.peerCount) \($0.peerCount == 1 ? "person" : "people")" } ?? "Saved on this Mac")
-                            .font(.system(size: 10, design: .rounded))
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
                             .foregroundStyle(nearby == nil ? Palette.secondary : Palette.accentText)
                     }
                     Spacer()
@@ -1411,10 +1427,9 @@ private struct WERAIView: View {
             }
         }
         .padding(.horizontal, 12)
-        .frame(height: 58)
+        .frame(height: 56)
         .background(selected ? Palette.accentSoft.opacity(0.7) : Palette.composer)
-        .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 15).stroke(selected ? Palette.controlAccent.opacity(0.5) : Palette.strokeStrong, lineWidth: 1))
+        .overlay(Rectangle().stroke(selected ? Palette.controlAccent : Palette.strokeStrong, lineWidth: selected ? 1.5 : 1))
     }
 
     private var progressView: some View {
@@ -1591,6 +1606,7 @@ private struct FloatingRoomView: View {
                 roomContent.background(Palette.opaqueSurface)
             }
         }
+        .tint(Palette.controlAccent)
     }
 
     private var roomContent: some View {
@@ -2393,6 +2409,25 @@ private struct FlatToolButtonStyle: ButtonStyle {
     }
 }
 
+private struct LandingButtonStyle: ButtonStyle {
+    let filled: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 10, weight: .bold, design: .monospaced))
+            .textCase(.uppercase)
+            .foregroundStyle(filled ? Palette.selectedControlText : Palette.ink)
+            .padding(.horizontal, 14)
+            .frame(height: 34)
+            .background(filled ? Palette.controlAccent : Palette.messageSurface)
+            .overlay(Rectangle().stroke(Palette.strokeStrong, lineWidth: 1.5))
+            .offset(y: !reduceMotion && configuration.isPressed ? 1 : 0)
+            .opacity(configuration.isPressed ? 0.84 : 1)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.1), value: configuration.isPressed)
+    }
+}
+
 private struct InlineActionButtonStyle: ButtonStyle {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -2849,10 +2884,17 @@ private enum Palette {
     static let secondary = Color(nsColor: .secondaryLabelColor)
     static let muted = Color(nsColor: .tertiaryLabelColor)
     static let controlAccent = adaptive(
-        light: NSColor(red: 0.08, green: 0.34, blue: 0.70, alpha: 1),
-        dark: NSColor(red: 0.29, green: 0.61, blue: 0.93, alpha: 1)
+        light: NSColor(red: 0.72, green: 0.18, blue: 0.29, alpha: 1),
+        dark: NSColor(red: 0.95, green: 0.40, blue: 0.42, alpha: 1),
+        highContrastLight: NSColor(red: 0.55, green: 0.09, blue: 0.20, alpha: 1),
+        highContrastDark: NSColor(red: 1.00, green: 0.54, blue: 0.53, alpha: 1)
     )
-    static let selectedControlText = Color(nsColor: .selectedControlTextColor)
+    static let selectedControlText = adaptive(
+        light: .white,
+        dark: NSColor(red: 0.13, green: 0.03, blue: 0.06, alpha: 1),
+        highContrastLight: .white,
+        highContrastDark: .black
+    )
     static let controlIcon = Color(nsColor: .labelColor)
     static let composer = Color(nsColor: .textBackgroundColor).opacity(0.9)
     static let opaqueSurface = Color(nsColor: .windowBackgroundColor)
@@ -2866,10 +2908,10 @@ private enum Palette {
     )
     static let accent = controlAccent
     static let accentText = adaptive(
-        light: NSColor(red: 0.05, green: 0.25, blue: 0.58, alpha: 1),
-        dark: NSColor(red: 0.68, green: 0.83, blue: 1.0, alpha: 1),
-        highContrastLight: NSColor(red: 0.02, green: 0.16, blue: 0.43, alpha: 1),
-        highContrastDark: NSColor(red: 0.80, green: 0.90, blue: 1.0, alpha: 1)
+        light: NSColor(red: 0.56, green: 0.11, blue: 0.23, alpha: 1),
+        dark: NSColor(red: 1.00, green: 0.60, blue: 0.59, alpha: 1),
+        highContrastLight: NSColor(red: 0.42, green: 0.05, blue: 0.15, alpha: 1),
+        highContrastDark: NSColor(red: 1.00, green: 0.82, blue: 0.80, alpha: 1)
     )
     static let syncText = accentText
     static let detailText = adaptive(
@@ -2880,18 +2922,18 @@ private enum Palette {
     )
     static let accentDark = accentText
     static let accentSoft = adaptive(
-        light: NSColor(red: 0.82, green: 0.88, blue: 0.97, alpha: 1),
-        dark: NSColor(red: 0.08, green: 0.13, blue: 0.25, alpha: 1)
+        light: NSColor(red: 0.97, green: 0.87, blue: 0.88, alpha: 1),
+        dark: NSColor(red: 0.20, green: 0.08, blue: 0.13, alpha: 1)
     )
     static let artworkFallback = accentSoft
     static let blueSoft = adaptive(
-        light: NSColor(red: 0.72, green: 0.82, blue: 0.95, alpha: 1),
-        dark: NSColor(red: 0.10, green: 0.16, blue: 0.31, alpha: 1)
+        light: NSColor(red: 0.85, green: 0.87, blue: 0.97, alpha: 1),
+        dark: NSColor(red: 0.09, green: 0.10, blue: 0.27, alpha: 1)
     )
-    static let video = Color(red: 0.055, green: 0.070, blue: 0.12)
+    static let video = Color(red: 0.045, green: 0.035, blue: 0.09)
     static let red = Color(nsColor: .systemRed)
     static let redSoft = Color(nsColor: .systemRed).opacity(0.16)
-    static let shadow = Color(red: 0.025, green: 0.055, blue: 0.12).opacity(0.18)
+    static let shadow = Color(red: 0.17, green: 0.04, blue: 0.18).opacity(0.18)
 
     private static func adaptive(
         light: NSColor,
