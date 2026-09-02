@@ -57,6 +57,23 @@ struct AudioPacketTests {
         #expect(messages.map(\.id) == [7, 8])
     }
 
+    @Test func targetedWalkieTalkieAudioRoundTrip() throws {
+        let message = WalkieTalkieMessage(
+            kind: .audio,
+            senderID: "mac-a",
+            senderName: "amber-fox-123",
+            targetID: "mac-b",
+            sessionID: "voice-1",
+            sequence: 7,
+            pcm16Mono: Data([0x01, 0x00, 0xFF, 0x7F])
+        )
+        let envelope = MeshEnvelope(type: "walkie_talkie", walkieTalkie: message)
+        let decoded = MeshEnvelopeDecoder().append(try envelope.encodedLine()).first
+
+        #expect(decoded?.walkieTalkie == message)
+        #expect(decoded?.walkieTalkie?.targetID == "mac-b")
+    }
+
     @Test func roomMessagesCarryPresenceAndChat() throws {
         let decoder = ControlLineDecoder()
         let roomParticipants = [

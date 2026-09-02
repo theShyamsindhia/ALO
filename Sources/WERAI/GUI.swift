@@ -25,13 +25,16 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
     private let updater = AppUpdater()
     private var window: NSWindow?
     private var roomBarController: FloatingRoomWindowController?
+    private var walkieTalkieBarController: WalkieTalkieWindowController?
     private var fullScreenVideoController: FullScreenVideoWindowController?
     private var statusMenuController: WERAIStatusMenuController?
+    private var pinnedWalkieStatusController: PinnedWalkieStatusController?
     private var phaseObserver: AnyCancellable?
     private var fullScreenObserver: AnyCancellable?
     private var videoPinnedObserver: AnyCancellable?
     private var videoFullScreenToggleObserver: AnyCancellable?
     private var floatingBarObserver: AnyCancellable?
+    private var walkieBarObserver: AnyCancellable?
     private var terminationSignalSources = [DispatchSourceSignal]()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -58,6 +61,7 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
             self?.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
         }
+        pinnedWalkieStatusController = PinnedWalkieStatusController(model: model)
         updater.updateAvailableHandler = { [weak self] version in self?.presentUpdate(version: version) }
         updater.messageHandler = { [weak self] message in self?.presentUpdateMessage(message) }
         model.peerVersionHandler = { [weak updater] version in updater?.observePeerVersion(version) }
@@ -91,6 +95,12 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
             .removeDuplicates()
             .sink { [weak self] hidden in
                 DispatchQueue.main.async { self?.updateFloatingBar(hidden: hidden) }
+            }
+
+        walkieBarObserver = model.$walkieBarHidden
+            .removeDuplicates()
+            .sink { [weak self] hidden in
+                DispatchQueue.main.async { self?.updateWalkieBar(hidden: hidden) }
             }
 
     }
@@ -135,12 +145,15 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
         if phase == .live {
             window?.orderOut(nil)
             updateFloatingBar(hidden: model.floatingBarHidden)
+            updateWalkieBar(hidden: model.walkieBarHidden)
         } else {
             statusMenuController?.closePopover()
             fullScreenVideoController?.close()
             fullScreenVideoController = nil
             roomBarController?.close()
             roomBarController = nil
+            walkieTalkieBarController?.close()
+            walkieTalkieBarController = nil
             window?.makeKeyAndOrderFront(nil)
         }
     }
@@ -172,6 +185,19 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
                 roomBarController = FloatingRoomWindowController(model: model)
             }
             roomBarController?.show()
+        }
+    }
+
+    private func updateWalkieBar(hidden: Bool) {
+        guard model.phase == .live else { return }
+        if hidden {
+            walkieTalkieBarController?.close()
+            walkieTalkieBarController = nil
+        } else {
+            if walkieTalkieBarController == nil {
+                walkieTalkieBarController = WalkieTalkieWindowController(model: model)
+            }
+            walkieTalkieBarController?.show()
         }
     }
 
@@ -267,7 +293,10 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
         popover.delegate = self
         popover.contentSize = panelSize
         popover.contentViewController = NSHostingController(
-            rootView: FloatingRoomView(model: model, presentation: .menuBar)
+            rootView: VStack(spacing: 8) {
+                WalkieTalkieBar(model: model, showsCloseButton: false)
+                FloatingRoomView(model: model, presentation: .menuBar)
+            }
         )
 
         model.$unreadMessageCount
@@ -328,7 +357,7 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
     }
 
     private var panelSize: NSSize {
-        NSSize(width: FloatingMetrics.width, height: model.floatingPanelHeight)
+        NSSize(width: FloatingMetrics.width, height: model.floatingPanelHeight + 66)
     }
 
     private func resizePopover() {
@@ -373,6 +402,113 @@ private final class StatusUnreadBadgeView: NSView {
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         nil
+    }
+}
+
+@MainActor
+private final class PinnedWalkieStatusController {
+    private final class Target: NSObject {
+        weak var owner: PinnedWalkieStatusController?
+        let participantID: String
+        var pressedAt: TimeInterval = 0
+        var latched = false
+        var suppressMouseUp = false
+
+        init(owner: PinnedWalkieStatusController, participantID: String) {
+            self.owner = owner
+            self.participantID = participantID
+        }
+
+        @MainActor @objc func handle(_ sender: Any?) { owner?.handle(self) }
+    }
+
+    private let model: WERAIViewModel
+    private var items = [String: (NSStatusItem, Target)]()
+    private var observers = Set<AnyCancellable>()
+
+    init(model: WERAIViewModel) {
+        self.model = model
+        Publishers.CombineLatest4(
+            model.$phase.removeDuplicates(),
+            model.$participants,
+            model.$pinnedWalkieDeviceIDs,
+            model.$incomingWalkieSpeakerID.removeDuplicates()
+        )
+        .sink { [weak self] phase, participants, pinned, incomingSpeakerID in
+            self?.update(
+                phase: phase,
+                participants: participants,
+                pinned: pinned,
+                incomingSpeakerID: incomingSpeakerID
+            )
+        }
+        .store(in: &observers)
+    }
+
+    private func update(
+        phase: WERAIViewModel.Phase,
+        participants: [RoomParticipant],
+        pinned: Set<String>,
+        incomingSpeakerID: String?
+    ) {
+        let available = phase == .live
+            ? participants.filter { pinned.contains($0.id) && $0.id != model.currentParticipantID }
+            : []
+        let wanted = Set(available.map(\.id))
+        for id in items.keys.filter({ !wanted.contains($0) }) {
+            guard let entry = items.removeValue(forKey: id) else { continue }
+            if entry.1.latched { model.setWalkiePressed(false, targetID: id) }
+            NSStatusBar.system.removeStatusItem(entry.0)
+        }
+        for participant in available {
+            let entry: (NSStatusItem, Target)
+            if let existing = items[participant.id] {
+                entry = existing
+            } else {
+                let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+                let target = Target(owner: self, participantID: participant.id)
+                item.button?.target = target
+                item.button?.action = #selector(Target.handle(_:))
+                item.button?.sendAction(on: [.leftMouseDown, .leftMouseUp])
+                entry = (item, target)
+                items[participant.id] = entry
+            }
+            let appearance = DeviceAppearance.generated(from: participant.id)
+            let symbol = participant.icon ?? appearance.icon
+            entry.0.button?.image = NSImage(systemSymbolName: symbol, accessibilityDescription: participant.name)
+            entry.0.button?.image?.isTemplate = true
+            entry.0.button?.contentTintColor = incomingSpeakerID == participant.id
+                ? .systemGreen
+                : NSColor.deviceIdentity(participant.colorHex ?? appearance.colorHex)
+            entry.0.button?.toolTip = "Click to open/close · hold to talk to \(participant.name)"
+        }
+    }
+
+    private func handle(_ target: Target) {
+        guard let event = NSApp.currentEvent else { return }
+        switch event.type {
+        case .leftMouseDown:
+            if target.latched {
+                target.latched = false
+                target.suppressMouseUp = true
+                model.setWalkiePressed(false, targetID: target.participantID)
+            } else {
+                for entry in items.values { entry.1.latched = false }
+                target.pressedAt = event.timestamp
+                target.suppressMouseUp = false
+                model.setWalkiePressed(true, targetID: target.participantID)
+            }
+        case .leftMouseUp:
+            if target.suppressMouseUp {
+                target.suppressMouseUp = false
+            } else if event.timestamp - target.pressedAt < 0.28 {
+                target.latched = true
+            } else {
+                model.setWalkiePressed(false, targetID: target.participantID)
+            }
+        default:
+            break
+        }
     }
 }
 
@@ -460,7 +596,17 @@ final class WERAIViewModel: ObservableObject {
     @Published var videoViewerPinned = false
     @Published var videoFullScreenToggle = 0
     @Published var currentUserName = "This Mac"
+    @Published var currentDeviceIcon = DeviceAppearance.icons[0]
+    @Published var currentDeviceColorHex = DeviceAppearance.colors[0]
     @Published var currentParticipantID: String?
+    @Published var selectedWalkieTargetID: String?
+    @Published private(set) var walkieTalking = false
+    @Published private(set) var walkieLineOpen = false
+    @Published private(set) var incomingWalkieSpeakerID: String?
+    @Published var walkieBarHidden: Bool
+    @Published var pinnedWalkieDeviceIDs: Set<String>
+    @Published var incomingMediaMuted: Bool
+    @Published var incomingCallsMuted: Bool
     @Published var roomHasVideo = false
     @Published var nowPlaying = NowPlayingMedia()
     @Published var localNowPlaying = NowPlayingMedia()
@@ -483,7 +629,12 @@ final class WERAIViewModel: ObservableObject {
     private var activeRoom: String?
     private var activeRoomConfiguration: RoomConfiguration?
     private var isLeavingRoom = false
+    private var walkieGeneration = 0
     private static let floatingBarPreferenceKey = "floatingBarHidden"
+    private static let walkieBarPreferenceKey = "walkieBarHidden"
+    private static let pinnedWalkiePreferenceKey = "pinnedWalkieDeviceIDs"
+    private static let incomingMediaMutedKey = "incomingMediaMuted"
+    private static let incomingCallsMutedKey = "incomingCallsMuted"
 
     init() {
         let defaults = UserDefaults.standard
@@ -501,10 +652,17 @@ final class WERAIViewModel: ObservableObject {
             defaults.set(generatedName, forKey: "meshDeviceDisplayName")
             currentUserName = generatedName
         }
+        let generatedAppearance = DeviceAppearance.generated(from: nodeID)
+        currentDeviceIcon = defaults.string(forKey: "meshDeviceIcon") ?? generatedAppearance.icon
+        currentDeviceColorHex = defaults.string(forKey: "meshDeviceColorHex") ?? generatedAppearance.colorHex
         savedRooms = roomStore.load()
         floatingBarHidden = defaults.object(forKey: Self.floatingBarPreferenceKey) == nil
             ? true
             : defaults.bool(forKey: Self.floatingBarPreferenceKey)
+        walkieBarHidden = defaults.bool(forKey: Self.walkieBarPreferenceKey)
+        pinnedWalkieDeviceIDs = Set(defaults.stringArray(forKey: Self.pinnedWalkiePreferenceKey) ?? [])
+        incomingMediaMuted = defaults.bool(forKey: Self.incomingMediaMutedKey)
+        incomingCallsMuted = defaults.bool(forKey: Self.incomingCallsMutedKey)
         selectedRoomID = savedRooms.first?.id
         roomBrowser = MeshRoomBrowser(
             updateHandler: { [weak self] rooms in
@@ -665,6 +823,8 @@ final class WERAIViewModel: ObservableObject {
             room: room,
             nodeID: nodeID,
             displayName: currentUserName,
+            deviceIcon: currentDeviceIcon,
+            deviceColorHex: currentDeviceColorHex,
             initialEvents: roomStore.loadEvents(roomID: room.id),
             statusHandler: { [weak self] status in
                 guard let self else { return }
@@ -700,11 +860,27 @@ final class WERAIViewModel: ObservableObject {
                     : "Broadcast could not start: \(self.readable(error))"
                 self.updateLocalNowPlayingMonitor()
             },
+            walkieTalkieStateHandler: { [weak self] senderID, senderName, active in
+                guard let self else { return }
+                guard !self.incomingCallsMuted else {
+                    self.incomingWalkieSpeakerID = nil
+                    return
+                }
+                if active {
+                    self.incomingWalkieSpeakerID = senderID
+                    self.statusText = "\(senderName) is talking to you"
+                } else if self.incomingWalkieSpeakerID == senderID {
+                    self.incomingWalkieSpeakerID = nil
+                    self.statusText = "Voice line quiet"
+                }
+            },
             replicaPersistenceHandler: { [weak self] replica in
                 self?.roomStore.saveEvents(replica.events, roomID: room.id)
             }
         )
         meshSession = session
+        session.setIncomingMediaMuted(incomingMediaMuted)
+        session.setIncomingWalkieTalkieMuted(incomingCallsMuted)
         do {
             try session.start(broadcastInitially: broadcastInitially)
             try? roomStore.save(room)
@@ -732,14 +908,14 @@ final class WERAIViewModel: ObservableObject {
 
         if selection == .video, !ensureScreenRecordingPermission() { return }
         mediaSwitchBusy = true
-        if selection == .video { statusText = "Preparing ALO Display and video capture" }
+        if selection == .video { statusText = "Preparing full-screen video capture" }
         Task {
             do {
                 try await meshSession?.setVideoEnabled(selection == .video)
                 experience = selection
                 floatingSection = selection == .video ? .video : .collapsed
                 statusText = selection == .video
-                    ? "ALO Display is live · use Displays Settings to arrange it"
+                    ? "This Mac's main display is live"
                     : "Audio room active"
             } catch {
                 errorMessage = readable(error)
@@ -771,7 +947,7 @@ final class WERAIViewModel: ObservableObject {
         audioIsRendering = false
         stopLocalNowPlayingMonitor()
         statusText = hasBroadcaster
-            ? "Taking over room audio and preparing ALO Display"
+            ? "Taking over room audio and preparing full-screen sharing"
             : "Starting audio and video broadcast"
         meshSession.beginBroadcasting(videoEnabled: true)
         videoBroadcastTimeoutTask?.cancel()
@@ -781,7 +957,7 @@ final class WERAIViewModel: ObservableObject {
             self.requestedVideoBroadcast = false
             self.mediaSwitchBusy = false
             self.statusText = "Video broadcast did not start · try again"
-            self.errorMessage = "ALO could not finish taking over audio and starting ALO Display."
+            self.errorMessage = "ALO could not finish taking over audio and starting full-screen sharing."
             self.videoBroadcastTimeoutTask = nil
         }
     }
@@ -841,10 +1017,149 @@ final class WERAIViewModel: ObservableObject {
         }
     }
 
+    func setWalkiePressed(_ pressed: Bool, targetID: String?) {
+        selectedWalkieTargetID = targetID
+        if pressed {
+            guard !walkieLineOpen else { return }
+            if walkieTalking { stopWalkieTalkie() }
+            startWalkieTalkie(targetID: targetID, keepOpen: false)
+        } else if !walkieLineOpen {
+            stopWalkieTalkie()
+        }
+    }
+
+    func toggleOpenWalkieLine() {
+        if walkieLineOpen {
+            walkieLineOpen = false
+            stopWalkieTalkie()
+        } else {
+            walkieLineOpen = true
+            startWalkieTalkie(targetID: selectedWalkieTargetID, keepOpen: true)
+        }
+    }
+
+    private func startWalkieTalkie(targetID: String?, keepOpen: Bool) {
+        guard phase == .live, let meshSession else { return }
+        if walkieTalking {
+            if keepOpen { walkieLineOpen = true }
+            return
+        }
+        walkieGeneration += 1
+        let generation = walkieGeneration
+        walkieTalking = true
+        statusText = targetID.flatMap { id in participants.first(where: { $0.id == id })?.name }
+            .map { "Talking to \($0)" } ?? "Talking to everyone"
+        Task {
+            do {
+                try await meshSession.beginWalkieTalkie(targetID: targetID)
+                guard generation == walkieGeneration, walkieTalking else {
+                    meshSession.endWalkieTalkie()
+                    return
+                }
+            } catch {
+                guard generation == walkieGeneration else { return }
+                walkieTalking = false
+                walkieLineOpen = false
+                errorMessage = readable(error)
+                statusText = "Push-to-talk could not start"
+            }
+        }
+    }
+
+    private func stopWalkieTalkie() {
+        walkieGeneration += 1
+        walkieTalking = false
+        meshSession?.endWalkieTalkie()
+        if incomingWalkieSpeakerID == nil { statusText = "Voice line quiet" }
+    }
+
+    func editDeviceIdentity() {
+        let alert = NSAlert()
+        alert.messageText = "Customize this Mac"
+        alert.informativeText = "The name, icon, and color appear to everyone in your rooms."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.spacing = 8
+        stack.frame = NSRect(x: 0, y: 0, width: 300, height: 96)
+        let nameField = NSTextField(string: currentUserName)
+        nameField.placeholderString = "Device name"
+        let iconPicker = NSPopUpButton()
+        for icon in DeviceAppearance.icons {
+            iconPicker.addItem(withTitle: icon)
+            iconPicker.lastItem?.image = NSImage(systemSymbolName: icon, accessibilityDescription: icon)
+        }
+        iconPicker.selectItem(withTitle: currentDeviceIcon)
+        let colorPicker = NSPopUpButton()
+        for color in DeviceAppearance.colors { colorPicker.addItem(withTitle: color) }
+        colorPicker.selectItem(withTitle: currentDeviceColorHex)
+        stack.addArrangedSubview(nameField)
+        stack.addArrangedSubview(iconPicker)
+        stack.addArrangedSubview(colorPicker)
+        alert.accessoryView = stack
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = String(nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).prefix(40))
+        guard !name.isEmpty else { return }
+        let appearance = DeviceAppearance(
+            icon: iconPicker.titleOfSelectedItem ?? currentDeviceIcon,
+            colorHex: colorPicker.titleOfSelectedItem ?? currentDeviceColorHex
+        )
+        currentUserName = name
+        currentDeviceIcon = appearance.icon
+        currentDeviceColorHex = appearance.colorHex
+        let defaults = UserDefaults.standard
+        defaults.set(name, forKey: "meshDeviceDisplayName")
+        defaults.set(appearance.icon, forKey: "meshDeviceIcon")
+        defaults.set(appearance.colorHex, forKey: "meshDeviceColorHex")
+        meshSession?.updateIdentity(name: name, icon: appearance.icon, colorHex: appearance.colorHex)
+    }
+
     func hideFloatingBar() {
         floatingSection = .collapsed
         floatingBarHidden = true
         UserDefaults.standard.set(true, forKey: Self.floatingBarPreferenceKey)
+    }
+
+    func hideWalkieBar() {
+        walkieBarHidden = true
+        UserDefaults.standard.set(true, forKey: Self.walkieBarPreferenceKey)
+    }
+
+    func showWalkieBar() {
+        walkieBarHidden = false
+        UserDefaults.standard.set(false, forKey: Self.walkieBarPreferenceKey)
+    }
+
+    func isWalkieDevicePinned(_ id: String) -> Bool { pinnedWalkieDeviceIDs.contains(id) }
+
+    func toggleWalkieDevicePin(_ id: String) {
+        if pinnedWalkieDeviceIDs.contains(id) { pinnedWalkieDeviceIDs.remove(id) }
+        else { pinnedWalkieDeviceIDs.insert(id) }
+        UserDefaults.standard.set(Array(pinnedWalkieDeviceIDs).sorted(), forKey: Self.pinnedWalkiePreferenceKey)
+    }
+
+    func toggleAllIncomingAudio() {
+        let mute = !(incomingMediaMuted && incomingCallsMuted)
+        setIncomingMediaMuted(mute)
+        setIncomingCallsMuted(mute)
+    }
+
+    func toggleIncomingMediaMute() { setIncomingMediaMuted(!incomingMediaMuted) }
+    func toggleIncomingCallsMute() { setIncomingCallsMuted(!incomingCallsMuted) }
+
+    private func setIncomingMediaMuted(_ muted: Bool) {
+        incomingMediaMuted = muted
+        UserDefaults.standard.set(muted, forKey: Self.incomingMediaMutedKey)
+        meshSession?.setIncomingMediaMuted(muted)
+    }
+
+    private func setIncomingCallsMuted(_ muted: Bool) {
+        incomingCallsMuted = muted
+        UserDefaults.standard.set(muted, forKey: Self.incomingCallsMutedKey)
+        meshSession?.setIncomingWalkieTalkieMuted(muted)
+        if muted { incomingWalkieSpeakerID = nil }
     }
 
     func showFloatingBar() {
@@ -1029,15 +1344,6 @@ final class WERAIViewModel: ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
-    func openDisplaysSettings() {
-        guard let url = URL(
-            string: "x-apple.systempreferences:com.apple.Displays-Settings.extension"
-        ) else { return }
-        if NSWorkspace.shared.open(url) {
-            statusText = "Arrange ALO Display beside your physical screens"
-        }
-    }
-
     func restartApplication() {
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.createsNewApplicationInstance = true
@@ -1098,7 +1404,7 @@ final class WERAIViewModel: ObservableObject {
                     self.videoBroadcastTimeoutTask = nil
                     self.experience = .video
                     self.floatingSection = .video
-                    self.statusText = "Audio and ALO Display are live"
+                    self.statusText = "Audio and this Mac's main display are live"
                 }
                 if !enabled {
                     self.videoFullscreen = false
@@ -1178,7 +1484,9 @@ final class WERAIViewModel: ObservableObject {
             id: current.id,
             name: current.name,
             volume: volume,
-            isMuted: muted
+            isMuted: muted,
+            icon: current.icon,
+            colorHex: current.colorHex
         )
     }
 
@@ -1188,6 +1496,11 @@ final class WERAIViewModel: ObservableObject {
         errorMessage = nil
         errorIsPermissionRelated = false
         permissionNotice = false
+        walkieGeneration += 1
+        walkieTalking = false
+        walkieLineOpen = false
+        incomingWalkieSpeakerID = nil
+        selectedWalkieTargetID = nil
         participants = []
         messages = []
         unreadMessageCount = 0
@@ -1379,6 +1692,15 @@ private struct WERAIView: View {
                         .foregroundStyle(Palette.secondary)
                 }
                 Spacer()
+                Button(action: model.editDeviceIdentity) {
+                    Image(systemName: model.currentDeviceIcon)
+                        .foregroundStyle(Color.white)
+                        .frame(width: 30, height: 30)
+                        .background(Color.deviceIdentity(model.currentDeviceColorHex))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Customize \(model.currentUserName)")
                 Button(model.mode == .share ? "Back to rooms" : "Create room") {
                     withAnimation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.86)) {
                         model.mode = model.mode == .share ? .listen : .share
@@ -2398,12 +2720,6 @@ private struct FloatingRoomView: View {
                 .buttonStyle(VideoControlButtonStyle())
                 .help("Open video window")
                 .accessibilityLabel("Open video window")
-                Button(action: model.openDisplaysSettings) {
-                    Image(systemName: "display.2")
-                }
-                .buttonStyle(VideoControlButtonStyle())
-                .help("Arrange ALO Display")
-                .accessibilityLabel("Open Displays Settings")
                 Button(action: model.collapseFloatingBar) {
                     Image(systemName: "chevron.down")
                 }
@@ -2571,6 +2887,183 @@ private struct WindowDragRegion: NSViewRepresentable {
     }
 }
 
+private struct WalkieTalkieBar: View {
+    @ObservedObject var model: WERAIViewModel
+    var showsCloseButton = true
+
+    var body: some View {
+        HStack(spacing: 8) {
+            WindowDragRegion()
+                .frame(width: 18, height: 44)
+                .help("Drag walkie-talkie bar")
+
+            walkieTarget(id: nil, name: "Everyone", icon: "person.3.fill", colorHex: "3F86E8")
+
+            Divider().frame(height: 30)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(model.participants) { participant in
+                        if participant.id == model.currentParticipantID {
+                            Button(action: model.editDeviceIdentity) {
+                                deviceIcon(participant)
+                                    .overlay(alignment: .bottomTrailing) {
+                                        Image(systemName: "pencil.circle.fill")
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(.white)
+                                    }
+                            }
+                            .buttonStyle(.plain)
+                            .help("Customize this Mac")
+                        } else {
+                            let appearance = DeviceAppearance.generated(from: participant.id)
+                            walkieTarget(
+                                id: participant.id,
+                                name: participant.name,
+                                icon: participant.icon ?? appearance.icon,
+                                colorHex: participant.colorHex ?? appearance.colorHex
+                            )
+                        }
+                    }
+                }
+            }
+
+            Divider().frame(height: 30)
+
+            Button(action: model.toggleOpenWalkieLine) {
+                Image(systemName: model.walkieLineOpen ? "lock.open.fill" : "lock.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(model.walkieLineOpen ? Color.white : Palette.controlIcon)
+                    .frame(width: 38, height: 38)
+                    .background(model.walkieLineOpen ? Palette.controlAccent : Palette.messageSurface)
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .help(model.walkieLineOpen
+                ? "Close voice line"
+                : "Keep selected line open; enable it on both Macs for two-way audio")
+            .accessibilityLabel(model.walkieLineOpen ? "Close voice line" : "Keep selected voice line open")
+
+            Button(action: model.toggleAllIncomingAudio) {
+                Image(systemName: model.incomingMediaMuted && model.incomingCallsMuted
+                    ? "speaker.slash.fill"
+                    : "speaker.wave.2.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Palette.controlIcon)
+                    .frame(width: 30, height: 30)
+            }
+            .buttonStyle(.plain)
+            .help("Mute or unmute all incoming audio")
+            .contextMenu {
+                Button(model.incomingMediaMuted ? "Unmute Music & Video" : "Mute Music & Video") {
+                    model.toggleIncomingMediaMute()
+                }
+                Button(model.incomingCallsMuted ? "Unmute Voice Lines" : "Mute Voice Lines") {
+                    model.toggleIncomingCallsMute()
+                }
+            }
+
+            Button(action: showsCloseButton ? model.hideWalkieBar : model.showWalkieBar) {
+                Image(systemName: showsCloseButton ? "xmark" : "eye.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Palette.controlIcon)
+                    .frame(width: 30, height: 30)
+            }
+            .buttonStyle(.plain)
+            .help(showsCloseButton ? "Hide walkie-talkie bar" : "Show walkie-talkie bar")
+        }
+        .padding(.horizontal, 10)
+        .frame(width: FloatingMetrics.width, height: 58)
+        .glass(cornerRadius: 22)
+    }
+
+    private func walkieTarget(id: String?, name: String, icon: String, colorHex: String) -> some View {
+        let selected = model.selectedWalkieTargetID == id
+        let incoming = id != nil && model.incomingWalkieSpeakerID == id
+        let outgoing = model.walkieTalking && selected
+        return Image(systemName: icon)
+            .font(.system(size: 15, weight: .semibold))
+            .foregroundStyle(Color.white)
+            .frame(width: 40, height: 40)
+            .background(Color.deviceIdentity(colorHex))
+            .clipShape(Circle())
+            .overlay {
+                Circle().stroke(
+                    incoming ? Color.green : outgoing ? Color.white : selected ? Palette.ink.opacity(0.7) : Color.clear,
+                    lineWidth: incoming ? 4 : 2
+                )
+            }
+            .shadow(color: incoming ? Color.green.opacity(0.75) : .clear, radius: 8)
+            .scaleEffect(incoming || outgoing ? 1.08 : 1)
+            .contentShape(Circle())
+            .onLongPressGesture(
+                minimumDuration: 0,
+                maximumDistance: 80,
+                pressing: { model.setWalkiePressed($0, targetID: id) },
+                perform: {}
+            )
+            .help("Hold to talk to \(name) · right-click to pin")
+            .accessibilityLabel("Hold to talk to \(name)")
+            .contextMenu {
+                if let id {
+                    Button(model.isWalkieDevicePinned(id) ? "Unpin from Menu Bar" : "Pin to Menu Bar") {
+                        model.toggleWalkieDevicePin(id)
+                    }
+                }
+            }
+    }
+
+    private func deviceIcon(_ participant: RoomParticipant) -> some View {
+        let appearance = DeviceAppearance.generated(from: participant.id)
+        return Image(systemName: participant.icon ?? appearance.icon)
+            .font(.system(size: 15, weight: .semibold))
+            .foregroundStyle(Color.white)
+            .frame(width: 40, height: 40)
+            .background(Color.deviceIdentity(participant.colorHex ?? appearance.colorHex))
+            .clipShape(Circle())
+    }
+}
+
+@MainActor
+private final class WalkieTalkieWindowController {
+    private let panel: FloatingRoomPanel
+    private var hasPosition = false
+
+    init(model: WERAIViewModel) {
+        panel = FloatingRoomPanel(
+            contentRect: NSRect(x: 0, y: 0, width: FloatingMetrics.width, height: 58),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.isFloatingPanel = true
+        panel.hidesOnDeactivate = false
+        panel.becomesKeyOnlyIfNeeded = true
+        panel.level = .floating
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+        panel.animationBehavior = .none
+        panel.isReleasedWhenClosed = false
+        panel.contentView = NSHostingView(rootView: WalkieTalkieBar(model: model))
+    }
+
+    func show() {
+        if !hasPosition, let screen = NSScreen.main {
+            let visible = screen.visibleFrame
+            panel.setFrameOrigin(NSPoint(
+                x: visible.midX - panel.frame.width / 2,
+                y: visible.minY + 98
+            ))
+            hasPosition = true
+        }
+        panel.orderFrontRegardless()
+    }
+
+    func close() { panel.orderOut(nil) }
+}
+
 private final class FloatingRoomPanel: NSPanel {
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
@@ -2736,12 +3229,6 @@ private struct FullScreenVideoView: View {
                 .buttonStyle(VideoControlButtonStyle())
                 .help(model.videoViewerPinned ? "Unpin from desktops" : "Keep on every desktop")
                 .accessibilityLabel(model.videoViewerPinned ? "Unpin video window" : "Pin video window")
-                Button(action: model.openDisplaysSettings) {
-                    Image(systemName: "display.2")
-                }
-                .buttonStyle(VideoControlButtonStyle())
-                .help("Arrange ALO Display")
-                .accessibilityLabel("Open Displays Settings")
                 Button(action: model.toggleVideoWindowFullScreen) {
                     Image(systemName: "arrow.up.left.and.arrow.down.right")
                 }
@@ -3051,5 +3538,34 @@ private enum Palette {
                 light
             }
         })
+    }
+}
+
+private extension Color {
+    static func deviceIdentity(_ hex: String) -> Color {
+        let normalized = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        guard normalized.count == 6, let value = UInt64(normalized, radix: 16) else {
+            return Palette.controlAccent
+        }
+        return Color(
+            red: Double((value >> 16) & 0xFF) / 255,
+            green: Double((value >> 8) & 0xFF) / 255,
+            blue: Double(value & 0xFF) / 255
+        )
+    }
+}
+
+private extension NSColor {
+    static func deviceIdentity(_ hex: String) -> NSColor {
+        let normalized = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        guard normalized.count == 6, let value = UInt64(normalized, radix: 16) else {
+            return .controlAccentColor
+        }
+        return NSColor(
+            red: CGFloat((value >> 16) & 0xFF) / 255,
+            green: CGFloat((value >> 8) & 0xFF) / 255,
+            blue: CGFloat(value & 0xFF) / 255,
+            alpha: 1
+        )
     }
 }

@@ -242,6 +242,8 @@ public struct MeshEnvelope: Codable, Sendable {
     public let room: RoomConfiguration?
     public let nodeID: String?
     public let displayName: String?
+    public let deviceIcon: String?
+    public let deviceColorHex: String?
     public let appVersion: String?
     public let events: [MeshRoomEvent]?
     public let event: MeshRoomEvent?
@@ -257,12 +259,15 @@ public struct MeshEnvelope: Codable, Sendable {
     public let mediaCommand: RoomMediaCommand?
     public let targetID: String?
     public let actionAttempt: UInt64?
+    public let walkieTalkie: WalkieTalkieMessage?
 
     public init(
         type: String,
         room: RoomConfiguration? = nil,
         nodeID: String? = nil,
         displayName: String? = nil,
+        deviceIcon: String? = nil,
+        deviceColorHex: String? = nil,
         appVersion: String? = nil,
         events: [MeshRoomEvent]? = nil,
         event: MeshRoomEvent? = nil,
@@ -277,12 +282,15 @@ public struct MeshEnvelope: Codable, Sendable {
         broadcasterEpoch: UInt64? = nil,
         mediaCommand: RoomMediaCommand? = nil,
         targetID: String? = nil,
-        actionAttempt: UInt64? = nil
+        actionAttempt: UInt64? = nil,
+        walkieTalkie: WalkieTalkieMessage? = nil
     ) {
         self.type = type
         self.room = room
         self.nodeID = nodeID
         self.displayName = displayName
+        self.deviceIcon = deviceIcon
+        self.deviceColorHex = deviceColorHex
         self.appVersion = appVersion
         self.events = events
         self.event = event
@@ -298,6 +306,7 @@ public struct MeshEnvelope: Codable, Sendable {
         self.mediaCommand = mediaCommand
         self.targetID = targetID
         self.actionAttempt = actionAttempt
+        self.walkieTalkie = walkieTalkie
     }
 
     public func encodedLine() throws -> Data {

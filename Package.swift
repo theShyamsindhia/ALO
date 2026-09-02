@@ -13,16 +13,9 @@ let package = Package(
     targets: [
         .target(name: "WERAICore"),
         .target(name: "WERAISharedAudioClient"),
-        .target(
-            name: "ALOVirtualDisplay",
-            linkerSettings: [
-                .linkedFramework("CoreGraphics"),
-                .linkedFramework("Foundation")
-            ]
-        ),
         .executableTarget(
             name: "WERAI",
-            dependencies: ["WERAICore", "WERAISharedAudioClient", "ALOVirtualDisplay"],
+            dependencies: ["WERAICore", "WERAISharedAudioClient"],
             linkerSettings: [
                 .linkedFramework("MediaPlayer"),
                 .unsafeFlags([

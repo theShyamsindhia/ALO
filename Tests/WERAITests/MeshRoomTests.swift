@@ -363,6 +363,62 @@ struct MeshRoomTests {
         #expect(commands.epochs == [epoch])
     }
 
+    @Test("Walkie-talkie targets one peer or every connected peer")
+    func walkieTalkieRoutingAndIdentity() throws {
+        let room = RoomConfiguration(name: "Walkie test", creatorPeerID: "a")
+        let aProbe = MeshProbe()
+        let bProbe = MeshProbe()
+        let cProbe = MeshProbe()
+        let bReady = PortProbe()
+        let cReady = PortProbe()
+        let bWalkie = WalkieProbe()
+        let cWalkie = WalkieProbe()
+        let nodeA = makeNode(room: room, id: "a", probe: aProbe, ports: PortProbe())
+        let nodeB = MeshControlPlane(
+            room: room, nodeID: "b", displayName: "B",
+            listenerReadyHandler: { bReady.set($0) },
+            replicaHandler: { bProbe.update(replica: $0) },
+            participantsHandler: { bProbe.update(participants: $0) },
+            walkieTalkieHandler: { bWalkie.add($0) }
+        )
+        let nodeC = MeshControlPlane(
+            room: room, nodeID: "c", displayName: "C",
+            listenerReadyHandler: { cReady.set($0) },
+            replicaHandler: { cProbe.update(replica: $0) },
+            participantsHandler: { cProbe.update(participants: $0) },
+            walkieTalkieHandler: { cWalkie.add($0) }
+        )
+        try nodeA.start(advertise: false)
+        try nodeB.start(advertise: false)
+        try nodeC.start(advertise: false)
+        defer { nodeA.stop(); nodeB.stop(); nodeC.stop() }
+        guard let portB = bReady.wait(), let portC = cReady.wait() else {
+            Issue.record("Walkie peers did not start")
+            return
+        }
+        nodeA.connectForTesting(to: .hostPort(host: "127.0.0.1", port: portB))
+        nodeA.connectForTesting(to: .hostPort(host: "127.0.0.1", port: portC))
+        #expect(waitUntil { aProbe.participantCount == 3 })
+
+        nodeA.publishWalkieTalkie(.init(
+            kind: .audio, senderID: "a", senderName: "A", targetID: "b",
+            sessionID: "targeted", sequence: 1, pcm16Mono: Data([0, 0])
+        ))
+        #expect(waitUntil { bWalkie.count == 1 })
+        #expect(cWalkie.count == 0)
+
+        nodeA.publishWalkieTalkie(.init(
+            kind: .began, senderID: "a", senderName: "A", targetID: nil,
+            sessionID: "all"
+        ))
+        #expect(waitUntil { bWalkie.count == 2 && cWalkie.count == 1 })
+
+        nodeB.updateIdentity(name: "Studio Mac", icon: "sparkles", colorHex: "E45B69")
+        #expect(waitUntil { aProbe.participant(id: "b")?.name == "Studio Mac" })
+        #expect(aProbe.participant(id: "b")?.icon == "sparkles")
+        #expect(aProbe.participant(id: "b")?.colorHex == "E45B69")
+    }
+
     @Test("Playback and Sync All survive a relayed mesh path")
     func roomActionsReachBroadcasterThroughRelay() throws {
         let room = RoomConfiguration(name: "Relayed control test", creatorPeerID: "a")
@@ -658,8 +714,18 @@ private final class MeshProbe: @unchecked Sendable {
     var chatTexts: [String?] { lock.withLock { replica.chatEvents.map(\.text) } }
     var broadcasterID: String? { lock.withLock { replica.broadcaster?.nodeID } }
     var broadcasterEpoch: UInt64? { lock.withLock { replica.broadcaster?.epoch } }
+    func participant(id: String) -> RoomParticipant? {
+        lock.withLock { participants.first(where: { $0.id == id }) }
+    }
     func update(replica: MeshRoomReplica) { lock.withLock { self.replica = replica } }
     func update(participants: [RoomParticipant]) { lock.withLock { self.participants = participants } }
+}
+
+private final class WalkieProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var messages = [WalkieTalkieMessage]()
+    var count: Int { lock.withLock { messages.count } }
+    func add(_ message: WalkieTalkieMessage) { lock.withLock { messages.append(message) } }
 }
 
 private final class MediaCommandProbe: @unchecked Sendable {

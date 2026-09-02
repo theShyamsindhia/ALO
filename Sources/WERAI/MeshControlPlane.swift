@@ -16,6 +16,8 @@ final class MeshControlPlane {
         let decoder = MeshEnvelopeDecoder()
         var nodeID: String?
         var displayName: String?
+        var deviceIcon: String?
+        var deviceColorHex: String?
         var appVersion: String?
         let localNonce = UUID().uuidString
         var authenticated = false
@@ -28,13 +30,16 @@ final class MeshControlPlane {
 
     let room: RoomConfiguration
     let nodeID: String
-    private let displayName: String
+    private var displayName: String
+    private var deviceIcon: String
+    private var deviceColorHex: String
     private let queue = DispatchQueue(label: "in.werai.mesh.control", qos: .userInteractive)
     private let replicaHandler: (MeshRoomReplica) -> Void
     private let participantsHandler: ([RoomParticipant]) -> Void
     private let peerVersionHandler: (String) -> Void
     private let mediaCommandHandler: (RoomMediaCommand, String, UInt64) -> Bool
     private let resyncRequestHandler: (String?, String, UInt64) -> Bool
+    private let walkieTalkieHandler: (WalkieTalkieMessage) -> Void
     private let appVersion: String
     private let listenerReadyHandler: ((NWEndpoint.Port) -> Void)?
     private var replica: MeshRoomReplica
@@ -63,6 +68,8 @@ final class MeshControlPlane {
         room: RoomConfiguration,
         nodeID: String,
         displayName: String,
+        deviceIcon: String? = nil,
+        deviceColorHex: String? = nil,
         appVersion: String = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0",
         initialEvents: [MeshRoomEvent] = [],
         listenerReadyHandler: ((NWEndpoint.Port) -> Void)? = nil,
@@ -70,15 +77,20 @@ final class MeshControlPlane {
         participantsHandler: @escaping ([RoomParticipant]) -> Void,
         peerVersionHandler: @escaping (String) -> Void = { _ in },
         mediaCommandHandler: @escaping (RoomMediaCommand, String, UInt64) -> Bool = { _, _, _ in true },
-        resyncRequestHandler: @escaping (String?, String, UInt64) -> Bool = { _, _, _ in true }
+        resyncRequestHandler: @escaping (String?, String, UInt64) -> Bool = { _, _, _ in true },
+        walkieTalkieHandler: @escaping (WalkieTalkieMessage) -> Void = { _ in }
     ) {
         self.room = room
         self.nodeID = nodeID
         self.displayName = displayName
+        let appearance = DeviceAppearance.generated(from: nodeID)
+        self.deviceIcon = deviceIcon ?? appearance.icon
+        self.deviceColorHex = deviceColorHex ?? appearance.colorHex
         self.appVersion = appVersion
         self.peerVersionHandler = peerVersionHandler
         self.mediaCommandHandler = mediaCommandHandler
         self.resyncRequestHandler = resyncRequestHandler
+        self.walkieTalkieHandler = walkieTalkieHandler
         self.replica = MeshRoomReplica(events: initialEvents)
         self.listenerReadyHandler = listenerReadyHandler
         self.replicaHandler = replicaHandler
@@ -158,6 +170,43 @@ final class MeshControlPlane {
 
     func publishQueueAdd(_ item: RoomQueueItem) { publish(kind: .queueAdd, queueItem: item) }
     func publishQueueRemove(_ id: String) { publish(kind: .queueRemove, queueItemID: id) }
+
+    func updateIdentity(name: String, icon: String, colorHex: String) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            let trimmed = String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(40))
+            guard !trimmed.isEmpty else { return }
+            let appearance = DeviceAppearance(icon: icon, colorHex: colorHex)
+            displayName = trimmed
+            deviceIcon = appearance.icon
+            deviceColorHex = appearance.colorHex
+            publishParticipants()
+            broadcast(MeshEnvelope(
+                type: "device_identity",
+                nodeID: nodeID,
+                displayName: trimmed,
+                deviceIcon: appearance.icon,
+                deviceColorHex: appearance.colorHex
+            ))
+        }
+    }
+
+    func publishWalkieTalkie(_ message: WalkieTalkieMessage) {
+        queue.async { [weak self] in
+            guard let self,
+                  message.senderID == nodeID,
+                  message.senderName.utf8.count <= 160,
+                  message.sessionID.utf8.count <= 128,
+                  (message.pcm16Mono?.count ?? 0) <= 8_192
+            else { return }
+            let envelope = MeshEnvelope(type: "walkie_talkie", walkieTalkie: message)
+            if let targetID = message.targetID {
+                if let link = peers[targetID] { send(envelope, to: link) }
+            } else {
+                broadcast(envelope)
+            }
+        }
+    }
 
     @discardableResult
     func publishMediaCommand(
@@ -363,6 +412,8 @@ final class MeshControlPlane {
             room: publicRoom,
             nodeID: nodeID,
             displayName: displayName,
+            deviceIcon: deviceIcon,
+            deviceColorHex: deviceColorHex,
             appVersion: appVersion,
             authNonce: room.isPrivate ? link.localNonce : nil
         )
@@ -434,6 +485,9 @@ final class MeshControlPlane {
             }
             link.nodeID = remoteID
             link.displayName = envelope.displayName
+            let remoteAppearance = DeviceAppearance.generated(from: remoteID)
+            link.deviceIcon = envelope.deviceIcon ?? remoteAppearance.icon
+            link.deviceColorHex = envelope.deviceColorHex ?? remoteAppearance.colorHex
             link.appVersion = envelope.appVersion
             if room.isPrivate {
                 guard let nonce = envelope.authNonce, nonce.count <= 128,
@@ -564,6 +618,29 @@ final class MeshControlPlane {
                 pendingRoomActions.removeValue(forKey: requestID)
             }
             if isNew { broadcast(envelope, excluding: link) }
+        case "device_identity", "display_name":
+            guard envelope.nodeID == remoteID,
+                  let name = envelope.displayName?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !name.isEmpty,
+                  name.utf8.count <= 160
+            else { return }
+            let appearance = DeviceAppearance(
+                icon: envelope.deviceIcon ?? DeviceAppearance.generated(from: remoteID).icon,
+                colorHex: envelope.deviceColorHex ?? DeviceAppearance.generated(from: remoteID).colorHex
+            )
+            link.displayName = name
+            link.deviceIcon = appearance.icon
+            link.deviceColorHex = appearance.colorHex
+            publishParticipants()
+        case "walkie_talkie":
+            guard let message = envelope.walkieTalkie,
+                  message.senderID == remoteID,
+                  message.senderName.utf8.count <= 160,
+                  message.sessionID.utf8.count <= 128,
+                  message.targetID == nil || message.targetID == nodeID,
+                  (message.pcm16Mono?.count ?? 0) <= 8_192
+            else { return }
+            walkieTalkieHandler(message)
         default:
             break
         }
@@ -585,9 +662,22 @@ final class MeshControlPlane {
     }
 
     private func publishParticipants() {
-        let local = RoomParticipant(id: nodeID, name: displayName)
+        let local = RoomParticipant(
+            id: nodeID,
+            name: displayName,
+            icon: deviceIcon,
+            colorHex: deviceColorHex
+        )
         let remote = peers.compactMap { id, link in
-            link.displayName.map { RoomParticipant(id: id, name: $0) }
+            link.displayName.map {
+                let appearance = DeviceAppearance.generated(from: id)
+                return RoomParticipant(
+                    id: id,
+                    name: $0,
+                    icon: link.deviceIcon ?? appearance.icon,
+                    colorHex: link.deviceColorHex ?? appearance.colorHex
+                )
+            }
         }
         participantsHandler(([local] + remote).sorted { $0.name < $1.name })
     }

@@ -8,16 +8,11 @@ final class HostSession {
     private var audioSource: AudioSource?
     private var videoCapture: ScreenVideoCapture?
     private var videoEncoder: VideoEncoder?
-    private let virtualDisplayOwner: VirtualDisplayOwner
     private var nowPlayingMonitor: NowPlayingMonitor?
     private var playbackController: SystemPlaybackController?
     private var shouldPauseSourceOnStop = false
     private var muteTap: AnyObject?
     private var videoStoppedHandler: (Error) -> Void = { _ in }
-    init(virtualDisplayFactory: @escaping () throws -> VirtualDisplayManaging = { try VirtualDisplayManager() }) {
-        self.virtualDisplayOwner = VirtualDisplayOwner(factory: virtualDisplayFactory)
-    }
-
     func start(
         roomName: String,
         participantID: String = UUID().uuidString,
@@ -130,7 +125,6 @@ final class HostSession {
         videoCapture = nil
         videoEncoder?.stop()
         videoEncoder = nil
-        virtualDisplayOwner.stop()
         nowPlayingMonitor?.stop()
         nowPlayingMonitor = nil
         playbackController = nil
@@ -169,7 +163,10 @@ final class HostSession {
     func setVideoEnabled(_ enabled: Bool) async throws {
         if enabled {
             guard videoCapture == nil, let host else { return }
-            let displayID = try virtualDisplayOwner.create()
+            let displayID = CGMainDisplayID()
+            guard displayID != kCGNullDirectDisplay, CGDisplayIsActive(displayID) != 0 else {
+                throw WERAIError("This Mac's main display is not available for screen sharing.")
+            }
             let encoder = VideoEncoder { frame in host.acceptVideo(frame) }
             let capture = ScreenVideoCapture()
             videoEncoder = encoder
@@ -190,7 +187,6 @@ final class HostSession {
                 if videoEncoder === encoder { videoEncoder = nil }
                 await capture.stop()
                 encoder.stop()
-                virtualDisplayOwner.stop()
                 throw error
             }
         } else {
@@ -199,7 +195,6 @@ final class HostSession {
             videoCapture = nil
             videoEncoder?.stop()
             videoEncoder = nil
-            virtualDisplayOwner.stop()
         }
     }
 
@@ -212,7 +207,6 @@ final class HostSession {
         host?.setVideoEnabled(false)
         await capture.stop()
         encoder?.stop()
-        virtualDisplayOwner.stop()
         fputs("Video sharing was disabled after capture stopped: \(error.localizedDescription)\n", stderr)
         return true
     }
@@ -231,16 +225,13 @@ final class HostSession {
         self.videoCapture = nil
         let activeVideoEncoder = videoEncoder
         videoEncoder = nil
-        let displayOwner = virtualDisplayOwner
         if let activeVideoCapture {
             Task {
                 await activeVideoCapture.stop()
                 activeVideoEncoder?.stop()
-                displayOwner.stop()
             }
         } else {
             activeVideoEncoder?.stop()
-            displayOwner.stop()
         }
         host?.stop()
     }

@@ -6,7 +6,9 @@ import WERAICore
 final class MeshSession {
     let room: RoomConfiguration
     let nodeID: String
-    private let displayName: String
+    private var displayName: String
+    private var deviceIcon: String
+    private var deviceColorHex: String
     private let control: MeshControlPlane
     private let statusHandler: (String) -> Void
     private let identityHandler: (String, String) -> Void
@@ -17,6 +19,11 @@ final class MeshSession {
     private let videoHandler: (CGImage) -> Void
     private let replicaPersistenceHandler: (MeshRoomReplica) -> Void
     private let errorHandler: (Error) -> Void
+    private let walkieTalkieStateHandler: (String, String, Bool) -> Void
+    private let walkieTalkieMicrophone = WalkieTalkieMicrophone()
+    private let walkieTalkiePlayer = WalkieTalkiePlayer()
+    private let walkieTransmissionQueue = DispatchQueue(label: "in.werai.walkie-transmission")
+    private var walkieTransmission: (id: String, targetID: String?, name: String, sequence: UInt64)?
     private var hostSession: HostSession?
     private var receiver: Receiver?
     private var replica = MeshRoomReplica()
@@ -27,6 +34,7 @@ final class MeshSession {
     private var mediaCommandReady = false
     private var transitionTask: Task<Void, Never>?
     private var isStopped = true
+    private var incomingMediaMuted = false
 
     var isBroadcasting: Bool { replica.broadcaster?.nodeID == nodeID }
     var hasBroadcaster: Bool { replica.broadcaster != nil }
@@ -36,6 +44,7 @@ final class MeshSession {
         var participants: ([RoomParticipant]) -> Void = { _ in }
         var mediaCommand: (RoomMediaCommand, String, UInt64) -> Bool = { _, _, _ in false }
         var resyncRequest: (String?, String, UInt64) -> Bool = { _, _, _ in false }
+        var walkieTalkie: (WalkieTalkieMessage) -> Void = { _ in }
     }
     private let callbackRelay: CallbackRelay
 
@@ -43,6 +52,8 @@ final class MeshSession {
         room: RoomConfiguration,
         nodeID: String,
         displayName: String,
+        deviceIcon: String? = nil,
+        deviceColorHex: String? = nil,
         initialEvents: [MeshRoomEvent] = [],
         statusHandler: @escaping (String) -> Void,
         identityHandler: @escaping (String, String) -> Void,
@@ -54,12 +65,16 @@ final class MeshSession {
         videoHandler: @escaping (CGImage) -> Void,
         peerVersionHandler: @escaping (String) -> Void = { _ in },
         errorHandler: @escaping (Error) -> Void = { _ in },
+        walkieTalkieStateHandler: @escaping (String, String, Bool) -> Void = { _, _, _ in },
         replicaPersistenceHandler: @escaping (MeshRoomReplica) -> Void = { _ in }
     ) {
         let relay = CallbackRelay()
         self.room = room
         self.nodeID = nodeID
         self.displayName = displayName
+        let appearance = DeviceAppearance.generated(from: nodeID)
+        self.deviceIcon = deviceIcon ?? appearance.icon
+        self.deviceColorHex = deviceColorHex ?? appearance.colorHex
         self.callbackRelay = relay
         self.statusHandler = statusHandler
         self.identityHandler = identityHandler
@@ -69,11 +84,14 @@ final class MeshSession {
         self.queueHandler = queueHandler
         self.videoHandler = videoHandler
         self.errorHandler = errorHandler
+        self.walkieTalkieStateHandler = walkieTalkieStateHandler
         self.replicaPersistenceHandler = replicaPersistenceHandler
         self.control = MeshControlPlane(
             room: room,
             nodeID: nodeID,
             displayName: displayName,
+            deviceIcon: deviceIcon,
+            deviceColorHex: deviceColorHex,
             initialEvents: initialEvents,
             replicaHandler: { replica in
                 DispatchQueue.main.async { relay.replica(replica) }
@@ -101,6 +119,9 @@ final class MeshSession {
                 }
                 if Thread.isMainThread { return accept() }
                 return DispatchQueue.main.sync(execute: accept)
+            },
+            walkieTalkieHandler: { message in
+                DispatchQueue.main.async { relay.walkieTalkie(message) }
             }
         )
         relay.replica = { [weak self] in self?.apply($0) }
@@ -119,6 +140,7 @@ final class MeshSession {
                 broadcasterEpoch: broadcasterEpoch
             ) ?? false
         }
+        relay.walkieTalkie = { [weak self] message in self?.receiveWalkieTalkie(message) }
     }
 
     func start(broadcastInitially: Bool) throws {
@@ -162,6 +184,78 @@ final class MeshSession {
         ))
     }
     func removeQueueItem(_ id: String) { control.publishQueueRemove(id) }
+    func updateIdentity(name: String, icon: String, colorHex: String) {
+        let trimmed = String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(40))
+        guard !trimmed.isEmpty else { return }
+        let appearance = DeviceAppearance(icon: icon, colorHex: colorHex)
+        displayName = trimmed
+        deviceIcon = appearance.icon
+        deviceColorHex = appearance.colorHex
+        control.updateIdentity(name: trimmed, icon: appearance.icon, colorHex: appearance.colorHex)
+        identityHandler(nodeID, trimmed)
+    }
+
+    func beginWalkieTalkie(targetID: String?) async throws {
+        guard targetID != nodeID else { return }
+        guard await WalkieTalkieMicrophone.requestAccess() else {
+            throw WERAIError(
+                "Microphone access is needed for push-to-talk. Enable ALO in Privacy & Security → Microphone."
+            )
+        }
+        endWalkieTalkie()
+        let sessionID = UUID().uuidString
+        let senderName = displayName
+        walkieTransmissionQueue.sync {
+            walkieTransmission = (sessionID, targetID, senderName, 0)
+        }
+        do {
+            try walkieTalkieMicrophone.start { [weak self] data in
+                guard let self else { return }
+                let message: WalkieTalkieMessage? = self.walkieTransmissionQueue.sync {
+                    guard var active = self.walkieTransmission, active.id == sessionID else { return nil }
+                    active.sequence &+= 1
+                    self.walkieTransmission = active
+                    return WalkieTalkieMessage(
+                        kind: .audio,
+                        senderID: self.nodeID,
+                        senderName: active.name,
+                        targetID: active.targetID,
+                        sessionID: active.id,
+                        sequence: active.sequence,
+                        pcm16Mono: data
+                    )
+                }
+                if let message { self.control.publishWalkieTalkie(message) }
+            }
+            control.publishWalkieTalkie(WalkieTalkieMessage(
+                kind: .began,
+                senderID: nodeID,
+                senderName: senderName,
+                targetID: targetID,
+                sessionID: sessionID
+            ))
+        } catch {
+            walkieTransmissionQueue.sync { walkieTransmission = nil }
+            throw error
+        }
+    }
+
+    func endWalkieTalkie() {
+        walkieTalkieMicrophone.stop()
+        let active = walkieTransmissionQueue.sync {
+            defer { walkieTransmission = nil }
+            return walkieTransmission
+        }
+        guard let active else { return }
+        control.publishWalkieTalkie(WalkieTalkieMessage(
+            kind: .ended,
+            senderID: nodeID,
+            senderName: active.name,
+            targetID: active.targetID,
+            sessionID: active.id,
+            sequence: active.sequence
+        ))
+    }
     @discardableResult
     func sendMediaCommand(_ command: RoomMediaCommand) -> Bool {
         guard let broadcaster = replica.broadcaster else { return false }
@@ -195,6 +289,12 @@ final class MeshSession {
     }
     func setLocalLevel(volume: Double, muted: Bool) { receiver?.setLocalLevel(volume: volume, muted: muted) }
     func setParticipantLevel(id: String, volume: Double, muted: Bool) { hostSession?.setParticipantLevel(id: id, volume: volume, muted: muted) }
+    func setIncomingMediaMuted(_ muted: Bool) {
+        incomingMediaMuted = muted
+        if isBroadcasting { hostSession?.setParticipantLevel(id: nodeID, volume: 1, muted: muted) }
+        else { receiver?.setLocalLevel(volume: 1, muted: muted) }
+    }
+    func setIncomingWalkieTalkieMuted(_ muted: Bool) { walkieTalkiePlayer.setMuted(muted) }
 
     func setVideoEnabled(_ enabled: Bool) async throws {
         guard let hostSession,
@@ -213,6 +313,8 @@ final class MeshSession {
     func stop() async {
         guard !isStopped else { return }
         isStopped = true
+        endWalkieTalkie()
+        walkieTalkiePlayer.stop()
         intendsToBroadcast = false
         intendsToBroadcastVideo = false
         if let broadcaster = replica.broadcaster, broadcaster.nodeID == nodeID {
@@ -235,6 +337,8 @@ final class MeshSession {
     func stopImmediately() {
         guard !isStopped else { return }
         isStopped = true
+        endWalkieTalkie()
+        walkieTalkiePlayer.stop()
         intendsToBroadcast = false
         intendsToBroadcastVideo = false
         transitionGeneration += 1
@@ -355,6 +459,7 @@ final class MeshSession {
                         )
                     }
                     mediaCommandReady = true
+                    host.setParticipantLevel(id: nodeID, volume: 1, muted: incomingMediaMuted)
                 } else {
                     statusHandler("Connecting to the room broadcaster")
                     let receiver = try Receiver(
@@ -389,6 +494,7 @@ final class MeshSession {
                     )
                     self.receiver = receiver
                     try receiver.start()
+                    receiver.setLocalLevel(volume: 1, muted: incomingMediaMuted)
                     guard generation == transitionGeneration,
                           replica.broadcaster == broadcaster else {
                         receiver.stop()
@@ -441,5 +547,17 @@ final class MeshSession {
         else { return false }
         guard mediaCommandReady, let hostSession else { return false }
         return hostSession.requestResync(participantID: targetID)
+    }
+
+    private func receiveWalkieTalkie(_ message: WalkieTalkieMessage) {
+        walkieTalkiePlayer.accept(message)
+        switch message.kind {
+        case .began:
+            walkieTalkieStateHandler(message.senderID, message.senderName, true)
+        case .ended:
+            walkieTalkieStateHandler(message.senderID, message.senderName, false)
+        case .audio:
+            break
+        }
     }
 }

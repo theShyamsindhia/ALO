@@ -3,7 +3,7 @@
 Free, synchronized system audio with optional screen sharing for Macs on the same local network.
 
 ALO creates a persistent local group with synchronized 48 kHz stereo audio, optional
-an arrangeable video display, current album artwork, a per-Mac mixer, participant presence, group
+full-screen video sharing, current album artwork, a per-Mac mixer, participant presence, group
 chat, and a shared media queue. There is no permanent host: any member can begin
 broadcasting, and the room remains available when its creator leaves. Exactly one Mac
 broadcasts media at a time while every connected Mac replicates the room's control,
@@ -93,10 +93,10 @@ The room name is optional. Without one, a receiver joins the first room it finds
 
 Broadcasting audio uses ScreenCaptureKit and needs **Screen & System Audio Recording**.
 ALO requests access when a member first chooses **Broadcast**, before claiming the room's
-media timeline. When the active broadcaster also enables video, ALO creates a 1920×1080
-**ALO Display** that appears
-in System Settings → Displays, captures that display only, and streams it to the room.
-Arrange it beside the physical displays and move the windows you want to share onto it.
+media timeline. When the active broadcaster also enables video, ALO captures that Mac's
+current main display and streams it to the room. On macOS 15, ALO requests the complete
+ScreenCaptureKit display list instead of limiting discovery to displays associated with
+currently visible windows.
 Every Mac may also ask for **Local Network** access.
 Grant recording access in System Settings → Privacy & Security, then use **Restart ALO** if
 macOS asks you to restart it.
@@ -106,11 +106,21 @@ copies of ALO, turn the switch off and on once, and restart the current app. Do 
 keep numbered copies such as `ALO 2.app` or `ALO 3.app` in Applications; macOS can
 retain stale privacy records for those development builds.
 
-ALO Display uses the same private `CGVirtualDisplay` mechanism used by several remote-
-display apps because macOS does not publish a third-party virtual-display API. The
-feature is runtime-checked and fails cleanly if Apple changes or removes it. Reading the
-display's pixels still uses ScreenCaptureKit and therefore intentionally requires the
-user's Screen Recording consent; the private display object itself exposes no framebuffer.
+Video sharing intentionally requires the user's Screen Recording consent. ALO captures
+only the current main display and excludes ALO's own windows from the stream.
+
+Every open room also has a compact walkie-talkie bar. Hold a colored device icon to talk
+only to that Mac, or hold the people icon to talk to everyone. The lock keeps the selected
+voice line open; enable it on both Macs for a two-way line. Right-click a device to pin its
+colored icon to the macOS menu bar, where a short click opens or closes the line and a hold
+acts as push-to-talk. Incoming speakers highlight green. The speaker control mutes both
+room media and calls by default, with separate Music & Video and Voice Lines choices in
+its context menu. Microphone access is requested only when voice transmission starts.
+
+Use the pencil on this Mac's walkie icon—or the colored icon beside Create Room—to change
+its generated device name, SF Symbol icon, and color. Identity changes persist on that Mac
+and propagate to the current room immediately. The walkie bar can be dismissed with its
+close button; the same controls remain available from ALO's menu-bar popover.
 
 ALO leaves the selected physical output unchanged. It privately suppresses the original
 local render only after synchronized playback is ready, avoiding feedback without adding

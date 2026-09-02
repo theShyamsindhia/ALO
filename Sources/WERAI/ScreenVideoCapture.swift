@@ -15,6 +15,13 @@ final class ScreenVideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var stopHandler: StopHandler?
     private var stopping = false
 
+    // Full-screen capture needs the complete display list. On macOS 15,
+    // requesting only on-screen windows can also restrict the associated
+    // displays returned by ScreenCaptureKit.
+    static let discoversOnlyOnScreenWindows = false
+
+    static let discoveryAttemptLimit = 20
+
     func start(
         displayID: CGDirectDisplayID,
         handler: @escaping Handler,
@@ -27,23 +34,27 @@ final class ScreenVideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         var selectedDisplay: SCDisplay?
         var availableApplications = [SCRunningApplication]()
-        // WindowServer publishes a new CGVirtualDisplay asynchronously. Give it
-        // a bounded moment to appear rather than intermittently failing the
-        // first video start after the user grants permission.
-        for attempt in 0..<12 {
+        // ScreenCaptureKit maintains its own display snapshot. Retry briefly if
+        // the user changed the main display just before starting the broadcast.
+        for attempt in 0..<Self.discoveryAttemptLimit {
             let content = try await SCShareableContent.excludingDesktopWindows(
                 false,
-                onScreenWindowsOnly: true
+                onScreenWindowsOnly: Self.discoversOnlyOnScreenWindows
             )
             if let match = content.displays.first(where: { $0.displayID == displayID }) {
                 selectedDisplay = match
                 availableApplications = content.applications
                 break
             }
-            if attempt < 11 { try await Task.sleep(nanoseconds: 100_000_000) }
+            if attempt < Self.discoveryAttemptLimit - 1 {
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
         }
         guard let display = selectedDisplay else {
-            throw WERAIError("ALO Display is not available for screen sharing.")
+            throw WERAIError(
+                "This Mac's main display is not available to ScreenCaptureKit. "
+                    + "Check Screen Recording access and try sharing again."
+            )
         }
 
         let currentBundleID = Bundle.main.bundleIdentifier

@@ -13,12 +13,23 @@ public struct RoomParticipant: Codable, Sendable, Equatable, Identifiable {
     public let name: String
     public let volume: Double
     public let isMuted: Bool
+    public let icon: String?
+    public let colorHex: String?
 
-    public init(id: String, name: String, volume: Double = 1, isMuted: Bool = false) {
+    public init(
+        id: String,
+        name: String,
+        volume: Double = 1,
+        isMuted: Bool = false,
+        icon: String? = nil,
+        colorHex: String? = nil
+    ) {
         self.id = id
         self.name = name
         self.volume = volume
         self.isMuted = isMuted
+        self.icon = icon
+        self.colorHex = colorHex
     }
 }
 
