@@ -1,5 +1,13 @@
 import Foundation
 
+public enum RoomMediaCommand: String, Codable, Sendable, Equatable {
+    case play
+    case pause
+    case togglePlayPause
+    case nextTrack
+    case previousTrack
+}
+
 public struct RoomParticipant: Codable, Sendable, Equatable, Identifiable {
     public let id: String
     public let name: String
@@ -115,6 +123,7 @@ public struct ControlMessage: Codable, Sendable {
     public let queueItemID: String?
     public let syncReport: PlaybackSyncReport?
     public let isPlaying: Bool?
+    public let mediaCommand: RoomMediaCommand?
 
     public init(
         type: String,
@@ -140,7 +149,8 @@ public struct ControlMessage: Codable, Sendable {
         queueItem: RoomQueueItem? = nil,
         queueItemID: String? = nil,
         syncReport: PlaybackSyncReport? = nil,
-        isPlaying: Bool? = nil
+        isPlaying: Bool? = nil,
+        mediaCommand: RoomMediaCommand? = nil
     ) {
         self.type = type
         self.udpPort = udpPort
@@ -166,6 +176,7 @@ public struct ControlMessage: Codable, Sendable {
         self.queueItemID = queueItemID
         self.syncReport = syncReport
         self.isPlaying = isPlaying
+        self.mediaCommand = mediaCommand
     }
 
     public func encodedLine() throws -> Data {

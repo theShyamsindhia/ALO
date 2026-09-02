@@ -118,15 +118,23 @@ struct AudioPacketTests {
 
     @Test func sharedPlaybackStateRoundTrip() throws {
         let decoder = ControlLineDecoder()
-        let request = try ControlMessage(type: "set_playback", isPlaying: false).encodedLine()
+        let commands: [RoomMediaCommand] = [
+            .play, .pause, .togglePlayPause, .previousTrack, .nextTrack
+        ]
+        let request = try commands.reduce(into: Data()) { data, command in
+            data += try ControlMessage(
+                type: "media_command",
+                mediaCommand: command
+            ).encodedLine()
+        }
         let state = try ControlMessage(
             type: "now_playing",
             nowPlaying: NowPlayingMedia(title: "Shared track", isPlaying: false)
         ).encodedLine()
 
         let messages = decoder.append(request + state)
-        #expect(messages[0].isPlaying == false)
-        #expect(messages[1].nowPlaying?.isPlaying == false)
+        #expect(messages.prefix(commands.count).compactMap(\.mediaCommand) == commands)
+        #expect(messages.last?.nowPlaying?.isPlaying == false)
     }
 
     @Test func sharedQueueRoundTrip() throws {

@@ -16,6 +16,7 @@ let package = Package(
             name: "WERAI",
             dependencies: ["WERAICore"],
             linkerSettings: [
+                .linkedFramework("MediaPlayer"),
                 .unsafeFlags([
                     "-Xlinker", "-sectcreate",
                     "-Xlinker", "__TEXT",

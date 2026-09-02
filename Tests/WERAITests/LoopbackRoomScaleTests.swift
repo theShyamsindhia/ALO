@@ -124,7 +124,7 @@ struct LoopbackRoomScaleTests {
         let hostReady = DispatchSemaphore(value: 0)
         let commandReceived = DispatchSemaphore(value: 0)
         let state = PortState()
-        let requestedState = LockedPlaybackState()
+        let requestedCommands = LockedMediaCommands()
         let host = HostServer(
             roomName: "Playback control test \(UUID().uuidString)",
             advertise: false,
@@ -132,8 +132,8 @@ struct LoopbackRoomScaleTests {
                 state.set(port)
                 hostReady.signal()
             },
-            playbackRequestHandler: { playing in
-                requestedState.set(playing)
+            playbackRequestHandler: { command in
+                requestedCommands.append(command)
                 commandReceived.signal()
                 return true
             }
@@ -151,8 +151,12 @@ struct LoopbackRoomScaleTests {
 
         peer.setRoomPlayback(playing: false)
         #expect(commandReceived.wait(timeout: .now() + 2) == .success)
-        #expect(requestedState.value == false)
+        #expect(requestedCommands.values == [.pause])
         #expect(waitUntil(timeout: 2) { peer.playbackStates.contains(false) })
+
+        peer.sendMediaCommand(.nextTrack)
+        #expect(commandReceived.wait(timeout: .now() + 2) == .success)
+        #expect(requestedCommands.values == [.pause, .nextTrack])
     }
 
     private func runRoom(
@@ -382,8 +386,15 @@ private final class HeadlessLoopbackPeer {
     }
 
     func setRoomPlayback(playing: Bool) {
+        sendMediaCommand(playing ? .play : .pause)
+    }
+
+    func sendMediaCommand(_ command: RoomMediaCommand) {
         queue.async { [weak self] in
-            self?.send(ControlMessage(type: "set_playback", isPlaying: playing))
+            self?.send(ControlMessage(
+                type: "media_command",
+                mediaCommand: command
+            ))
         }
     }
 
@@ -493,19 +504,19 @@ private final class HeadlessLoopbackPeer {
     }
 }
 
-private final class LockedPlaybackState: @unchecked Sendable {
+private final class LockedMediaCommands: @unchecked Sendable {
     private let lock = NSLock()
-    private var storedValue: Bool?
+    private var storedValues = [RoomMediaCommand]()
 
-    var value: Bool? {
+    var values: [RoomMediaCommand] {
         lock.lock()
         defer { lock.unlock() }
-        return storedValue
+        return storedValues
     }
 
-    func set(_ value: Bool) {
+    func append(_ value: RoomMediaCommand) {
         lock.lock()
-        storedValue = value
+        storedValues.append(value)
         lock.unlock()
     }
 }

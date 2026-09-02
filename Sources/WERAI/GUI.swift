@@ -24,8 +24,10 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow?
     private var roomBarController: FloatingRoomWindowController?
     private var fullScreenVideoController: FullScreenVideoWindowController?
+    private var statusMenuController: WERAIStatusMenuController?
     private var phaseObserver: AnyCancellable?
     private var fullScreenObserver: AnyCancellable?
+    private var floatingBarObserver: AnyCancellable?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMainMenu()
@@ -46,6 +48,10 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         self.window = window
+        statusMenuController = WERAIStatusMenuController(model: model) { [weak self] in
+            self?.window?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        }
 
         phaseObserver = model.$phase
             .removeDuplicates()
@@ -59,6 +65,12 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.async { self?.updateFullScreenVideo(enabled) }
             }
 
+        floatingBarObserver = model.$floatingBarHidden
+            .removeDuplicates()
+            .sink { [weak self] hidden in
+                DispatchQueue.main.async { self?.updateFloatingBar(hidden: hidden) }
+            }
+
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -70,6 +82,7 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
             if model.videoFullscreen {
                 fullScreenVideoController?.show()
             } else {
+                model.floatingBarHidden = false
                 roomBarController?.show()
             }
         } else {
@@ -88,7 +101,7 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
                 roomBarController = FloatingRoomWindowController(model: model)
             }
             window?.orderOut(nil)
-            roomBarController?.show()
+            if !model.floatingBarHidden { roomBarController?.show() }
         } else {
             fullScreenVideoController?.close()
             fullScreenVideoController = nil
@@ -102,7 +115,7 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
         guard enabled, model.phase == .live, model.roomHasVideo else {
             fullScreenVideoController?.close()
             fullScreenVideoController = nil
-            if model.phase == .live { roomBarController?.show() }
+            if model.phase == .live, !model.floatingBarHidden { roomBarController?.show() }
             return
         }
 
@@ -111,6 +124,15 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
         }
         roomBarController?.close()
         fullScreenVideoController?.show()
+    }
+
+    private func updateFloatingBar(hidden: Bool) {
+        guard model.phase == .live else { return }
+        if hidden {
+            roomBarController?.close()
+        } else if !model.videoFullscreen {
+            roomBarController?.show()
+        }
     }
 
     private func installMainMenu() {
@@ -131,6 +153,98 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
         )
         appMenuItem.submenu = appMenu
         NSApp.mainMenu = mainMenu
+    }
+}
+
+@MainActor
+private final class WERAIStatusMenuController: NSObject, NSMenuDelegate {
+    private let model: WERAIViewModel
+    private let openMainWindow: () -> Void
+    private let statusItem: NSStatusItem
+    private let menu = NSMenu()
+
+    init(model: WERAIViewModel, openMainWindow: @escaping () -> Void) {
+        self.model = model
+        self.openMainWindow = openMainWindow
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        super.init()
+        statusItem.button?.image = NSImage(
+            systemSymbolName: "waveform.circle.fill",
+            accessibilityDescription: "WERAI"
+        )
+        statusItem.button?.image?.isTemplate = true
+        statusItem.button?.toolTip = "WERAI"
+        menu.delegate = self
+        statusItem.menu = menu
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        if model.phase == .live {
+            let room = NSMenuItem(title: model.roomTitle, action: nil, keyEquivalent: "")
+            room.isEnabled = false
+            menu.addItem(room)
+            let detail = NSMenuItem(
+                title: "\(model.participants.count) listening · In sync",
+                action: nil,
+                keyEquivalent: ""
+            )
+            detail.isEnabled = false
+            menu.addItem(detail)
+            menu.addItem(.separator())
+            addItem(
+                model.roomIsPlaying ? "Pause for Everyone" : "Play for Everyone",
+                action: #selector(togglePlayback),
+                key: "p"
+            )
+            addItem("Previous Track", action: #selector(previousTrack))
+            addItem("Next Track", action: #selector(nextTrack))
+            menu.addItem(.separator())
+            addItem(
+                model.floatingBarHidden ? "Show Floating Controls" : "Hide Floating Controls",
+                action: #selector(toggleFloatingControls)
+            )
+            menu.addItem(.separator())
+            addItem("Leave Room", action: #selector(leaveRoom))
+        } else {
+            addItem("Open WERAI", action: #selector(openApp))
+        }
+        menu.addItem(.separator())
+        addItem("Quit WERAI", action: #selector(quit), key: "q")
+    }
+
+    private func addItem(_ title: String, action: Selector, key: String = "") {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+        item.target = self
+        menu.addItem(item)
+    }
+
+    @objc private func togglePlayback() {
+        model.toggleRoomPlayback()
+    }
+
+    @objc private func previousTrack() {
+        model.sendRoomMediaCommand(.previousTrack)
+    }
+
+    @objc private func nextTrack() {
+        model.sendRoomMediaCommand(.nextTrack)
+    }
+
+    @objc private func toggleFloatingControls() {
+        model.floatingBarHidden ? model.showFloatingBar() : model.hideFloatingBar()
+    }
+
+    @objc private func leaveRoom() {
+        model.stop()
+    }
+
+    @objc private func openApp() {
+        openMainWindow()
+    }
+
+    @objc private func quit() {
+        NSApp.terminate(nil)
     }
 }
 
@@ -210,6 +324,7 @@ final class WERAIViewModel: ObservableObject {
     @Published var mediaSwitchBusy = false
     @Published var permissionNotice = false
     @Published var floatingSection: FloatingSection = .collapsed
+    @Published var floatingBarHidden = false
 
     private var roomBrowser: RoomBrowser!
     private var hostSession: HostSession?
@@ -382,12 +497,25 @@ final class WERAIViewModel: ObservableObject {
     }
 
     func toggleRoomPlayback() {
-        let shouldPlay = !roomIsPlaying
+        sendRoomMediaCommand(roomIsPlaying ? .pause : .play)
+    }
+
+    func sendRoomMediaCommand(_ command: RoomMediaCommand) {
         if let hostSession {
-            hostSession.setRoomPlayback(playing: shouldPlay)
+            hostSession.sendRoomMediaCommand(command)
         } else {
-            receiver?.setRoomPlayback(playing: shouldPlay)
+            receiver?.sendRoomMediaCommand(command)
         }
+    }
+
+    func hideFloatingBar() {
+        floatingSection = .collapsed
+        floatingBarHidden = true
+    }
+
+    func showFloatingBar() {
+        videoFullscreen = false
+        floatingBarHidden = false
     }
 
     func canControl(_ participant: RoomParticipant) -> Bool {
@@ -491,6 +619,7 @@ final class WERAIViewModel: ObservableObject {
 
     func collapseFloatingBar() {
         floatingSection = .collapsed
+        floatingBarHidden = false
     }
 
     func enterVideoFullscreen() {
@@ -1089,6 +1218,12 @@ private struct FloatingRoomView: View {
                 help: model.isHost ? "Share or view screen" : "View shared screen"
             ) { model.toggleVideoFromFloatingBar() }
             .keyboardShortcut("3", modifiers: .command)
+
+            roomBarButton(
+                icon: "eye.slash",
+                active: false,
+                help: "Hide floating controls"
+            ) { model.hideFloatingBar() }
 
             Divider().frame(height: 20)
 

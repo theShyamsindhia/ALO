@@ -46,7 +46,10 @@ enum WERAICommand {
         let host = HostServer(roomName: roomName)
         try host.start()
 
-        let localReceiver = try Receiver(requestedRoom: roomName)
+        let localReceiver = try Receiver(
+            requestedRoom: roomName,
+            capturesSystemMediaCommands: false
+        )
         try localReceiver.start()
 
         let capture = SystemAudioCapture()

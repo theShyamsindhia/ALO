@@ -34,6 +34,11 @@ to the room bar without interrupting audio. Unread chat is shown on the message 
 When the source player publishes track information, the host sends
 the title, artist, and album artwork to every Mac. Screen sharing remains off by
 default. Guests can control their own output, while the host can control every Mac.
+The menu-bar waveform provides shared play/pause, previous/next, show/hide controls,
+and leave-room actions without opening the floating bar. The floating bar's eye button
+hides it until **Show Floating Controls** is selected from that menu. On joined client
+Macs, keyboard, Touch Bar, headphone, and Control Center play/pause/previous/next
+commands are forwarded to the host; volume buttons continue to control the local Mac.
 The interface follows macOS accessibility preferences for reduced motion, reduced
 transparency, increased contrast, and the user-selected control accent.
 
@@ -101,6 +106,8 @@ new WERAI build does not silently become a different app in macOS privacy settin
   behind the room timeline, it flushes stale scheduled audio and re-anchors itself.
 - Play and pause in the room bar are shared controls. A participant's request is sent
   to the host Mac, applied to its active system media player, and rebroadcast to the room.
+- Joined clients publish the room as their active macOS Now Playing session, allowing
+  system and accessory transport buttons to use the same host-authoritative command path.
 - Video follows the same room target and capture timestamps as audio, preserving lip sync.
 - Audio uses about 1.54 Mb/s per receiving Mac. Video targets about 4 Mb/s at up to
   1280×720 and 30 fps using Apple’s hardware H.264 encoder.

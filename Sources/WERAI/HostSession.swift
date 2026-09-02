@@ -33,8 +33,8 @@ final class HostSession {
                 roomName: roomName,
                 statusHandler: statusHandler,
                 receiverCountHandler: receiverCountHandler,
-                playbackRequestHandler: { [weak playbackController] playing in
-                    playbackController?.setPlaying(playing) ?? false
+                playbackRequestHandler: { [weak playbackController] command in
+                    playbackController?.perform(command) ?? false
                 }
             )
             try host.start()
@@ -42,6 +42,7 @@ final class HostSession {
 
             let localReceiver = try Receiver(
                 requestedRoom: roomName,
+                capturesSystemMediaCommands: false,
                 statusHandler: { status in
                     if status == .playing {
                         statusHandler("This Mac is playing in sync")
@@ -127,8 +128,8 @@ final class HostSession {
         host?.setParticipantLevel(id: id, volume: volume, muted: muted)
     }
 
-    func setRoomPlayback(playing: Bool) {
-        localReceiver?.setRoomPlayback(playing: playing)
+    func sendRoomMediaCommand(_ command: RoomMediaCommand) {
+        localReceiver?.sendRoomMediaCommand(command)
     }
 
     func setVideoEnabled(_ enabled: Bool) async throws {

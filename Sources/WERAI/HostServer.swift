@@ -44,7 +44,7 @@ final class HostServer {
     private let listenerReadyHandler: ((NWEndpoint.Port) -> Void)?
     private let outboundSend: OutboundSend?
     private let audioBackpressurePolicy: AudioBackpressurePolicy
-    private let playbackRequestHandler: ((Bool) -> Bool)?
+    private let playbackRequestHandler: ((RoomMediaCommand) -> Bool)?
     private let packetizer = AudioPacketizer()
     private var listener: NWListener?
     private var clients = [ObjectIdentifier: Client]()
@@ -62,7 +62,7 @@ final class HostServer {
         listenerReadyHandler: ((NWEndpoint.Port) -> Void)? = nil,
         outboundSend: OutboundSend? = nil,
         audioBackpressurePolicy: AudioBackpressurePolicy = .boundedLatest(maxInFlight: 8),
-        playbackRequestHandler: ((Bool) -> Bool)? = nil
+        playbackRequestHandler: ((RoomMediaCommand) -> Bool)? = nil
     ) {
         self.roomName = roomName
         self.statusHandler = statusHandler
@@ -333,11 +333,19 @@ final class HostServer {
                 muted: message.muted ?? client.isMuted
             )
 
-        case "set_playback":
+        case "set_playback", "media_command":
             guard client.id != nil,
-                  let isPlaying = message.isPlaying,
-                  playbackRequestHandler?(isPlaying) == true
+                  let command = message.mediaCommand
+                    ?? message.isPlaying.map({ $0 ? .play : .pause }),
+                  playbackRequestHandler?(command) == true
             else { return }
+            let isPlaying: Bool
+            switch command {
+            case .play: isPlaying = true
+            case .pause: isPlaying = false
+            case .togglePlayPause: isPlaying = !(nowPlaying.isPlaying ?? true)
+            case .nextTrack, .previousTrack: return
+            }
             nowPlaying = NowPlayingMedia(
                 title: nowPlaying.title,
                 artist: nowPlaying.artist,

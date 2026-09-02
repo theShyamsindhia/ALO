@@ -276,8 +276,15 @@ final class SystemPlaybackController {
         if let frameworkHandle { dlclose(frameworkHandle) }
     }
 
-    func setPlaying(_ playing: Bool) -> Bool {
-        // MediaRemote command values: play = 0, pause = 1.
-        sendCommand?(playing ? 0 : 1, nil) ?? false
+    func perform(_ command: RoomMediaCommand) -> Bool {
+        let commandValue: Int
+        switch command {
+        case .play: commandValue = 0
+        case .pause: commandValue = 1
+        case .togglePlayPause: commandValue = 2
+        case .nextTrack: commandValue = 4
+        case .previousTrack: commandValue = 5
+        }
+        return sendCommand?(commandValue, nil) ?? false
     }
 }

@@ -7,6 +7,7 @@ final class Receiver {
     private let queue = DispatchQueue(label: "in.werai.receiver.network", qos: .userInteractive)
     private let requestedRoom: String?
     private let displayName: String
+    private let capturesSystemMediaCommands: Bool
     private let participantID = UUID().uuidString
     private let statusHandler: ((ReceiverStatus) -> Void)?
     private let identityHandler: ((_ id: String, _ name: String) -> Void)?
@@ -19,6 +20,9 @@ final class Receiver {
     private let jitter = NetworkJitterEstimator()
     private let player: SynchronizedPlayer
     private let videoDecoder: VideoDecoder
+    private lazy var remoteCommandCenter = RoomRemoteCommandCenter { [weak self] command in
+        self?.sendRoomMediaCommand(command)
+    }
     private var udpListener: NWListener?
     private var videoListener: NWListener?
     private var browser: NWBrowser?
@@ -36,6 +40,7 @@ final class Receiver {
     init(
         requestedRoom: String?,
         displayName: String? = nil,
+        capturesSystemMediaCommands: Bool = true,
         statusHandler: ((ReceiverStatus) -> Void)? = nil,
         identityHandler: ((_ id: String, _ name: String) -> Void)? = nil,
         participantsHandler: (([RoomParticipant]) -> Void)? = nil,
@@ -47,6 +52,7 @@ final class Receiver {
     ) throws {
         self.requestedRoom = requestedRoom
         self.displayName = displayName ?? Host.current().localizedName ?? "Mac"
+        self.capturesSystemMediaCommands = capturesSystemMediaCommands
         self.statusHandler = statusHandler
         self.identityHandler = identityHandler
         self.participantsHandler = participantsHandler
@@ -133,6 +139,7 @@ final class Receiver {
             videoConnections.removeAll()
             player.stop()
             videoDecoder.stop()
+            if capturesSystemMediaCommands { remoteCommandCenter.stop() }
             hasChosenRoom = false
             audioListenerReady = false
             videoListenerReady = false
@@ -170,8 +177,12 @@ final class Receiver {
     }
 
     func setRoomPlayback(playing: Bool) {
+        sendRoomMediaCommand(playing ? .play : .pause)
+    }
+
+    func sendRoomMediaCommand(_ command: RoomMediaCommand) {
         queue.async { [weak self] in
-            self?.send(ControlMessage(type: "set_playback", isPlaying: playing))
+            self?.send(ControlMessage(type: "media_command", mediaCommand: command))
         }
     }
 
@@ -219,6 +230,9 @@ final class Receiver {
             case .ready:
                 print("Connected to \(endpoint).")
                 self.statusHandler?(.connected)
+                if self.capturesSystemMediaCommands {
+                    self.remoteCommandCenter.start(roomName: self.requestedRoom ?? "WERAI Room")
+                }
                 self.sendJoin()
                 self.startPinging()
             case .failed(let error):
@@ -293,7 +307,11 @@ final class Receiver {
                     case "media_state":
                         self.mediaStateHandler?(message.videoEnabled ?? false)
                     case "now_playing":
-                        self.nowPlayingHandler?(message.nowPlaying ?? NowPlayingMedia())
+                        let media = message.nowPlaying ?? NowPlayingMedia()
+                        if self.capturesSystemMediaCommands {
+                            self.remoteCommandCenter.update(media)
+                        }
+                        self.nowPlayingHandler?(media)
                     case "level":
                         self.player.setLevel(
                             volume: message.volume ?? 1,
