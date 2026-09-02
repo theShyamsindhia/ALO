@@ -750,6 +750,22 @@ final class WERAIViewModel: ObservableObject {
         meshSession?.sendMediaCommand(command)
     }
 
+    func syncParticipant(_ participant: RoomParticipant) {
+        if meshSession?.requestResync(participantID: participant.id) == true {
+            statusText = "Syncing \(participant.id == currentParticipantID ? "this Mac" : participant.name)"
+        } else {
+            statusText = "Wait for the audio connection, then try syncing again"
+        }
+    }
+
+    func syncAllDevices() {
+        if meshSession?.requestResync() == true {
+            statusText = "Syncing every Mac to the room clock"
+        } else {
+            statusText = "Wait for the audio connection, then try syncing again"
+        }
+    }
+
     func hideFloatingBar() {
         floatingSection = .collapsed
         floatingBarHidden = true
@@ -2130,7 +2146,11 @@ private struct FloatingRoomView: View {
 
     private var peopleMixer: some View {
         VStack(spacing: 0) {
-            panelHeader(title: "People", detail: "Each Mac has its own level")
+            panelHeader(
+                title: "People",
+                detail: "Each Mac has its own level",
+                syncAction: model.syncAllDevices
+            )
             Divider().opacity(0.42)
             if model.activePrivateInviteKey != nil {
                 HStack(spacing: 8) {
@@ -2220,6 +2240,15 @@ private struct FloatingRoomView: View {
             .disabled(!controllable)
             .help(participant.isMuted ? "Unmute \(participant.name)" : "Mute \(participant.name)")
             .accessibilityLabel(participant.isMuted ? "Unmute \(participant.name)" : "Mute \(participant.name)")
+            Button { model.syncParticipant(participant) } label: {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(Palette.controlIcon)
+                    .frame(width: 32, height: 30)
+            }
+            .buttonStyle(FlatToolButtonStyle(active: false))
+            .help("Sync \(participant.id == model.currentParticipantID ? "this Mac" : participant.name) now")
+            .accessibilityLabel("Sync \(participant.id == model.currentParticipantID ? "this Mac" : participant.name) now")
         }
         .padding(.horizontal, 8)
         .frame(height: 64)
@@ -2311,7 +2340,11 @@ private struct FloatingRoomView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func panelHeader(title: String, detail: String) -> some View {
+    private func panelHeader(
+        title: String,
+        detail: String,
+        syncAction: (() -> Void)? = nil
+    ) -> some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
@@ -2322,6 +2355,15 @@ private struct FloatingRoomView: View {
                     .foregroundStyle(Palette.secondary)
             }
             Spacer()
+            if let syncAction {
+                Button(action: syncAction) {
+                    Label("Sync all", systemImage: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+                .buttonStyle(PillButtonStyle(filled: false))
+                .help("Re-align every Mac to the room clock")
+                .accessibilityLabel("Sync all Macs now")
+            }
             Button(action: model.collapseFloatingBar) {
                 Image(systemName: "chevron.down")
                     .font(.system(size: 10, weight: .semibold))

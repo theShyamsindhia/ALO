@@ -216,6 +216,15 @@ final class Receiver {
         }
     }
 
+    @discardableResult
+    func requestResync(participantID: String? = nil) -> Bool {
+        queue.sync {
+            guard control != nil, hasAuthenticatedControl else { return false }
+            send(ControlMessage(type: "resync_request", targetID: participantID))
+            return true
+        }
+    }
+
     func updateNowPlaying(_ media: NowPlayingMedia) {
         guard capturesSystemMediaCommands else { return }
         queue.async { [weak self] in self?.remoteCommandCenter.update(media) }
@@ -347,6 +356,8 @@ final class Receiver {
                             self.remoteCommandCenter.update(media)
                         }
                         self.nowPlayingHandler?(media)
+                    case "room_playback":
+                        self.player.setRoomPlayback(playing: message.isPlaying ?? true)
                     case "level":
                         self.player.setLevel(
                             volume: message.volume ?? 1,

@@ -133,6 +133,11 @@ final class MeshSession {
         else if let receiver { receiver.sendRoomMediaCommand(command) }
         else { pendingMediaCommand = command; mediaCommandReady = false }
     }
+    func requestResync(participantID: String? = nil) -> Bool {
+        if let hostSession { return hostSession.requestResync(participantID: participantID) }
+        if let receiver { return receiver.requestResync(participantID: participantID) }
+        return false
+    }
     func setLocalLevel(volume: Double, muted: Bool) { receiver?.setLocalLevel(volume: volume, muted: muted) }
     func setParticipantLevel(id: String, volume: Double, muted: Bool) { hostSession?.setParticipantLevel(id: id, volume: volume, muted: muted) }
 

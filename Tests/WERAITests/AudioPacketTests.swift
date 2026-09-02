@@ -29,6 +29,23 @@ struct AudioPacketTests {
         #expect(second[0].captureTimeNanos == 1_005_000_000)
     }
 
+    @Test func packetizerStartsFreshTimelineAfterPause() {
+        let packetizer = AudioPacketizer()
+        #expect(packetizer.append(
+            samples: [Int16](repeating: 1, count: 200),
+            captureTimeNanos: 1_000_000_000
+        ).isEmpty)
+
+        packetizer.discardPendingSamples()
+        let resumed = packetizer.append(
+            samples: [Int16](repeating: 2, count: 480),
+            captureTimeNanos: 8_000_000_000
+        )
+
+        #expect(resumed.count == 1)
+        #expect(resumed[0].captureTimeNanos == 8_000_000_000)
+    }
+
     @Test func controlMessagesCanArriveInChunks() throws {
         let decoder = ControlLineDecoder()
         let first = try ControlMessage(type: "ping", id: 7, clientNanos: 10).encodedLine()

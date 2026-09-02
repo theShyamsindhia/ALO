@@ -170,7 +170,9 @@ struct LoopbackRoomScaleTests {
             playbackRequestHandler: { command in
                 requestedCommands.append(command)
                 commandReceived.signal()
-                return true
+                // Room playback must remain authoritative even when macOS does not
+                // deliver play/pause to the source app.
+                return command == .nextTrack || command == .previousTrack
             }
         )
         try host.start()
@@ -195,6 +197,7 @@ struct LoopbackRoomScaleTests {
         #expect(commandReceived.wait(timeout: .now() + 2) == .success)
         #expect(requestedCommands.values == [.pause])
         #expect(waitUntil(timeout: 2) { peer.playbackStates.contains(false) })
+        #expect(waitUntil(timeout: 2) { observer.roomPlaybackStates.contains(false) })
         #expect(waitUntil(timeout: 2) {
             peer.resyncCommandCount == 1 && observer.resyncCommandCount == 1
         })
@@ -203,6 +206,7 @@ struct LoopbackRoomScaleTests {
         #expect(commandReceived.wait(timeout: .now() + 2) == .success)
         #expect(requestedCommands.values == [.pause, .play])
         #expect(waitUntil(timeout: 2) { observer.playbackStates.contains(true) })
+        #expect(waitUntil(timeout: 2) { peer.roomPlaybackStates.contains(true) })
         #expect(waitUntil(timeout: 2) {
             peer.resyncCommandCount == 2 && observer.resyncCommandCount == 2
         })
@@ -217,6 +221,47 @@ struct LoopbackRoomScaleTests {
         #expect(waitUntil(timeout: 2) { observer.playbackStates.last == false })
         #expect(peer.resyncCommandCount == 2)
         #expect(observer.resyncCommandCount == 2)
+    }
+
+    @Test("Any participant can manually resync one Mac or the whole room")
+    func participantCanRequestManualResync() throws {
+        let hostReady = DispatchSemaphore(value: 0)
+        let state = PortState()
+        let host = HostServer(
+            roomName: "Manual sync test \(UUID().uuidString)",
+            advertise: false,
+            listenerReadyHandler: { port in
+                state.set(port)
+                hostReady.signal()
+            }
+        )
+        try host.start()
+        defer { host.stop() }
+        guard hostReady.wait(timeout: .now() + 3) == .success,
+              let hostPort = state.port
+        else { throw LoopbackTestError.hostDidNotStart }
+
+        let requester = HeadlessLoopbackPeer(index: 201)
+        let target = HeadlessLoopbackPeer(index: 202)
+        let healthyPeer = HeadlessLoopbackPeer(index: 203)
+        for peer in [requester, target, healthyPeer] { try peer.start(hostPort: hostPort) }
+        defer { [requester, target, healthyPeer].forEach { $0.stop() } }
+        guard requester.waitUntilJoined(timeout: 3),
+              target.waitUntilJoined(timeout: 3),
+              healthyPeer.waitUntilJoined(timeout: 3)
+        else { throw LoopbackTestError.peerDidNotJoin }
+
+        requester.requestResync(participantID: "loopback-peer-202")
+        #expect(waitUntil(timeout: 2) { target.resyncCommandCount == 1 })
+        #expect(requester.resyncCommandCount == 0)
+        #expect(healthyPeer.resyncCommandCount == 0)
+
+        healthyPeer.requestResync(participantID: nil)
+        #expect(waitUntil(timeout: 2) {
+            requester.resyncCommandCount == 1
+                && target.resyncCommandCount == 2
+                && healthyPeer.resyncCommandCount == 1
+        })
     }
 
     @Test("An established listener can adapt timing after audio but a joiner cannot retime it")
@@ -470,6 +515,7 @@ private final class HeadlessLoopbackPeer {
     private var arrivals = [UInt32: PacketArrival]()
     private var receivedResyncCommands = 0
     private var receivedPlaybackStates = [Bool]()
+    private var receivedRoomPlaybackStates = [Bool]()
     private var receivedPlayoutDelays = [UInt64]()
 
     init(index: Int) {
@@ -481,6 +527,7 @@ private final class HeadlessLoopbackPeer {
     var lastSequence: UInt32? { queue.sync { arrivals.keys.max() } }
     var resyncCommandCount: Int { queue.sync { receivedResyncCommands } }
     var playbackStates: [Bool] { queue.sync { receivedPlaybackStates } }
+    var roomPlaybackStates: [Bool] { queue.sync { receivedRoomPlaybackStates } }
     var playoutDelays: [UInt64] { queue.sync { receivedPlayoutDelays } }
 
     func start(hostPort: NWEndpoint.Port) throws {
@@ -565,6 +612,12 @@ private final class HeadlessLoopbackPeer {
         }
     }
 
+    func requestResync(participantID: String?) {
+        queue.async { [weak self] in
+            self?.send(ControlMessage(type: "resync_request", targetID: participantID))
+        }
+    }
+
     func snapshot() -> PeerSnapshot {
         queue.sync {
             PeerSnapshot(
@@ -630,6 +683,9 @@ private final class HeadlessLoopbackPeer {
                     } else if message.type == "now_playing",
                               let isPlaying = message.nowPlaying?.isPlaying {
                         self.receivedPlaybackStates.append(isPlaying)
+                    } else if message.type == "room_playback",
+                              let isPlaying = message.isPlaying {
+                        self.receivedRoomPlaybackStates.append(isPlaying)
                     }
                 }
             }

@@ -93,6 +93,13 @@ public final class AudioPacketizer {
 
     public init() {}
 
+    /// Drops a partial packet when a room pauses without rewinding sequence numbers.
+    /// The next append establishes a fresh capture timestamp for resumed playback.
+    public func discardPendingSamples() {
+        pendingSamples.removeAll(keepingCapacity: true)
+        pendingStartNanos = nil
+    }
+
     public func append(samples: [Int16], captureTimeNanos: UInt64) -> [AudioPacket] {
         guard !samples.isEmpty, samples.count.isMultiple(of: channels) else { return [] }
 

@@ -30,6 +30,7 @@ final class HostServer {
         var pendingAudio: Data?
         var syncReport: PlaybackSyncReport?
         var lastResyncCommandNanos: UInt64 = 0
+        var lastManualResyncRequestNanos: UInt64 = 0
 
         init(control: NWConnection) {
             self.control = control
@@ -51,6 +52,7 @@ final class HostServer {
     private var clients = [ObjectIdentifier: Client]()
     private var videoEnabled = false
     private var nowPlaying = NowPlayingMedia()
+    private var roomPlaybackIsPlaying = true
     private var mediaQueue = [RoomQueueItem]()
     private var groupPlayoutDelayNanos = RoomTiming.defaultPlayoutDelayNanos
     private var lastGroupDelayAdjustmentNanos: UInt64 = 0
@@ -123,7 +125,7 @@ final class HostServer {
 
     func acceptAudio(samples: [Int16], captureTimeNanos: UInt64) {
         queue.async { [weak self] in
-            guard let self else { return }
+            guard let self, self.roomPlaybackIsPlaying else { return }
             let packets = self.packetizer.append(
                 samples: samples,
                 captureTimeNanos: captureTimeNanos
@@ -170,9 +172,20 @@ final class HostServer {
 
     func setNowPlaying(_ media: NowPlayingMedia) {
         queue.async { [weak self] in
-            guard let self, media != self.nowPlaying else { return }
-            self.nowPlaying = media
-            self.broadcast(ControlMessage(type: "now_playing", nowPlaying: media))
+            guard let self else { return }
+            let presentedMedia = self.roomPlaybackIsPlaying
+                ? media
+                : NowPlayingMedia(
+                    title: media.title,
+                    artist: media.artist,
+                    album: media.album,
+                    artworkData: media.artworkData,
+                    sourceURL: media.sourceURL,
+                    isPlaying: false
+                )
+            guard presentedMedia != self.nowPlaying else { return }
+            self.nowPlaying = presentedMedia
+            self.broadcast(ControlMessage(type: "now_playing", nowPlaying: presentedMedia))
         }
     }
 
@@ -279,6 +292,12 @@ final class HostServer {
             ).encodedLine() {
                 send(data, over: client.control)
             }
+            if let data = try? ControlMessage(
+                type: "room_playback",
+                isPlaying: roomPlaybackIsPlaying
+            ).encodedLine() {
+                send(data, over: client.control)
+            }
             sendQueue(to: client)
             sendTiming(to: client)
 
@@ -348,16 +367,20 @@ final class HostServer {
         case "set_playback", "media_command":
             guard client.id != nil,
                   let command = message.mediaCommand
-                    ?? message.isPlaying.map({ $0 ? .play : .pause }),
-                  playbackRequestHandler?(command) == true
+                    ?? message.isPlaying.map({ $0 ? .play : .pause })
             else { return }
+            let sourceAccepted = playbackRequestHandler?(command) == true
             let isPlaying: Bool
             switch command {
             case .play: isPlaying = true
             case .pause: isPlaying = false
-            case .togglePlayPause: isPlaying = !(nowPlaying.isPlaying ?? true)
-            case .nextTrack, .previousTrack: return
+            case .togglePlayPause: isPlaying = !roomPlaybackIsPlaying
+            case .nextTrack, .previousTrack:
+                guard sourceAccepted else { return }
+                return
             }
+            roomPlaybackIsPlaying = isPlaying
+            if !isPlaying { packetizer.discardPendingSamples() }
             nowPlaying = NowPlayingMedia(
                 title: nowPlaying.title,
                 artist: nowPlaying.artist,
@@ -367,8 +390,8 @@ final class HostServer {
                 isPlaying: isPlaying
             )
             broadcast(ControlMessage(type: "now_playing", nowPlaying: nowPlaying))
-            // A deliberate play/pause action is also the room's manual recovery path.
-            // Metadata-only playback updates must not trigger this reset.
+            broadcast(ControlMessage(type: "room_playback", isPlaying: isPlaying))
+            // Pause discards queued sound immediately; play starts a fresh room-clock anchor.
             broadcast(ControlMessage(type: "resync"))
 
         case "sync_status":
@@ -383,6 +406,21 @@ final class HostServer {
                 client.lastResyncCommandNanos = now
                 if let data = try? ControlMessage(type: "resync").encodedLine() {
                     send(data, over: client.control)
+                }
+            }
+
+        case "resync_request":
+            guard client.id != nil else { return }
+            let now = MonotonicClock.nowNanos()
+            guard now - client.lastManualResyncRequestNanos >= 750_000_000 else { return }
+            client.lastManualResyncRequestNanos = now
+            guard let data = try? ControlMessage(type: "resync").encodedLine() else { return }
+            if let targetID = message.targetID {
+                guard let target = clients.values.first(where: { $0.id == targetID }) else { return }
+                send(data, over: target.control)
+            } else {
+                for target in clients.values where target.id != nil {
+                    send(data, over: target.control)
                 }
             }
 

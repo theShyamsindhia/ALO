@@ -153,6 +153,10 @@ final class HostSession {
         localReceiver?.sendRoomMediaCommand(command)
     }
 
+    func requestResync(participantID: String? = nil) -> Bool {
+        localReceiver?.requestResync(participantID: participantID) ?? false
+    }
+
     func setVideoEnabled(_ enabled: Bool) async throws {
         if enabled {
             guard videoCapture == nil, let host else { return }

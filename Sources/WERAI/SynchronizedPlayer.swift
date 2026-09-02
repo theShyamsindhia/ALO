@@ -38,6 +38,7 @@ final class SynchronizedPlayer {
     private var participantVolume: Double = 1
     private var participantMuted = false
     private var playbackIsActive = false
+    private var roomPlaybackIsPlaying = true
     private(set) var configurationChangeCount: UInt64 = 0
 
     var clockOffsetNanos: Int64?
@@ -82,6 +83,7 @@ final class SynchronizedPlayer {
     }
 
     func accept(_ packet: AudioPacket) {
+        guard roomPlaybackIsPlaying else { return }
         let now = MonotonicClock.nowNanos()
         lastPacketReceivedNanos = now
         pending[packet.sequence] = packet
@@ -92,6 +94,10 @@ final class SynchronizedPlayer {
     }
 
     func maintainSync() {
+        guard roomPlaybackIsPlaying else {
+            setPlaybackActive(false)
+            return
+        }
         applyPendingAudioEngineConfigurationChange()
         drain()
         updatePlaybackActivity(nowNanos: MonotonicClock.nowNanos())
@@ -237,6 +243,25 @@ final class SynchronizedPlayer {
         participantVolume = min(max(volume, 0), 1)
         participantMuted = muted
         applyOutputGain()
+    }
+
+    func setRoomPlayback(playing: Bool) {
+        guard roomPlaybackIsPlaying != playing else { return }
+        roomPlaybackIsPlaying = playing
+        guard !playing else { return }
+
+        player.stop()
+        pending.removeAll()
+        expectedSequence = nil
+        anchorFrameIndex = nil
+        anchorCaptureNanos = nil
+        hasStarted = false
+        smoothedCorrection = 0
+        varispeed.rate = 1
+        latestLatenessNanos = 0
+        playbackWatchdog.reset()
+        driftRecovery.reset()
+        setPlaybackActive(false)
     }
 
     private func applyOutputGain() {
