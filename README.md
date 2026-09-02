@@ -25,18 +25,20 @@ Open `dist/WERAI.app`, then choose one role:
 - **Start a room** on the Mac whose system audio you want to send. Screen sharing is off by default.
 - **Join a room** on every other Mac, then choose the nearby room.
 
-After the room connects, the setup window disappears and one room bar floats above
-your other apps and across macOS Spaces. Its compact row keeps the room and four core
-tools available. That same continuous glass surface grows upward only when needed:
+After the room connects, the setup window disappears and the room moves into the
+menu bar. Click the waveform to reveal the compact controls; the same surface grows
+downward only when chat, queue, people, or video is requested. A red indicator on the
+menu-bar icon marks unread chat without leaving another window on screen. The optional
+floating bar can be restored from the window control and remains above your other apps
+and across macOS Spaces. In either presentation,
 the queue owns its media-link field, chat owns its message composer, and people owns the
 per-Mac mixer. Video can expand in the surface or enter a screen-filling view, then return
-to the room bar without interrupting audio. Unread chat is shown on the message control.
+to the controls without interrupting audio. Unread chat is also shown on the message control.
 When the source player publishes track information, the host sends
 the title, artist, and album artwork to every Mac. Screen sharing remains off by
 default. Guests can control their own output, while the host can control every Mac.
-The menu-bar waveform provides shared play/pause, previous/next, show/hide controls,
-and leave-room actions without opening the floating bar. The floating bar's eye button
-hides it until **Show Floating Controls** is selected from that menu. On joined client
+The menu-bar waveform provides the complete room experience without requiring the
+floating bar. Its window button toggles the floating presentation at any time. On joined client
 Macs, keyboard, Touch Bar, headphone, and Control Center play/pause/previous/next
 commands are forwarded to the host; volume buttons continue to control the local Mac.
 The interface follows macOS accessibility preferences for reduced motion, reduced

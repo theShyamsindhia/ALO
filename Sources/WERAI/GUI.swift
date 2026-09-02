@@ -74,15 +74,16 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        model.phase != .live
+        false
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if model.phase == .live {
             if model.videoFullscreen {
                 fullScreenVideoController?.show()
+            } else if model.floatingBarHidden {
+                statusMenuController?.showPopover()
             } else {
-                model.floatingBarHidden = false
                 roomBarController?.show()
             }
         } else {
@@ -97,12 +98,10 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
 
     private func updateWindows(for phase: WERAIViewModel.Phase) {
         if phase == .live {
-            if roomBarController == nil {
-                roomBarController = FloatingRoomWindowController(model: model)
-            }
             window?.orderOut(nil)
-            if !model.floatingBarHidden { roomBarController?.show() }
+            updateFloatingBar(hidden: model.floatingBarHidden)
         } else {
+            statusMenuController?.closePopover()
             fullScreenVideoController?.close()
             fullScreenVideoController = nil
             roomBarController?.close()
@@ -130,7 +129,11 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
         guard model.phase == .live else { return }
         if hidden {
             roomBarController?.close()
+            roomBarController = nil
         } else if !model.videoFullscreen {
+            if roomBarController == nil {
+                roomBarController = FloatingRoomWindowController(model: model)
+            }
             roomBarController?.show()
         }
     }
@@ -157,11 +160,13 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
 }
 
 @MainActor
-private final class WERAIStatusMenuController: NSObject, NSMenuDelegate {
+private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
     private let model: WERAIViewModel
     private let openMainWindow: () -> Void
     private let statusItem: NSStatusItem
-    private let menu = NSMenu()
+    private let popover = NSPopover()
+    private let badgeView = StatusUnreadBadgeView()
+    private var observers = Set<AnyCancellable>()
 
     init(model: WERAIViewModel, openMainWindow: @escaping () -> Void) {
         self.model = model
@@ -174,77 +179,117 @@ private final class WERAIStatusMenuController: NSObject, NSMenuDelegate {
         )
         statusItem.button?.image?.isTemplate = true
         statusItem.button?.toolTip = "WERAI"
-        menu.delegate = self
-        statusItem.menu = menu
-    }
-
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        menu.removeAllItems()
-        if model.phase == .live {
-            let room = NSMenuItem(title: model.roomTitle, action: nil, keyEquivalent: "")
-            room.isEnabled = false
-            menu.addItem(room)
-            let detail = NSMenuItem(
-                title: "\(model.participants.count) listening · In sync",
-                action: nil,
-                keyEquivalent: ""
-            )
-            detail.isEnabled = false
-            menu.addItem(detail)
-            menu.addItem(.separator())
-            addItem(
-                model.roomIsPlaying ? "Pause for Everyone" : "Play for Everyone",
-                action: #selector(togglePlayback),
-                key: "p"
-            )
-            addItem("Previous Track", action: #selector(previousTrack))
-            addItem("Next Track", action: #selector(nextTrack))
-            menu.addItem(.separator())
-            addItem(
-                model.floatingBarHidden ? "Show Floating Controls" : "Hide Floating Controls",
-                action: #selector(toggleFloatingControls)
-            )
-            menu.addItem(.separator())
-            addItem("Leave Room", action: #selector(leaveRoom))
-        } else {
-            addItem("Open WERAI", action: #selector(openApp))
+        if let button = statusItem.button {
+            button.target = self
+            button.action = #selector(togglePopover)
+            button.sendAction(on: [.leftMouseUp])
+            badgeView.translatesAutoresizingMaskIntoConstraints = false
+            button.addSubview(badgeView)
+            NSLayoutConstraint.activate([
+                badgeView.widthAnchor.constraint(equalToConstant: 8),
+                badgeView.heightAnchor.constraint(equalToConstant: 8),
+                badgeView.trailingAnchor.constraint(equalTo: button.trailingAnchor, constant: -1),
+                badgeView.topAnchor.constraint(equalTo: button.topAnchor, constant: 1),
+            ])
         }
-        menu.addItem(.separator())
-        addItem("Quit WERAI", action: #selector(quit), key: "q")
+
+        popover.behavior = .transient
+        popover.animates = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        popover.delegate = self
+        popover.contentSize = panelSize
+        popover.contentViewController = NSHostingController(
+            rootView: FloatingRoomView(model: model, presentation: .menuBar)
+        )
+
+        model.$unreadMessageCount
+            .removeDuplicates()
+            .sink { [weak self] count in self?.updateBadge(count: count) }
+            .store(in: &observers)
+        model.$phase
+            .removeDuplicates()
+            .sink { [weak self] phase in self?.updatePhase(phase) }
+            .store(in: &observers)
+        Publishers.CombineLatest3(
+            model.$floatingSection.removeDuplicates(),
+            model.$permissionNotice.removeDuplicates(),
+            model.$participants.map(\.count).removeDuplicates()
+        )
+        .dropFirst()
+        .sink { [weak self] _ in self?.resizePopover() }
+        .store(in: &observers)
     }
 
-    private func addItem(_ title: String, action: Selector, key: String = "") {
-        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
-        item.target = self
-        menu.addItem(item)
+    func showPopover() {
+        guard model.phase == .live,
+              let button = statusItem.button,
+              !popover.isShown
+        else { return }
+        popover.contentSize = panelSize
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        model.setMenuBarPopoverVisible(true)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
-    @objc private func togglePlayback() {
-        model.toggleRoomPlayback()
+    func closePopover() {
+        guard popover.isShown else { return }
+        popover.performClose(nil)
     }
 
-    @objc private func previousTrack() {
-        model.sendRoomMediaCommand(.previousTrack)
+    func popoverDidClose(_ notification: Notification) {
+        model.setMenuBarPopoverVisible(false)
     }
 
-    @objc private func nextTrack() {
-        model.sendRoomMediaCommand(.nextTrack)
+    @objc private func togglePopover() {
+        guard model.phase == .live else {
+            openMainWindow()
+            return
+        }
+        popover.isShown ? closePopover() : showPopover()
     }
 
-    @objc private func toggleFloatingControls() {
-        model.floatingBarHidden ? model.showFloatingBar() : model.hideFloatingBar()
+    private var panelSize: NSSize {
+        NSSize(width: FloatingMetrics.width, height: model.floatingPanelHeight)
     }
 
-    @objc private func leaveRoom() {
-        model.stop()
+    private func resizePopover() {
+        guard popover.contentSize != panelSize else { return }
+        popover.contentSize = panelSize
     }
 
-    @objc private func openApp() {
-        openMainWindow()
+    private func updateBadge(count: Int) {
+        badgeView.isHidden = count == 0
+        let detail = count == 0 ? "WERAI" : "WERAI · \(count) unread message\(count == 1 ? "" : "s")"
+        statusItem.button?.toolTip = detail
+        statusItem.button?.setAccessibilityLabel(detail)
     }
 
-    @objc private func quit() {
-        NSApp.terminate(nil)
+    private func updatePhase(_ phase: WERAIViewModel.Phase) {
+        if phase != .live { closePopover() }
+        statusItem.button?.image = NSImage(
+            systemSymbolName: phase == .live ? "waveform.circle.fill" : "waveform.circle",
+            accessibilityDescription: "WERAI"
+        )
+        statusItem.button?.image?.isTemplate = true
+    }
+}
+
+private final class StatusUnreadBadgeView: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.systemRed.cgColor
+        layer?.cornerRadius = 4
+        layer?.borderWidth = 1
+        layer?.borderColor = NSColor.controlBackgroundColor.cgColor
+        isHidden = true
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
     }
 }
 
@@ -324,15 +369,21 @@ final class WERAIViewModel: ObservableObject {
     @Published var mediaSwitchBusy = false
     @Published var permissionNotice = false
     @Published var floatingSection: FloatingSection = .collapsed
-    @Published var floatingBarHidden = false
+    @Published var floatingBarHidden: Bool
+    @Published private(set) var menuBarPopoverVisible = false
 
     private var roomBrowser: RoomBrowser!
     private var hostSession: HostSession?
     private var receiver: Receiver?
     private var localNowPlayingMonitor: NowPlayingMonitor?
     private var activeRoom: String?
+    private static let floatingBarPreferenceKey = "floatingBarHidden"
 
     init() {
+        let defaults = UserDefaults.standard
+        floatingBarHidden = defaults.object(forKey: Self.floatingBarPreferenceKey) == nil
+            ? true
+            : defaults.bool(forKey: Self.floatingBarPreferenceKey)
         roomBrowser = RoomBrowser(
             updateHandler: { [weak self] rooms in
                 DispatchQueue.main.async {
@@ -511,11 +562,22 @@ final class WERAIViewModel: ObservableObject {
     func hideFloatingBar() {
         floatingSection = .collapsed
         floatingBarHidden = true
+        UserDefaults.standard.set(true, forKey: Self.floatingBarPreferenceKey)
     }
 
     func showFloatingBar() {
         videoFullscreen = false
         floatingBarHidden = false
+        UserDefaults.standard.set(false, forKey: Self.floatingBarPreferenceKey)
+    }
+
+    func setMenuBarPopoverVisible(_ visible: Bool) {
+        menuBarPopoverVisible = visible
+        if visible, floatingSection == .chat {
+            unreadMessageCount = 0
+        } else if !visible, floatingBarHidden {
+            floatingSection = .collapsed
+        }
     }
 
     func canControl(_ participant: RoomParticipant) -> Bool {
@@ -619,7 +681,6 @@ final class WERAIViewModel: ObservableObject {
 
     func collapseFloatingBar() {
         floatingSection = .collapsed
-        floatingBarHidden = false
     }
 
     func enterVideoFullscreen() {
@@ -740,7 +801,9 @@ final class WERAIViewModel: ObservableObject {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.messages.append(RoomMessage(sender: sender, text: text, sentNanos: sentNanos))
-                if sender != self.currentUserName, self.floatingSection != .chat {
+                let chatIsVisible = self.floatingSection == .chat
+                    && (!self.floatingBarHidden || self.menuBarPopoverVisible)
+                if sender != self.currentUserName, !chatIsVisible {
                     self.unreadMessageCount += 1
                 }
             }
@@ -1091,8 +1154,14 @@ private struct WERAIView: View {
     }
 }
 
+private enum RoomControlsPresentation {
+    case floating
+    case menuBar
+}
+
 private struct FloatingRoomView: View {
     @ObservedObject var model: WERAIViewModel
+    var presentation: RoomControlsPresentation = .floating
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var composerFocused: Bool
 
@@ -1152,6 +1221,16 @@ private struct FloatingRoomView: View {
     }
 
     var body: some View {
+        Group {
+            if presentation == .floating {
+                roomContent.floatingSurface(cornerRadius: FloatingMetrics.cornerRadius)
+            } else {
+                roomContent.background(Palette.opaqueSurface)
+            }
+        }
+    }
+
+    private var roomContent: some View {
         VStack(spacing: 0) {
             if hasExpandedContent {
                 expandedContent
@@ -1168,7 +1247,6 @@ private struct FloatingRoomView: View {
             roomBar
         }
         .frame(width: FloatingMetrics.width, height: model.floatingPanelHeight, alignment: .bottom)
-        .floatingSurface(cornerRadius: FloatingMetrics.cornerRadius)
         .animation(panelAnimation, value: model.floatingSection)
         .animation(panelAnimation, value: model.permissionNotice)
         .animation(panelAnimation, value: model.participants.count)
@@ -1220,10 +1298,12 @@ private struct FloatingRoomView: View {
             .keyboardShortcut("3", modifiers: .command)
 
             roomBarButton(
-                icon: "eye.slash",
+                icon: presentation == .menuBar && model.floatingBarHidden ? "macwindow" : "eye.slash",
                 active: false,
-                help: "Hide floating controls"
-            ) { model.hideFloatingBar() }
+                help: model.floatingBarHidden ? "Show floating controls" : "Hide floating controls"
+            ) {
+                model.floatingBarHidden ? model.showFloatingBar() : model.hideFloatingBar()
+            }
 
             Divider().frame(height: 20)
 
@@ -1244,8 +1324,9 @@ private struct FloatingRoomView: View {
         }
     }
 
+    @ViewBuilder
     private var roomIdentity: some View {
-        HStack(spacing: 9) {
+        let identity = HStack(spacing: 9) {
             artworkTile
 
             VStack(alignment: .leading, spacing: 2) {
@@ -1271,8 +1352,13 @@ private struct FloatingRoomView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
-        .overlay(WindowDragRegion().accessibilityHidden(true))
-        .help("Drag to move WERAI")
+        if presentation == .floating {
+            identity
+                .overlay(WindowDragRegion().accessibilityHidden(true))
+                .help("Drag to move WERAI")
+        } else {
+            identity
+        }
     }
 
     private var artworkTile: some View {
