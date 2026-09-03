@@ -407,6 +407,43 @@ struct VoicePlaybackSessionLifecycle {
     }
 }
 
+struct VoiceLevelMeter {
+    static func normalizedLevel(fromPCM16Mono data: Data) -> Double {
+        guard !data.isEmpty,
+              data.count.isMultiple(of: MemoryLayout<Int16>.size)
+        else { return 0 }
+
+        var sumOfSquares = 0.0
+        let sampleCount = data.count / MemoryLayout<Int16>.size
+        data.withUnsafeBytes { bytes in
+            for index in 0..<sampleCount {
+                let offset = index * MemoryLayout<Int16>.size
+                let bits = UInt16(bytes[offset]) | (UInt16(bytes[offset + 1]) << 8)
+                let sample = Double(Int16(bitPattern: bits)) / 32_768
+                sumOfSquares += sample * sample
+            }
+        }
+
+        let rms = sqrt(sumOfSquares / Double(sampleCount))
+        guard rms > 0.000_1 else { return 0 }
+        let decibels = 20 * log10(rms)
+        return min(1, max(0, (decibels + 48) / 40))
+    }
+}
+
+struct VoiceLevelEnvelope {
+    private(set) var level = 0.0
+
+    mutating func update(target: Double) -> Double {
+        let target = min(1, max(0, target))
+        let response = target > level ? 0.5 : 0.16
+        level += (target - level) * response
+        return level
+    }
+
+    mutating func reset() { level = 0 }
+}
+
 struct VoiceJitterBuffer {
     enum Output: Equatable {
         case audio(Data)
@@ -509,6 +546,9 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
         var jitter = VoiceJitterBuffer()
         var isActive = false
         var lifecycle = VoicePlaybackSessionLifecycle()
+        var levelEnvelope = VoiceLevelEnvelope()
+        var lastPublishedLevel = 0.0
+        var lastLevelPublication: UInt64 = 0
         var timeoutWorkItem: DispatchWorkItem?
         var inactivityWorkItem: DispatchWorkItem?
 
@@ -527,7 +567,7 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
         channels: 1
     )!
     private let format = playbackFormat
-    private let stateHandler: @Sendable (String, String, String, Bool) -> Void
+    private let stateHandler: @Sendable (String, String, String, Bool, Double) -> Void
     private var sessions = [String: Session]()
     private var tracker = WalkieTalkiePlaybackTracker()
     private var configurationObserver: NSObjectProtocol?
@@ -559,7 +599,7 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
     }
 
     init(
-        stateHandler: @escaping @Sendable (String, String, String, Bool) -> Void = { _, _, _, _ in }
+        stateHandler: @escaping @Sendable (String, String, String, Bool, Double) -> Void = { _, _, _, _, _ in }
     ) {
         self.stateHandler = stateHandler
         configurationObserver = NotificationCenter.default.addObserver(
@@ -694,7 +734,12 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
             }
         }
         if !session.player.isPlaying, engine.isRunning { session.player.play() }
-        setSessionActive(session, true)
+        let level = session.levelEnvelope.update(target: VoiceLevelMeter.normalizedLevel(fromPCM16Mono: data))
+        if session.isActive {
+            publishLevelIfNeeded(for: session, level: level)
+        } else {
+            setSessionActive(session, true)
+        }
     }
 
     private func ensureEngineRunning() -> Bool {
@@ -765,7 +810,27 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
     private func setSessionActive(_ session: Session, _ active: Bool) {
         guard session.isActive != active else { return }
         session.isActive = active
-        stateHandler(session.id, session.senderID, session.senderName, active)
+        if active {
+            publishLevel(for: session, level: session.levelEnvelope.level)
+        } else {
+            session.levelEnvelope.reset()
+            session.lastPublishedLevel = 0
+            stateHandler(session.id, session.senderID, session.senderName, false, 0)
+        }
+    }
+
+    private func publishLevelIfNeeded(for session: Session, level: Double) {
+        let now = DispatchTime.now().uptimeNanoseconds
+        let minimumInterval: UInt64 = 66_000_000
+        guard now &- session.lastLevelPublication >= minimumInterval else { return }
+        guard abs(level - session.lastPublishedLevel) >= 0.015 else { return }
+        publishLevel(for: session, level: level, now: now)
+    }
+
+    private func publishLevel(for session: Session, level: Double, now: UInt64? = nil) {
+        session.lastPublishedLevel = level
+        session.lastLevelPublication = now ?? DispatchTime.now().uptimeNanoseconds
+        stateHandler(session.id, session.senderID, session.senderName, true, level)
     }
 
     private func stopSession(_ id: String) {

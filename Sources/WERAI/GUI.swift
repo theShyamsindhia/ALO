@@ -1115,6 +1115,7 @@ final class WERAIViewModel: ObservableObject {
     @Published private(set) var walkieTalking = false
     @Published private(set) var walkieStarting = false
     @Published private(set) var incomingWalkieSpeakerIDs = Set<String>()
+    @Published private(set) var incomingWalkieLevels = [String: Double]()
     @Published private(set) var openLineState: OpenLineState = .idle
     @Published private(set) var voiceInputDevices = [VoiceInputDevice]()
     @Published var selectedVoiceInputUID: String?
@@ -1406,17 +1407,21 @@ final class WERAIViewModel: ObservableObject {
                     : "Broadcast could not start: \(self.readable(error))"
                 self.updateLocalNowPlayingMonitor()
             },
-            walkieTalkieStateHandler: { [weak self] senderID, senderName, active in
+            walkieTalkieStateHandler: { [weak self] senderID, senderName, active, level in
                 guard let self else { return }
                 guard !self.incomingCallsMuted else {
                     self.incomingWalkieSpeakerIDs.removeAll()
+                    self.incomingWalkieLevels.removeAll()
                     return
                 }
+                let wasActive = self.incomingWalkieSpeakerIDs.contains(senderID)
                 if active {
                     self.incomingWalkieSpeakerIDs.insert(senderID)
-                    self.statusText = "\(senderName) is talking to you"
+                    self.incomingWalkieLevels[senderID] = min(1, max(0, level))
+                    if !wasActive { self.statusText = "\(senderName) is talking to you" }
                 } else {
                     self.incomingWalkieSpeakerIDs.remove(senderID)
+                    self.incomingWalkieLevels.removeValue(forKey: senderID)
                     if self.incomingWalkieSpeakerIDs.isEmpty { self.statusText = "Talk is off" }
                 }
             },
@@ -2086,7 +2091,10 @@ final class WERAIViewModel: ObservableObject {
         incomingCallsMuted = muted
         UserDefaults.standard.set(muted, forKey: Self.incomingCallsMutedKey)
         meshSession?.setIncomingWalkieTalkieMuted(muted)
-        if muted { incomingWalkieSpeakerIDs.removeAll() }
+        if muted {
+            incomingWalkieSpeakerIDs.removeAll()
+            incomingWalkieLevels.removeAll()
+        }
     }
 
     func showFloatingBar() {
@@ -2393,6 +2401,7 @@ final class WERAIViewModel: ObservableObject {
                 self.participants = Self.mergingParticipants(participants, preserving: self.participants)
                 let liveIDs = Set(participants.map(\.id))
                 self.incomingWalkieSpeakerIDs.formIntersection(liveIDs)
+                self.incomingWalkieLevels = self.incomingWalkieLevels.filter { liveIDs.contains($0.key) }
                 let previousTargets = self.effectiveTalkTargetIDs
                 self.latchedTalkTargetIDs.formIntersection(liveIDs)
                 self.pushToTalkTargetIDs.formIntersection(liveIDs)
@@ -2543,6 +2552,7 @@ final class WERAIViewModel: ObservableObject {
         openLineInvitationTimeoutTask = nil
         openLineState = .idle
         incomingWalkieSpeakerIDs.removeAll()
+        incomingWalkieLevels.removeAll()
         latchedTalkTargetIDs.removeAll()
         pushToTalkTargetIDs.removeAll()
         globalShortcutTalkTargets.removeAll()
@@ -4331,11 +4341,12 @@ private struct WalkieTalkieTargetIcon: View {
     let profileImageData: Data?
     let interaction: TalkTargetInteraction
     @State private var isPressed = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         let selected = interaction == .toggle ? model.isTalkTargetSelected(id) : isPushToTalkSelected
-        let incoming = id.map(model.incomingWalkieSpeakerIDs.contains)
-            ?? !model.incomingWalkieSpeakerIDs.isEmpty
+        let incoming = id.map(model.incomingWalkieSpeakerIDs.contains) ?? false
+        let incomingLevel = id.flatMap { model.incomingWalkieLevels[$0] } ?? 0
         let outgoing = model.walkieTalking && selected
         let linePeer = id.map(model.isOpenLinePeer) ?? false
         Group {
@@ -4365,20 +4376,34 @@ private struct WalkieTalkieTargetIcon: View {
         .overlay {
             ZStack {
                 Circle().stroke(
-                    selected ? model.roomAccentColor.opacity(outgoing ? 1 : 0.55) : Color.clear,
-                    lineWidth: 3
+                    selected
+                        ? (outgoing ? Palette.voiceBlue : Palette.voiceSelection).opacity(outgoing ? 0.86 : 0.68)
+                        : Color.clear,
+                    lineWidth: outgoing ? 2.25 : 1.5
                 )
                 Circle()
-                    .stroke(incoming ? Color.green : Color.clear, lineWidth: 3)
-                    .padding(outgoing ? -4 : 0)
+                    .stroke(
+                        incoming ? Palette.voiceBlue.opacity(0.56 + incomingLevel * 0.34) : Color.clear,
+                        lineWidth: 2.25
+                    )
+                    .padding(-3)
+                    .scaleEffect(reduceMotion ? 1 : 1 + incomingLevel * 0.045)
                 Circle()
                     .stroke(linePeer ? lineColor : Color.clear, style: StrokeStyle(lineWidth: 2, dash: [3, 2]))
                     .padding(-7)
             }
         }
-        .shadow(color: incoming ? Color.green.opacity(0.65) : .clear, radius: 7)
+        .overlay(alignment: .bottomTrailing) {
+            if incoming {
+                VoiceLevelBadge(level: incomingLevel)
+                    .offset(x: 3, y: 3)
+                    .transition(reduceMotion ? .opacity : .scale(scale: 0.72).combined(with: .opacity))
+            }
+        }
         .frame(width: 40, height: 40)
         .contentShape(Circle())
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: incomingLevel)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: incoming)
         .contextMenu {
             if let id {
                 if interaction == .toggle {
@@ -4454,6 +4479,28 @@ private struct WalkieTalkieTargetIcon: View {
         if incoming { states.append("This device is speaking") }
         if linePeer { states.append("Open line participant") }
         return states.joined(separator: ", ")
+    }
+}
+
+private struct VoiceLevelBadge: View {
+    let level: Double
+
+    private let barProfile: [CGFloat] = [0.52, 1, 0.72, 0.9]
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 1.2) {
+            ForEach(Array(barProfile.enumerated()), id: \.offset) { _, profile in
+                Capsule()
+                    .fill(Palette.voiceBlue)
+                    .frame(width: 1.6, height: 2.5 + CGFloat(level) * 5.5 * profile)
+            }
+        }
+        .frame(width: 18, height: 13)
+        .background(Palette.voiceBadgeSurface)
+        .clipShape(Capsule())
+        .overlay(Capsule().stroke(Palette.glassHighlight.opacity(0.74), lineWidth: 0.75))
+        .scaleEffect(1 + CGFloat(level) * 0.035)
+        .accessibilityHidden(true)
     }
 }
 
@@ -4700,9 +4747,9 @@ private struct WalkieTalkieBar: View {
     }
 
     private var voiceStateColor: Color {
-        if !model.incomingWalkieSpeakerIDs.isEmpty { return .green }
+        if !model.incomingWalkieSpeakerIDs.isEmpty { return Palette.voiceBlue }
         if model.walkieTalking || model.walkieStarting || model.openLineState.isSendingMicrophone {
-            return model.roomAccentColor
+            return Palette.voiceBlue
         }
         return Palette.muted
     }
@@ -5656,6 +5703,15 @@ private enum Palette {
     static let controlAccent = adaptive(
         light: NSColor(red: 0.08, green: 0.34, blue: 0.70, alpha: 1),
         dark: NSColor(red: 0.29, green: 0.61, blue: 0.93, alpha: 1)
+    )
+    static let voiceBlue = adaptive(
+        light: NSColor(red: 0.12, green: 0.46, blue: 0.82, alpha: 1),
+        dark: NSColor(red: 0.35, green: 0.68, blue: 0.96, alpha: 1)
+    )
+    static let voiceSelection = Color(nsColor: .tertiaryLabelColor)
+    static let voiceBadgeSurface = adaptive(
+        light: NSColor(white: 0.94, alpha: 0.96),
+        dark: NSColor(white: 0.12, alpha: 0.96)
     )
     static let selectedControlText = Color(nsColor: .selectedControlTextColor)
     static let controlIcon = Color(nsColor: .labelColor)

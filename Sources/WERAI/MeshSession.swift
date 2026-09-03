@@ -20,7 +20,7 @@ final class MeshSession {
     private let videoHandler: (CGImage) -> Void
     private let replicaPersistenceHandler: (MeshRoomReplica) -> Void
     private let errorHandler: (Error) -> Void
-    private let walkieTalkieStateHandler: (String, String, Bool) -> Void
+    private let walkieTalkieStateHandler: (String, String, Bool, Double) -> Void
     private let walkieTalkieTransmissionEndedHandler: (Error) -> Void
     private let incomingOpenLineInvitationHandler: (OpenLineInvitation) -> Void
     private let openLineStateHandler: (OpenLineState) -> Void
@@ -98,6 +98,7 @@ final class MeshSession {
     private var walkieStartGeneration: Int?
     private var walkieTalkieTargets = Set<String>()
     private var activeIncomingVoiceSessions = [String: String]()
+    private var incomingVoiceSessionLevels = [String: Double]()
     private var openLineSessionState: OpenLineSessionState
 
     var isBroadcasting: Bool { replica.broadcaster?.nodeID == nodeID }
@@ -115,7 +116,7 @@ final class MeshSession {
         var replica: (MeshRoomReplica) -> Void = { _ in }
         var participants: ([RoomParticipant]) -> Void = { _ in }
         var openLine: (OpenLineMessage) -> Void = { _ in }
-        var walkieTalkie: (String, String, String, Bool) -> Void = { _, _, _, _ in }
+        var walkieTalkie: (String, String, String, Bool, Double) -> Void = { _, _, _, _, _ in }
     }
     private let callbackRelay: CallbackRelay
 
@@ -168,7 +169,7 @@ final class MeshSession {
         videoHandler: @escaping (CGImage) -> Void,
         peerVersionHandler: @escaping (String) -> Void = { _ in },
         errorHandler: @escaping (Error) -> Void = { _ in },
-        walkieTalkieStateHandler: @escaping (String, String, Bool) -> Void = { _, _, _ in },
+        walkieTalkieStateHandler: @escaping (String, String, Bool, Double) -> Void = { _, _, _, _ in },
         walkieTalkieTransmissionEndedHandler: @escaping (Error) -> Void = { _ in },
         incomingOpenLineInvitationHandler: @escaping (OpenLineInvitation) -> Void = { _ in },
         openLineStateHandler: @escaping (OpenLineState) -> Void = { _ in },
@@ -203,9 +204,9 @@ final class MeshSession {
         self.openLineStateHandler = openLineStateHandler
         self.openLineSessionState = OpenLineSessionState(localID: nodeID)
         let walkieTalkiePlayer = WalkieTalkiePlayer(
-            stateHandler: { sessionID, senderID, senderName, active in
+            stateHandler: { sessionID, senderID, senderName, active, level in
                 DispatchQueue.main.async {
-                    relay.walkieTalkie(sessionID, senderID, senderName, active)
+                    relay.walkieTalkie(sessionID, senderID, senderName, active, level)
                 }
             }
         )
@@ -249,7 +250,8 @@ final class MeshSession {
                 sessionID: $0,
                 senderID: $1,
                 senderName: $2,
-                active: $3
+                active: $3,
+                level: $4
             )
         }
     }
@@ -666,22 +668,33 @@ final class MeshSession {
         sessionID: String,
         senderID: String,
         senderName: String,
-        active: Bool
+        active: Bool,
+        level: Double
     ) {
         let wasDucking = !activeIncomingVoiceSessions.isEmpty
         let senderWasActive = activeIncomingVoiceSessions.values.contains(senderID)
+        let previousLevel = incomingVoiceLevel(for: senderID)
         if active {
             activeIncomingVoiceSessions[sessionID] = senderID
+            incomingVoiceSessionLevels[sessionID] = level
         } else {
             activeIncomingVoiceSessions.removeValue(forKey: sessionID)
+            incomingVoiceSessionLevels.removeValue(forKey: sessionID)
         }
         let senderIsActive = activeIncomingVoiceSessions.values.contains(senderID)
-        if senderWasActive != senderIsActive {
-            walkieTalkieStateHandler(senderID, senderName, senderIsActive)
+        let currentLevel = incomingVoiceLevel(for: senderID)
+        if senderWasActive != senderIsActive || abs(previousLevel - currentLevel) >= 0.001 {
+            walkieTalkieStateHandler(senderID, senderName, senderIsActive, currentLevel)
         }
         if wasDucking != !activeIncomingVoiceSessions.isEmpty {
             applyIncomingVoiceDucking()
         }
+    }
+
+    private func incomingVoiceLevel(for senderID: String) -> Double {
+        activeIncomingVoiceSessions.compactMap { sessionID, activeSenderID in
+            activeSenderID == senderID ? incomingVoiceSessionLevels[sessionID] : nil
+        }.max() ?? 0
     }
 
     private func applyIncomingVoiceDucking() {

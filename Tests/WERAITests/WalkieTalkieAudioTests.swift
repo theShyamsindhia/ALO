@@ -91,6 +91,35 @@ struct WalkieTalkieAudioTests {
         #expect(bobSamples[0] == -0.5)
     }
 
+    @Test("Voice metering follows PCM amplitude without reacting to silence")
+    func voiceLevelMetering() {
+        let silence = Data(repeating: 0, count: 640)
+        let quiet = Data(Array(repeating: [UInt8(0xCD), UInt8(0x0C)], count: 320).flatMap { $0 })
+        let loud = Data(Array(repeating: [UInt8(0x00), UInt8(0x40)], count: 320).flatMap { $0 })
+
+        let silenceLevel = VoiceLevelMeter.normalizedLevel(fromPCM16Mono: silence)
+        let quietLevel = VoiceLevelMeter.normalizedLevel(fromPCM16Mono: quiet)
+        let loudLevel = VoiceLevelMeter.normalizedLevel(fromPCM16Mono: loud)
+
+        #expect(silenceLevel == 0)
+        #expect(quietLevel > 0)
+        #expect(loudLevel > quietLevel)
+        #expect(loudLevel <= 1)
+    }
+
+    @Test("Voice level envelope rises faster than it falls")
+    func voiceLevelEnvelope() {
+        var envelope = VoiceLevelEnvelope()
+        let attack = envelope.update(target: 1)
+        let release = envelope.update(target: 0)
+
+        #expect(attack == 0.5)
+        #expect(release > 0)
+        #expect(release < attack)
+        envelope.reset()
+        #expect(envelope.level == 0)
+    }
+
     @Test("Interleaved talkers keep independent sequence state")
     func independentTalkerSequences() {
         var tracker = WalkieTalkiePlaybackTracker()
