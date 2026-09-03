@@ -126,6 +126,9 @@ if $development_build; then
 fi
 cp dist/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 cp Resources/ALOSetupBackground.png "$app/Contents/Resources/ALOSetupBackground.png"
+for setup_slide in Resources/ALOSetupSlide-*.jpg; do
+    cp "$setup_slide" "$app/Contents/Resources/${setup_slide:t}"
+done
 if [[ "$codesign_identity" == "-" ]]; then
     if $development_build; then
         run_codesign "${codesign_arguments[@]}" "$app"
