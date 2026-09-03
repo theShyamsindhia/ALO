@@ -104,6 +104,7 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$binary" "$app/Contents/MacOS/alo"
 cp Resources/Info.plist "$app/Contents/Info.plist"
 cp dist/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
+cp -R Resources/LandingArt "$app/Contents/Resources/LandingArt"
 if [[ "$codesign_identity" == "-" ]]; then
     run_codesign "${codesign_arguments[@]}" \
         --requirements Resources/WERAI.requirements \
