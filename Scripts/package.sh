@@ -6,27 +6,43 @@ cd "${0:A:h}/.."
 
 architectures=(arm64 x86_64)
 archive_suffix="universal"
-if [[ "${1:-}" == "--arm64-only" ]]; then
-    architectures=(arm64)
-    archive_suffix="arm64"
-elif [[ $# -gt 0 ]]; then
-    echo "Usage: $0 [--arm64-only]" >&2
-    exit 2
-fi
+development_build=false
+for argument in "$@"; do
+    case "$argument" in
+        --arm64-only)
+            architectures=(arm64)
+            archive_suffix="arm64"
+            ;;
+        --dev)
+            development_build=true
+            ;;
+        *)
+            echo "Usage: $0 [--arm64-only] [--dev]" >&2
+            exit 2
+            ;;
+    esac
+done
 
 for architecture in "${architectures[@]}"; do
     swift build -c release --arch "$architecture"
 done
 mkdir -p dist
 
-binary="dist/alo"
+if $development_build; then
+    binary="dist/alo-dev"
+    app="dist/ALO Dev.app"
+    bundle_identifier="in.werai.audio.dev"
+else
+    binary="dist/alo"
+    app="dist/ALO.app"
+    bundle_identifier="in.werai.audio"
+fi
 cli_archive="dist/alo-cli-macos-$archive_suffix.zip"
-app="dist/ALO.app"
 codesign_identity="${WERAI_CODESIGN_IDENTITY:--}"
 codesign_arguments=(
     --force
     --sign "$codesign_identity"
-    --identifier in.werai.audio
+    --identifier "$bundle_identifier"
     --entitlements Resources/ALO.entitlements
 )
 if [[ "$codesign_identity" != "-" ]]; then
@@ -103,15 +119,29 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$binary" "$app/Contents/MacOS/alo"
 cp Resources/Info.plist "$app/Contents/Info.plist"
+if $development_build; then
+    /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $bundle_identifier" "$app/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName ALO Dev" "$app/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleName ALO Dev" "$app/Contents/Info.plist"
+fi
 cp dist/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 if [[ "$codesign_identity" == "-" ]]; then
-    run_codesign "${codesign_arguments[@]}" \
-        --requirements Resources/WERAI.requirements \
-        "$app"
+    if $development_build; then
+        run_codesign "${codesign_arguments[@]}" "$app"
+    else
+        run_codesign "${codesign_arguments[@]}" \
+            --requirements Resources/WERAI.requirements \
+            "$app"
+    fi
 else
     run_codesign "${codesign_arguments[@]}" "$app"
 fi
 codesign --verify --deep --strict --verbose=2 "$app"
+
+if $development_build; then
+    echo "Created $app with isolated bundle id $bundle_identifier"
+    exit 0
+fi
 
 rm -f "$cli_archive"
 ditto -c -k "$binary" "$cli_archive"

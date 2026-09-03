@@ -16,6 +16,7 @@ enum VoiceInputCatalog {
         let devices: [VoiceInputDevice] = allDeviceIDs().compactMap { deviceID in
             guard isAlive(deviceID),
                   !isHidden(deviceID),
+                  isSupportedInputTransport(deviceID),
                   hasInput(deviceID),
                   let uid = VirtualAudioDevice.uid(for: deviceID),
                   uid != VirtualAudioDevice.uid,
@@ -24,6 +25,10 @@ enum VoiceInputCatalog {
             return VoiceInputDevice(id: uid, name: name, isSystemDefault: deviceID == defaultID)
         }
         return sorted(devices)
+    }
+
+    static func systemDefaultName() -> String? {
+        defaultInputDeviceID().flatMap(name(for:))
     }
 
     static func sorted(_ devices: [VoiceInputDevice]) -> [VoiceInputDevice] {
@@ -102,12 +107,39 @@ enum VoiceInputCatalog {
 
     private static func hasInput(_ deviceID: AudioDeviceID) -> Bool {
         var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyStreams,
+            mSelector: kAudioDevicePropertyStreamConfiguration,
             mScope: kAudioDevicePropertyScopeInput,
             mElement: kAudioObjectPropertyElementMain
         )
         var size: UInt32 = 0
-        return AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size) == noErr && size > 0
+        guard AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size) == noErr,
+              size >= MemoryLayout<AudioBufferList>.size
+        else { return false }
+        let storage = UnsafeMutableRawPointer.allocate(
+            byteCount: Int(size),
+            alignment: MemoryLayout<AudioBufferList>.alignment
+        )
+        defer { storage.deallocate() }
+        let bufferList = storage.bindMemory(to: AudioBufferList.self, capacity: 1)
+        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, bufferList) == noErr else {
+            return false
+        }
+        return UnsafeMutableAudioBufferListPointer(bufferList).contains { $0.mNumberChannels > 0 }
+    }
+
+    private static func isSupportedInputTransport(_ deviceID: AudioDeviceID) -> Bool {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var transport = UInt32(0)
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &transport) == noErr else {
+            return true
+        }
+        return transport != kAudioDeviceTransportTypeAggregate
+            && transport != kAudioDeviceTransportTypeVirtual
     }
 
     private static func isAlive(_ deviceID: AudioDeviceID) -> Bool {
@@ -216,17 +248,9 @@ final class WalkieTalkieMicrophone: @unchecked Sendable {
         stopOnQueue()
         let engine = AVAudioEngine()
         let input = engine.inputNode
-        if VoiceInputCatalog.usesSystemDefault(inputDeviceUID) {
-            try? input.setVoiceProcessingEnabled(true)
-            if input.isVoiceProcessingEnabled {
-                input.voiceProcessingOtherAudioDuckingConfiguration = .init(
-                    enableAdvancedDucking: false,
-                    duckingLevel: .min
-                )
-            }
-        }
-        // VoiceProcessingIO follows the system input. Explicit device routing
-        // stays on the standard input unit, where CurrentDevice is supported.
+        // Use the hardware input unit directly. VoiceProcessingIO creates
+        // transient aggregate devices and can report a running engine while
+        // delivering no microphone frames on some Macs.
         try VoiceInputCatalog.apply(inputDeviceUID, to: input)
         let inputFormat = input.outputFormat(forBus: 0)
         guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0,

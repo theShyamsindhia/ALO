@@ -34,8 +34,11 @@ final class BroadcastAudioRouter {
     }
 
     static var defaultJournalURL: URL {
+        let directoryName = Bundle.main.bundleIdentifier == "in.werai.audio.dev"
+            ? "WERAI-Dev"
+            : "WERAI"
         let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("WERAI", isDirectory: true)
+            .appendingPathComponent(directoryName, isDirectory: true)
         return root.appendingPathComponent("broadcast-route.json")
     }
 

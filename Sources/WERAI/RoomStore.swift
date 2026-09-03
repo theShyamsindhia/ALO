@@ -21,10 +21,14 @@ final class RoomStore {
             let root = FileManager.default.urls(
                 for: .applicationSupportDirectory,
                 in: .userDomainMask
-            ).first!.appendingPathComponent("WERAI", isDirectory: true)
+            ).first!.appendingPathComponent(Self.storageDirectoryName, isDirectory: true)
             try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             self.fileURL = root.appendingPathComponent("rooms.json")
         }
+    }
+
+    private static var storageDirectoryName: String {
+        Bundle.main.bundleIdentifier == "in.werai.audio.dev" ? "WERAI-Dev" : "WERAI"
     }
 
     func load() -> [RoomConfiguration] {
@@ -114,7 +118,9 @@ final class RoomStore {
 }
 
 private final class RoomSecretStore {
-    private let service = "in.werai.audio.room"
+    private let service = Bundle.main.bundleIdentifier == "in.werai.audio.dev"
+        ? "in.werai.audio.dev.room"
+        : "in.werai.audio.room"
 
     func read(roomID: String) -> String? {
         let query: [String: Any] = [

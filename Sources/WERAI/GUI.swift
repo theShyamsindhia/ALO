@@ -6,6 +6,16 @@ import SwiftUI
 import UniformTypeIdentifiers
 import WERAICore
 
+private enum ALOAppFlavor {
+    static var isDevelopment: Bool {
+        Bundle.main.bundleIdentifier == "in.werai.audio.dev"
+    }
+
+    static var displayName: String { isDevelopment ? "ALO Dev" : "ALO" }
+    static var statusSymbol: String { isDevelopment ? "hammer.fill" : "cat.fill" }
+    static var idleStatusSymbol: String { isDevelopment ? "hammer" : "cat" }
+}
+
 @MainActor
 enum GUIApplication {
     private static var appDelegate: WERAIAppDelegate?
@@ -30,7 +40,6 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
     private var walkieTalkieBarController: WalkieTalkieWindowController?
     private var fullScreenVideoController: FullScreenVideoWindowController?
     private var statusMenuController: WERAIStatusMenuController?
-    private var pinnedWalkieStatusController: PinnedWalkieStatusController?
     private var phaseObserver: AnyCancellable?
     private var fullScreenObserver: AnyCancellable?
     private var videoPinnedObserver: AnyCancellable?
@@ -48,7 +57,7 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "ALO"
+        window.title = ALOAppFlavor.displayName
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.backgroundColor = .windowBackgroundColor
@@ -63,11 +72,12 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
             self?.window?.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
         }
-        pinnedWalkieStatusController = PinnedWalkieStatusController(model: model)
-        updater.updateAvailableHandler = { [weak self] version in self?.presentUpdate(version: version) }
-        updater.messageHandler = { [weak self] message in self?.presentUpdateMessage(message) }
-        model.peerVersionHandler = { [weak updater] version in updater?.observePeerVersion(version) }
-        updater.start()
+        if !ALOAppFlavor.isDevelopment {
+            updater.updateAvailableHandler = { [weak self] version in self?.presentUpdate(version: version) }
+            updater.messageHandler = { [weak self] message in self?.presentUpdateMessage(message) }
+            model.peerVersionHandler = { [weak updater] version in updater?.observePeerVersion(version) }
+            updater.start()
+        }
 
         phaseObserver = model.$phase
             .removeDuplicates()
@@ -227,6 +237,20 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
             keyEquivalent: "q"
         )
         appMenuItem.submenu = appMenu
+
+        let editMenuItem = NSMenuItem()
+        mainMenu.addItem(editMenuItem)
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo", action: #selector(UndoManager.undo), keyEquivalent: "z")
+        let redoItem = editMenu.addItem(withTitle: "Redo", action: #selector(UndoManager.redo), keyEquivalent: "z")
+        redoItem.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenuItem.submenu = editMenu
+
         NSApp.mainMenu = mainMenu
     }
 
@@ -271,11 +295,11 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
         statusItem.button?.image = NSImage(
-            systemSymbolName: "cat.fill",
-            accessibilityDescription: "ALO"
+            systemSymbolName: ALOAppFlavor.statusSymbol,
+            accessibilityDescription: ALOAppFlavor.displayName
         )
         statusItem.button?.image?.isTemplate = true
-        statusItem.button?.toolTip = "ALO"
+        statusItem.button?.toolTip = ALOAppFlavor.displayName
         if let button = statusItem.button {
             button.target = self
             button.action = #selector(togglePopover)
@@ -294,13 +318,17 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
         popover.animates = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         popover.delegate = self
         popover.contentSize = panelSize
-        popover.contentViewController = NSHostingController(
-            rootView: VStack(spacing: 8) {
-                WalkieTalkieBar(model: model, showsCloseButton: false)
+        let popoverController = NSHostingController(
+            rootView: VStack(spacing: 0) {
                 FloatingRoomView(model: model, presentation: .menuBar)
+                Divider()
+                WalkieTalkieBar(model: model, showsCloseButton: false)
             }
-            .padding(FloatingMetrics.popoverInset)
+            .background(Palette.opaqueSurface)
         )
+        popoverController.view.wantsLayer = true
+        popoverController.view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        popover.contentViewController = popoverController
 
         model.$unreadMessageCount
             .removeDuplicates()
@@ -361,11 +389,12 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
 
     private var panelSize: NSSize {
         NSSize(
-            width: FloatingMetrics.width + FloatingMetrics.popoverInset * 2,
+            width: FloatingMetrics.width,
             height: model.floatingPanelHeight
+                + FloatingMetrics.menuBarMediaHeight
+                - FloatingMetrics.barHeight
                 + FloatingMetrics.walkieBarHeight
-                + 8
-                + FloatingMetrics.popoverInset * 2
+                + FloatingMetrics.separatorHeight
         )
     }
 
@@ -380,7 +409,9 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
 
     private func updateBadge(count: Int) {
         badgeView.isHidden = count == 0
-        let detail = count == 0 ? "ALO" : "ALO · \(count) unread message\(count == 1 ? "" : "s")"
+        let detail = count == 0
+            ? ALOAppFlavor.displayName
+            : "\(ALOAppFlavor.displayName) · \(count) unread message\(count == 1 ? "" : "s")"
         statusItem.button?.toolTip = detail
         statusItem.button?.setAccessibilityLabel(detail)
     }
@@ -388,8 +419,8 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
     private func updatePhase(_ phase: WERAIViewModel.Phase) {
         if phase != .live { closePopover() }
         statusItem.button?.image = NSImage(
-            systemSymbolName: phase == .live ? "cat.fill" : "cat",
-            accessibilityDescription: "ALO"
+            systemSymbolName: phase == .live ? ALOAppFlavor.statusSymbol : ALOAppFlavor.idleStatusSymbol,
+            accessibilityDescription: ALOAppFlavor.displayName
         )
         statusItem.button?.image?.isTemplate = true
     }
@@ -414,6 +445,7 @@ private final class StatusUnreadBadgeView: NSView {
     }
 }
 
+#if false // Per-device menu-bar voice targets are intentionally disabled.
 @MainActor
 private final class PinnedWalkieStatusController {
     private final class Target: NSObject {
@@ -528,6 +560,7 @@ private final class PinnedWalkieStatusController {
         }
     }
 }
+#endif
 
 struct RoomMessage: Identifiable, Equatable {
     let id = UUID()
@@ -540,9 +573,9 @@ struct RoomMessage: Identifiable, Equatable {
 private enum FloatingMetrics {
     static let width: CGFloat = 560
     static let barHeight: CGFloat = 58
+    static let menuBarMediaHeight: CGFloat = 88
     static let cornerRadius: CGFloat = 22
     static let windowInset: CGFloat = 4
-    static let popoverInset: CGFloat = 6
     static var windowWidth: CGFloat { width + windowInset * 2 }
     static let separatorHeight: CGFloat = 1
     static let expansionDuration: TimeInterval = 0.24
@@ -551,7 +584,13 @@ private enum FloatingMetrics {
     static let queueHeight: CGFloat = 392
     static let videoHeight: CGFloat = 476
     static let permissionHeight: CGFloat = 244
-    static let walkieBarHeight: CGFloat = 96
+    static let walkieBarHeight: CGFloat = 50
+    static let walkieBarMinWidth: CGFloat = 220
+    static let walkieBarMaxWidth: CGFloat = 720
+
+    static func walkieBarWidth(participantCount: Int) -> CGFloat {
+        min(walkieBarMaxWidth, max(walkieBarMinWidth, CGFloat(participantCount) * 40 + 204))
+    }
 
     static func windowHeight(for contentHeight: CGFloat) -> CGFloat {
         contentHeight + windowInset * 2
@@ -708,25 +747,44 @@ private struct DeviceIdentityEditorView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Emoji")
                         .font(.system(size: 11, weight: .semibold))
-                    Picker("Emoji", selection: $icon) {
+                    LazyVGrid(
+                        columns: Array(repeating: GridItem(.fixed(30), spacing: 5), count: 8),
+                        spacing: 5
+                    ) {
                         ForEach(DeviceAppearance.icons, id: \.self) { emoji in
-                            Text(emoji).tag(emoji)
+                            Button { icon = emoji } label: {
+                                Text(emoji)
+                                    .font(.system(size: 16))
+                                    .frame(width: 30, height: 30)
+                                    .background(icon == emoji ? Palette.controlAccent.opacity(0.18) : Palette.messageSurface)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                            .stroke(
+                                                icon == emoji ? Palette.controlAccent : Palette.stroke,
+                                                lineWidth: icon == emoji ? 2 : 1
+                                            )
+                                    )
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Device emoji \(emoji)")
+                            .accessibilityValue(icon == emoji ? "Selected" : "")
                         }
                     }
-                    .labelsHidden()
-                    .frame(width: 108)
-                    .accessibilityLabel("Device emoji")
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Color")
                         .font(.system(size: 11, weight: .semibold))
-                    HStack(spacing: 5) {
+                    LazyVGrid(
+                        columns: Array(repeating: GridItem(.fixed(29), spacing: 5), count: 4),
+                        spacing: 5
+                    ) {
                         ForEach(Array(DeviceAppearance.colors.enumerated()), id: \.element) { index, color in
                             Button { colorHex = color } label: {
                                 Circle()
                                     .fill(Color.deviceIdentity(color))
-                                    .frame(width: 23, height: 23)
+                                    .frame(width: 21, height: 21)
                                     .overlay(
                                         Circle().stroke(
                                             colorHex == color ? Palette.ink : Palette.strokeStrong,
@@ -741,6 +799,7 @@ private struct DeviceIdentityEditorView: View {
                             .accessibilityValue(colorHex == color ? "Selected" : "")
                         }
                     }
+                    .frame(width: 131)
                 }
             }
 
@@ -886,7 +945,6 @@ final class WERAIViewModel: ObservableObject {
     @Published private(set) var voiceInputDevices = [VoiceInputDevice]()
     @Published var selectedVoiceInputUID: String?
     @Published var walkieBarHidden: Bool
-    @Published var pinnedWalkieDeviceIDs: Set<String>
     @Published var incomingMediaMuted: Bool
     @Published var incomingCallsMuted: Bool
     @Published var roomHasVideo = false
@@ -915,7 +973,6 @@ final class WERAIViewModel: ObservableObject {
     private var walkieGeneration = 0
     private static let floatingBarPreferenceKey = "floatingBarHidden"
     private static let walkieBarPreferenceKey = "walkieBarHidden"
-    private static let pinnedWalkiePreferenceKey = "pinnedWalkieDeviceIDs"
     private static let incomingMediaMutedKey = "incomingMediaMuted"
     private static let incomingCallsMutedKey = "incomingCallsMuted"
     private static let voiceInputUIDKey = "voiceInputUID"
@@ -954,7 +1011,6 @@ final class WERAIViewModel: ObservableObject {
             ? true
             : defaults.bool(forKey: Self.floatingBarPreferenceKey)
         walkieBarHidden = defaults.bool(forKey: Self.walkieBarPreferenceKey)
-        pinnedWalkieDeviceIDs = Set(defaults.stringArray(forKey: Self.pinnedWalkiePreferenceKey) ?? [])
         incomingMediaMuted = defaults.bool(forKey: Self.incomingMediaMutedKey)
         incomingCallsMuted = defaults.bool(forKey: Self.incomingCallsMutedKey)
         voiceInputDevices = VoiceInputCatalog.availableDevices()
@@ -1528,14 +1584,6 @@ final class WERAIViewModel: ObservableObject {
         UserDefaults.standard.set(false, forKey: Self.walkieBarPreferenceKey)
     }
 
-    func isWalkieDevicePinned(_ id: String) -> Bool { pinnedWalkieDeviceIDs.contains(id) }
-
-    func toggleWalkieDevicePin(_ id: String) {
-        if pinnedWalkieDeviceIDs.contains(id) { pinnedWalkieDeviceIDs.remove(id) }
-        else { pinnedWalkieDeviceIDs.insert(id) }
-        UserDefaults.standard.set(Array(pinnedWalkieDeviceIDs).sorted(), forKey: Self.pinnedWalkiePreferenceKey)
-    }
-
     func toggleAllIncomingAudio() {
         let mute = !(incomingMediaMuted && incomingCallsMuted)
         setIncomingMediaMuted(mute)
@@ -2062,7 +2110,9 @@ private struct WERAIView: View {
 
     private var versionLabel: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-        return "V\(version ?? "DEV")"
+        return ALOAppFlavor.isDevelopment
+            ? "DEV · V\(version ?? "LOCAL")"
+            : "V\(version ?? "DEV")"
     }
 
     var body: some View {
@@ -2137,7 +2187,8 @@ private struct WERAIView: View {
                                 .foregroundStyle(Palette.secondary)
                         }
                     }
-                    .padding(.horizontal, 10)
+                    .padding(.leading, 5)
+                    .padding(.trailing, 16)
                     .frame(height: 36)
                     .background(Palette.messageSurface)
                     .clipShape(Capsule())
@@ -2424,6 +2475,14 @@ private struct FloatingRoomView: View {
         max(0, model.floatingPanelHeight - FloatingMetrics.barHeight - FloatingMetrics.separatorHeight)
     }
 
+    private var roomBarHeight: CGFloat {
+        presentation == .menuBar ? FloatingMetrics.menuBarMediaHeight : FloatingMetrics.barHeight
+    }
+
+    private var roomContentHeight: CGFloat {
+        model.floatingPanelHeight + roomBarHeight - FloatingMetrics.barHeight
+    }
+
     private var expansionIdentity: String {
         if model.permissionNotice { return "permission" }
         if let preview = model.incomingMessagePreview,
@@ -2467,7 +2526,7 @@ private struct FloatingRoomView: View {
     }
 
     var body: some View {
-        Group {
+        return Group {
             if presentation == .floating {
                 roomContent
                     .floatingSurface(cornerRadius: FloatingMetrics.cornerRadius)
@@ -2495,7 +2554,7 @@ private struct FloatingRoomView: View {
 
             roomBar
         }
-        .frame(width: FloatingMetrics.width, height: model.floatingPanelHeight, alignment: .bottom)
+        .frame(width: FloatingMetrics.width, height: roomContentHeight, alignment: .bottom)
         .animation(panelAnimation, value: model.floatingSection)
         .animation(panelAnimation, value: model.permissionNotice)
         .animation(panelAnimation, value: model.participants.count)
@@ -2511,39 +2570,24 @@ private struct FloatingRoomView: View {
                 activeIcon: "dot.radiowaves.left.and.right",
                 active: model.isHost,
                 disabled: model.mediaSwitchBusy,
-                help: model.isHost ? "Stop broadcasting this Mac" : (model.hasBroadcaster ? "Take over room audio" : "Broadcast this Mac")
+                help: model.isHost ? "Stop broadcasting" : (model.hasBroadcaster ? "Take over room audio" : "Broadcast audio")
             ) { model.toggleBroadcasting() }
 
-            roomBarButton(
-                icon: model.roomIsPlaying ? "pause.fill" : "play.fill",
-                active: false,
-                help: model.roomIsPlaying ? "Pause for everyone" : "Play for everyone"
-            ) { model.toggleRoomPlayback() }
+            if model.hasBroadcaster || model.isHost {
+                roomBarButton(
+                    icon: model.roomIsPlaying ? "pause.fill" : "play.fill",
+                    active: false,
+                    help: model.roomIsPlaying ? "Pause everywhere" : "Play everywhere"
+                ) { model.toggleRoomPlayback() }
 
-            roomBarButton(
-                icon: "music.note.list",
-                activeIcon: "music.note.list",
-                active: model.floatingSection == .queue,
-                help: "Room queue"
-            ) { model.showQueue() }
-            .keyboardShortcut("4", modifiers: .command)
-
-            roomBarButton(
-                icon: "bubble.left.and.text.bubble.right",
-                activeIcon: "bubble.left.and.text.bubble.right.fill",
-                active: model.floatingSection == .chat,
-                badge: model.unreadMessageCount,
-                help: "Conversation"
-            ) { model.showChat() }
-            .keyboardShortcut("1", modifiers: .command)
-
-            roomBarButton(
-                icon: "person.2",
-                activeIcon: "person.2.fill",
-                active: model.floatingSection == .people,
-                help: "People and volume"
-            ) { model.showPeople() }
-            .keyboardShortcut("2", modifiers: .command)
+                roomBarButton(
+                    icon: "music.note.list",
+                    activeIcon: "music.note.list",
+                    active: model.floatingSection == .queue,
+                    help: "Room queue"
+                ) { model.showQueue() }
+                .keyboardShortcut("4", modifiers: .command)
+            }
 
             roomBarButton(
                 icon: model.mediaSwitchBusy ? "hourglass" : "rectangle.on.rectangle",
@@ -2553,14 +2597,6 @@ private struct FloatingRoomView: View {
                 help: model.videoControlHelp
             ) { model.toggleVideoFromFloatingBar() }
             .keyboardShortcut("3", modifiers: .command)
-
-            roomBarButton(
-                icon: presentation == .menuBar && model.floatingBarHidden ? "macwindow" : "eye.slash",
-                active: false,
-                help: model.floatingBarHidden ? "Show floating controls" : "Hide floating controls"
-            ) {
-                model.floatingBarHidden ? model.showFloatingBar() : model.hideFloatingBar()
-            }
 
             Divider().frame(height: 20)
 
@@ -2575,7 +2611,7 @@ private struct FloatingRoomView: View {
             .accessibilityLabel("Leave room")
         }
         .padding(.horizontal, 8)
-        .frame(width: FloatingMetrics.width, height: FloatingMetrics.barHeight)
+        .frame(width: FloatingMetrics.width, height: roomBarHeight)
         .onChange(of: model.floatingSection) { _, section in
             composerFocused = section == .chat
         }
@@ -2602,6 +2638,7 @@ private struct FloatingRoomView: View {
                     }
                 }
             }
+            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
@@ -2627,11 +2664,15 @@ private struct FloatingRoomView: View {
             .font(.system(size: 10, weight: .medium))
             .foregroundStyle(Palette.detailText)
             .lineLimit(1)
+            .allowsTightening(true)
+            .minimumScaleFactor(0.82)
             .fixedSize(horizontal: true, vertical: false)
     }
 
     private var artworkTile: some View {
-        Group {
+        let size: CGFloat = presentation == .menuBar ? 62 : 38
+        let radius: CGFloat = presentation == .menuBar ? 17 : 11
+        return Group {
             if let data = model.nowPlaying.artworkData, let image = NSImage(data: data) {
                 Image(nsImage: image)
                     .resizable()
@@ -2645,10 +2686,10 @@ private struct FloatingRoomView: View {
                 }
             }
         }
-        .frame(width: 38, height: 38)
-        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .frame(width: size, height: size)
+        .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 11, style: .continuous)
+            RoundedRectangle(cornerRadius: radius, style: .continuous)
                 .stroke(Palette.stroke, lineWidth: 1)
         )
         .accessibilityLabel(model.nowPlaying.title.map { "Album artwork for \($0)" } ?? "Audio room")
@@ -3356,6 +3397,19 @@ private struct WindowDragRegion: NSViewRepresentable {
     }
 }
 
+private struct WindowDragHandle: View {
+    var body: some View {
+        Image(systemName: "circle.grid.2x3.fill")
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(Palette.controlIcon.opacity(0.5))
+            .frame(width: 24, height: 40)
+            .overlay(WindowDragRegion())
+            .contentShape(Rectangle())
+            .help("Drag to move voice controls")
+            .accessibilityLabel("Drag voice controls")
+    }
+}
+
 private struct DeviceAvatar: View {
     let emoji: String
     let colorHex: String
@@ -3397,7 +3451,7 @@ private struct WalkieTalkieTargetIcon: View {
             emoji: icon,
             colorHex: colorHex,
             profileImageData: profileImageData,
-            size: 40
+            size: 32
         )
             .overlay {
                 Circle().stroke(
@@ -3423,16 +3477,9 @@ private struct WalkieTalkieTargetIcon: View {
                     model.setWalkiePressed(false, targetID: id)
                 }
             }
-            .help("Hold to talk to \(name)\(id == nil ? "" : " · right-click to pin")")
+            .help("Hold to talk to \(name)")
             .accessibilityLabel("Hold to talk to \(name)")
             .accessibilityValue(incoming ? "Talking to you" : outgoing ? "You are talking" : selected ? "Selected" : "")
-            .contextMenu {
-                if let id {
-                    Button(model.isWalkieDevicePinned(id) ? "Unpin from Menu Bar" : "Pin to Menu Bar") {
-                        model.toggleWalkieDevicePin(id)
-                    }
-                }
-            }
     }
 }
 
@@ -3447,181 +3494,143 @@ private struct WalkieTalkieBar: View {
                     .glass(cornerRadius: 22)
                     .padding(FloatingMetrics.windowInset)
             } else {
-                controls.floatingSurface(cornerRadius: 16)
+                controls.background(Palette.opaqueSurface)
             }
         }
         .onAppear(perform: model.refreshVoiceInputs)
     }
 
     private var controls: some View {
-        VStack(spacing: 6) {
-            HStack(spacing: 8) {
-                if showsCloseButton {
-                    WindowDragRegion()
-                        .frame(width: 16, height: 24)
-                        .help("Drag voice controls")
-                }
-                Image(systemName: "waveform.badge.mic")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(Palette.controlAccent)
-                Text("VOICE")
-                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                    .foregroundStyle(Palette.controlIcon)
-                Text(voiceStatus)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(model.walkieTalking ? Palette.accentText : Palette.controlIcon.opacity(0.75))
-                    .lineLimit(1)
-                Spacer(minLength: 4)
-
-                Menu {
-                    Button {
-                        model.selectVoiceInput(nil)
-                    } label: {
-                        if model.selectedVoiceInputUID == nil {
-                            Label("System Default", systemImage: "checkmark")
-                        } else {
-                            Text("System Default")
-                        }
-                    }
-                    Divider()
-                    ForEach(model.voiceInputDevices.filter { !$0.isSystemDefault }) { input in
-                        Button {
-                            model.selectVoiceInput(input.id)
-                        } label: {
-                            if input.id == model.selectedVoiceInputUID {
-                                Label(input.name, systemImage: "checkmark")
-                            } else {
-                                Text(input.name)
-                            }
-                        }
-                    }
-                    Divider()
-                    Button("Refresh Microphones") { model.refreshVoiceInputs() }
-                } label: {
-                    ViewThatFits(in: .horizontal) {
-                        Label(selectedMicrophoneName, systemImage: "mic.fill")
-                            .fixedSize(horizontal: true, vertical: false)
-                        Label("Microphone", systemImage: "mic.fill")
-                            .fixedSize(horizontal: true, vertical: false)
-                    }
-                    .font(.system(size: 10, weight: .semibold))
-                    .lineLimit(1)
-                }
-                .menuStyle(.borderlessButton)
-                .frame(maxWidth: 184)
-                .help("Microphone: \(selectedMicrophoneName)")
-
-                if showsCloseButton {
-                    Button(action: model.hideWalkieBar) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 10, weight: .bold))
-                            .frame(width: 24, height: 24)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Hide voice controls")
-                    .accessibilityLabel("Hide voice controls")
-                }
+        HStack(spacing: 8) {
+            if showsCloseButton {
+                WindowDragHandle()
             }
 
-            HStack(spacing: 8) {
-                Text("TALK TO")
-                    .font(.system(size: 9, weight: .bold, design: .rounded))
-                    .foregroundStyle(Palette.controlIcon.opacity(0.6))
+            walkieTarget(id: nil, name: "Everyone", icon: "👥", colorHex: "3F86E8")
 
-                walkieTarget(id: nil, name: "Everyone", icon: "👥", colorHex: "3F86E8")
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(remoteParticipants) { participant in
+                        let appearance = DeviceAppearance.generated(from: participant.id)
+                        walkieTarget(
+                            id: participant.id,
+                            name: participant.name,
+                            icon: participant.icon ?? appearance.icon,
+                            colorHex: participant.colorHex ?? appearance.colorHex,
+                            profileImageData: participant.profileImageData
+                        )
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+            }
+            .scrollClipDisabled()
+            .frame(maxWidth: .infinity)
 
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
-                        ForEach(remoteParticipants) { participant in
-                            let appearance = DeviceAppearance.generated(from: participant.id)
-                            walkieTarget(
-                                id: participant.id,
-                                name: participant.name,
-                                icon: participant.icon ?? appearance.icon,
-                                colorHex: participant.colorHex ?? appearance.colorHex,
-                                profileImageData: participant.profileImageData
-                            )
+            communicationButton(
+                icon: model.unreadMessageCount > 0 ? "bubble.left.and.text.bubble.right.fill" : "bubble.left.and.text.bubble.right",
+                active: model.floatingSection == .chat,
+                badge: model.unreadMessageCount,
+                help: "Conversation"
+            ) { model.showChat() }
+            .keyboardShortcut("1", modifiers: .command)
+
+            communicationButton(
+                icon: model.floatingSection == .people ? "person.2.fill" : "person.2",
+                active: model.floatingSection == .people,
+                help: "People and volume"
+            ) { model.showPeople() }
+            .keyboardShortcut("2", modifiers: .command)
+
+            Menu {
+                    Menu("Microphone") {
+                        Button {
+                            model.selectVoiceInput(nil)
+                        } label: {
+                            if model.selectedVoiceInputUID == nil {
+                                Label(systemDefaultMicrophoneLabel, systemImage: "checkmark")
+                            } else {
+                                Text(systemDefaultMicrophoneLabel)
+                            }
                         }
-                    }
-                }
-                .frame(maxWidth: .infinity)
-
-                Button(action: model.toggleOpenWalkieLine) {
-                    Label(
-                        model.walkieStarting ? "Connecting…" : model.walkieLineOpen ? "Close line" : "Open line",
-                        systemImage: model.walkieLineOpen ? "phone.down.fill" : "phone.fill"
-                    )
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(model.walkieLineOpen ? Color.white : Palette.controlIcon)
-                    .padding(.horizontal, 9)
-                    .frame(height: 34)
-                    .background(model.walkieLineOpen ? Palette.controlAccent : Palette.messageSurface)
-                    .clipShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .disabled(remoteParticipants.isEmpty)
-                .help(model.walkieLineOpen ? "Close the always-on voice line" : "Keep the selected voice line open")
-
-                Menu {
-                    Button(model.incomingMediaMuted ? "Unmute Music & Video" : "Mute Music & Video") {
-                        model.toggleIncomingMediaMute()
-                    }
-                    Button(model.incomingCallsMuted ? "Unmute Voice Lines" : "Mute Voice Lines") {
-                        model.toggleIncomingCallsMute()
+                        Divider()
+                        ForEach(model.voiceInputDevices.filter { !$0.isSystemDefault }) { input in
+                            Button {
+                                model.selectVoiceInput(input.id)
+                            } label: {
+                                if input.id == model.selectedVoiceInputUID {
+                                    Label(input.name, systemImage: "checkmark")
+                                } else {
+                                    Text(input.name)
+                                }
+                            }
+                        }
+                        Divider()
+                        Button("Refresh Microphones") { model.refreshVoiceInputs() }
                     }
                     Divider()
-                    Button(model.incomingMediaMuted && model.incomingCallsMuted ? "Unmute Everything" : "Mute Everything") {
-                        model.toggleAllIncomingAudio()
+                    Button(model.walkieLineOpen ? "Close open voice line" : "Keep selected voice line open") {
+                        model.toggleOpenWalkieLine()
                     }
-                } label: {
-                    Image(systemName: incomingAudioIcon)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Palette.controlIcon)
-                        .frame(width: 30, height: 34)
-                        .background(Palette.messageSurface)
-                        .clipShape(Capsule())
+                    .disabled(remoteParticipants.isEmpty)
+                    Button(model.incomingCallsMuted ? "Unmute incoming voice" : "Mute incoming voice") {
+                        model.toggleIncomingCallsMute()
+                    }
+                    Button(model.incomingMediaMuted ? "Unmute incoming media" : "Mute incoming media") {
+                        model.toggleIncomingMediaMute()
+                    }
+                    Divider()
+                    Button(model.walkieBarHidden ? "Show voice floating bar" : "Hide voice floating bar") {
+                        model.walkieBarHidden ? model.showWalkieBar() : model.hideWalkieBar()
+                    }
+                    Button(model.floatingBarHidden ? "Show media floating bar" : "Hide media floating bar") {
+                        model.floatingBarHidden ? model.showFloatingBar() : model.hideFloatingBar()
+                    }
+            } label: {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 30, height: 28)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize(horizontal: true, vertical: false)
+            .help("Voice settings · \(selectedMicrophoneName)")
+
+            if showsCloseButton {
+                Button(action: model.hideWalkieBar) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .frame(width: 24, height: 24)
                 }
-                .menuStyle(.borderlessButton)
-                .frame(width: 34)
-                .help("Incoming audio options")
+                .buttonStyle(.plain)
+                .help("Hide voice controls")
+                .accessibilityLabel("Hide voice controls")
             }
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .frame(width: FloatingMetrics.width, height: FloatingMetrics.walkieBarHeight)
+        .frame(
+            minWidth: showsCloseButton ? FloatingMetrics.walkieBarMinWidth : FloatingMetrics.width,
+            maxWidth: showsCloseButton ? .infinity : FloatingMetrics.width,
+            minHeight: FloatingMetrics.walkieBarHeight,
+            maxHeight: FloatingMetrics.walkieBarHeight
+        )
     }
 
     private var remoteParticipants: [RoomParticipant] {
         model.participants.filter { $0.id != model.currentParticipantID }
     }
 
-    private var selectedTargetName: String {
-        guard let id = model.selectedWalkieTargetID else { return "everyone" }
-        return remoteParticipants.first(where: { $0.id == id })?.name ?? "selected Mac"
-    }
-
     private var selectedMicrophoneName: String {
         guard let selectedVoiceInputUID = model.selectedVoiceInputUID else {
-            let defaultName = model.voiceInputDevices.first(where: \.isSystemDefault)?.name
+            let defaultName = VoiceInputCatalog.systemDefaultName()
             return defaultName.map { "System Default · \($0)" } ?? "System Default"
         }
         return model.voiceInputDevices.first(where: { $0.id == selectedVoiceInputUID })?.name
             ?? "System microphone"
     }
 
-    private var voiceStatus: String {
-        if model.walkieStarting { return "Requesting microphone…" }
-        if model.walkieTalking {
-            return model.walkieLineOpen ? "Line open with \(selectedTargetName)" : "Talking to \(selectedTargetName)"
-        }
-        if !model.incomingWalkieSpeakerIDs.isEmpty { return "Someone is talking to you" }
-        return remoteParticipants.isEmpty ? "Waiting for another Mac" : "Hold an icon to talk"
-    }
-
-    private var incomingAudioIcon: String {
-        if model.incomingMediaMuted && model.incomingCallsMuted { return "speaker.slash.fill" }
-        if model.incomingCallsMuted { return "mic.slash.fill" }
-        return "speaker.wave.2.fill"
+    private var systemDefaultMicrophoneLabel: String {
+        VoiceInputCatalog.systemDefaultName().map { "System Default — \($0)" }
+            ?? "System Default Microphone"
     }
 
     private func walkieTarget(
@@ -3641,22 +3650,52 @@ private struct WalkieTalkieBar: View {
         )
     }
 
+    private func communicationButton(
+        icon: String,
+        active: Bool,
+        badge: Int = 0,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 30, height: 30)
+                if badge > 0 {
+                    Text("\(min(badge, 99))")
+                        .font(.system(size: 7, weight: .bold))
+                        .foregroundStyle(Color.white)
+                        .padding(.horizontal, 3)
+                        .frame(minWidth: 12, minHeight: 12)
+                        .background(Palette.red)
+                        .clipShape(Capsule())
+                }
+            }
+        }
+        .buttonStyle(FlatToolButtonStyle(active: active))
+        .help(help)
+        .accessibilityLabel(help)
+    }
+
 }
 
 @MainActor
 private final class WalkieTalkieWindowController {
     private let panel: FloatingRoomPanel
     private var hasPosition = false
+    private var participantObserver: AnyCancellable?
 
     init(model: WERAIViewModel) {
         panel = FloatingRoomPanel(
             contentRect: NSRect(
                 x: 0,
                 y: 0,
-                width: FloatingMetrics.windowWidth,
+                width: FloatingMetrics.walkieBarWidth(participantCount: model.participants.count)
+                    + FloatingMetrics.windowInset * 2,
                 height: FloatingMetrics.windowHeight(for: FloatingMetrics.walkieBarHeight)
             ),
-            styleMask: [.borderless],
+            styleMask: [.borderless, .resizable],
             backing: .buffered,
             defer: false
         )
@@ -3670,7 +3709,25 @@ private final class WalkieTalkieWindowController {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         panel.animationBehavior = .none
         panel.isReleasedWhenClosed = false
-        panel.contentView = NSHostingView(rootView: WalkieTalkieBar(model: model))
+        panel.minSize = NSSize(
+            width: FloatingMetrics.walkieBarMinWidth + FloatingMetrics.windowInset * 2,
+            height: FloatingMetrics.windowHeight(for: FloatingMetrics.walkieBarHeight)
+        )
+        panel.maxSize = NSSize(
+            width: FloatingMetrics.walkieBarMaxWidth + FloatingMetrics.windowInset * 2,
+            height: FloatingMetrics.windowHeight(for: FloatingMetrics.walkieBarHeight)
+        )
+        let hostingView = NSHostingView(rootView: WalkieTalkieBar(model: model))
+        hostingView.sizingOptions = []
+        panel.contentView = hostingView
+
+        participantObserver = model.$participants
+            .map(\.count)
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] count in
+                DispatchQueue.main.async { self?.fitParticipants(count: count) }
+            }
     }
 
     func show() {
@@ -3686,6 +3743,16 @@ private final class WalkieTalkieWindowController {
     }
 
     func close() { panel.orderOut(nil) }
+
+    private func fitParticipants(count: Int) {
+        let width = FloatingMetrics.walkieBarWidth(participantCount: count)
+            + FloatingMetrics.windowInset * 2
+        guard width > panel.frame.width else { return }
+        var frame = panel.frame
+        frame.origin.x -= (width - frame.width) / 2
+        frame.size.width = width
+        panel.setFrame(frame, display: true, animate: panel.isVisible)
+    }
 }
 
 private final class FloatingRoomPanel: NSPanel {

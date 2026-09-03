@@ -111,10 +111,9 @@ its own windows from the native picker.
 
 Every open room also has a compact walkie-talkie bar. Hold a colored device icon to talk
 only to that Mac, or hold the people icon to talk to everyone. **Open line** keeps the selected
-voice line open; enable it on both Macs for a two-way line. Choose the active microphone from
-the labeled microphone menu. Right-click a device to pin its
-colored icon to the macOS menu bar, where a short click opens or closes the line and a hold
-acts as push-to-talk. Incoming speakers highlight green. The incoming-audio menu can mute
+voice line open; enable it on both Macs for a two-way line. Choose the active hardware microphone from
+the labeled microphone menu. Voice targets stay in ALO's unified popover or optional floating
+controls. Incoming speakers highlight clearly. The incoming-audio menu can mute
 Music & Video, Voice Lines, or everything. Microphone access is requested only when voice
 transmission starts; if it was previously denied, ALO links directly to Microphone settings.
 
