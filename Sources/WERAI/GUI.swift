@@ -105,6 +105,9 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
     private var walkieTalkieBarController: WalkieTalkieWindowController?
     private var fullScreenVideoController: FullScreenVideoWindowController?
     private var statusMenuController: WERAIStatusMenuController?
+    private var diagnosticsController: DiagnosticsWindowController?
+    private var shortcutManager: GlobalShortcutManager?
+    private var shortcutMapperController: ShortcutMapperWindowController?
     private var phaseObserver: AnyCancellable?
     private var fullScreenObserver: AnyCancellable?
     private var videoPinnedObserver: AnyCancellable?
@@ -119,6 +122,9 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         installTerminationSignalHandlers()
         installMainMenu()
+        shortcutManager = GlobalShortcutManager { [weak self] action, pressed in
+            self?.model.handleGlobalShortcut(action, pressed: pressed)
+        }
         let window = NSWindow(
             contentRect: NSRect(
                 x: 0,
@@ -389,6 +395,20 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
             keyEquivalent: ""
         )
         updateItem.target = self
+        let diagnosticsItem = appMenu.addItem(
+            withTitle: "Diagnostics…",
+            action: #selector(showDiagnostics(_:)),
+            keyEquivalent: "d"
+        )
+        diagnosticsItem.keyEquivalentModifierMask = [.command, .shift]
+        diagnosticsItem.target = self
+        let shortcutsItem = appMenu.addItem(
+            withTitle: "Shortcut Mapper…",
+            action: #selector(showShortcutMapper(_:)),
+            keyEquivalent: ","
+        )
+        shortcutsItem.keyEquivalentModifierMask = [.command]
+        shortcutsItem.target = self
         appMenu.addItem(.separator())
         appMenu.addItem(
             withTitle: "Quit ALO",
@@ -406,6 +426,21 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func checkForUpdates(_ sender: Any?) {
         updater.checkForUpdates(userInitiated: true)
+    }
+
+    @objc func showDiagnostics(_ sender: Any?) {
+        if diagnosticsController == nil {
+            diagnosticsController = DiagnosticsWindowController(model: model)
+        }
+        diagnosticsController?.show()
+    }
+
+    @objc func showShortcutMapper(_ sender: Any?) {
+        guard let shortcutManager else { return }
+        if shortcutMapperController == nil {
+            shortcutMapperController = ShortcutMapperWindowController(manager: shortcutManager, model: model)
+        }
+        shortcutMapperController?.show()
     }
 
     private func presentUpdate(version: String) {
@@ -505,6 +540,9 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
             .removeDuplicates()
             .dropFirst()
             .filter { !$0 }
+            .sink { [weak self] _ in self?.closePopover() }
+            .store(in: &observers)
+        NotificationCenter.default.publisher(for: .aloWillPresentScreenPicker)
             .sink { [weak self] _ in self?.closePopover() }
             .store(in: &observers)
         NSWorkspace.shared.notificationCenter
@@ -1034,6 +1072,7 @@ final class WERAIViewModel: ObservableObject {
     private var requestedVideoBroadcast = false
     private var videoBroadcastTimeoutTask: Task<Void, Never>?
     private let roomStore = RoomStore()
+    private let lastJoinedRoomStore = LastJoinedRoomStore()
     private let nodeID: String
     private var localNowPlayingMonitor: NowPlayingMonitor?
     private var deviceIdentityEditor: DeviceIdentityEditorController?
@@ -1044,6 +1083,7 @@ final class WERAIViewModel: ObservableObject {
     private var activeRoomConfiguration: RoomConfiguration?
     private var isLeavingRoom = false
     private var walkieGeneration = 0
+    private var globalShortcutTalkTargets = [GlobalShortcutAction: Set<String>]()
     private static let floatingBarPreferenceKey = "floatingBarHidden"
     private static let walkieBarPreferenceKey = "walkieBarHidden"
     private static let incomingMediaMutedKey = "incomingMediaMuted"
@@ -1109,6 +1149,13 @@ final class WERAIViewModel: ObservableObject {
             }
         )
         roomBrowser.start()
+        if let room = lastJoinedRoomStore.roomToRestore(from: savedRooms) {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.phase == .idle else { return }
+                self.selectedRoomID = room.id
+                self.open(room, broadcastInitially: false)
+            }
+        }
     }
 
     var normalizedRoomName: String { roomName.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -1229,6 +1276,7 @@ final class WERAIViewModel: ObservableObject {
 
     func forgetRoom(roomID: String) {
         do {
+            lastJoinedRoomStore.clear(ifMatching: roomID)
             try roomStore.forget(roomID: roomID)
             savedRooms = roomStore.load()
             if selectedRoomID == roomID {
@@ -1313,6 +1361,7 @@ final class WERAIViewModel: ObservableObject {
                 self.walkieStarting = false
                 self.latchedTalkTargetIDs.removeAll()
                 self.pushToTalkTargetIDs.removeAll()
+                self.globalShortcutTalkTargets.removeAll()
                 self.errorMessage = self.readable(error)
                 self.statusText = "Talk stopped"
             },
@@ -1352,6 +1401,7 @@ final class WERAIViewModel: ObservableObject {
         do {
             try session.start(broadcastInitially: broadcastInitially)
             try? roomStore.save(room)
+            lastJoinedRoomStore.markJoined(room)
             savedRooms = roomStore.load()
             phase = .live
             statusText = broadcastInitially ? "Starting this Mac's broadcast" : "Room open"
@@ -1486,6 +1536,92 @@ final class WERAIViewModel: ObservableObject {
             statusText = "Syncing listeners to the broadcaster"
         } else {
             statusText = "Wait for the audio connection, then try syncing again"
+        }
+    }
+
+    func globalShortcutAvailability(_ action: GlobalShortcutAction) -> GlobalShortcutAvailability {
+        guard phase == .live, meshSession != nil else {
+            return .unavailable("Available while a room is open")
+        }
+        switch action.kind {
+        case .talkToEveryone:
+            return currentRemoteParticipantIDs.isEmpty
+                ? .unavailable("No other device is in the room")
+                : .ready
+        case .talkToDevice:
+            guard let participantID = action.participantID,
+                  currentRemoteParticipantIDs.contains(participantID)
+            else { return .unavailable("This device is not currently in the room") }
+            return .ready
+        case .shareScreen:
+            if mediaSwitchBusy { return .unavailable("Screen sharing is already changing") }
+            if roomHasVideo { return .unavailable(isHost ? "Your screen is already shared" : "Another device is sharing") }
+            return .ready
+        case .broadcastAudio:
+            if mediaSwitchBusy { return .unavailable("The broadcast is already changing") }
+            return isHost ? .unavailable("This Mac is already broadcasting") : .ready
+        case .stopAudioBroadcast:
+            return isHost ? .ready : .unavailable("This Mac is not broadcasting")
+        case .stopScreenShare:
+            return isHost && roomHasVideo ? .ready : .unavailable("This Mac is not sharing a screen")
+        case .syncMyDevice:
+            if isHost { return .unavailable("The broadcaster is the sync source") }
+            return hasBroadcaster ? .ready : .unavailable("No broadcaster is connected")
+        case .syncAllDevices:
+            return hasBroadcaster ? .ready : .unavailable("No broadcaster is connected")
+        }
+    }
+
+    func handleGlobalShortcut(_ action: GlobalShortcutAction, pressed: Bool) {
+        if action.kind == .talkToEveryone || action.kind == .talkToDevice {
+            if !pressed {
+                globalShortcutTalkTargets.removeValue(forKey: action)
+                reconcileTalkTargets()
+                return
+            }
+            let availability = globalShortcutAvailability(action)
+            guard availability.available else {
+                statusText = availability.reason ?? "That shortcut is not available right now"
+                return
+            }
+            if let participantID = action.participantID {
+                globalShortcutTalkTargets[action] = [participantID]
+            } else {
+                globalShortcutTalkTargets[action] = currentRemoteParticipantIDs
+            }
+            reconcileTalkTargets()
+            return
+        }
+
+        guard pressed else { return }
+        let availability = globalShortcutAvailability(action)
+        guard availability.available else {
+            statusText = availability.reason ?? "That shortcut is not available right now"
+            return
+        }
+        switch action.kind {
+        case .talkToEveryone, .talkToDevice:
+            break
+        case .shareScreen:
+            if isHost { selectExperience(.video) }
+            else { beginAudioAndVideoBroadcast() }
+        case .broadcastAudio:
+            toggleBroadcasting()
+        case .stopAudioBroadcast:
+            meshSession?.stopBroadcasting()
+            statusText = "Stopping this Mac's audio broadcast"
+        case .stopScreenShare:
+            selectExperience(.audio)
+        case .syncMyDevice:
+            guard let currentParticipantID,
+                  let participant = participants.first(where: { $0.id == currentParticipantID })
+            else {
+                statusText = "This Mac is still joining the room"
+                return
+            }
+            syncParticipant(participant)
+        case .syncAllDevices:
+            syncAllDevices()
         }
     }
 
@@ -1705,7 +1841,10 @@ final class WERAIViewModel: ObservableObject {
     }
 
     private var effectiveTalkTargetIDs: Set<String> {
-        latchedTalkTargetIDs.union(pushToTalkTargetIDs)
+        globalShortcutTalkTargets.values.reduce(
+            latchedTalkTargetIDs.union(pushToTalkTargetIDs),
+            { $0.union($1) }
+        )
     }
 
     private func reconcileTalkTargets() {
@@ -1734,6 +1873,7 @@ final class WERAIViewModel: ObservableObject {
                 walkieTalking = false
                 latchedTalkTargetIDs.removeAll()
                 pushToTalkTargetIDs.removeAll()
+                globalShortcutTalkTargets.removeAll()
                 presentMicrophoneAccessHelp()
                 return
             }
@@ -1760,6 +1900,7 @@ final class WERAIViewModel: ObservableObject {
                 walkieTalking = false
                 latchedTalkTargetIDs.removeAll()
                 pushToTalkTargetIDs.removeAll()
+                globalShortcutTalkTargets.removeAll()
                 errorMessage = readable(error)
                 statusText = "Unable to start Talk"
             }
@@ -1786,6 +1927,7 @@ final class WERAIViewModel: ObservableObject {
         walkieTalking = false
         latchedTalkTargetIDs.removeAll()
         pushToTalkTargetIDs.removeAll()
+        globalShortcutTalkTargets.removeAll()
         meshSession?.endWalkieTalkie()
         if incomingWalkieSpeakerIDs.isEmpty { statusText = "Talk is off" }
     }
@@ -2011,6 +2153,11 @@ final class WERAIViewModel: ObservableObject {
     }
 
     func toggleVideoFromFloatingBar() {
+        if mediaSwitchBusy {
+            statusText = "Cancelling screen selection"
+            Task { try? await meshSession?.setVideoEnabled(false) }
+            return
+        }
         switch videoControlIntent {
         case .toggleViewer:
             toggleFloatingVideo()
@@ -2048,6 +2195,7 @@ final class WERAIViewModel: ObservableObject {
 
     func stop() {
         isLeavingRoom = true
+        lastJoinedRoomStore.clear(ifMatching: activeRoomConfiguration?.id)
         phase = .starting
         statusText = "Leaving the room"
         stopLocalNowPlayingMonitor()
@@ -2113,6 +2261,21 @@ final class WERAIViewModel: ObservableObject {
         meshSession?.stopImmediately()
     }
 
+    func diagnosticRoomContext() -> DiagnosticRoomContext {
+        let active = phase == .live && meshSession != nil
+        let remotePeerCount = participants.filter { $0.id != currentParticipantID }.count
+        return DiagnosticRoomContext(
+            isActive: active,
+            role: active ? (isHost ? .broadcaster : .listener) : .none,
+            participantCount: participants.count,
+            remotePeerCount: remotePeerCount,
+            syncLabel: roomSyncLabel,
+            audioIsRendering: audioIsRendering,
+            hasBroadcaster: hasBroadcaster,
+            timing: meshSession?.diagnosticsSnapshot()
+        )
+    }
+
     private func ensureScreenRecordingPermission() -> Bool {
         switch RecordingErrorPresentation.accessStep(
             preflightGranted: CGPreflightScreenCaptureAccess(),
@@ -2167,6 +2330,9 @@ final class WERAIViewModel: ObservableObject {
                 let previousTargets = self.effectiveTalkTargetIDs
                 self.latchedTalkTargetIDs.formIntersection(liveIDs)
                 self.pushToTalkTargetIDs.formIntersection(liveIDs)
+                for action in Array(self.globalShortcutTalkTargets.keys) {
+                    self.globalShortcutTalkTargets[action]?.formIntersection(liveIDs)
+                }
                 if self.effectiveTalkTargetIDs != previousTargets {
                     self.reconcileTalkTargets()
                 }
@@ -2312,6 +2478,7 @@ final class WERAIViewModel: ObservableObject {
         incomingWalkieSpeakerIDs.removeAll()
         latchedTalkTargetIDs.removeAll()
         pushToTalkTargetIDs.removeAll()
+        globalShortcutTalkTargets.removeAll()
         participants = []
         messages = []
         unreadMessageCount = 0
@@ -3012,11 +3179,11 @@ private struct FloatingRoomView: View {
             }
 
             roomBarButton(
-                icon: model.mediaSwitchBusy ? "hourglass" : "rectangle.on.rectangle",
+                icon: model.mediaSwitchBusy ? "xmark" : "rectangle.on.rectangle",
                 activeIcon: "rectangle.fill.on.rectangle.fill",
                 active: model.floatingSection == .video || model.experience == .video,
-                disabled: !model.canSelectVideo || model.mediaSwitchBusy,
-                help: model.videoControlHelp
+                disabled: !model.canSelectVideo,
+                help: model.mediaSwitchBusy ? "Cancel screen selection" : model.videoControlHelp
             ) { model.toggleVideoFromFloatingBar() }
             .keyboardShortcut("3", modifiers: .command)
 
@@ -4199,6 +4366,13 @@ private struct WalkieTalkieBar: View {
                     }
                     Button(model.floatingBarHidden ? "Show media floating bar" : "Hide media floating bar") {
                         model.floatingBarHidden ? model.showFloatingBar() : model.hideFloatingBar()
+                    }
+                    Divider()
+                    Button("Shortcut Mapper…") {
+                        (NSApp.delegate as? WERAIAppDelegate)?.showShortcutMapper(nil)
+                    }
+                    Button("Diagnostics…") {
+                        (NSApp.delegate as? WERAIAppDelegate)?.showDiagnostics(nil)
                     }
             } label: {
                 Image(systemName: "slider.horizontal.3")

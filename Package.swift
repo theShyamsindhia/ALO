@@ -17,6 +17,7 @@ let package = Package(
             name: "WERAI",
             dependencies: ["WERAICore", "WERAISharedAudioClient"],
             linkerSettings: [
+                .linkedFramework("Carbon"),
                 .linkedFramework("MediaPlayer"),
                 .unsafeFlags([
                     "-Xlinker", "-sectcreate",

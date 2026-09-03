@@ -102,6 +102,14 @@ final class MeshSession {
     var isBroadcasting: Bool { replica.broadcaster?.nodeID == nodeID }
     var hasBroadcaster: Bool { replica.broadcaster != nil }
 
+    func diagnosticsSnapshot() -> SessionTimingDiagnostics? {
+        if let hostSession { return hostSession.diagnosticsSnapshot() }
+        if let receiver {
+            return SessionTimingDiagnostics(receiver: receiver.diagnosticsSnapshot(), host: nil)
+        }
+        return nil
+    }
+
     private final class CallbackRelay {
         var replica: (MeshRoomReplica) -> Void = { _ in }
         var participants: ([RoomParticipant]) -> Void = { _ in }

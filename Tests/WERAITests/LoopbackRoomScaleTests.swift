@@ -482,8 +482,8 @@ struct LoopbackRoomScaleTests {
         #expect(joiningPeer.playoutDelays.last == establishedDelay)
     }
 
-    @Test("A room that starts empty does not let its first late joiner retime the active timeline")
-    func firstLateJoinerCannotRetimeActiveTimeline() throws {
+    @Test("The first listener can establish timing after audio starts in an empty room")
+    func firstListenerCanEstablishTimingAfterAudioStarts() throws {
         let ready = DispatchSemaphore(value: 0)
         let state = PortState()
         let host = HostServer(
@@ -514,8 +514,9 @@ struct LoopbackRoomScaleTests {
         peer.recommendPlayoutDelay(RoomTiming.maximumPlayoutDelayNanos)
         peer.sendPing()
         #expect(peer.waitForPong(timeout: 2))
-        Thread.sleep(forTimeInterval: 0.05)
-        #expect(peer.playoutDelays.last == RoomTiming.defaultPlayoutDelayNanos)
+        #expect(waitUntil(timeout: 2) {
+            peer.playoutDelays.last == RoomTiming.maximumPlayoutDelayNanos
+        })
     }
 
     private func runRoom(

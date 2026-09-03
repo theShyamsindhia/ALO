@@ -23,6 +23,46 @@ struct ScreenVideoCaptureTests {
         }
     }
 
+    @Test("Cancelling an awaiting picker resumes its caller")
+    @MainActor
+    func pickerPendingCancellation() async {
+        var presentationEvents = [String]()
+        weak var pendingPicker: ScreenContentPicker?
+        let picker = ScreenContentPicker(
+            presentationDelay: .zero,
+            timeout: .seconds(5),
+            activateApplication: { presentationEvents.append("activate") },
+            presentPicker: { _ in
+                presentationEvents.append("present")
+                pendingPicker?.cancel()
+            }
+        )
+        pendingPicker = picker
+
+        await #expect(throws: CancellationError.self) {
+            try await picker.selectDisplayOrWindow()
+        }
+        #expect(presentationEvents == ["activate", "present"])
+    }
+
+    @Test("An unresponsive system picker times out instead of hanging")
+    @MainActor
+    func pickerTimeout() async {
+        let picker = ScreenContentPicker(
+            presentationDelay: .zero,
+            timeout: .milliseconds(10),
+            activateApplication: {},
+            presentPicker: { _ in }
+        )
+
+        do {
+            _ = try await picker.selectDisplayOrWindow()
+            Issue.record("Expected screen selection to time out")
+        } catch {
+            #expect(error.localizedDescription == "Screen selection timed out. Try sharing again.")
+        }
+    }
+
     @Test("Video capture selects only the requested display")
     func exactDisplaySelection() {
         #expect(ScreenVideoCapture.selectsRequestedDisplay(9, from: [2, 9, 4]) == 9)

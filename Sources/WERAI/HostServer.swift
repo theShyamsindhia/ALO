@@ -60,8 +60,9 @@ final class HostServer {
     private var mediaQueue = [RoomQueueItem]()
     private var groupPlayoutDelayNanos = RoomTiming.defaultPlayoutDelayNanos
     private var lastGroupDelayAdjustmentNanos: UInt64 = 0
-    // Nil until the first audio packet. Once the timeline is active, only clients
-    // already joined at that instant may influence its adaptive shared delay.
+    // Nil until the first identified remote listener is present while audio is
+    // flowing. Once established, later joiners inherit (but cannot retime) the
+    // active timeline.
     private var timingEligibleClients: Set<ObjectIdentifier>?
 
     init(
@@ -127,6 +128,20 @@ final class HostServer {
         }
     }
 
+    func diagnosticsSnapshot() -> HostTimingDiagnostics {
+        queue.sync {
+            let listeners = clients.values.filter { $0.id != nil && $0.id != localParticipantID }
+            let reports = listeners.compactMap(\.syncReport)
+            return HostTimingDiagnostics(
+                listenerCount: listeners.count,
+                reportingListenerCount: reports.count,
+                groupBufferMilliseconds: Double(groupPlayoutDelayNanos) / 1_000_000,
+                maximumLatenessMilliseconds: Double(reports.map(\.latenessNanos).max() ?? 0) / 1_000_000,
+                totalResyncCount: reports.reduce(0) { $0 &+ $1.resyncCount }
+            )
+        }
+    }
+
     func acceptAudio(samples: [Int16], captureTimeNanos: UInt64) {
         queue.async { [weak self] in
             guard let self else { return }
@@ -148,7 +163,10 @@ final class HostServer {
             )
             guard !packets.isEmpty else { return }
             let audioClientEntries = self.clients.filter { $0.value.audio != nil }
-            if self.timingEligibleClients == nil {
+            let hasIdentifiedRemoteListener = audioClientEntries.contains { _, client in
+                client.id != nil && client.id != self.localParticipantID
+            }
+            if self.timingEligibleClients == nil, hasIdentifiedRemoteListener {
                 self.timingEligibleClients = Set(audioClientEntries.compactMap { identifier, client in
                     client.id != nil ? identifier : nil
                 })

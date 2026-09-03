@@ -3,6 +3,43 @@ import Foundation
 import ScreenCaptureKit
 import WERAICore
 
+enum BroadcasterPlaybackMode: Equatable {
+    case directSource
+    case synchronizedReceiver
+
+    static func resolve(sourceMuteTapActive: Bool) -> Self {
+        sourceMuteTapActive ? .synchronizedReceiver : .directSource
+    }
+
+    static func shouldAttemptSourceMuteTap(
+        alreadyAttempted: Bool,
+        setupInFlight: Bool,
+        tapActive: Bool
+    ) -> Bool {
+        !alreadyAttempted && !setupInFlight && !tapActive
+    }
+
+    static func canAdoptSuccessfulTap(
+        belongsToOriginalSession: Bool,
+        currentReceiverIsPlaying: Bool
+    ) -> Bool {
+        belongsToOriginalSession || currentReceiverIsPlaying
+    }
+
+    var mutesSynchronizedReceiver: Bool {
+        self == .directSource
+    }
+
+    var activeStatus: String {
+        switch self {
+        case .directSource:
+            return "Broadcasting this Mac · local playback is not delayed"
+        case .synchronizedReceiver:
+            return "This Mac is playing in sync"
+        }
+    }
+}
+
 @MainActor
 final class HostSession {
     private var host: HostServer?
@@ -14,6 +51,13 @@ final class HostSession {
     private var nowPlayingMonitor: NowPlayingMonitor?
     private var playbackController: SystemPlaybackController?
     private var shouldPauseSourceOnStop = false
+    private var sourceMuteTap: AnyObject?
+    private var sourceMuteTapTask: Task<Void, Never>?
+    private var sourceMuteTapAttempted = false
+    private var playbackSessionID: UUID?
+    private var playbackMode = BroadcasterPlaybackMode.directSource
+    private var localReceiverIsPlaying = false
+    private var playbackStatusHandler: ((String) -> Void)?
     private var videoStoppedHandler: (Error) -> Void = { _ in }
     func start(
         roomName: String,
@@ -67,15 +111,20 @@ final class HostSession {
             try Task.checkCancellation()
 
             statusHandler("Broadcasting this Mac · waiting for audio")
+            let playbackSessionID = UUID()
+            self.playbackSessionID = playbackSessionID
+            playbackStatusHandler = statusHandler
             let localReceiver = try Receiver(
                 requestedRoom: roomName,
                 participantID: participantID,
                 capturesSystemMediaCommands: false,
-                statusHandler: { status in
-                    if status == .playing {
-                        statusHandler("Broadcasting this Mac")
-                    } else if status == .silent {
-                        statusHandler("Broadcasting this Mac · waiting for audio")
+                statusHandler: { [weak self] status in
+                    Task { @MainActor [weak self] in
+                        self?.handleLocalReceiverStatus(
+                            status,
+                            playbackSessionID: playbackSessionID,
+                            statusHandler: statusHandler
+                        )
                     }
                 },
                 identityHandler: identityHandler,
@@ -86,14 +135,12 @@ final class HostSession {
                 queueHandler: queueHandler,
                 videoHandler: videoHandler
             )
-            try localReceiver.start()
-            // ScreenCaptureKit's combined Screen & System Audio permission is
-            // sufficient for broadcasting. Do not start SourceMuteTap here: it
-            // invokes macOS's separate System Audio Recording Only permission.
-            // The source app remains the broadcaster's local playback, so mute
-            // only this synchronized return to avoid hearing a delayed duplicate.
-            localReceiver.setLocalPlaybackMuted(true)
             self.localReceiver = localReceiver
+            applyPlaybackMode(
+                .resolve(sourceMuteTapActive: false),
+                to: localReceiver
+            )
+            try localReceiver.start()
             try Task.checkCancellation()
 
             if initialVideoEnabled {
@@ -112,6 +159,7 @@ final class HostSession {
         // capture and room route have been removed.
         if shouldPauseSourceOnStop { _ = playbackController?.perform(.pause) }
         shouldPauseSourceOnStop = false
+        stopLocalPlayback()
         try? await audioSource?.stop()
         audioSource = nil
         videoPicker?.deactivate()
@@ -123,8 +171,6 @@ final class HostSession {
         nowPlayingMonitor?.stop()
         nowPlayingMonitor = nil
         playbackController = nil
-        localReceiver?.stop()
-        localReceiver = nil
         host?.stop()
         host = nil
     }
@@ -150,6 +196,124 @@ final class HostSession {
         localReceiver?.setVoiceDuckingActive(active)
     }
 
+    private func handleLocalReceiverStatus(
+        _ status: ReceiverStatus,
+        playbackSessionID: UUID,
+        statusHandler: @escaping (String) -> Void
+    ) {
+        guard self.playbackSessionID == playbackSessionID else { return }
+        switch status {
+        case .playing:
+            localReceiverIsPlaying = true
+            statusHandler(playbackMode.activeStatus)
+            startOptionalSourceMuteTap(
+                playbackSessionID: playbackSessionID,
+                statusHandler: statusHandler
+            )
+        case .silent:
+            localReceiverIsPlaying = false
+            statusHandler("Broadcasting this Mac · waiting for audio")
+        default:
+            break
+        }
+    }
+
+    /// Starts the optional tap only after the synchronized Receiver has audio
+    /// scheduled. The Core Audio permission prompt and tap setup run away from
+    /// the main actor, so a pending or denied prompt cannot block screen share.
+    private func startOptionalSourceMuteTap(
+        playbackSessionID: UUID,
+        statusHandler: @escaping (String) -> Void
+    ) {
+        guard BroadcasterPlaybackMode.shouldAttemptSourceMuteTap(
+            alreadyAttempted: sourceMuteTapAttempted,
+            setupInFlight: sourceMuteTapTask != nil,
+            tapActive: sourceMuteTap != nil
+        ),
+              let expectedReceiver = localReceiver
+        else { return }
+        sourceMuteTapAttempted = true
+
+        guard #available(macOS 14.2, *) else { return }
+        statusHandler("Broadcasting this Mac · setting up local sync")
+        let tap = SourceMuteTap()
+        sourceMuteTapTask = Task { @MainActor [weak self, weak expectedReceiver] in
+            let result = await Task.detached(priority: .userInitiated) {
+                Result { try tap.start() }
+            }.value
+            let cancelled = Task.isCancelled
+
+            guard let self else {
+                if case .success = result { tap.stop() }
+                return
+            }
+            self.sourceMuteTapTask = nil
+            let belongsToOriginalSession = !cancelled
+                && self.playbackSessionID == playbackSessionID
+                && expectedReceiver != nil
+                && self.localReceiver === expectedReceiver
+
+            switch result {
+            case .success:
+                // A consent request can outlive a quick stop/start. The tap is
+                // process-wide, so hand a successful result to the new Receiver
+                // when it is already playing instead of prompting a second time.
+                guard let currentReceiver = self.localReceiver,
+                      BroadcasterPlaybackMode.canAdoptSuccessfulTap(
+                        belongsToOriginalSession: belongsToOriginalSession,
+                        currentReceiverIsPlaying: self.localReceiverIsPlaying
+                      )
+                else {
+                    tap.stop()
+                    return
+                }
+                self.sourceMuteTap = tap
+                self.sourceMuteTapAttempted = true
+                self.applyPlaybackMode(
+                    .resolve(sourceMuteTapActive: true),
+                    to: currentReceiver
+                )
+                (self.playbackStatusHandler ?? statusHandler)(self.playbackMode.activeStatus)
+            case .failure(let error):
+                guard belongsToOriginalSession, let expectedReceiver else { return }
+                // This optimization has its own macOS Audio Capture consent.
+                // Denial or setup failure is intentionally nonfatal: the source
+                // application remains audible and room/screen sharing continues.
+                fputs("Optional synchronized local playback is unavailable: \(error.localizedDescription)\n", stderr)
+                self.applyPlaybackMode(
+                    .resolve(sourceMuteTapActive: false),
+                    to: expectedReceiver
+                )
+                statusHandler(self.playbackMode.activeStatus)
+            }
+        }
+    }
+
+    private func applyPlaybackMode(_ mode: BroadcasterPlaybackMode, to receiver: Receiver) {
+        playbackMode = mode
+        receiver.setLocalPlaybackMuted(mode.mutesSynchronizedReceiver)
+    }
+
+    private func stopLocalPlayback() {
+        playbackSessionID = nil
+        sourceMuteTapAttempted = false
+        localReceiverIsPlaying = false
+        playbackStatusHandler = nil
+        sourceMuteTapTask?.cancel()
+        // Keep an in-flight permission/setup task retained until it returns.
+        // A quick stop/start must not launch a second Core Audio consent request.
+
+        // Stop the delayed return before removing source suppression, avoiding
+        // even a short duplicate render during teardown.
+        localReceiver?.stop()
+        localReceiver = nil
+        if #available(macOS 14.2, *), let tap = sourceMuteTap as? SourceMuteTap {
+            tap.stop()
+        }
+        sourceMuteTap = nil
+        playbackMode = .directSource
+    }
+
     @discardableResult
     func sendRoomMediaCommand(_ command: RoomMediaCommand) -> Bool {
         host?.sendRoomMediaCommand(command) ?? false
@@ -158,6 +322,13 @@ final class HostSession {
     func requestResync(participantID: String? = nil) -> Bool {
         guard let host else { return false }
         return host.requestResync(participantID: participantID)
+    }
+
+    func diagnosticsSnapshot() -> SessionTimingDiagnostics {
+        SessionTimingDiagnostics(
+            receiver: localReceiver?.diagnosticsSnapshot(),
+            host: host?.diagnosticsSnapshot()
+        )
     }
 
     func setVideoEnabled(_ enabled: Bool) async throws {
@@ -235,10 +406,10 @@ final class HostSession {
     func stopImmediately() {
         if shouldPauseSourceOnStop { _ = playbackController?.perform(.pause) }
         shouldPauseSourceOnStop = false
+        stopLocalPlayback()
         if let audioSource { Task { try? await audioSource.stop() } }
         videoPicker?.deactivate()
         videoPicker = nil
-        localReceiver?.stop()
         nowPlayingMonitor?.stop()
         host?.setVideoEnabled(false)
         let activeVideoCapture = videoCapture

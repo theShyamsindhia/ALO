@@ -13,9 +13,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.13.13</string>
+    <string>0.13.14</string>
     <key>CFBundleVersion</key>
-    <string>44</string>
+    <string>45</string>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © 2026 Shyam Sindiya</string>
     <key>CFBundleIconFile</key>
@@ -26,6 +26,8 @@
     <string>public.app-category.music</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>ALO uses system audio access to keep this Mac's playback synchronized with everyone else while broadcasting.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>ALO uses this Mac's microphone only while you use Talk or join an Open Line.</string>
 	<key>NSScreenCaptureUsageDescription</key>

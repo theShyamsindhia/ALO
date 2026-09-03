@@ -48,6 +48,8 @@ final class Receiver {
     private var videoConnections = [NWConnection]()
     private var lastSyncReportNanos: UInt64 = 0
     private var locallyForcedPlaybackMuted = false
+    private var participantVolume = 1.0
+    private var participantMuted = false
 
     init(
         requestedRoom: String?,
@@ -179,6 +181,24 @@ final class Receiver {
         }
     }
 
+    func diagnosticsSnapshot() -> ReceiverTimingDiagnostics {
+        queue.sync {
+            let now = MonotonicClock.nowNanos()
+            let report = player.syncReport()
+            return ReceiverTimingDiagnostics(
+                roundTripMilliseconds: clock.bestRoundTripNanos.map { Double($0) / 1_000_000 },
+                clockOffsetMilliseconds: clock.offsetNanos(at: now).map { Double($0) / 1_000_000 },
+                jitterMilliseconds: Double(jitter.jitterNanos) / 1_000_000,
+                recommendedBufferMilliseconds: Double(
+                    jitter.recommendedPlayoutDelayNanos(roundTripNanos: clock.bestRoundTripNanos)
+                ) / 1_000_000,
+                latenessMilliseconds: Double(report.latenessNanos) / 1_000_000,
+                latePacketCount: report.latePacketCount,
+                resyncCount: report.resyncCount
+            )
+        }
+    }
+
     func sendChat(_ text: String) {
         queue.async { [weak self] in
             self?.send(ControlMessage(type: "chat", text: text))
@@ -215,7 +235,10 @@ final class Receiver {
         queue.async { [weak self] in
             guard let self else { return }
             self.locallyForcedPlaybackMuted = muted
-            self.player.setLevel(volume: 1, muted: muted)
+            self.player.setLevel(
+                volume: self.participantVolume,
+                muted: self.participantMuted || muted
+            )
         }
     }
 
@@ -383,9 +406,11 @@ final class Receiver {
                     case "room_playback":
                         self.player.setRoomPlayback(playing: message.isPlaying ?? true)
                     case "level":
+                        self.participantVolume = message.volume ?? 1
+                        self.participantMuted = message.muted ?? false
                         self.player.setLevel(
-                            volume: message.volume ?? 1,
-                            muted: (message.muted ?? false) || self.locallyForcedPlaybackMuted
+                            volume: self.participantVolume,
+                            muted: self.participantMuted || self.locallyForcedPlaybackMuted
                         )
                     case "chat":
                         if let sender = message.sender, let text = message.text {

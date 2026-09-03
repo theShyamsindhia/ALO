@@ -1,3 +1,4 @@
+import AppKit
 import CoreMedia
 import CoreVideo
 import CoreGraphics
@@ -5,10 +6,40 @@ import Foundation
 import ScreenCaptureKit
 import WERAICore
 
+extension Notification.Name {
+    static let aloWillPresentScreenPicker = Notification.Name("in.werai.screen-picker.will-present")
+}
+
 @MainActor
 final class ScreenContentPicker: NSObject, SCContentSharingPickerObserver {
+    nonisolated static let menuDismissDelay: Duration = .milliseconds(150)
+    nonisolated static let selectionTimeout: Duration = .seconds(45)
+
     private var continuation: CheckedContinuation<SCContentFilter, Error>?
     private var isCancelled = false
+    private var presentationTask: Task<Void, Never>?
+    private var timeoutTask: Task<Void, Never>?
+    private let presentationDelay: Duration
+    private let timeout: Duration
+    private let activateApplication: @MainActor () -> Void
+    private let presentPicker: @MainActor (SCContentSharingPicker) -> Void
+
+    init(
+        presentationDelay: Duration = ScreenContentPicker.menuDismissDelay,
+        timeout: Duration = ScreenContentPicker.selectionTimeout,
+        activateApplication: @escaping @MainActor () -> Void = {
+            NSApp.activate(ignoringOtherApps: true)
+        },
+        presentPicker: @escaping @MainActor (SCContentSharingPicker) -> Void = { picker in
+            picker.present()
+        }
+    ) {
+        self.presentationDelay = presentationDelay
+        self.timeout = timeout
+        self.activateApplication = activateApplication
+        self.presentPicker = presentPicker
+        super.init()
+    }
 
     static func configuration(excludingBundleID bundleID: String?) -> SCContentSharingPickerConfiguration {
         var configuration = SCContentSharingPickerConfiguration()
@@ -31,7 +62,25 @@ final class ScreenContentPicker: NSObject, SCContentSharingPickerObserver {
                 )
                 picker.add(self)
                 picker.isActive = true
-                picker.present()
+                NotificationCenter.default.post(name: .aloWillPresentScreenPicker, object: nil)
+                // A transient menu-bar popover can swallow the system picker's
+                // presentation. Give it one turn to close, then foreground ALO.
+                presentationTask = Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    try? await Task.sleep(for: self.presentationDelay)
+                    guard !Task.isCancelled, self.continuation != nil else { return }
+                    self.activateApplication()
+                    self.presentPicker(picker)
+                }
+                timeoutTask = Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    try? await Task.sleep(for: self.timeout)
+                    guard !Task.isCancelled, self.continuation != nil else { return }
+                    self.finish(
+                        with: .failure(WERAIError("Screen selection timed out. Try sharing again.")),
+                        picker: picker
+                    )
+                }
             }
         } onCancel: {
             Task { @MainActor [weak self] in self?.cancel() }
@@ -39,17 +88,17 @@ final class ScreenContentPicker: NSObject, SCContentSharingPickerObserver {
     }
 
     func cancel() {
-        isCancelled = true
-        finish(
-            with: .failure(CancellationError()),
-            picker: SCContentSharingPicker.shared
-        )
+        deactivate()
     }
 
     /// Keep the system picker active while its stream is alive. Deactivation
     /// happens only when sharing stops or selection fails.
     func deactivate() {
         isCancelled = true
+        presentationTask?.cancel()
+        presentationTask = nil
+        timeoutTask?.cancel()
+        timeoutTask = nil
         if let continuation {
             self.continuation = nil
             continuation.resume(throwing: CancellationError())
@@ -65,14 +114,24 @@ final class ScreenContentPicker: NSObject, SCContentSharingPickerObserver {
         for stream: SCStream?
     ) {
         Task { @MainActor in
+            // `present()` requests a new selection and therefore reports no
+            // associated stream. Ignore updates for another active app stream.
+            guard stream == nil else { return }
             guard let continuation else { return }
             self.continuation = nil
+            presentationTask?.cancel()
+            presentationTask = nil
+            timeoutTask?.cancel()
+            timeoutTask = nil
             continuation.resume(returning: filter)
         }
     }
 
     nonisolated func contentSharingPicker(_ picker: SCContentSharingPicker, didCancelFor stream: SCStream?) {
-        Task { @MainActor in finish(with: .failure(CancellationError()), picker: picker) }
+        Task { @MainActor in
+            guard stream == nil else { return }
+            finish(with: .failure(CancellationError()), picker: picker)
+        }
     }
 
     nonisolated func contentSharingPickerStartDidFailWithError(_ error: Error) {
@@ -87,6 +146,10 @@ final class ScreenContentPicker: NSObject, SCContentSharingPickerObserver {
     ) {
         guard let continuation else { return }
         self.continuation = nil
+        presentationTask?.cancel()
+        presentationTask = nil
+        timeoutTask?.cancel()
+        timeoutTask = nil
         picker.remove(self)
         picker.isActive = false
         continuation.resume(with: result)
