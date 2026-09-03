@@ -13,9 +13,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-	<string>0.13.21</string>
+	<string>0.13.22</string>
     <key>CFBundleVersion</key>
-	<string>52</string>
+	<string>53</string>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © 2026 Shyam Sindiya</string>
     <key>CFBundleIconFile</key>
