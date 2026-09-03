@@ -79,16 +79,39 @@ final class WalkieTalkiePlayer {
     private let queue = DispatchQueue(label: "in.werai.walkie-playback", qos: .userInteractive)
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
-    private let format = AVAudioFormat(
-        commonFormat: .pcmFormatInt16,
-        sampleRate: WalkieTalkieMicrophone.sampleRate,
-        channels: 1,
-        interleaved: false
+    static let playbackFormat = AVAudioFormat(
+        standardFormatWithSampleRate: WalkieTalkieMicrophone.sampleRate,
+        channels: 1
     )!
+    private let format = playbackFormat
     private var sessionID: String?
     private var lastSequence: UInt64 = 0
     private var timeoutWorkItem: DispatchWorkItem?
     private var muted = false
+
+    static func makePlaybackBuffer(fromPCM16Mono data: Data) -> AVAudioPCMBuffer? {
+        guard !data.isEmpty,
+              data.count <= 8_192,
+              data.count.isMultiple(of: MemoryLayout<Int16>.size)
+        else { return nil }
+
+        let frameCount = AVAudioFrameCount(data.count / MemoryLayout<Int16>.size)
+        guard let buffer = AVAudioPCMBuffer(
+            pcmFormat: playbackFormat,
+            frameCapacity: frameCount
+        ), let destination = buffer.floatChannelData?[0]
+        else { return nil }
+
+        buffer.frameLength = frameCount
+        data.withUnsafeBytes { bytes in
+            for index in 0..<Int(frameCount) {
+                let offset = index * MemoryLayout<Int16>.size
+                let bits = UInt16(bytes[offset]) | (UInt16(bytes[offset + 1]) << 8)
+                destination[index] = Float(Int16(bitPattern: bits)) / 32_768
+            }
+        }
+        return buffer
+    }
 
     init() {
         engine.attach(player)
@@ -117,17 +140,18 @@ final class WalkieTalkiePlayer {
     private func acceptOnQueue(_ message: WalkieTalkieMessage) {
         switch message.kind {
         case .began:
-            beginSession(message.sessionID)
+            _ = beginSession(message.sessionID)
         case .audio:
-            if sessionID != message.sessionID { beginSession(message.sessionID) }
+            if sessionID != message.sessionID || !engine.isRunning {
+                guard beginSession(message.sessionID) else { return }
+            }
             guard message.sequence > lastSequence,
                   let data = message.pcm16Mono,
-                  !data.isEmpty,
-                  data.count <= 8_192,
-                  data.count.isMultiple(of: MemoryLayout<Int16>.size)
+                  let buffer = Self.makePlaybackBuffer(fromPCM16Mono: data)
             else { return }
             lastSequence = message.sequence
-            schedule(data)
+            player.scheduleBuffer(buffer)
+            if !player.isPlaying { player.play() }
             armTimeout(for: message.sessionID)
         case .ended:
             guard sessionID == message.sessionID else { return }
@@ -135,7 +159,8 @@ final class WalkieTalkiePlayer {
         }
     }
 
-    private func beginSession(_ id: String) {
+    @discardableResult
+    private func beginSession(_ id: String) -> Bool {
         timeoutWorkItem?.cancel()
         player.stop()
         sessionID = id
@@ -144,19 +169,13 @@ final class WalkieTalkiePlayer {
             engine.prepare()
             try? engine.start()
         }
+        guard engine.isRunning else {
+            sessionID = nil
+            return false
+        }
         player.play()
         armTimeout(for: id)
-    }
-
-    private func schedule(_ data: Data) {
-        let frames = AVAudioFrameCount(data.count / MemoryLayout<Int16>.size)
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames),
-              let destination = buffer.int16ChannelData?[0]
-        else { return }
-        buffer.frameLength = frames
-        _ = data.copyBytes(to: UnsafeMutableBufferPointer(start: destination, count: Int(frames)))
-        player.scheduleBuffer(buffer)
-        if !player.isPlaying { player.play() }
+        return true
     }
 
     private func armTimeout(for id: String) {

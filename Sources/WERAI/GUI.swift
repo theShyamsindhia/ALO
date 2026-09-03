@@ -814,11 +814,6 @@ final class WERAIViewModel: ObservableObject {
 
     private func open(_ room: RoomConfiguration, broadcastInitially: Bool) {
         resetRoomState()
-        activeRoom = room.name
-        activeRoomConfiguration = room
-        phase = .starting
-        statusText = "Opening \(room.name)"
-        roomBrowser.stop()
         let session = MeshSession(
             room: room,
             nodeID: nodeID,
@@ -878,6 +873,11 @@ final class WERAIViewModel: ObservableObject {
                 self?.roomStore.saveEvents(replica.events, roomID: room.id)
             }
         )
+        activeRoom = room.name
+        activeRoomConfiguration = room
+        phase = .starting
+        statusText = "Opening \(room.name)"
+        roomBrowser.stop()
         meshSession = session
         session.setIncomingMediaMuted(incomingMediaMuted)
         session.setIncomingWalkieTalkieMuted(incomingCallsMuted)

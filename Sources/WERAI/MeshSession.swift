@@ -21,7 +21,7 @@ final class MeshSession {
     private let errorHandler: (Error) -> Void
     private let walkieTalkieStateHandler: (String, String, Bool) -> Void
     private let walkieTalkieMicrophone = WalkieTalkieMicrophone()
-    private let walkieTalkiePlayer = WalkieTalkiePlayer()
+    private var walkieTalkiePlayer: WalkieTalkiePlayer?
     private let walkieTransmissionQueue = DispatchQueue(label: "in.werai.walkie-transmission")
     private var walkieTransmission: (id: String, targetID: String?, name: String, sequence: UInt64)?
     private var hostSession: HostSession?
@@ -35,6 +35,7 @@ final class MeshSession {
     private var transitionTask: Task<Void, Never>?
     private var isStopped = true
     private var incomingMediaMuted = false
+    private var incomingWalkieTalkieMuted = false
 
     var isBroadcasting: Bool { replica.broadcaster?.nodeID == nodeID }
     var hasBroadcaster: Bool { replica.broadcaster != nil }
@@ -294,7 +295,10 @@ final class MeshSession {
         if isBroadcasting { hostSession?.setParticipantLevel(id: nodeID, volume: 1, muted: muted) }
         else { receiver?.setLocalLevel(volume: 1, muted: muted) }
     }
-    func setIncomingWalkieTalkieMuted(_ muted: Bool) { walkieTalkiePlayer.setMuted(muted) }
+    func setIncomingWalkieTalkieMuted(_ muted: Bool) {
+        incomingWalkieTalkieMuted = muted
+        walkieTalkiePlayer?.setMuted(muted)
+    }
 
     func setVideoEnabled(_ enabled: Bool) async throws {
         guard let hostSession,
@@ -314,7 +318,8 @@ final class MeshSession {
         guard !isStopped else { return }
         isStopped = true
         endWalkieTalkie()
-        walkieTalkiePlayer.stop()
+        walkieTalkiePlayer?.stop()
+        walkieTalkiePlayer = nil
         intendsToBroadcast = false
         intendsToBroadcastVideo = false
         if let broadcaster = replica.broadcaster, broadcaster.nodeID == nodeID {
@@ -338,7 +343,8 @@ final class MeshSession {
         guard !isStopped else { return }
         isStopped = true
         endWalkieTalkie()
-        walkieTalkiePlayer.stop()
+        walkieTalkiePlayer?.stop()
+        walkieTalkiePlayer = nil
         intendsToBroadcast = false
         intendsToBroadcastVideo = false
         transitionGeneration += 1
@@ -550,7 +556,12 @@ final class MeshSession {
     }
 
     private func receiveWalkieTalkie(_ message: WalkieTalkieMessage) {
-        walkieTalkiePlayer.accept(message)
+        if !incomingWalkieTalkieMuted,
+           message.kind == .audio,
+           walkieTalkiePlayer == nil {
+            walkieTalkiePlayer = WalkieTalkiePlayer()
+        }
+        walkieTalkiePlayer?.accept(message)
         switch message.kind {
         case .began:
             walkieTalkieStateHandler(message.senderID, message.senderName, true)
