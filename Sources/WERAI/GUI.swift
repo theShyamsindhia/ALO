@@ -14,8 +14,88 @@ private enum ALOAppFlavor {
     }
 
     static var displayName: String { isDevelopment ? "ALO Dev" : "ALO" }
-    static var statusSymbol: String { isDevelopment ? "hammer.fill" : "cat.fill" }
-    static var idleStatusSymbol: String { isDevelopment ? "hammer" : "cat" }
+
+    static func statusImage(active: Bool) -> NSImage? {
+        if isDevelopment {
+            return NSImage(
+                systemSymbolName: active ? "hammer.fill" : "hammer",
+                accessibilityDescription: displayName
+            )
+        }
+        return ALOStatusIcon.image(active: active)
+    }
+}
+
+private enum ALOStatusIcon {
+    /// A small, front-facing cat head drawn as a template image. SF Symbols'
+    /// `cat` is a side-on body silhouette, which is hard to identify at menu-bar
+    /// size and does not match ALO's face-forward app mark.
+    static func image(active: Bool) -> NSImage {
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
+            guard let context = NSGraphicsContext.current?.cgContext else { return false }
+            context.setLineCap(.round)
+            context.setLineJoin(.round)
+
+            let head = CGMutablePath()
+            head.move(to: CGPoint(x: 2.4, y: 10.8))
+            head.addLine(to: CGPoint(x: 2.4, y: 15.7))
+            head.addLine(to: CGPoint(x: 6.0, y: 13.8))
+            head.addCurve(
+                to: CGPoint(x: 12.0, y: 13.8),
+                control1: CGPoint(x: 7.7, y: 14.8),
+                control2: CGPoint(x: 10.3, y: 14.8)
+            )
+            head.addLine(to: CGPoint(x: 15.6, y: 15.7))
+            head.addLine(to: CGPoint(x: 15.6, y: 10.8))
+            head.addCurve(
+                to: CGPoint(x: 9.0, y: 2.1),
+                control1: CGPoint(x: 15.6, y: 5.2),
+                control2: CGPoint(x: 12.8, y: 2.1)
+            )
+            head.addCurve(
+                to: CGPoint(x: 2.4, y: 10.8),
+                control1: CGPoint(x: 5.2, y: 2.1),
+                control2: CGPoint(x: 2.4, y: 5.2)
+            )
+            head.closeSubpath()
+
+            context.setFillColor(NSColor.black.cgColor)
+            context.setStrokeColor(NSColor.black.cgColor)
+            if active {
+                context.addPath(head)
+                context.fillPath()
+                context.saveGState()
+                context.setBlendMode(.clear)
+                context.fillEllipse(in: CGRect(x: 5.2, y: 8.4, width: 1.8, height: 2.2))
+                context.fillEllipse(in: CGRect(x: 11.0, y: 8.4, width: 1.8, height: 2.2))
+                drawCatMuzzle(in: context)
+                context.restoreGState()
+            } else {
+                context.setLineWidth(1.45)
+                context.addPath(head)
+                context.strokePath()
+                context.fillEllipse(in: CGRect(x: 5.5, y: 8.6, width: 1.3, height: 1.7))
+                context.fillEllipse(in: CGRect(x: 11.2, y: 8.6, width: 1.3, height: 1.7))
+                context.setLineWidth(1.05)
+                drawCatMuzzle(in: context)
+            }
+            return true
+        }
+        image.isTemplate = true
+        image.accessibilityDescription = ALOAppFlavor.displayName
+        return image
+    }
+
+    private static func drawCatMuzzle(in context: CGContext) {
+        let muzzle = CGMutablePath()
+        muzzle.move(to: CGPoint(x: 7.9, y: 6.7))
+        muzzle.addLine(to: CGPoint(x: 9.0, y: 5.9))
+        muzzle.addLine(to: CGPoint(x: 10.1, y: 6.7))
+        muzzle.move(to: CGPoint(x: 9.0, y: 5.9))
+        muzzle.addLine(to: CGPoint(x: 9.0, y: 4.9))
+        context.addPath(muzzle)
+        context.strokePath()
+    }
 }
 
 @MainActor
@@ -473,10 +553,7 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
         self.openMainWindow = openMainWindow
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         super.init()
-        statusItem.button?.image = NSImage(
-            systemSymbolName: ALOAppFlavor.statusSymbol,
-            accessibilityDescription: ALOAppFlavor.displayName
-        )
+        statusItem.button?.image = ALOAppFlavor.statusImage(active: true)
         statusItem.button?.image?.isTemplate = true
         statusItem.button?.toolTip = ALOAppFlavor.displayName
         if let button = statusItem.button {
@@ -618,10 +695,7 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
 
     private func updatePhase(_ phase: WERAIViewModel.Phase) {
         if phase != .live { closePopover() }
-        statusItem.button?.image = NSImage(
-            systemSymbolName: phase == .live ? ALOAppFlavor.statusSymbol : ALOAppFlavor.idleStatusSymbol,
-            accessibilityDescription: ALOAppFlavor.displayName
-        )
+        statusItem.button?.image = ALOAppFlavor.statusImage(active: phase == .live)
         statusItem.button?.image?.isTemplate = true
     }
 
@@ -3281,12 +3355,26 @@ private struct FloatingRoomView: View {
         }
         .padding(.horizontal, 8)
         .frame(width: FloatingMetrics.width, height: roomBarHeight)
+        .background(alignment: .leading) {
+            if presentation == .menuBar {
+                menuBarArtworkBackdrop
+            }
+        }
+        .clipped()
     }
 
     @ViewBuilder
     private var roomIdentity: some View {
         let identity = HStack(spacing: 9) {
-            artworkTile
+            if presentation == .menuBar {
+                // The artwork itself bleeds to the row edge behind this clear
+                // lane; text begins after its strongest, most legible area.
+                Color.clear
+                    .frame(width: 88, height: roomBarHeight)
+                    .accessibilityHidden(true)
+            } else {
+                artworkTile
+            }
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(model.nowPlaying.title ?? model.roomTitle)
@@ -3315,6 +3403,37 @@ private struct FloatingRoomView: View {
         } else {
             identity
         }
+    }
+
+    private var menuBarArtworkBackdrop: some View {
+        Group {
+            if let data = model.nowPlaying.artworkData, let image = NSImage(data: data) {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            } else {
+                ZStack {
+                    roomAccent.opacity(0.18)
+                    Image(systemName: "music.note")
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundStyle(roomAccent)
+                        .offset(x: -21)
+                }
+            }
+        }
+        .frame(width: 138, height: roomBarHeight)
+        .mask(
+            LinearGradient(
+                stops: [
+                    .init(color: .black, location: 0),
+                    .init(color: .black, location: 0.52),
+                    .init(color: .clear, location: 1),
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+        )
+        .accessibilityHidden(true)
     }
 
     private func statusLabel(compact: Bool) -> some View {
