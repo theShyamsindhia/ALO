@@ -7,9 +7,41 @@ import WERAICore
 struct MediaOutputGain {
     static func effectiveGain(
         participantVolume: Double,
-        muted: Bool
+        muted: Bool,
+        duckingGain: Double = 1
     ) -> Double {
-        muted ? 0 : min(max(participantVolume, 0), 1)
+        muted ? 0 : min(max(participantVolume, 0), 1) * min(max(duckingGain, 0), 1)
+    }
+}
+
+struct MediaDuckingEnvelope {
+    static let duckedGain = 0.32
+    static let attackDurationSeconds = 0.12
+    static let releaseDurationSeconds = 0.50
+
+    private(set) var gain = 1.0
+    private(set) var isActive = false
+
+    mutating func setActive(_ active: Bool) {
+        isActive = active
+    }
+
+    @discardableResult
+    mutating func advance(seconds: Double) -> Bool {
+        guard seconds > 0 else { return false }
+        let target = isActive ? Self.duckedGain : 1
+        guard gain != target else { return false }
+        let duration = isActive
+            ? Self.attackDurationSeconds
+            : Self.releaseDurationSeconds
+        let step = (1 - Self.duckedGain) * seconds / duration
+        let previous = gain
+        if step + 1e-12 >= abs(target - gain) {
+            gain = target
+        } else {
+            gain += target < gain ? -step : step
+        }
+        return gain != previous
     }
 }
 
@@ -46,6 +78,8 @@ final class SynchronizedPlayer {
     private var recoveryRetryNotBeforeNanos: UInt64 = 0
     private var participantVolume: Double = 1
     private var participantMuted = false
+    private var duckingEnvelope = MediaDuckingEnvelope()
+    private var lastDuckingUpdateNanos = MonotonicClock.nowNanos()
     private var playbackIsActive = false
     private var roomPlaybackIsPlaying = true
     private var resyncCutoverCaptureNanos: UInt64?
@@ -108,19 +142,20 @@ final class SynchronizedPlayer {
     }
 
     func maintainSync() {
+        let now = MonotonicClock.nowNanos()
+        updateDucking(nowNanos: now)
         guard roomPlaybackIsPlaying else {
             setPlaybackActive(false)
             return
         }
         applyPendingAudioEngineConfigurationChange()
         drain()
-        updatePlaybackActivity(nowNanos: MonotonicClock.nowNanos())
+        updatePlaybackActivity(nowNanos: now)
         guard hasStarted else {
             playbackWatchdog.reset()
             return
         }
 
-        let now = MonotonicClock.nowNanos()
         let renderTime = player.lastRenderTime
         let playerTime = renderTime.flatMap { player.playerTime(forNodeTime: $0) }
         if playbackWatchdog.shouldResynchronize(
@@ -261,6 +296,12 @@ final class SynchronizedPlayer {
         applyOutputGain()
     }
 
+    func setVoiceDucking(active: Bool) {
+        let now = MonotonicClock.nowNanos()
+        updateDucking(nowNanos: now)
+        duckingEnvelope.setActive(active)
+    }
+
     func setRoomPlayback(playing: Bool) {
         guard roomPlaybackIsPlaying != playing else { return }
         roomPlaybackIsPlaying = playing
@@ -284,9 +325,21 @@ final class SynchronizedPlayer {
     private func applyOutputGain() {
         player.volume = Float(MediaOutputGain.effectiveGain(
             participantVolume: participantVolume,
-            muted: participantMuted
+            muted: participantMuted,
+            duckingGain: duckingEnvelope.gain
         ))
         updatePlaybackActivity(nowNanos: MonotonicClock.nowNanos())
+    }
+
+    private func updateDucking(nowNanos: UInt64) {
+        let elapsedNanos = nowNanos >= lastDuckingUpdateNanos
+            ? nowNanos - lastDuckingUpdateNanos
+            : 0
+        lastDuckingUpdateNanos = nowNanos
+        guard duckingEnvelope.advance(seconds: Double(elapsedNanos) / 1_000_000_000) else {
+            return
+        }
+        applyOutputGain()
     }
 
     private func updatePlaybackActivity(nowNanos: UInt64) {
@@ -412,6 +465,7 @@ final class SynchronizedPlayer {
             engine.prepare()
             try engine.start()
             refreshOutputState()
+            applyOutputGain()
             recoveryRetryNotBeforeNanos = 0
         } catch {
             fputs("Audio output recovery failed: \(error.localizedDescription)\n", stderr)

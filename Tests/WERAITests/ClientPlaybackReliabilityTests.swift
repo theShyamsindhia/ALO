@@ -55,14 +55,35 @@ struct ClientPlaybackReliabilityTests {
         ) == ["talk-peer"])
     }
 
-    @Test("Voice playback never changes synchronized media gain")
-    func voiceDoesNotDuckMedia() {
+    @Test("Voice ducking preserves participant volume and mute")
+    func voiceDuckingPreservesLevelControls() {
         #expect(MediaOutputGain.effectiveGain(
-            participantVolume: 0.5, muted: false
-        ) == 0.5)
+            participantVolume: 0.5, muted: false, duckingGain: 0.32
+        ) == 0.16)
         #expect(MediaOutputGain.effectiveGain(
-            participantVolume: 0.5, muted: true
+            participantVolume: 0.5, muted: true, duckingGain: 0.32
         ) == 0)
+    }
+
+    @Test("Voice ducking attacks quickly and releases gently")
+    func voiceDuckingEnvelope() {
+        var envelope = MediaDuckingEnvelope()
+        envelope.setActive(true)
+        let attacked = envelope.advance(seconds: MediaDuckingEnvelope.attackDurationSeconds)
+        #expect(attacked)
+        #expect(envelope.gain == MediaDuckingEnvelope.duckedGain)
+        envelope.setActive(false)
+        let releasing = envelope.advance(
+            seconds: MediaDuckingEnvelope.releaseDurationSeconds / 2
+        )
+        #expect(releasing)
+        #expect(envelope.gain > MediaDuckingEnvelope.duckedGain)
+        #expect(envelope.gain < 1)
+        let released = envelope.advance(
+            seconds: MediaDuckingEnvelope.releaseDurationSeconds / 2
+        )
+        #expect(released)
+        #expect(envelope.gain == 1)
     }
     @Test @MainActor func videoControlStartsAudioAndVideoWhenNoBroadcasterVideoExists() {
         #expect(WERAIViewModel.videoControlIntent(

@@ -20,6 +20,7 @@ final class MeshSession {
     private let videoHandler: (CGImage) -> Void
     private let replicaPersistenceHandler: (MeshRoomReplica) -> Void
     private let errorHandler: (Error) -> Void
+    private let walkieTalkieStateHandler: (String, String, Bool) -> Void
     private let walkieTalkieTransmissionEndedHandler: (Error) -> Void
     private let incomingOpenLineInvitationHandler: (OpenLineInvitation) -> Void
     private let openLineStateHandler: (OpenLineState) -> Void
@@ -96,6 +97,7 @@ final class MeshSession {
     private var localParticipantMuted = false
     private var walkieStartGeneration: Int?
     private var walkieTalkieTargets = Set<String>()
+    private var activeIncomingVoiceSessions = [String: String]()
     private var openLineSessionState: OpenLineSessionState
 
     var isBroadcasting: Bool { replica.broadcaster?.nodeID == nodeID }
@@ -113,6 +115,7 @@ final class MeshSession {
         var replica: (MeshRoomReplica) -> Void = { _ in }
         var participants: ([RoomParticipant]) -> Void = { _ in }
         var openLine: (OpenLineMessage) -> Void = { _ in }
+        var walkieTalkie: (String, String, String, Bool) -> Void = { _, _, _, _ in }
     }
     private let callbackRelay: CallbackRelay
 
@@ -194,14 +197,15 @@ final class MeshSession {
         self.queueHandler = queueHandler
         self.videoHandler = videoHandler
         self.errorHandler = errorHandler
+        self.walkieTalkieStateHandler = walkieTalkieStateHandler
         self.walkieTalkieTransmissionEndedHandler = walkieTalkieTransmissionEndedHandler
         self.incomingOpenLineInvitationHandler = incomingOpenLineInvitationHandler
         self.openLineStateHandler = openLineStateHandler
         self.openLineSessionState = OpenLineSessionState(localID: nodeID)
         let walkieTalkiePlayer = WalkieTalkiePlayer(
-            stateHandler: { senderID, senderName, active in
+            stateHandler: { sessionID, senderID, senderName, active in
                 DispatchQueue.main.async {
-                    walkieTalkieStateHandler(senderID, senderName, active)
+                    relay.walkieTalkie(sessionID, senderID, senderName, active)
                 }
             }
         )
@@ -240,6 +244,14 @@ final class MeshSession {
         relay.replica = { [weak self] in self?.apply($0) }
         relay.participants = participantsHandler
         relay.openLine = { [weak self] in self?.receiveOpenLine($0) }
+        relay.walkieTalkie = { [weak self] in
+            self?.updateIncomingVoiceActivity(
+                sessionID: $0,
+                senderID: $1,
+                senderName: $2,
+                active: $3
+            )
+        }
     }
 
     func start(broadcastInitially: Bool) throws {
@@ -650,6 +662,34 @@ final class MeshSession {
     }
     func setIncomingWalkieTalkieMuted(_ muted: Bool) { walkieTalkiePlayer.setMuted(muted) }
 
+    private func updateIncomingVoiceActivity(
+        sessionID: String,
+        senderID: String,
+        senderName: String,
+        active: Bool
+    ) {
+        let wasDucking = !activeIncomingVoiceSessions.isEmpty
+        let senderWasActive = activeIncomingVoiceSessions.values.contains(senderID)
+        if active {
+            activeIncomingVoiceSessions[sessionID] = senderID
+        } else {
+            activeIncomingVoiceSessions.removeValue(forKey: sessionID)
+        }
+        let senderIsActive = activeIncomingVoiceSessions.values.contains(senderID)
+        if senderWasActive != senderIsActive {
+            walkieTalkieStateHandler(senderID, senderName, senderIsActive)
+        }
+        if wasDucking != !activeIncomingVoiceSessions.isEmpty {
+            applyIncomingVoiceDucking()
+        }
+    }
+
+    private func applyIncomingVoiceDucking() {
+        let active = !activeIncomingVoiceSessions.isEmpty
+        hostSession?.setVoiceDuckingActive(active)
+        receiver?.setVoiceDuckingActive(active)
+    }
+
     func setVideoEnabled(_ enabled: Bool) async throws {
         guard let hostSession,
               let broadcaster = replica.broadcaster,
@@ -835,6 +875,7 @@ final class MeshSession {
                         volume: localVolume,
                         muted: localParticipantMuted || incomingMediaMuted
                     )
+                    applyIncomingVoiceDucking()
                 } else {
                     statusHandler("Connecting to the room broadcaster")
                     let receiver = try Receiver(
@@ -874,6 +915,7 @@ final class MeshSession {
                         volume: localVolume,
                         muted: localParticipantMuted || incomingMediaMuted
                     )
+                    applyIncomingVoiceDucking()
                     guard generation == transitionGeneration,
                           replica.broadcaster == broadcaster else {
                         receiver.stop()

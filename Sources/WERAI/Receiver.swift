@@ -242,6 +242,13 @@ final class Receiver {
         }
     }
 
+    /// Dims this Mac's synchronized media without changing room state or timing.
+    func setVoiceDuckingActive(_ active: Bool) {
+        queue.async { [weak self] in
+            self?.player.setVoiceDucking(active: active)
+        }
+    }
+
     func setRoomPlayback(playing: Bool) {
         sendRoomMediaCommand(playing ? .play : .pause)
     }

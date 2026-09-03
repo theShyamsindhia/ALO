@@ -527,7 +527,7 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
         channels: 1
     )!
     private let format = playbackFormat
-    private let stateHandler: @Sendable (String, String, Bool) -> Void
+    private let stateHandler: @Sendable (String, String, String, Bool) -> Void
     private var sessions = [String: Session]()
     private var tracker = WalkieTalkiePlaybackTracker()
     private var configurationObserver: NSObjectProtocol?
@@ -559,7 +559,7 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
     }
 
     init(
-        stateHandler: @escaping @Sendable (String, String, Bool) -> Void = { _, _, _ in }
+        stateHandler: @escaping @Sendable (String, String, String, Bool) -> Void = { _, _, _, _ in }
     ) {
         self.stateHandler = stateHandler
         configurationObserver = NotificationCenter.default.addObserver(
@@ -765,7 +765,7 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
     private func setSessionActive(_ session: Session, _ active: Bool) {
         guard session.isActive != active else { return }
         session.isActive = active
-        stateHandler(session.senderID, session.senderName, active)
+        stateHandler(session.id, session.senderID, session.senderName, active)
     }
 
     private func stopSession(_ id: String) {

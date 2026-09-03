@@ -231,6 +231,10 @@ final class HostSession {
         host?.setParticipantLevel(id: id, volume: volume, muted: muted)
     }
 
+    func setVoiceDuckingActive(_ active: Bool) {
+        localReceiver?.setVoiceDuckingActive(active)
+    }
+
     @discardableResult
     func sendRoomMediaCommand(_ command: RoomMediaCommand) -> Bool {
         host?.sendRoomMediaCommand(command) ?? false
