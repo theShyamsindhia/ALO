@@ -70,13 +70,13 @@ func makeALOEditMenu() -> NSMenu {
 @MainActor
 private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
     private enum SetupWindow {
-        static let width: CGFloat = 360
+        static let width: CGFloat = 306
         static let collapseDuration: TimeInterval = 0.28
 
         @MainActor static func height(for model: WERAIViewModel) -> CGFloat {
             switch model.phase {
             case .idle:
-                return 470
+                return 426
             case .starting:
                 return 270
             case .failed:
@@ -121,16 +121,21 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
                 width: SetupWindow.width,
                 height: SetupWindow.height(for: model)
             ),
-            styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
+            styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         window.title = ALOAppFlavor.displayName
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
+        window.titlebarSeparatorStyle = .none
         window.backgroundColor = .clear
         window.isOpaque = false
+        window.hasShadow = false
         window.isMovableByWindowBackground = true
+        window.standardWindowButton(.closeButton)?.isHidden = true
+        window.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        window.standardWindowButton(.zoomButton)?.isHidden = true
         window.contentView = NSHostingView(rootView: WERAIView(model: model))
         window.center()
         setupWindowFrame = window.frame
@@ -2623,7 +2628,6 @@ private struct WERAIView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var roomNameFocused: Bool
     @FocusState private var privateKeyFocused: Bool
-    @State private var spacesExpanded = false
 
     private var versionLabel: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
@@ -2635,11 +2639,11 @@ private struct WERAIView: View {
     var body: some View {
         ZStack {
             if model.phase == .idle {
-                SetupPalette.stage
-                    .ignoresSafeArea()
+                Color.clear
             } else {
-                Palette.canvas
-                    .ignoresSafeArea()
+                RoundedRectangle(cornerRadius: 27, style: .continuous)
+                    .fill(Palette.canvas)
+                    .padding(10)
             }
             switch model.phase {
             case .idle: idleView
@@ -2655,8 +2659,6 @@ private struct WERAIView: View {
 
     private var idleView: some View {
         setupConsole
-            .padding(.top, 30)
-            .padding(.bottom, 20)
     }
 
     private var setupConsole: some View {
@@ -2667,7 +2669,7 @@ private struct WERAIView: View {
                 if model.mode == .share {
                     createRoomPanel
                         .transition(setupSheetTransition)
-                } else if spacesExpanded {
+                } else {
                     roomList
                         .transition(setupSheetTransition)
                 }
@@ -2683,9 +2685,8 @@ private struct WERAIView: View {
             RoundedRectangle(cornerRadius: 27, style: .continuous)
                 .stroke(Color.white.opacity(0.94), lineWidth: 4)
         )
-        .shadow(color: Color.black.opacity(0.38), radius: 28, y: 16)
+        .shadow(color: Color.black.opacity(0.30), radius: 12, y: 6)
         .animation(reduceMotion ? nil : .smooth(duration: 0.32), value: model.mode)
-        .animation(reduceMotion ? nil : .smooth(duration: 0.32), value: spacesExpanded)
     }
 
     private var setupSheetTransition: AnyTransition {
@@ -2712,7 +2713,7 @@ private struct WERAIView: View {
                     Text("WERAI")
                         .font(.system(size: 7, weight: .black, design: .rounded))
                         .tracking(0.8)
-                    Text("CONNECT THROUGH SOUND")
+                    Text("CONNECT THROUGH SOUND · \(versionLabel)")
                         .font(.system(size: 4, weight: .bold, design: .rounded))
                         .tracking(0.65)
                         .opacity(0.74)
@@ -2739,32 +2740,6 @@ private struct WERAIView: View {
                     .padding(.top, 7)
 
                 Spacer()
-
-                if model.mode == .listen && !spacesExpanded {
-                    Button {
-                        model.refreshRooms()
-                        withAnimation(reduceMotion ? nil : .smooth(duration: 0.32)) {
-                            spacesExpanded = true
-                        }
-                    } label: {
-                        HStack(spacing: 7) {
-                            Text("CREATE SPACES")
-                            Image(systemName: "arrow.down.right")
-                                .font(.system(size: 8, weight: .black))
-                                .opacity(0.76)
-                            Spacer()
-                        }
-                        .font(.system(size: 13, weight: .black, design: .rounded))
-                        .tracking(-0.2)
-                        .frame(maxWidth: .infinity)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(PressScaleButtonStyle())
-                    .help("Show saved and nearby spaces")
-                    .accessibilityLabel("Show \(model.roomChoices.count) spaces")
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 100)
-                }
             }
             .foregroundStyle(Color.white)
             .shadow(color: Color.black.opacity(0.4), radius: 5, y: 1)
@@ -2776,47 +2751,34 @@ private struct WERAIView: View {
 
     private var setupFooter: some View {
         ZStack {
-            if model.mode == .listen && !spacesExpanded {
-                HStack {
-                    Spacer()
-                    Text(versionLabel)
-                        .font(.system(size: 6, weight: .bold, design: .monospaced))
-                        .tracking(0.25)
-                        .foregroundStyle(SetupPalette.muted)
-                }
-                .padding(.trailing, 13)
-            }
-
-            if model.mode == .share || spacesExpanded {
-                HStack {
-                    Button {
-                        withAnimation(reduceMotion ? nil : .smooth(duration: 0.28)) {
-                            if model.mode == .share {
-                                model.mode = .listen
-                            } else {
-                                model.mode = .share
-                            }
+            HStack {
+                Button {
+                    withAnimation(reduceMotion ? nil : .smooth(duration: 0.28)) {
+                        if model.mode == .share {
+                            model.mode = .listen
+                        } else {
+                            model.mode = .share
                         }
-                    } label: {
-                        Image(systemName: model.mode == .share ? "chevron.left" : "plus")
                     }
-                    .help(model.mode == .share ? "Back to spaces" : "Create a space")
-                    .accessibilityLabel(model.mode == .share ? "Back to spaces" : "Create a space")
-
-                    Spacer()
-
-                    if model.mode == .listen {
-                        Button(action: model.joinSelectedRoom) {
-                            Image(systemName: "arrow.right")
-                        }
-                        .disabled(!model.canJoin)
-                        .help("Open selected space")
-                        .accessibilityLabel("Open selected space")
-                    }
+                } label: {
+                    Image(systemName: model.mode == .share ? "chevron.left" : "plus")
                 }
-                .buttonStyle(SetupFooterButtonStyle())
-                .padding(.horizontal, 13)
+                .help(model.mode == .share ? "Back to spaces" : "Create a space")
+                .accessibilityLabel(model.mode == .share ? "Back to spaces" : "Create a space")
+
+                Spacer()
+
+                if model.mode == .listen {
+                    Button(action: model.joinSelectedRoom) {
+                        Image(systemName: "arrow.right")
+                    }
+                    .disabled(!model.canJoin)
+                    .help("Open selected space")
+                    .accessibilityLabel("Open selected space")
+                }
             }
+            .buttonStyle(SetupFooterButtonStyle())
+            .padding(.horizontal, 13)
 
             Text("ALO")
                 .font(.system(size: 13, weight: .black, design: .rounded))
@@ -2914,16 +2876,6 @@ private struct WERAIView: View {
                 .buttonStyle(SetupDrawerIconButtonStyle())
                 .help("Refresh nearby spaces")
                 .accessibilityLabel("Refresh nearby spaces")
-                Button {
-                    withAnimation(reduceMotion ? nil : .smooth(duration: 0.28)) {
-                        spacesExpanded = false
-                    }
-                } label: {
-                    Image(systemName: "chevron.down")
-                }
-                .buttonStyle(SetupDrawerIconButtonStyle())
-                .help("Close spaces")
-                .accessibilityLabel("Close spaces")
             }
             .padding(.horizontal, 16)
             .frame(height: 48)
@@ -5324,13 +5276,11 @@ private enum Palette {
 }
 
 private enum SetupPalette {
-    static let stage = Color(red: 0.035, green: 0.043, blue: 0.038)
     static let ink = Color(red: 0.055, green: 0.075, blue: 0.055)
     static let secondary = Color(red: 0.23, green: 0.28, blue: 0.22)
     static let muted = Color(red: 0.42, green: 0.46, blue: 0.40)
     static let live = Color(red: 0.035, green: 0.28, blue: 0.16)
     static let stroke = Color.black.opacity(0.10)
-    static let surface = Color.white.opacity(0.90)
     static let surfaceStrong = Color.white.opacity(0.95)
 }
 
