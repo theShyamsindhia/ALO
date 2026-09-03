@@ -2275,8 +2275,12 @@ private struct WERAIView: View {
 
     var body: some View {
         ZStack {
-            Palette.canvas
-                .ignoresSafeArea()
+            if model.phase == .idle {
+                SetupBackground()
+            } else {
+                Palette.canvas
+                    .ignoresSafeArea()
+            }
             switch model.phase {
             case .idle: idleView
             case .starting: progressView
@@ -2299,19 +2303,28 @@ private struct WERAIView: View {
     private var setupConsole: some View {
         VStack(spacing: 16) {
             HStack {
-                Text(model.mode == .share ? "New room" : "Rooms")
-                    .font(.system(size: 24, weight: .black, design: .rounded))
-                    .tracking(-0.7)
-                    .foregroundStyle(Palette.ink)
-                Text(versionLabel)
-                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(Palette.muted)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(model.mode == .share ? "New room" : "Rooms")
+                            .font(.system(size: 24, weight: .black, design: .rounded))
+                            .tracking(-0.7)
+                        Text(versionLabel)
+                            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                            .opacity(0.62)
+                    }
+                    Text(model.mode == .share
+                        ? "Choose a name, then invite your people."
+                        : "Saved here and live on your Wi-Fi.")
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .opacity(0.72)
+                }
+                .foregroundStyle(Color.white)
                 Spacer()
                 if model.mode == .listen {
                     Button(action: model.refreshRooms) {
                         Image(systemName: "arrow.clockwise")
                     }
-                    .buttonStyle(SetupIconButtonStyle())
+                    .buttonStyle(SetupIconButtonStyle(onImage: true))
                     .help("Refresh nearby rooms")
                     .accessibilityLabel("Refresh nearby rooms")
                 }
@@ -2323,7 +2336,7 @@ private struct WERAIView: View {
                         size: 28
                     )
                 }
-                .buttonStyle(SetupIconButtonStyle())
+                .buttonStyle(SetupIconButtonStyle(onImage: true))
                 .help("Edit \(model.currentUserName)")
                 .accessibilityLabel("Edit this Mac's room identity")
             }
@@ -2342,25 +2355,28 @@ private struct WERAIView: View {
             TextField("Room name", text: $model.roomName)
                 .textFieldStyle(.plain)
                 .font(.system(size: 17, weight: .medium, design: .rounded))
-                .foregroundStyle(Palette.ink)
+                .foregroundStyle(SetupPalette.ink)
                 .focused($roomNameFocused)
                 .onSubmit(model.startSharing)
                 .padding(.horizontal, 16)
                 .frame(height: 52)
-                .background(Palette.composer)
+                .background(SetupPalette.surface)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(roomNameFocused ? Palette.controlAccent : Palette.strokeStrong, lineWidth: roomNameFocused ? 2 : 1)
+                        .stroke(roomNameFocused ? Palette.controlAccent : SetupPalette.stroke, lineWidth: roomNameFocused ? 2 : 1)
                 )
 
             HStack(spacing: 8) {
                 Button {
                     model.createPrivateRoom.toggle()
                 } label: {
-                    Image(systemName: model.createPrivateRoom ? "lock.fill" : "person.3.fill")
+                    Label(
+                        model.createPrivateRoom ? "Private" : "Public",
+                        systemImage: model.createPrivateRoom ? "lock.fill" : "person.3.fill"
+                    )
                 }
-                .buttonStyle(SetupIconButtonStyle(active: model.createPrivateRoom))
+                .buttonStyle(SetupActionButtonStyle(active: model.createPrivateRoom))
                 .help(model.createPrivateRoom ? "Private room" : "Public room")
                 .accessibilityLabel(model.createPrivateRoom ? "Make room public" : "Make room private")
                 Spacer()
@@ -2369,15 +2385,15 @@ private struct WERAIView: View {
                         model.mode = .listen
                     }
                 } label: {
-                    Image(systemName: "chevron.left")
+                    Label("Rooms", systemImage: "chevron.left")
                 }
-                .buttonStyle(SetupIconButtonStyle())
+                .buttonStyle(SetupActionButtonStyle())
                 .help("Back to rooms")
                 .accessibilityLabel("Back to rooms")
                 Button(action: model.startSharing) {
-                    Image(systemName: "arrow.right")
+                    Label("Create", systemImage: "arrow.right")
                 }
-                .buttonStyle(SetupIconButtonStyle(filled: true))
+                .buttonStyle(SetupActionButtonStyle(filled: true))
                 .disabled(!model.canStartSharing)
                 .help("Create and open room")
                 .accessibilityLabel("Create and open room")
@@ -2398,6 +2414,12 @@ private struct WERAIView: View {
                             Image(systemName: "dot.radiowaves.left.and.right")
                                 .font(.system(size: 22, weight: .medium))
                                 .foregroundStyle(Palette.accent)
+                            Text("Looking for rooms")
+                                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                .foregroundStyle(SetupPalette.ink)
+                            Text("Keep ALO open on nearby Macs.")
+                                .font(.system(size: 10, weight: .medium, design: .rounded))
+                                .foregroundStyle(SetupPalette.secondary)
                         }
                         .frame(maxWidth: .infinity, minHeight: 170)
                         .help("Looking for rooms on your network")
@@ -2407,18 +2429,24 @@ private struct WERAIView: View {
                             roomCard(room)
                             if room.id != model.roomChoices.last?.id {
                                 Divider()
+                                    .overlay(SetupPalette.stroke)
                                     .padding(.leading, 58)
                             }
                         }
                     }
                 }
             }
-            .frame(maxHeight: 270)
-            .background(Palette.messageSurface)
+            .frame(height: setupRoomListHeight)
+            .background {
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(SetupPalette.surface)
+            }
             .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .stroke(Palette.strokeStrong, lineWidth: 1)
+                    .stroke(Color.white.opacity(0.72), lineWidth: 1)
             )
 
             if model.selectedRoomConfiguration?.isPrivate == true,
@@ -2426,10 +2454,11 @@ private struct WERAIView: View {
                 TextField("Private room invite key", text: $model.privateRoomKey)
                     .textFieldStyle(.plain)
                     .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .foregroundStyle(SetupPalette.ink)
                     .focused($privateKeyFocused)
                     .padding(.horizontal, 14)
                     .frame(height: 42)
-                    .background(Palette.composer)
+                    .background(SetupPalette.surface)
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     .onAppear {
                         NSApp.activate(ignoringOtherApps: true)
@@ -2442,21 +2471,27 @@ private struct WERAIView: View {
                         model.mode = .share
                     }
                 } label: {
-                    Image(systemName: "plus")
+                    Label("New room", systemImage: "plus")
                 }
-                .buttonStyle(SetupIconButtonStyle())
+                .buttonStyle(SetupActionButtonStyle())
                 .help("Create room")
                 .accessibilityLabel("Create room")
                 Spacer()
                 Button(action: model.joinSelectedRoom) {
-                    Image(systemName: "arrow.right")
+                    Label("Open room", systemImage: "arrow.right")
                 }
-                .buttonStyle(SetupIconButtonStyle(filled: true))
+                .buttonStyle(SetupActionButtonStyle(filled: true))
                 .disabled(!model.canJoin)
                 .help("Open selected room")
                 .accessibilityLabel("Open selected room")
             }
         }
+    }
+
+    private var setupRoomListHeight: CGFloat {
+        guard !model.roomChoices.isEmpty else { return 170 }
+        let visibleRows = min(model.roomChoices.count, 4)
+        return CGFloat(visibleRows * 58 + max(0, visibleRows - 1))
     }
 
     private func roomCard(_ room: RoomConfiguration) -> some View {
@@ -2478,15 +2513,15 @@ private struct WERAIView: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(room.name)
                             .font(.system(size: 13, weight: .bold, design: .rounded))
-                            .foregroundStyle(Palette.ink)
+                            .foregroundStyle(SetupPalette.ink)
                         Text(nearby.map { "Nearby · \($0.peerCount) \($0.peerCount == 1 ? "person" : "people")" } ?? "Saved on this Mac")
                             .font(.system(size: 10, design: .rounded))
-                            .foregroundStyle(nearby == nil ? Palette.secondary : Palette.accentText)
+                            .foregroundStyle(nearby == nil ? SetupPalette.secondary : Palette.accentText)
                     }
                     Spacer()
                     Image(systemName: selected ? "checkmark.circle.fill" : "chevron.right")
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(selected ? Palette.controlAccent : Palette.muted)
+                        .foregroundStyle(selected ? Palette.controlAccent : SetupPalette.muted)
                 }
                 .contentShape(Rectangle())
             }
@@ -2496,7 +2531,7 @@ private struct WERAIView: View {
                 Button { model.forgetRoom(roomID: room.id) } label: {
                     Image(systemName: "trash")
                         .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(Palette.secondary)
+                        .foregroundStyle(SetupPalette.secondary)
                         .frame(width: 30, height: 34)
                 }
                 .buttonStyle(FlatToolButtonStyle(active: false))
@@ -2506,7 +2541,7 @@ private struct WERAIView: View {
         }
         .padding(.horizontal, 12)
         .frame(height: 58)
-        .background(selected ? Palette.accentSoft.opacity(0.7) : Color.clear)
+        .background(selected ? Palette.controlAccent.opacity(0.12) : Color.clear)
     }
 
     private var progressView: some View {
@@ -3532,15 +3567,16 @@ private struct FlatToolButtonStyle: ButtonStyle {
 private struct SetupIconButtonStyle: ButtonStyle {
     var filled = false
     var active = false
+    var onImage = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.isEnabled) private var isEnabled
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 13, weight: .bold))
-            .foregroundStyle(filled || active ? Palette.selectedControlText : Palette.controlIcon)
+            .foregroundStyle(filled || active ? Palette.selectedControlText : onImage ? SetupPalette.ink : Palette.controlIcon)
             .frame(width: 38, height: 38)
-            .background(filled || active ? Palette.controlAccent : Palette.messageSurface)
+            .background(filled || active ? Palette.controlAccent : onImage ? SetupPalette.surface : Palette.messageSurface)
             .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 13, style: .continuous)
@@ -3549,6 +3585,31 @@ private struct SetupIconButtonStyle: ButtonStyle {
             .scaleEffect(!reduceMotion && configuration.isPressed ? 0.94 : 1)
             .opacity(isEnabled ? (configuration.isPressed ? 0.82 : 1) : 0.34)
             .animation(reduceMotion ? nil : .spring(response: 0.2, dampingFraction: 0.82), value: configuration.isPressed)
+    }
+}
+
+private struct SetupActionButtonStyle: ButtonStyle {
+    var filled = false
+    var active = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 11, weight: .semibold, design: .rounded))
+            .labelStyle(.titleAndIcon)
+            .foregroundStyle(filled || active ? Palette.selectedControlText : SetupPalette.ink)
+            .padding(.horizontal, 13)
+            .frame(height: 38)
+            .background(filled || active ? Palette.controlAccent : SetupPalette.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .stroke(filled || active ? Color.clear : Color.white.opacity(0.62), lineWidth: 1)
+            )
+            .scaleEffect(!reduceMotion && configuration.isPressed ? 0.96 : 1)
+            .opacity(isEnabled ? (configuration.isPressed ? 0.84 : 1) : 0.34)
+            .animation(reduceMotion ? nil : .spring(response: 0.2, dampingFraction: 0.84), value: configuration.isPressed)
     }
 }
 
@@ -4232,6 +4293,32 @@ private struct AmbientBackground: View {
     }
 }
 
+private struct SetupBackground: View {
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack {
+                if let url = Bundle.main.url(forResource: "ALOSetupBackground", withExtension: "png"),
+                   let image = NSImage(contentsOf: url) {
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: geometry.size.width, height: geometry.size.height)
+                        .clipped()
+                } else {
+                    AmbientBackground(isLive: false)
+                }
+                LinearGradient(
+                    colors: [Color.black.opacity(0.42), Color.black.opacity(0.08), Color.black.opacity(0.18)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+        }
+        .ignoresSafeArea()
+    }
+}
+
 private struct WaveformGlyph: View {
     let active: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -4428,6 +4515,14 @@ private enum Palette {
             }
         })
     }
+}
+
+private enum SetupPalette {
+    static let ink = Color(red: 0.055, green: 0.075, blue: 0.055)
+    static let secondary = Color(red: 0.23, green: 0.28, blue: 0.22)
+    static let muted = Color(red: 0.42, green: 0.46, blue: 0.40)
+    static let stroke = Color.black.opacity(0.10)
+    static let surface = Color.white.opacity(0.78)
 }
 
 private extension Color {

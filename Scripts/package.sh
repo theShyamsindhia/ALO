@@ -125,6 +125,7 @@ if $development_build; then
     /usr/libexec/PlistBuddy -c "Set :CFBundleName ALO Dev" "$app/Contents/Info.plist"
 fi
 cp dist/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
+cp Resources/ALOSetupBackground.png "$app/Contents/Resources/ALOSetupBackground.png"
 if [[ "$codesign_identity" == "-" ]]; then
     if $development_build; then
         run_codesign "${codesign_arguments[@]}" "$app"
