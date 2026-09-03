@@ -33,6 +33,40 @@ enum GUIApplication {
 }
 
 @MainActor
+func makeALOEditMenu() -> NSMenu {
+    let menu = NSMenu(title: "Edit")
+
+    func addResponderItem(
+        _ title: String,
+        action: Selector,
+        key: String = "",
+        modifiers: NSEvent.ModifierFlags = [.command]
+    ) {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+        item.keyEquivalentModifierMask = modifiers
+        item.target = nil
+        menu.addItem(item)
+    }
+
+    addResponderItem("Undo", action: Selector(("undo:")), key: "z")
+    addResponderItem("Redo", action: Selector(("redo:")), key: "z", modifiers: [.command, .shift])
+    menu.addItem(.separator())
+    addResponderItem("Cut", action: #selector(NSText.cut(_:)), key: "x")
+    addResponderItem("Copy", action: #selector(NSText.copy(_:)), key: "c")
+    addResponderItem("Paste", action: #selector(NSText.paste(_:)), key: "v")
+    addResponderItem(
+        "Paste and Match Style",
+        action: #selector(NSTextView.pasteAsPlainText(_:)),
+        key: "v",
+        modifiers: [.command, .option, .shift]
+    )
+    addResponderItem("Delete", action: #selector(NSText.delete(_:)))
+    menu.addItem(.separator())
+    addResponderItem("Select All", action: #selector(NSResponder.selectAll(_:)), key: "a")
+    return menu
+}
+
+@MainActor
 private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
     private enum SetupWindow {
         static let width: CGFloat = 440
@@ -364,16 +398,7 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
 
         let editMenuItem = NSMenuItem()
         mainMenu.addItem(editMenuItem)
-        let editMenu = NSMenu(title: "Edit")
-        editMenu.addItem(withTitle: "Undo", action: #selector(UndoManager.undo), keyEquivalent: "z")
-        let redoItem = editMenu.addItem(withTitle: "Redo", action: #selector(UndoManager.redo), keyEquivalent: "z")
-        redoItem.keyEquivalentModifierMask = [.command, .shift]
-        editMenu.addItem(.separator())
-        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
-        editMenuItem.submenu = editMenu
+        editMenuItem.submenu = makeALOEditMenu()
 
         NSApp.mainMenu = mainMenu
     }
@@ -985,7 +1010,10 @@ private struct DeviceIdentityEditorView: View {
         .frame(width: 480, height: 430)
         .background(AmbientBackground(isLive: false))
         .tint(Palette.controlAccent)
-        .onAppear { nameFocused = true }
+        .onAppear {
+            NSApp.activate(ignoringOtherApps: true)
+            DispatchQueue.main.async { nameFocused = true }
+        }
         .fileImporter(isPresented: $choosesPhoto, allowedContentTypes: [.image]) { result in
             do {
                 let url = try result.get()
@@ -2236,6 +2264,7 @@ private struct WERAIView: View {
     @ObservedObject var model: WERAIViewModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var roomNameFocused: Bool
+    @FocusState private var privateKeyFocused: Bool
 
     private var versionLabel: String {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
@@ -2354,6 +2383,10 @@ private struct WERAIView: View {
                 .accessibilityLabel("Create and open room")
             }
         }
+        .onAppear {
+            NSApp.activate(ignoringOtherApps: true)
+            DispatchQueue.main.async { roomNameFocused = true }
+        }
     }
 
     private var roomList: some View {
@@ -2393,10 +2426,15 @@ private struct WERAIView: View {
                 TextField("Private room invite key", text: $model.privateRoomKey)
                     .textFieldStyle(.plain)
                     .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .focused($privateKeyFocused)
                     .padding(.horizontal, 14)
                     .frame(height: 42)
                     .background(Palette.composer)
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .onAppear {
+                        NSApp.activate(ignoringOtherApps: true)
+                        DispatchQueue.main.async { privateKeyFocused = true }
+                    }
             }
             HStack(spacing: 8) {
                 Button {
@@ -2578,6 +2616,7 @@ private struct FloatingRoomView: View {
     var presentation: RoomControlsPresentation = .floating
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var composerFocused: Bool
+    @FocusState private var queueFocused: Bool
 
     private var panelTransition: AnyTransition {
         reduceMotion
@@ -2749,9 +2788,6 @@ private struct FloatingRoomView: View {
         }
         .padding(.horizontal, 8)
         .frame(width: FloatingMetrics.width, height: roomBarHeight)
-        .onChange(of: model.floatingSection) { _, section in
-            composerFocused = section == .chat
-        }
     }
 
     @ViewBuilder
@@ -2973,6 +3009,7 @@ private struct FloatingRoomView: View {
                     .textFieldStyle(.plain)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(Palette.ink)
+                    .focused($queueFocused)
                     .onSubmit(model.addQueueLink)
                 if !model.queueURL.isEmpty {
                     Button("Add", action: model.addQueueLink)
@@ -3000,6 +3037,10 @@ private struct FloatingRoomView: View {
         .padding(.horizontal, 12)
         .frame(height: 58)
         .animation(panelAnimation, value: model.queueNotice)
+        .onAppear {
+            NSApp.activate(ignoringOtherApps: true)
+            DispatchQueue.main.async { queueFocused = true }
+        }
     }
 
     private func queueRow(_ item: RoomQueueItem) -> some View {
@@ -3174,6 +3215,10 @@ private struct FloatingRoomView: View {
         )
         .padding(10)
         .onTapGesture { composerFocused = true }
+        .onAppear {
+            NSApp.activate(ignoringOtherApps: true)
+            DispatchQueue.main.async { composerFocused = true }
+        }
         .animation(
             reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.72),
             value: hasDraft
