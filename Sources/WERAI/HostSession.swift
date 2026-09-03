@@ -19,6 +19,10 @@ enum BroadcasterPlaybackMode: Equatable {
             : .directSource
     }
 
+    static var unifiedTapSource: Self {
+        resolve(sourceMuteTapActive: true, sourceMuteTapFeedsRoomAudio: true)
+    }
+
     var mutesSynchronizedReceiver: Bool {
         self == .directSource
     }
@@ -27,6 +31,10 @@ enum BroadcasterPlaybackMode: Equatable {
 
 @MainActor
 final class HostSession {
+    nonisolated static var synchronizedPlaybackMode: BroadcasterPlaybackMode {
+        .unifiedTapSource
+    }
+
     private var host: HostServer?
     private var localReceiver: Receiver?
     private var audioSource: AudioSource?
@@ -50,7 +58,7 @@ final class HostSession {
         chatHandler: @escaping (_ sender: String, _ text: String, _ sentNanos: UInt64) -> Void,
         queueHandler: @escaping ([RoomQueueItem]) -> Void,
         videoHandler: @escaping (CGImage) -> Void,
-        audioStoppedHandler: @escaping (Error) -> Void = { _ in },
+        audioStoppedHandler: @escaping @Sendable (Error) -> Void = { _ in },
         videoStoppedHandler: @escaping (Error) -> Void = { _ in }
     ) async throws {
         do {
@@ -58,8 +66,6 @@ final class HostSession {
             try Task.checkCancellation()
             statusHandler("Opening your room")
             statusHandler("Preparing system audio capture")
-            let source: AudioSource = SystemAudioCapture(unexpectedStopHandler: audioStoppedHandler)
-            audioSource = source
             let playbackController = SystemPlaybackController()
             self.playbackController = playbackController
             let host = HostServer(
@@ -81,10 +87,12 @@ final class HostSession {
             nowPlayingMonitor.start()
             self.nowPlayingMonitor = nowPlayingMonitor
 
-            statusHandler("Starting synchronized audio")
-            try await source.start { samples, captureTimeNanos in
-                host.acceptAudio(samples: samples, captureTimeNanos: captureTimeNanos)
-            }
+            let (source, playbackMode) = try await startAudioSource(
+                host: host,
+                statusHandler: statusHandler,
+                audioStoppedHandler: audioStoppedHandler
+            )
+            audioSource = source
             shouldPauseSourceOnStop = true
             try Task.checkCancellation()
 
@@ -95,7 +103,11 @@ final class HostSession {
                 capturesSystemMediaCommands: false,
                 statusHandler: { status in
                     if status == .playing {
-                        statusHandler("Broadcasting this Mac")
+                        statusHandler(
+                            playbackMode == .synchronizedReceiver
+                                ? "This Mac is playing in sync"
+                                : "Broadcasting this Mac · local playback is not delayed"
+                        )
                     } else if status == .silent {
                         statusHandler("Broadcasting this Mac · waiting for audio")
                     }
@@ -109,13 +121,6 @@ final class HostSession {
                 videoHandler: videoHandler
             )
             try localReceiver.start()
-            let playbackMode = BroadcasterPlaybackMode.resolve(
-                sourceMuteTapActive: false,
-                sourceMuteTapFeedsRoomAudio: false
-            )
-            // Fail-safe: until the Core Audio tap is a complete 48 kHz stereo
-            // room source, ScreenCaptureKit remains authoritative and the
-            // broadcaster hears the source app directly.
             localReceiver.setLocalPlaybackMuted(playbackMode.mutesSynchronizedReceiver)
             self.localReceiver = localReceiver
             try Task.checkCancellation()
@@ -130,12 +135,46 @@ final class HostSession {
         }
     }
 
+    private func startAudioSource(
+        host: HostServer,
+        statusHandler: @escaping (String) -> Void,
+        audioStoppedHandler: @escaping @Sendable (Error) -> Void
+    ) async throws -> (AudioSource, BroadcasterPlaybackMode) {
+        let handler: AudioSource.AudioHandler = { samples, captureTimeNanos in
+            host.acceptAudio(samples: samples, captureTimeNanos: captureTimeNanos)
+        }
+
+        guard #available(macOS 14.2, *) else {
+            throw WERAIError("Synchronized broadcasting requires macOS 14.2 or newer.")
+        }
+        statusHandler("Starting one synchronized audio path")
+        let tapSource = SystemAudioTapCapture(
+            unexpectedStopHandler: audioStoppedHandler
+        )
+        do {
+            try await tapSource.start(audioHandler: handler)
+        } catch {
+            if let tapError = error as? SystemAudioTapCaptureError,
+               tapError.isPermissionFailure {
+                throw WERAIError(
+                    "System audio access was denied. Enable ALO under Privacy & Security → System Audio Recording Only, then try again."
+                )
+            }
+            throw WERAIError(
+                "ALO could not start synchronized system audio. Open Diagnostics for capture and permission checks. (\(error.localizedDescription))"
+            )
+        }
+        return (tapSource, Self.synchronizedPlaybackMode)
+    }
+
     func stop() async {
         // Releasing broadcaster ownership must also stop the source application;
         // otherwise a takeover leaves the old Mac playing locally after its
         // capture and room route have been removed.
         if shouldPauseSourceOnStop { _ = playbackController?.perform(.pause) }
         shouldPauseSourceOnStop = false
+        localReceiver?.stop()
+        localReceiver = nil
         try? await audioSource?.stop()
         audioSource = nil
         videoPicker?.deactivate()
@@ -147,8 +186,6 @@ final class HostSession {
         nowPlayingMonitor?.stop()
         nowPlayingMonitor = nil
         playbackController = nil
-        localReceiver?.stop()
-        localReceiver = nil
         host?.stop()
         host = nil
     }
@@ -266,10 +303,10 @@ final class HostSession {
     func stopImmediately() {
         if shouldPauseSourceOnStop { _ = playbackController?.perform(.pause) }
         shouldPauseSourceOnStop = false
+        localReceiver?.stop()
         if let audioSource { Task { try? await audioSource.stop() } }
         videoPicker?.deactivate()
         videoPicker = nil
-        localReceiver?.stop()
         nowPlayingMonitor?.stop()
         host?.setVideoEnabled(false)
         let activeVideoCapture = videoCapture

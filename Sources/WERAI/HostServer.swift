@@ -59,11 +59,10 @@ final class HostServer {
     private var lastAudioCaptureNanos: UInt64?
     private var mediaQueue = [RoomQueueItem]()
     private var groupPlayoutDelayNanos = RoomTiming.defaultPlayoutDelayNanos
-    private var lastGroupDelayAdjustmentNanos: UInt64 = 0
-    // Nil until the first audio packet. Once the timeline is active, only clients
-    // already joined at that instant may influence its adaptive shared delay.
-    // In particular, a first listener arriving after playback starts must inherit
-    // the live delay rather than retiming every running player one second later.
+    // Nil until an audio packet sees at least one real listener. Capture starts
+    // before the broadcaster's local Receiver in production, so freezing an
+    // empty set would permanently disable adaptation. Once the first listener
+    // cohort exists, later joiners inherit rather than retime the live room.
     private var timingEligibleClients: Set<ObjectIdentifier>?
 
     init(
@@ -165,9 +164,20 @@ final class HostServer {
             guard !packets.isEmpty else { return }
             let audioClientEntries = self.clients.filter { $0.value.audio != nil }
             if self.timingEligibleClients == nil {
-                self.timingEligibleClients = Set(audioClientEntries.compactMap { identifier, client in
-                    client.id != nil ? identifier : nil
-                })
+                let firstRemoteListeners = audioClientEntries.compactMap {
+                    identifier, client -> ObjectIdentifier? in
+                    guard let id = client.id, id != self.localParticipantID else { return nil }
+                    return identifier
+                }
+                // Production capture starts before the broadcaster's local
+                // Receiver connects. Do not freeze eligibility to an empty set
+                // on those first packets: the first real listener must still be
+                // able to raise the shared buffer for the room. Once at least
+                // one listener is present, freeze this cohort so later joiners
+                // cannot retime an established live timeline.
+                if !firstRemoteListeners.isEmpty {
+                    self.timingEligibleClients = Set(firstRemoteListeners)
+                }
             }
 
             let audioClients = audioClientEntries.map(\.value)
@@ -232,9 +242,8 @@ final class HostServer {
                     type: "room_playback",
                     isPlaying: self.roomPlaybackIsPlaying
                 ))
-                // A confirmed play starts listeners on the same fresh source
-                // position. The broadcaster restarts naturally from room_playback;
-                // resetting its loopback output can leave its muted source inaudible.
+                // A confirmed play starts every synchronized output, including
+                // the broadcaster's local return, on the same fresh source position.
                 _ = self.sendCoordinatedResync(targetID: nil)
             }
         }
@@ -488,19 +497,12 @@ final class HostServer {
     ) -> Bool {
         guard let data = try? coordinatedResyncMessage(nowNanos: nowNanos).encodedLine() else { return false }
         if let targetID {
-            // The broadcaster's local receiver is not a listener resync target.
-            // Its source application is the local audible path, so resetting the
-            // return stream must never interrupt the broadcaster's own playback.
-            if targetID == localParticipantID { return true }
             guard let target = clients.values.first(where: { $0.id == targetID }) else { return false }
             send(data, over: target.control)
             return true
         } else {
-            let targets = clients.values.filter {
-                $0.id != nil && $0.id != localParticipantID
-            }
-            // A room containing only the broadcaster is already synchronized.
-            guard !targets.isEmpty else { return localParticipantID != nil }
+            let targets = clients.values.filter { $0.id != nil }
+            guard !targets.isEmpty else { return false }
             for target in targets {
                 send(data, over: target.control)
             }
@@ -589,20 +591,22 @@ final class HostServer {
         let next: UInt64
         if desired > groupPlayoutDelayNanos {
             next = desired
-        } else if desired < groupPlayoutDelayNanos,
-                  now - lastGroupDelayAdjustmentNanos >= 2_000_000_000 {
-            next = max(desired, groupPlayoutDelayNanos - 10_000_000)
+        } else if desired < groupPlayoutDelayNanos, !roomPlaybackIsPlaying {
+            // Never move a live timeline backward in small steps. Every such
+            // change requires a hard future cutover on all listeners, which can
+            // turn one transient jitter spike into repeated audible gaps. A
+            // paused room may adopt the lower stable delay before playback
+            // resumes on its normal coordinated boundary.
+            next = desired
         } else {
             return
         }
         guard next != groupPlayoutDelayNanos else { return }
 
         groupPlayoutDelayNanos = next
-        lastGroupDelayAdjustmentNanos = now
-        // The broadcaster hears its direct source and is not a delayed room
-        // output. Retiming its muted local receiver only creates misleading
-        // Recovering/Synced status changes.
-        for client in clients.values where client.id != localParticipantID {
+        // Every audible output uses the synchronized Receiver timeline now,
+        // including the broadcaster's local return.
+        for client in clients.values where client.id != nil {
             sendTiming(to: client)
         }
         if roomPlaybackIsPlaying, lastAudioCaptureNanos != nil {
