@@ -4249,14 +4249,15 @@ private struct InlineActionButtonStyle: ButtonStyle {
 }
 
 private struct VideoOverlayButtonStyle: ButtonStyle {
+    var compact = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 10, weight: .semibold))
+            .font(.system(size: compact ? 9 : 10, weight: .semibold))
             .foregroundStyle(Color.white.opacity(0.9))
-            .padding(.horizontal, 12)
-            .frame(height: 30)
+            .padding(.horizontal, compact ? 10 : 12)
+            .frame(height: compact ? 28 : 30)
             .background(Color.black.opacity(configuration.isPressed ? 0.48 : 0.3))
             .clipShape(Capsule())
             .scaleEffect(!reduceMotion && configuration.isPressed ? 0.985 : 1)
@@ -5017,11 +5018,131 @@ private final class FullScreenVideoWindow: NSWindow {
     override var canBecomeMain: Bool { true }
 }
 
+@MainActor
+private final class VideoControlAutoHide: NSObject, ObservableObject {
+    @Published private(set) var isVisible = true
+
+    private let idleInterval: TimeInterval = 2.4
+    private var lastActivity = ProcessInfo.processInfo.systemUptime
+    private var timer: Timer?
+    private var isPinned = false
+
+    func setPinned(_ pinned: Bool) {
+        isPinned = pinned
+        if pinned {
+            reveal()
+        } else {
+            stopTimer()
+            isVisible = true
+        }
+    }
+
+    func notePointerActivity() {
+        lastActivity = ProcessInfo.processInfo.systemUptime
+        guard isPinned else { return }
+        if !isVisible { isVisible = true }
+        startTimerIfNeeded()
+    }
+
+    func stop() {
+        stopTimer()
+    }
+
+    private func reveal() {
+        lastActivity = ProcessInfo.processInfo.systemUptime
+        isVisible = true
+        startTimerIfNeeded()
+    }
+
+    private func startTimerIfNeeded() {
+        guard timer == nil else { return }
+        timer = Timer.scheduledTimer(
+            timeInterval: 0.25,
+            target: self,
+            selector: #selector(checkIdleState),
+            userInfo: nil,
+            repeats: true
+        )
+        timer?.tolerance = 0.08
+    }
+
+    private func stopTimer() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    @objc private func checkIdleState() {
+        guard isPinned else {
+            stopTimer()
+            return
+        }
+        guard ProcessInfo.processInfo.systemUptime - lastActivity >= idleInterval else { return }
+        isVisible = false
+        stopTimer()
+    }
+}
+
+private struct VideoPointerActivityRegion: NSViewRepresentable {
+    let onActivity: () -> Void
+
+    func makeNSView(context: Context) -> TrackingView {
+        TrackingView(onActivity: onActivity)
+    }
+
+    func updateNSView(_ nsView: TrackingView, context: Context) {
+        nsView.onActivity = onActivity
+    }
+
+    final class TrackingView: NSView {
+        var onActivity: () -> Void
+        private var pointerTrackingArea: NSTrackingArea?
+
+        init(onActivity: @escaping () -> Void) {
+            self.onActivity = onActivity
+            super.init(frame: .zero)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            if let pointerTrackingArea {
+                removeTrackingArea(pointerTrackingArea)
+            }
+            let area = NSTrackingArea(
+                rect: .zero,
+                options: [.inVisibleRect, .mouseEnteredAndExited, .mouseMoved, .activeAlways],
+                owner: self,
+                userInfo: nil
+            )
+            addTrackingArea(area)
+            pointerTrackingArea = area
+        }
+
+        override func mouseEntered(with event: NSEvent) {
+            onActivity()
+        }
+
+        override func mouseMoved(with event: NSEvent) {
+            onActivity()
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            nil
+        }
+    }
+}
+
 private struct FullScreenVideoView: View {
     @ObservedObject var model: WERAIViewModel
+    @StateObject private var controlVisibility = VideoControlAutoHide()
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        ZStack(alignment: .bottom) {
+        ZStack {
             Color.black.ignoresSafeArea()
             if let frame = model.videoFrame {
                 Image(decorative: frame, scale: 1)
@@ -5036,52 +5157,100 @@ private struct FullScreenVideoView: View {
                 }
                 .foregroundStyle(Color.white.opacity(0.72))
             }
+        }
+        .background {
+            VideoPointerActivityRegion {
+                controlVisibility.notePointerActivity()
+            }
+        }
+        .overlay(alignment: .bottom) {
+            videoControls
+                .opacity(showsVideoControls ? 1 : 0)
+                .offset(y: showsVideoControls ? 0 : 8)
+                .allowsHitTesting(showsVideoControls)
+                .accessibilityHidden(!showsVideoControls)
+                .animation(
+                    reduceMotion ? nil : .snappy(duration: 0.2, extraBounce: 0.04),
+                    value: showsVideoControls
+                )
+                .padding(.bottom, 18)
+        }
+        .onAppear {
+            controlVisibility.setPinned(model.videoViewerPinned)
+        }
+        .onChange(of: model.videoViewerPinned) { _, pinned in
+            controlVisibility.setPinned(pinned)
+        }
+        .onDisappear {
+            controlVisibility.stop()
+        }
+        .onExitCommand(perform: model.exitVideoFullscreen)
+    }
 
-            HStack(spacing: 10) {
+    private var showsVideoControls: Bool {
+        !model.videoViewerPinned || controlVisibility.isVisible
+    }
+
+    private var videoControls: some View {
+        VStack(spacing: 0) {
+            Capsule()
+                .fill(Color.white.opacity(0.36))
+                .frame(width: 34, height: 3)
+                .frame(width: 88, height: 9)
+                .contentShape(Rectangle())
+                .overlay(WindowDragRegion().accessibilityHidden(true))
+                .help("Drag video window")
+
+            HStack(spacing: 7) {
                 Circle().fill(Palette.accent).frame(width: 6, height: 6)
                 Text(model.isHost ? "YOUR SCREEN" : "LIVE SCREEN")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .tracking(0.5)
-                Text("·")
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .tracking(0.35)
                 Text(model.roomTitle)
-                    .font(.system(size: 11, weight: .medium))
+                    .font(.system(size: 10, weight: .medium))
                     .lineLimit(1)
                 Spacer()
                 Button(model.isHost ? "Stop sharing" : "Audio only") {
                     model.selectExperience(.audio)
                 }
-                .buttonStyle(VideoOverlayButtonStyle())
+                .buttonStyle(VideoOverlayButtonStyle(compact: true))
                 Button(action: model.toggleVideoViewerPinned) {
                     Image(systemName: model.videoViewerPinned ? "pin.fill" : "pin")
                 }
-                .buttonStyle(VideoControlButtonStyle())
+                .buttonStyle(VideoControlButtonStyle(size: 28))
                 .help(model.videoViewerPinned ? "Unpin from desktops" : "Keep on every desktop")
                 .accessibilityLabel(model.videoViewerPinned ? "Unpin video window" : "Pin video window")
                 Button(action: model.toggleVideoWindowFullScreen) {
                     Image(systemName: "arrow.up.left.and.arrow.down.right")
                 }
-                .buttonStyle(VideoControlButtonStyle())
+                .buttonStyle(VideoControlButtonStyle(size: 28))
                 .help("Toggle full screen")
                 .accessibilityLabel("Toggle full screen")
                 Button(action: model.exitVideoFullscreen) {
                     Image(systemName: "xmark")
                 }
-                .buttonStyle(VideoControlButtonStyle())
+                .buttonStyle(VideoControlButtonStyle(size: 28))
                 .help("Close video window")
                 .accessibilityLabel("Close video window")
             }
             .foregroundStyle(Color.white.opacity(0.92))
-            .padding(.horizontal, 14)
-            .frame(width: 520, height: 48)
-            .background(.ultraThinMaterial.opacity(0.78))
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(Color.white.opacity(0.18), lineWidth: 1)
-            )
-            .padding(.bottom, 28)
+            .padding(.horizontal, 8)
+            .frame(height: 30)
         }
-        .onExitCommand(perform: model.exitVideoFullscreen)
+        .padding(.bottom, 5)
+        .frame(width: 438, height: 44)
+        .background {
+            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 15, style: .continuous)
+                        .fill(Color.black.opacity(0.18))
+                }
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                .stroke(Color.white.opacity(0.16), lineWidth: 1)
+        }
     }
 }
 
@@ -5112,6 +5281,7 @@ private final class FullScreenVideoWindowController: NSObject, NSWindowDelegate 
         window.minSize = NSSize(width: 520, height: 320)
         window.isOpaque = true
         window.backgroundColor = .black
+        window.acceptsMouseMovedEvents = true
         window.collectionBehavior = [.fullScreenPrimary]
         window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: FullScreenVideoView(model: model))
@@ -5420,10 +5590,12 @@ private struct PressScaleButtonStyle: ButtonStyle {
 }
 
 private struct VideoControlButtonStyle: ButtonStyle {
+    var size: CGFloat = 30
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 11, weight: .semibold))
-            .frame(width: 30, height: 30)
+            .frame(width: size, height: size)
             .background(Color.black.opacity(configuration.isPressed ? 0.48 : 0.28))
             .clipShape(Circle())
     }
