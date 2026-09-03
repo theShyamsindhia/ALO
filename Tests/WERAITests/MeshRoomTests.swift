@@ -5,6 +5,12 @@ import Testing
 import WERAICore
 
 struct MeshRoomTests {
+    @Test("Room discovery and media allow nearby peer-to-peer paths")
+    func nearbyPeerToPeerNetworking() {
+        #expect(LocalNetworkParameters.tcp().includePeerToPeer)
+        #expect(LocalNetworkParameters.udp().includePeerToPeer)
+    }
+
     @Test("Emoji identity and bounded profile images remain wire-compatible")
     func identityProfileWireCompatibility() throws {
         let profileImage = Data(repeating: 0x5A, count: DeviceAppearance.maximumProfileImageBytes)

@@ -89,7 +89,7 @@ final class HostServer {
     }
 
     func start() throws {
-        let listener = try NWListener(using: .tcp, on: .any)
+        let listener = try NWListener(using: LocalNetworkParameters.tcp(), on: .any)
         if advertise {
             listener.service = NWListener.Service(name: roomName, type: Self.serviceType)
         }
@@ -327,7 +327,11 @@ final class HostServer {
             client.audio?.cancel()
             client.audioSendsInFlight = 0
             client.pendingAudio = nil
-            let connection = NWConnection(host: host, port: port, using: .udp)
+            let connection = NWConnection(
+                host: host,
+                port: port,
+                using: LocalNetworkParameters.udp()
+            )
             connection.stateUpdateHandler = { state in
                 if case .failed(let error) = state {
                     fputs("Audio path failed: \(error)\n", stderr)
@@ -337,7 +341,11 @@ final class HostServer {
             client.audio = connection
 
             client.video?.cancel()
-            let videoConnection = NWConnection(host: host, port: videoEndpointPort, using: .tcp)
+            let videoConnection = NWConnection(
+                host: host,
+                port: videoEndpointPort,
+                using: LocalNetworkParameters.tcp()
+            )
             videoConnection.stateUpdateHandler = { state in
                 if case .failed(let error) = state {
                     fputs("Video path failed: \(error)\n", stderr)

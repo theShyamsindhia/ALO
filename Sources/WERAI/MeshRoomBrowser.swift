@@ -29,7 +29,7 @@ final class MeshRoomBrowser {
         guard browser == nil else { return }
         let browser = NWBrowser(
             for: .bonjourWithTXTRecord(type: Self.serviceType, domain: nil),
-            using: .tcp
+            using: LocalNetworkParameters.tcp()
         )
         browser.browseResultsChangedHandler = { [weak self] results, _ in
             var rooms = [String: (name: String, isPrivate: Bool, peers: Int, accessProof: String?)]()

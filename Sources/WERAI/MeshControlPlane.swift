@@ -130,7 +130,7 @@ final class MeshControlPlane: @unchecked Sendable {
 
     func start(advertise: Bool = true) throws {
         isStopped = false
-        let listener = try NWListener(using: .tcp, on: .any)
+        let listener = try NWListener(using: LocalNetworkParameters.tcp(), on: .any)
         if advertise {
             var txtRecord = [
                 "roomID": room.id,
@@ -157,7 +157,7 @@ final class MeshControlPlane: @unchecked Sendable {
         if advertise {
             let browser = NWBrowser(
                 for: .bonjourWithTXTRecord(type: MeshRoomBrowser.serviceType, domain: nil),
-                using: .tcp
+                using: LocalNetworkParameters.tcp()
             )
             browser.browseResultsChangedHandler = { [weak self] results, _ in self?.consider(results) }
             browser.start(queue: queue)
@@ -461,7 +461,7 @@ final class MeshControlPlane: @unchecked Sendable {
     }
 
     private func connect(to endpoint: NWEndpoint, expectedNodeID: String?) {
-        let connection = NWConnection(to: endpoint, using: .tcp)
+        let connection = NWConnection(to: endpoint, using: LocalNetworkParameters.tcp())
         let link = Link(connection: connection, initiated: true)
         link.nodeID = expectedNodeID
         register(link)

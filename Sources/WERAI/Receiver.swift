@@ -101,7 +101,7 @@ final class Receiver {
     }
 
     func start() throws {
-        let audioListener = try NWListener(using: .udp, on: .any)
+        let audioListener = try NWListener(using: LocalNetworkParameters.udp(), on: .any)
         audioListener.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             switch state {
@@ -120,7 +120,7 @@ final class Receiver {
         audioListener.start(queue: queue)
         udpListener = audioListener
 
-        let videoListener = try NWListener(using: .tcp, on: .any)
+        let videoListener = try NWListener(using: LocalNetworkParameters.tcp(), on: .any)
         videoListener.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             switch state {
@@ -284,7 +284,7 @@ final class Receiver {
     private func startBrowsing() {
         let browser = NWBrowser(
             for: .bonjour(type: HostServer.serviceType, domain: nil),
-            using: .tcp
+            using: LocalNetworkParameters.tcp()
         )
         browser.browseResultsChangedHandler = { [weak self] results, _ in
             self?.consider(results)
@@ -313,7 +313,7 @@ final class Receiver {
     }
 
     private func connect(to endpoint: NWEndpoint) {
-        let connection = NWConnection(to: endpoint, using: .tcp)
+        let connection = NWConnection(to: endpoint, using: LocalNetworkParameters.tcp())
         connection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             switch state {
