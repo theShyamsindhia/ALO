@@ -22,6 +22,7 @@ typedef struct {
 typedef struct {
     uint64_t writePosition;
     _Atomic uint64_t latestFrameExclusive;
+    _Atomic uint64_t callbackCount;
     ALOTapAudioFrame frames[ALO_TAP_RING_CAPACITY];
 } ALOTapAudioRing;
 
@@ -41,6 +42,18 @@ uint64_t ALOTapAudioRingLatestFrame(ALOTapAudioRingHandle handle) {
     if (handle == NULL) return 0;
     ALOTapAudioRing *ring = handle;
     return atomic_load_explicit(&ring->latestFrameExclusive, memory_order_acquire);
+}
+
+void ALOTapAudioRingMarkCallback(ALOTapAudioRingHandle handle) {
+    if (handle == NULL) return;
+    ALOTapAudioRing *ring = handle;
+    atomic_fetch_add_explicit(&ring->callbackCount, 1, memory_order_release);
+}
+
+uint64_t ALOTapAudioRingLatestCallback(ALOTapAudioRingHandle handle) {
+    if (handle == NULL) return 0;
+    ALOTapAudioRing *ring = handle;
+    return atomic_load_explicit(&ring->callbackCount, memory_order_acquire);
 }
 
 static void ALOTapAudioRingWriteFrame(

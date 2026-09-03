@@ -29,6 +29,18 @@ enum BroadcasterPlaybackMode: Equatable {
 
 }
 
+private final class SourcePlaybackActivity: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Bool?
+
+    func update(_ value: Bool?) {
+        guard let value else { return }
+        lock.withLock { self.value = value }
+    }
+
+    func current() -> Bool? { lock.withLock { value } }
+}
+
 @MainActor
 final class HostSession {
     nonisolated static var synchronizedPlaybackMode: BroadcasterPlaybackMode {
@@ -81,7 +93,9 @@ final class HostSession {
             self.host = host
             try Task.checkCancellation()
 
+            let sourcePlaybackActivity = SourcePlaybackActivity()
             let nowPlayingMonitor = NowPlayingMonitor { [weak host] media in
+                sourcePlaybackActivity.update(media.isPlaying)
                 host?.setNowPlaying(media)
             }
             nowPlayingMonitor.start()
@@ -90,6 +104,7 @@ final class HostSession {
             let (source, playbackMode) = try await startAudioSource(
                 host: host,
                 statusHandler: statusHandler,
+                sourcePlaybackIsActive: { sourcePlaybackActivity.current() },
                 audioStoppedHandler: audioStoppedHandler
             )
             audioSource = source
@@ -138,6 +153,7 @@ final class HostSession {
     private func startAudioSource(
         host: HostServer,
         statusHandler: @escaping (String) -> Void,
+        sourcePlaybackIsActive: @escaping @Sendable () -> Bool?,
         audioStoppedHandler: @escaping @Sendable (Error) -> Void
     ) async throws -> (AudioSource, BroadcasterPlaybackMode) {
         let handler: AudioSource.AudioHandler = { samples, captureTimeNanos in
@@ -149,7 +165,16 @@ final class HostSession {
         }
         statusHandler("Starting one synchronized audio path")
         let tapSource = SystemAudioTapCapture(
-            unexpectedStopHandler: audioStoppedHandler
+            sourcePlaybackIsActive: sourcePlaybackIsActive,
+            unexpectedStopHandler: { [weak self] error in
+                Task { @MainActor [weak self] in
+                    // A capture failure is not a user media command. Once the
+                    // muting tap is detached, let the source app continue at
+                    // its real playback state instead of sending Pause.
+                    self?.shouldPauseSourceOnStop = false
+                    audioStoppedHandler(error)
+                }
+            }
         )
         do {
             try await tapSource.start(audioHandler: handler)
@@ -204,11 +229,6 @@ final class HostSession {
 
     func setParticipantLevel(id: String, volume: Double, muted: Bool) {
         host?.setParticipantLevel(id: id, volume: volume, muted: muted)
-    }
-
-    /// Applies voice ducking to the broadcaster's own synchronized receiver.
-    func setVoiceDuckingActive(_ active: Bool) {
-        localReceiver?.setVoiceDuckingActive(active)
     }
 
     @discardableResult

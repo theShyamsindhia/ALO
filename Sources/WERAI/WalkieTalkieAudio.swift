@@ -528,12 +528,10 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
     )!
     private let format = playbackFormat
     private let stateHandler: @Sendable (String, String, Bool) -> Void
-    private let playbackActivityHandler: @Sendable (Bool) -> Void
     private var sessions = [String: Session]()
     private var tracker = WalkieTalkiePlaybackTracker()
     private var configurationObserver: NSObjectProtocol?
     private var muted = false
-    private var activeSessionCount = 0
     private let maximumBufferedFrames = AVAudioFramePosition(WalkieTalkieMicrophone.sampleRate * 0.20)
 
     static func makePlaybackBuffer(fromPCM16Mono data: Data) -> AVAudioPCMBuffer? {
@@ -561,11 +559,9 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
     }
 
     init(
-        stateHandler: @escaping @Sendable (String, String, Bool) -> Void = { _, _, _ in },
-        playbackActivityHandler: @escaping @Sendable (Bool) -> Void = { _ in }
+        stateHandler: @escaping @Sendable (String, String, Bool) -> Void = { _, _, _ in }
     ) {
         self.stateHandler = stateHandler
-        self.playbackActivityHandler = playbackActivityHandler
         configurationObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange,
             object: engine,
@@ -737,8 +733,8 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
     }
 
     /// Network delivery and render callbacks do not land at perfectly even
-    /// intervals. A short hangover prevents the speaking indicator and media
-    /// ducking from pulsing between otherwise-continuous 20 ms packets.
+    /// intervals. A short hangover keeps the speaking indicator stable between
+    /// otherwise-continuous 20 ms packets.
     private func armPlaybackInactivity(for session: Session) {
         session.inactivityWorkItem?.cancel()
         let sessionID = session.id
@@ -769,12 +765,7 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
     private func setSessionActive(_ session: Session, _ active: Bool) {
         guard session.isActive != active else { return }
         session.isActive = active
-        activeSessionCount += active ? 1 : -1
-        activeSessionCount = max(0, activeSessionCount)
         stateHandler(session.senderID, session.senderName, active)
-        if (active && activeSessionCount == 1) || (!active && activeSessionCount == 0) {
-            playbackActivityHandler(active)
-        }
     }
 
     private func stopSession(_ id: String) {

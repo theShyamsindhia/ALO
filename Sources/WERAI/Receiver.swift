@@ -242,14 +242,6 @@ final class Receiver {
         }
     }
 
-    /// Dims synchronized room media while locally-rendered voice is audible.
-    /// Participant volume and mute remain owned by `setLocalLevel`.
-    func setVoiceDuckingActive(_ active: Bool) {
-        queue.async { [weak self] in
-            self?.player.setVoiceDuckingActive(active)
-        }
-    }
-
     func setRoomPlayback(playing: Bool) {
         sendRoomMediaCommand(playing ? .play : .pause)
     }

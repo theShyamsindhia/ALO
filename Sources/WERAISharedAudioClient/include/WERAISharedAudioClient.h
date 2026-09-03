@@ -20,6 +20,14 @@ ALOTapAudioRingHandle ALOTapAudioRingCreate(void);
 void ALOTapAudioRingDestroy(ALOTapAudioRingHandle handle);
 uint64_t ALOTapAudioRingCapacity(void);
 uint64_t ALOTapAudioRingLatestFrame(ALOTapAudioRingHandle handle);
+
+/// Records that Core Audio entered the IO callback, even when the callback did
+/// not contain renderable frames. This distinguishes a healthy silent tap from
+/// a stopped audio device.
+void ALOTapAudioRingMarkCallback(ALOTapAudioRingHandle handle);
+
+/// Returns the number of Core Audio IO callbacks observed by this ring.
+uint64_t ALOTapAudioRingLatestCallback(ALOTapAudioRingHandle handle);
 void ALOTapAudioRingWriteInterleavedFloat(
     ALOTapAudioRingHandle handle,
     const float *samples,

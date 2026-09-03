@@ -5,33 +5,109 @@ import WERAICore
 import WERAISharedAudioClient
 
 @available(macOS 14.2, *)
+enum TapCaptureHealthAction: Equatable {
+    case waiting
+    case progressed
+    case sustainedProgress
+    case rebuildGraph
+}
+
+@available(macOS 14.2, *)
 struct TapCaptureLivenessWatchdog {
+    private static let continuousFrameGapNanos: UInt64 = 250_000_000
     private let timeoutNanos: UInt64
+    private let stableWindowNanos: UInt64
+    private var latestCallback: UInt64 = 0
     private var latestFrame: UInt64 = 0
-    private var lastProgressNanos: UInt64
-    private var didReportFailure = false
+    private var lastCallbackProgressNanos: UInt64
+    private var lastFrameProgressNanos: UInt64
+    private var healthyFramesSinceNanos: UInt64?
+    private var reportedSustainedProgress = false
+    private var sourcePlaybackWasActive = false
+    private var didRequestRecovery = false
 
     init(
         startedAtNanos: UInt64,
-        timeoutNanos: UInt64 = 2_000_000_000
+        timeoutNanos: UInt64 = 2_000_000_000,
+        stableWindowNanos: UInt64 = 3_000_000_000
     ) {
-        lastProgressNanos = startedAtNanos
+        lastCallbackProgressNanos = startedAtNanos
+        lastFrameProgressNanos = startedAtNanos
         self.timeoutNanos = timeoutNanos
+        self.stableWindowNanos = stableWindowNanos
     }
 
-    mutating func observe(latestFrame: UInt64, nowNanos: UInt64) -> Bool {
-        guard !didReportFailure else { return false }
-        if latestFrame != self.latestFrame {
-            self.latestFrame = latestFrame
-            lastProgressNanos = nowNanos
-            return false
+    mutating func observe(
+        latestCallback: UInt64,
+        latestFrame: UInt64,
+        sourcePlaybackIsActive: Bool,
+        nowNanos: UInt64
+    ) -> TapCaptureHealthAction {
+        guard !didRequestRecovery else { return .waiting }
+        if sourcePlaybackIsActive && !sourcePlaybackWasActive {
+            // A paused source can legitimately leave the last frame timestamp
+            // far in the past. Give a newly-playing source a fresh delivery
+            // grace period before declaring its first buffer missing.
+            lastFrameProgressNanos = nowNanos
+            healthyFramesSinceNanos = nil
+            reportedSustainedProgress = false
         }
-        guard nowNanos >= lastProgressNanos,
-              nowNanos - lastProgressNanos >= timeoutNanos
-        else { return false }
-        didReportFailure = true
-        return true
+        sourcePlaybackWasActive = sourcePlaybackIsActive
+        var madeProgress = false
+        if latestCallback != self.latestCallback {
+            self.latestCallback = latestCallback
+            lastCallbackProgressNanos = nowNanos
+            madeProgress = true
+        }
+        if latestFrame != self.latestFrame {
+            if sourcePlaybackIsActive,
+               nowNanos >= lastFrameProgressNanos,
+               nowNanos - lastFrameProgressNanos > Self.continuousFrameGapNanos {
+                healthyFramesSinceNanos = nil
+                reportedSustainedProgress = false
+            }
+            self.latestFrame = latestFrame
+            lastFrameProgressNanos = nowNanos
+            if healthyFramesSinceNanos == nil { healthyFramesSinceNanos = nowNanos }
+            madeProgress = true
+        } else if sourcePlaybackIsActive,
+                  nowNanos >= lastFrameProgressNanos,
+                  nowNanos - lastFrameProgressNanos > Self.continuousFrameGapNanos {
+            healthyFramesSinceNanos = nil
+            reportedSustainedProgress = false
+        }
+        if !reportedSustainedProgress,
+           let healthyFramesSinceNanos,
+           nowNanos >= healthyFramesSinceNanos,
+           nowNanos - healthyFramesSinceNanos >= stableWindowNanos {
+            reportedSustainedProgress = true
+            return .sustainedProgress
+        }
+        let callbackStalled = nowNanos >= lastCallbackProgressNanos
+            && nowNanos - lastCallbackProgressNanos >= timeoutNanos
+        let activeFramesStalled = sourcePlaybackIsActive
+            && nowNanos >= lastFrameProgressNanos
+            && nowNanos - lastFrameProgressNanos >= timeoutNanos
+        guard callbackStalled || activeFramesStalled else {
+            return madeProgress ? .progressed : .waiting
+        }
+        didRequestRecovery = true
+        return .rebuildGraph
     }
+}
+
+@available(macOS 14.2, *)
+struct TapCaptureRecoveryBudget {
+    static let maximumAttempts = 4
+    private(set) var attempts = 0
+
+    mutating func beginAttempt() -> Int? {
+        guard attempts < Self.maximumAttempts else { return nil }
+        attempts += 1
+        return attempts
+    }
+
+    mutating func reset() { attempts = 0 }
 }
 
 @available(macOS 14.2, *)
@@ -88,6 +164,7 @@ final class SystemAudioTapCapture: AudioSource, @unchecked Sendable {
     private let deliveryQueue = DispatchQueue(label: "in.werai.audio.system-tap.delivery", qos: .userInteractive)
     private let deliveryQueueKey = DispatchSpecificKey<UInt8>()
     private let unexpectedStopHandler: @Sendable (Error) -> Void
+    private let sourcePlaybackIsActive: @Sendable () -> Bool?
     private let stateLock = NSLock()
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var tapFormatConfiguration: TapStreamConfiguration?
@@ -103,11 +180,17 @@ final class SystemAudioTapCapture: AudioSource, @unchecked Sendable {
     private var hostTicksPerFrame = 0.0
     private var stopping = false
     private var unexpectedFailureReported = false
+    private var recoveryPending = false
+    private var recoveryBudget = TapCaptureRecoveryBudget()
     private var livenessWatchdog = TapCaptureLivenessWatchdog(
         startedAtNanos: MonotonicClock.nowNanos()
     )
 
-    init(unexpectedStopHandler: @escaping @Sendable (Error) -> Void = { _ in }) {
+    init(
+        sourcePlaybackIsActive: @escaping @Sendable () -> Bool? = { nil },
+        unexpectedStopHandler: @escaping @Sendable (Error) -> Void = { _ in }
+    ) {
+        self.sourcePlaybackIsActive = sourcePlaybackIsActive
         self.unexpectedStopHandler = unexpectedStopHandler
         deliveryQueue.setSpecific(key: deliveryQueueKey, value: 1)
     }
@@ -144,16 +227,31 @@ final class SystemAudioTapCapture: AudioSource, @unchecked Sendable {
     }
 
     private func startSynchronously(audioHandler: @escaping AudioHandler) throws {
-        guard tapID == kAudioObjectUnknown else { return }
+        stateLock.withLock {
+            stopping = false
+            unexpectedFailureReported = false
+            recoveryPending = false
+            recoveryBudget.reset()
+            self.audioHandler = audioHandler
+        }
+        try startGraphSynchronously()
+    }
+
+    /// Builds only the Core Audio graph. Keeping the room-facing handler outside
+    /// this lifecycle lets route and format changes rebuild the tap without
+    /// publishing a false Stop Broadcast transition.
+    private func startGraphSynchronously() throws {
+        guard tapID == kAudioObjectUnknown,
+              aggregateID == kAudioObjectUnknown,
+              ioProcID == nil,
+              ring == nil
+        else {
+            throw WERAIError("ALO could not rebuild an incompletely detached audio tap.")
+        }
         guard let ownProcessID = Self.audioObjectID(forPID: getpid()) else {
             throw WERAIError("ALO could not identify its own Core Audio process.")
         }
 
-        stateLock.withLock {
-            stopping = false
-            unexpectedFailureReported = false
-            self.audioHandler = audioHandler
-        }
         livenessWatchdog = TapCaptureLivenessWatchdog(
             startedAtNanos: MonotonicClock.nowNanos()
         )
@@ -237,6 +335,7 @@ final class SystemAudioTapCapture: AudioSource, @unchecked Sendable {
         inputTime: UnsafePointer<AudioTimeStamp>
     ) {
         guard let ring else { return }
+        ALOTapAudioRingMarkCallback(ring)
         let buffers = UnsafeMutableAudioBufferListPointer(
             UnsafeMutablePointer(mutating: inputData)
         )
@@ -291,13 +390,24 @@ final class SystemAudioTapCapture: AudioSource, @unchecked Sendable {
 
     private func drainRing() {
         guard let ring, let converter else { return }
+        let latestCallback = ALOTapAudioRingLatestCallback(ring)
         let latest = ALOTapAudioRingLatestFrame(ring)
         let now = MonotonicClock.nowNanos()
-        if livenessWatchdog.observe(latestFrame: latest, nowNanos: now) {
-            reportUnexpectedStop(WERAIError(
-                "System audio stopped arriving from Core Audio. Start broadcasting again."
+        switch livenessWatchdog.observe(
+            latestCallback: latestCallback,
+            latestFrame: latest,
+            sourcePlaybackIsActive: sourcePlaybackIsActive() == true,
+            nowNanos: now
+        ) {
+        case .sustainedProgress:
+            stateLock.withLock { recoveryBudget.reset() }
+        case .rebuildGraph:
+            requestGraphRecovery(WERAIError(
+                "The Core Audio tap stopped delivering valid audio."
             ))
             return
+        case .waiting, .progressed:
+            break
         }
         let capacity = ALOTapAudioRingCapacity()
         if latest > nextRingFrame &+ capacity {
@@ -343,7 +453,13 @@ final class SystemAudioTapCapture: AudioSource, @unchecked Sendable {
         stateLock.withLock {
             stopping = true
             audioHandler = nil
+            recoveryPending = false
+            recoveryBudget.reset()
         }
+        teardownGraphSynchronously()
+    }
+
+    private func teardownGraphSynchronously() {
         deliveryTimer?.setEventHandler {}
         deliveryTimer?.cancel()
         deliveryTimer = nil
@@ -418,8 +534,8 @@ final class SystemAudioTapCapture: AudioSource, @unchecked Sendable {
     }
 
     private func installTapFormatListener() throws {
-        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            self?.handleTapFormatChange()
+        let listener: AudioObjectPropertyListenerBlock = { [weak self] objectID, _ in
+            self?.handleTapFormatChange(for: objectID)
         }
         var address = Self.propertyAddress(selector: kAudioTapPropertyFormat)
         try Self.check(
@@ -434,8 +550,9 @@ final class SystemAudioTapCapture: AudioSource, @unchecked Sendable {
         tapFormatListener = listener
     }
 
-    private func handleTapFormatChange() {
-        guard tapID != kAudioObjectUnknown,
+    private func handleTapFormatChange(for objectID: AudioObjectID) {
+        guard objectID == tapID,
+              tapID != kAudioObjectUnknown,
               let expected = tapFormatConfiguration
         else { return }
         do {
@@ -444,11 +561,66 @@ final class SystemAudioTapCapture: AudioSource, @unchecked Sendable {
                 selector: kAudioTapPropertyFormat
             )
             guard TapStreamConfiguration(current) != expected else { return }
-            reportUnexpectedStop(WERAIError(
-                "The system audio format changed. Start broadcasting again to resynchronize."
-            ))
+            requestGraphRecovery(WERAIError("The system audio tap format changed."))
         } catch {
-            reportUnexpectedStop(error)
+            requestGraphRecovery(error)
+        }
+    }
+
+    /// Rebuilds the tap and aggregate device in place. The HostSession and its
+    /// room identity stay alive, so a transient Core Audio route change cannot
+    /// masquerade as a user-requested Stop Broadcast action.
+    private func requestGraphRecovery(_ error: Error) {
+        let shouldSchedule = stateLock.withLock { () -> Bool in
+            guard !stopping, !recoveryPending else { return false }
+            recoveryPending = true
+            return true
+        }
+        guard shouldSchedule else { return }
+        let reason = error.localizedDescription
+        setupQueue.async { [weak self] in
+            self?.recoverGraphSynchronously(reason: reason)
+        }
+    }
+
+    private func recoverGraphSynchronously(reason: String) {
+        let authorization = stateLock.withLock { () -> (active: Bool, attempt: Int?) in
+            guard !stopping, audioHandler != nil else {
+                recoveryPending = false
+                return (false, nil)
+            }
+            return (true, recoveryBudget.beginAttempt())
+        }
+        guard authorization.active else { return }
+        guard let attempt = authorization.attempt else {
+            teardownGraphSynchronously()
+            stateLock.withLock { recoveryPending = false }
+            reportUnexpectedStop(WERAIError(
+                "System audio stayed unhealthy after \(TapCaptureRecoveryBudget.maximumAttempts) recovery attempts."
+            ))
+            return
+        }
+
+        fputs("ALO: Rebuilding synchronized audio graph (\(reason), attempt \(attempt)).\n", stderr)
+        teardownGraphSynchronously()
+        guard stateLock.withLock({ !stopping && audioHandler != nil }) else { return }
+
+        do {
+            try startGraphSynchronously()
+            stateLock.withLock { recoveryPending = false }
+        } catch {
+            teardownGraphSynchronously()
+            guard attempt < TapCaptureRecoveryBudget.maximumAttempts else {
+                stateLock.withLock { recoveryPending = false }
+                reportUnexpectedStop(WERAIError(
+                    "System audio could not recover after a Core Audio change. \(error.localizedDescription)"
+                ))
+                return
+            }
+            let retryDelay = min(2.0, 0.25 * Double(1 << (attempt - 1)))
+            setupQueue.asyncAfter(deadline: .now() + retryDelay) { [weak self] in
+                self?.recoverGraphSynchronously(reason: reason)
+            }
         }
     }
 

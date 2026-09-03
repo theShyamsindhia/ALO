@@ -55,22 +55,13 @@ struct ClientPlaybackReliabilityTests {
         ) == ["talk-peer"])
     }
 
-    @Test("Media ducking reaches 30 percent with a short attack and gentle release")
-    func voiceDuckingEnvelope() {
-        var envelope = MediaDuckingEnvelope()
-        envelope.setDucked(true, at: 1_000_000_000)
-
-        #expect(abs(envelope.advance(to: 1_030_000_000) - 0.65) < 0.000_001)
-        #expect(abs(envelope.advance(to: 1_060_000_000) - 0.30) < 0.000_001)
-
-        envelope.setDucked(false, at: 1_060_000_000)
-        #expect(abs(envelope.advance(to: 1_235_000_000) - 0.65) < 0.000_001)
-        #expect(abs(envelope.advance(to: 1_410_000_000) - 1.0) < 0.000_001)
-        #expect(MediaDuckingEnvelope.effectiveGain(
-            participantVolume: 0.5, muted: false, duckingGain: 0.3
-        ) == 0.15)
-        #expect(MediaDuckingEnvelope.effectiveGain(
-            participantVolume: 0.5, muted: true, duckingGain: 1
+    @Test("Voice playback never changes synchronized media gain")
+    func voiceDoesNotDuckMedia() {
+        #expect(MediaOutputGain.effectiveGain(
+            participantVolume: 0.5, muted: false
+        ) == 0.5)
+        #expect(MediaOutputGain.effectiveGain(
+            participantVolume: 0.5, muted: true
         ) == 0)
     }
     @Test @MainActor func videoControlStartsAudioAndVideoWhenNoBroadcasterVideoExists() {

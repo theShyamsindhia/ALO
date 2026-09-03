@@ -95,7 +95,6 @@ final class MeshSession {
     private var localVolume = 1.0
     private var localParticipantMuted = false
     private var walkieStartGeneration: Int?
-    private var incomingVoicePlaybackActive = false
     private var walkieTalkieTargets = Set<String>()
     private var openLineSessionState: OpenLineSessionState
 
@@ -114,7 +113,6 @@ final class MeshSession {
         var replica: (MeshRoomReplica) -> Void = { _ in }
         var participants: ([RoomParticipant]) -> Void = { _ in }
         var openLine: (OpenLineMessage) -> Void = { _ in }
-        var voiceActivity: (Bool) -> Void = { _ in }
     }
     private let callbackRelay: CallbackRelay
 
@@ -205,9 +203,6 @@ final class MeshSession {
                 DispatchQueue.main.async {
                     walkieTalkieStateHandler(senderID, senderName, active)
                 }
-            },
-            playbackActivityHandler: { active in
-                DispatchQueue.main.async { relay.voiceActivity(active) }
             }
         )
         self.walkieTalkiePlayer = walkieTalkiePlayer
@@ -245,11 +240,6 @@ final class MeshSession {
         relay.replica = { [weak self] in self?.apply($0) }
         relay.participants = participantsHandler
         relay.openLine = { [weak self] in self?.receiveOpenLine($0) }
-        relay.voiceActivity = { [weak self] active in
-            self?.incomingVoicePlaybackActive = active
-            self?.receiver?.setVoiceDuckingActive(active)
-            self?.hostSession?.setVoiceDuckingActive(active)
-        }
     }
 
     func start(broadcastInitially: Bool) throws {
@@ -818,7 +808,6 @@ final class MeshSession {
                         await host.stop()
                         return
                     }
-                    host.setVoiceDuckingActive(incomingVoicePlaybackActive)
                     if initialVideoEnabled,
                        let current = replica.broadcaster,
                        current.nodeID == nodeID {
@@ -881,7 +870,6 @@ final class MeshSession {
                     )
                     self.receiver = receiver
                     try receiver.start()
-                    receiver.setVoiceDuckingActive(incomingVoicePlaybackActive)
                     receiver.setLocalLevel(
                         volume: localVolume,
                         muted: localParticipantMuted || incomingMediaMuted
