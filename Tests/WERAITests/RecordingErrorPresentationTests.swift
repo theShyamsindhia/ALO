@@ -61,6 +61,6 @@ struct RecordingErrorPresentationTests {
         )
 
         #expect(RecordingErrorPresentation.isPermissionFailure(wrapper, screenCaptureAccess: true))
-        #expect(RecordingErrorPresentation.message(for: wrapper, screenCaptureAccess: true).contains("System Audio Recording Only"))
+        #expect(RecordingErrorPresentation.message(for: wrapper, screenCaptureAccess: true).contains("Screen & System Audio Recording"))
     }
 }

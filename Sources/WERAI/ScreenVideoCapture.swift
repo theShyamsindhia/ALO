@@ -5,6 +5,77 @@ import Foundation
 import ScreenCaptureKit
 import WERAICore
 
+@MainActor
+final class ScreenContentPicker: NSObject, SCContentSharingPickerObserver {
+    private var continuation: CheckedContinuation<SCContentFilter, Error>?
+    private var isCancelled = false
+
+    static func configuration(excludingBundleID bundleID: String?) -> SCContentSharingPickerConfiguration {
+        var configuration = SCContentSharingPickerConfiguration()
+        configuration.allowedPickerModes = [.singleDisplay, .singleWindow]
+        configuration.allowsChangingSelectedContent = false
+        if let bundleID { configuration.excludedBundleIDs = [bundleID] }
+        return configuration
+    }
+
+    func selectDisplayOrWindow() async throws -> SCContentFilter {
+        guard !isCancelled else { throw CancellationError() }
+        guard continuation == nil else { throw WERAIError("A screen picker is already open.") }
+        let picker = SCContentSharingPicker.shared
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                self.continuation = continuation
+                picker.defaultConfiguration = Self.configuration(
+                    excludingBundleID: Bundle.main.bundleIdentifier
+                )
+                picker.add(self)
+                picker.isActive = true
+                picker.present()
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in self?.cancel() }
+        }
+    }
+
+    func cancel() {
+        isCancelled = true
+        finish(
+            with: .failure(CancellationError()),
+            picker: SCContentSharingPicker.shared
+        )
+    }
+
+    nonisolated func contentSharingPicker(
+        _ picker: SCContentSharingPicker,
+        didUpdateWith filter: SCContentFilter,
+        for stream: SCStream?
+    ) {
+        Task { @MainActor in finish(with: .success(filter), picker: picker) }
+    }
+
+    nonisolated func contentSharingPicker(_ picker: SCContentSharingPicker, didCancelFor stream: SCStream?) {
+        Task { @MainActor in finish(with: .failure(CancellationError()), picker: picker) }
+    }
+
+    nonisolated func contentSharingPickerStartDidFailWithError(_ error: Error) {
+        Task { @MainActor in
+            finish(with: .failure(error), picker: SCContentSharingPicker.shared)
+        }
+    }
+
+    private func finish(
+        with result: Result<SCContentFilter, Error>,
+        picker: SCContentSharingPicker
+    ) {
+        guard let continuation else { return }
+        self.continuation = nil
+        picker.remove(self)
+        picker.isActive = false
+        continuation.resume(with: result)
+    }
+}
+
 final class ScreenVideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     typealias Handler = (_ pixelBuffer: CVPixelBuffer, _ captureTimeNanos: UInt64) -> Void
     typealias StopHandler = (_ error: Error) -> Void
@@ -27,11 +98,6 @@ final class ScreenVideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         handler: @escaping Handler,
         stopped: @escaping StopHandler = { _ in }
     ) async throws {
-        queue.sync {
-            self.handler = handler
-            self.stopHandler = stopped
-            self.stopping = false
-        }
         var selectedDisplay: SCDisplay?
         var availableApplications = [SCRunningApplication]()
         // ScreenCaptureKit maintains its own display snapshot. Retry briefly if
@@ -66,11 +132,26 @@ final class ScreenVideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             excludingApplications: excludedApplications,
             exceptingWindows: []
         )
+        try await start(filter: filter, handler: handler, stopped: stopped)
+    }
+
+    func start(
+        filter: SCContentFilter,
+        handler: @escaping Handler,
+        stopped: @escaping StopHandler = { _ in }
+    ) async throws {
+        queue.sync {
+            self.handler = handler
+            self.stopHandler = stopped
+            self.stopping = false
+        }
         let configuration = SCStreamConfiguration()
-        let scale = min(1, min(1280 / Double(display.width), 720 / Double(display.height)))
+        let sourceWidth = max(2, Double(filter.contentRect.width) * Double(filter.pointPixelScale))
+        let sourceHeight = max(2, Double(filter.contentRect.height) * Double(filter.pointPixelScale))
+        let scale = min(1, min(1280 / sourceWidth, 720 / sourceHeight))
         configuration.capturesAudio = false
-        configuration.width = max(2, Int(Double(display.width) * scale) / 2 * 2)
-        configuration.height = max(2, Int(Double(display.height) * scale) / 2 * 2)
+        configuration.width = max(2, Int(sourceWidth * scale) / 2 * 2)
+        configuration.height = max(2, Int(sourceHeight * scale) / 2 * 2)
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: 30)
         configuration.queueDepth = 5
         configuration.showsCursor = true

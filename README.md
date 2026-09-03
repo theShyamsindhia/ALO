@@ -35,8 +35,9 @@ on this Mac:
 
 The first time a Mac broadcasts, macOS asks for **Screen & System Audio Recording**
 permission. ALO uses that permission for system audio only while that Mac is the active
-broadcaster. After granting it, restart ALO once. No separate speaker output or audio
-driver is installed.
+broadcaster. This single grant covers audio and optional display/window video; ALO does not
+request the separate **System Audio Recording Only** permission. Restart ALO only if macOS
+still reports the old permission state. No separate speaker output or audio driver is installed.
 
 After the room connects, the setup window disappears and the room moves into the
 menu bar. Click the cat to reveal the compact controls; the same surface grows
@@ -93,10 +94,9 @@ The room name is optional. Without one, a receiver joins the first room it finds
 
 Broadcasting audio uses ScreenCaptureKit and needs **Screen & System Audio Recording**.
 ALO requests access when a member first chooses **Broadcast**, before claiming the room's
-media timeline. When the active broadcaster also enables video, ALO captures that Mac's
-current main display and streams it to the room. On macOS 15, ALO requests the complete
-ScreenCaptureKit display list instead of limiting discovery to displays associated with
-currently visible windows.
+media timeline. When the active broadcaster also enables video, ALO opens the native macOS
+sharing picker. Choose one display or one window; cancelling the picker leaves video off.
+The selected content is then streamed to the room.
 Every Mac may also ask for **Local Network** access.
 Grant recording access in System Settings → Privacy & Security, then use **Restart ALO** if
 macOS asks you to restart it.
@@ -106,19 +106,20 @@ copies of ALO, turn the switch off and on once, and restart the current app. Do 
 keep numbered copies such as `ALO 2.app` or `ALO 3.app` in Applications; macOS can
 retain stale privacy records for those development builds.
 
-Video sharing intentionally requires the user's Screen Recording consent. ALO captures
-only the current main display and excludes ALO's own windows from the stream.
+Video sharing intentionally requires the user's Screen Recording consent. ALO excludes
+its own windows from the native picker.
 
 Every open room also has a compact walkie-talkie bar. Hold a colored device icon to talk
-only to that Mac, or hold the people icon to talk to everyone. The lock keeps the selected
-voice line open; enable it on both Macs for a two-way line. Right-click a device to pin its
+only to that Mac, or hold the people icon to talk to everyone. **Open line** keeps the selected
+voice line open; enable it on both Macs for a two-way line. Choose the active microphone from
+the labeled microphone menu. Right-click a device to pin its
 colored icon to the macOS menu bar, where a short click opens or closes the line and a hold
-acts as push-to-talk. Incoming speakers highlight green. The speaker control mutes both
-room media and calls by default, with separate Music & Video and Voice Lines choices in
-its context menu. Microphone access is requested only when voice transmission starts.
+acts as push-to-talk. Incoming speakers highlight green. The incoming-audio menu can mute
+Music & Video, Voice Lines, or everything. Microphone access is requested only when voice
+transmission starts; if it was previously denied, ALO links directly to Microphone settings.
 
-Use the pencil on this Mac's walkie icon—or the colored icon beside Create Room—to change
-its generated device name, SF Symbol icon, and color. Identity changes persist on that Mac
+Use **Customize this Mac** on the room picker to change
+its generated device name, emoji, color, and optional profile photo. Identity changes persist on that Mac
 and propagate to the current room immediately. The walkie bar can be dismissed with its
 close button; the same controls remain available from ALO's menu-bar popover.
 

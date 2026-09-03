@@ -5,6 +5,54 @@ import Testing
 import WERAICore
 
 struct MeshRoomTests {
+    @Test("Emoji identity and bounded profile images remain wire-compatible")
+    func identityProfileWireCompatibility() throws {
+        let profileImage = Data(repeating: 0x5A, count: DeviceAppearance.maximumProfileImageBytes)
+        let envelope = MeshEnvelope(
+            type: "hello",
+            nodeID: "peer",
+            deviceIcon: "🦊",
+            profileImageData: profileImage
+        )
+        let encoded = try envelope.encodedLine()
+        let decoded = try #require(MeshEnvelopeDecoder().append(encoded).first)
+
+        #expect(decoded.deviceIcon == "🦊")
+        #expect(decoded.profileImageData == profileImage)
+        #expect(String(decoding: encoded, as: UTF8.self).contains("\"deviceIcon\":\"🦊\""))
+
+        let legacy = try JSONDecoder().decode(
+            MeshEnvelope.self,
+            from: Data(#"{"type":"hello","deviceIcon":"🦊"}"#.utf8)
+        )
+        #expect(legacy.deviceIcon == "🦊")
+        #expect(legacy.profileImageData == nil)
+
+        let oversized = Data(
+            repeating: 0xFF,
+            count: DeviceAppearance.maximumProfileImageBytes + 1
+        )
+        #expect(DeviceAppearance.sanitizedProfileImageData(Data()) == nil)
+        #expect(DeviceAppearance.sanitizedProfileImageData(oversized) == nil)
+        #expect(MeshEnvelope(type: "hello", profileImageData: oversized).profileImageData == nil)
+        #expect(DeviceAppearance(icon: "laptopcomputer", colorHex: "E45B69").icon == DeviceAppearance.icons[0])
+
+        let oversizedBase64 = oversized.base64EncodedString()
+        let oversizedWire = Data(
+            ("{\"type\":\"hello\",\"profileImageData\":\"" + oversizedBase64 + "\"}\n").utf8
+        )
+        #expect(MeshEnvelopeDecoder().append(oversizedWire).first?.profileImageData == nil)
+
+        let oversizedParticipant = try JSONDecoder().decode(
+            RoomParticipant.self,
+            from: Data((
+                "{\"id\":\"peer\",\"name\":\"Peer\",\"volume\":1," +
+                    "\"isMuted\":false,\"profileImageData\":\"" + oversizedBase64 + "\"}"
+            ).utf8)
+        )
+        #expect(oversizedParticipant.profileImageData == nil)
+    }
+
     @Test("Lamport ordering is not controlled by persisted wall clocks")
     func lamportOrderingPrecedesWallTime() {
         let olderCounter = MeshVersion(counter: 1, nodeID: "z", wallTimeMillis: UInt64.max)
@@ -146,6 +194,8 @@ struct MeshRoomTests {
 
         nodeA.publishChat("from creator")
         #expect(waitUntil { a.chatCount == 1 && b.chatCount == 1 && c.chatCount == 1 })
+        #expect(a.chatSenderIDs == ["a"])
+        #expect(b.chatSenderIDs == ["a"])
         nodeA.stop()
         #expect(waitUntil { b.participantCount == 2 && c.participantCount == 2 })
 
@@ -363,6 +413,47 @@ struct MeshRoomTests {
         #expect(commands.epochs == [epoch])
     }
 
+    @Test("Stopping does not block behind an in-flight room command")
+    func stoppingDoesNotDeadlockWithCommandHandler() throws {
+        let room = RoomConfiguration(name: "Nonblocking stop test", creatorPeerID: "a")
+        let ready = PortProbe()
+        let a = MeshProbe()
+        let b = MeshProbe()
+        let blocker = BlockingCommandProbe()
+        let nodeA = makeNode(room: room, id: "a", probe: a, ports: PortProbe())
+        let nodeB = MeshControlPlane(
+            room: room,
+            nodeID: "b",
+            displayName: "B",
+            listenerReadyHandler: { ready.set($0) },
+            replicaHandler: { b.update(replica: $0) },
+            participantsHandler: { b.update(participants: $0) },
+            mediaCommandHandler: { _, _, _ in blocker.handle() }
+        )
+        try nodeA.start(advertise: false)
+        try nodeB.start(advertise: false)
+        defer {
+            blocker.release()
+            nodeA.stop()
+            nodeB.stop()
+        }
+        guard let port = ready.wait() else {
+            Issue.record("Mesh listener did not start")
+            return
+        }
+        nodeA.connectForTesting(to: .hostPort(host: "127.0.0.1", port: port))
+        #expect(waitUntil { a.participantCount == 2 && b.participantCount == 2 })
+        nodeB.publishBroadcaster(active: true, mediaServiceName: "test-media")
+        #expect(waitUntil { a.broadcasterID == "b" })
+        let epoch = try #require(a.broadcasterEpoch)
+        nodeA.publishMediaCommand(.pause, broadcasterID: "b", broadcasterEpoch: epoch)
+        #expect(blocker.waitUntilEntered())
+
+        let started = Date()
+        nodeB.stop()
+        #expect(Date().timeIntervalSince(started) < 0.2)
+    }
+
     @Test("Walkie-talkie targets one peer or every connected peer")
     func walkieTalkieRoutingAndIdentity() throws {
         let room = RoomConfiguration(name: "Walkie test", creatorPeerID: "a")
@@ -373,9 +464,11 @@ struct MeshRoomTests {
         let cReady = PortProbe()
         let bWalkie = WalkieProbe()
         let cWalkie = WalkieProbe()
+        let initialProfileImage = Data([0x01, 0x02, 0x03])
         let nodeA = makeNode(room: room, id: "a", probe: aProbe, ports: PortProbe())
         let nodeB = MeshControlPlane(
             room: room, nodeID: "b", displayName: "B",
+            profileImageData: initialProfileImage,
             listenerReadyHandler: { bReady.set($0) },
             replicaHandler: { bProbe.update(replica: $0) },
             participantsHandler: { bProbe.update(participants: $0) },
@@ -399,6 +492,7 @@ struct MeshRoomTests {
         nodeA.connectForTesting(to: .hostPort(host: "127.0.0.1", port: portB))
         nodeA.connectForTesting(to: .hostPort(host: "127.0.0.1", port: portC))
         #expect(waitUntil { aProbe.participantCount == 3 })
+        #expect(aProbe.participant(id: "b")?.profileImageData == initialProfileImage)
 
         nodeA.publishWalkieTalkie(.init(
             kind: .audio, senderID: "a", senderName: "A", targetID: "b",
@@ -413,10 +507,61 @@ struct MeshRoomTests {
         ))
         #expect(waitUntil { bWalkie.count == 2 && cWalkie.count == 1 })
 
-        nodeB.updateIdentity(name: "Studio Mac", icon: "sparkles", colorHex: "E45B69")
+        let profileImage = Data([0x89, 0x50, 0x4E, 0x47])
+        nodeB.updateIdentity(
+            name: "Studio Mac",
+            icon: "🦊",
+            colorHex: "E45B69",
+            profileImageData: profileImage
+        )
         #expect(waitUntil { aProbe.participant(id: "b")?.name == "Studio Mac" })
-        #expect(aProbe.participant(id: "b")?.icon == "sparkles")
+        #expect(aProbe.participant(id: "b")?.icon == "🦊")
         #expect(aProbe.participant(id: "b")?.colorHex == "E45B69")
+        #expect(aProbe.participant(id: "b")?.profileImageData == profileImage)
+        #expect(MeshControlPlane.identityEnvelopeType == "display_name")
+
+        nodeB.updateIdentity(
+            name: "Studio Mac",
+            icon: "🦊",
+            colorHex: "E45B69",
+            profileImageData: nil
+        )
+        #expect(waitUntil { aProbe.participant(id: "b")?.profileImageData == nil })
+    }
+
+    @Test("Peer-provided appearance values are sanitized")
+    func invalidPeerAppearanceIsSanitized() throws {
+        let room = RoomConfiguration(name: "Appearance test", creatorPeerID: "a")
+        let a = MeshProbe()
+        let b = MeshProbe()
+        let ready = PortProbe()
+        let nodeA = makeNode(room: room, id: "a", probe: a, ports: PortProbe())
+        let nodeB = MeshControlPlane(
+            room: room,
+            nodeID: "b",
+            displayName: "B",
+            deviceIcon: "not-an-sf-symbol-we-allow",
+            deviceColorHex: "NOTHEX",
+            profileImageData: Data(
+                repeating: 0xFF,
+                count: DeviceAppearance.maximumProfileImageBytes + 1
+            ),
+            listenerReadyHandler: { ready.set($0) },
+            replicaHandler: { b.update(replica: $0) },
+            participantsHandler: { b.update(participants: $0) }
+        )
+        try nodeA.start(advertise: false)
+        try nodeB.start(advertise: false)
+        defer { nodeA.stop(); nodeB.stop() }
+        guard let port = ready.wait() else {
+            Issue.record("Mesh listener did not start")
+            return
+        }
+        nodeA.connectForTesting(to: .hostPort(host: "127.0.0.1", port: port))
+        #expect(waitUntil { a.participantCount == 2 })
+        #expect(a.participant(id: "b")?.icon == DeviceAppearance.icons[0])
+        #expect(a.participant(id: "b")?.colorHex == DeviceAppearance.colors[0])
+        #expect(a.participant(id: "b")?.profileImageData == nil)
     }
 
     @Test("Playback and Sync All survive a relayed mesh path")
@@ -712,6 +857,7 @@ private final class MeshProbe: @unchecked Sendable {
     var participantCount: Int { lock.withLock { participants.count } }
     var chatCount: Int { lock.withLock { replica.chatEvents.count } }
     var chatTexts: [String?] { lock.withLock { replica.chatEvents.map(\.text) } }
+    var chatSenderIDs: [String?] { lock.withLock { replica.chatEvents.map(\.senderID) } }
     var broadcasterID: String? { lock.withLock { replica.broadcaster?.nodeID } }
     var broadcasterEpoch: UInt64? { lock.withLock { replica.broadcaster?.epoch } }
     func participant(id: String) -> RoomParticipant? {
@@ -719,6 +865,20 @@ private final class MeshProbe: @unchecked Sendable {
     }
     func update(replica: MeshRoomReplica) { lock.withLock { self.replica = replica } }
     func update(participants: [RoomParticipant]) { lock.withLock { self.participants = participants } }
+}
+
+private final class BlockingCommandProbe: @unchecked Sendable {
+    private let entered = DispatchSemaphore(value: 0)
+    private let released = DispatchSemaphore(value: 0)
+
+    func handle() -> Bool {
+        entered.signal()
+        _ = released.wait(timeout: .now() + 3)
+        return true
+    }
+
+    func waitUntilEntered() -> Bool { entered.wait(timeout: .now() + 3) == .success }
+    func release() { released.signal() }
 }
 
 private final class WalkieProbe: @unchecked Sendable {

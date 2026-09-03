@@ -112,4 +112,31 @@ struct ClientPlaybackReliabilityTests {
             hasMedia: false
         ))
     }
+
+    @Test func identityRefreshPreservesPerDeviceMixerSettings() {
+        let prior = [RoomParticipant(
+            id: "peer",
+            name: "Old name",
+            volume: 0.35,
+            isMuted: true,
+            icon: "laptopcomputer",
+            colorHex: "E45B69"
+        )]
+        let refreshed = [RoomParticipant(
+            id: "peer",
+            name: "New name",
+            volume: 1,
+            isMuted: false,
+            icon: "sparkles",
+            colorHex: "7C6FF2"
+        )]
+
+        let merged = WERAIViewModel.mergingParticipants(refreshed, preserving: prior)
+
+        #expect(merged.first?.name == "New name")
+        #expect(merged.first?.icon == "sparkles")
+        #expect(merged.first?.colorHex == "7C6FF2")
+        #expect(merged.first?.volume == 0.35)
+        #expect(merged.first?.isMuted == true)
+    }
 }

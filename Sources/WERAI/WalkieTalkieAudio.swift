@@ -1,10 +1,137 @@
 import AVFoundation
+import AudioToolbox
+import CoreAudio
 import Foundation
 import WERAICore
 
-final class WalkieTalkieMicrophone {
+struct VoiceInputDevice: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let isSystemDefault: Bool
+}
+
+enum VoiceInputCatalog {
+    static func availableDevices() -> [VoiceInputDevice] {
+        let defaultID = defaultInputDeviceID()
+        let devices: [VoiceInputDevice] = allDeviceIDs().compactMap { deviceID in
+            guard isAlive(deviceID),
+                  hasInput(deviceID),
+                  let uid = VirtualAudioDevice.uid(for: deviceID),
+                  let name = name(for: deviceID)
+            else { return nil }
+            return VoiceInputDevice(id: uid, name: name, isSystemDefault: deviceID == defaultID)
+        }
+        return sorted(devices)
+    }
+
+    static func sorted(_ devices: [VoiceInputDevice]) -> [VoiceInputDevice] {
+        devices.sorted {
+            if $0.isSystemDefault != $1.isSystemDefault { return $0.isSystemDefault }
+            let nameOrder = $0.name.localizedCaseInsensitiveCompare($1.name)
+            if nameOrder != .orderedSame { return nameOrder == .orderedAscending }
+            return $0.id < $1.id
+        }
+    }
+
+    static func apply(_ uid: String?, to inputNode: AVAudioInputNode) throws {
+        guard let uid else { return }
+        guard var deviceID = VirtualAudioDevice.deviceID(uid: uid),
+              isAlive(deviceID), hasInput(deviceID)
+        else { throw WERAIError("The selected microphone is no longer available.") }
+        guard let audioUnit = inputNode.audioUnit else {
+            throw WERAIError("ALO could not prepare the selected microphone.")
+        }
+        let status = AudioUnitSetProperty(
+            audioUnit,
+            kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global,
+            0,
+            &deviceID,
+            UInt32(MemoryLayout<AudioDeviceID>.size)
+        )
+        guard status == noErr else {
+            throw WERAIError("ALO could not use the selected microphone (OSStatus \(status)).")
+        }
+    }
+
+    private static func allDeviceIDs() -> [AudioDeviceID] {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDevices,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size
+        ) == noErr else { return [] }
+        var devices = [AudioDeviceID](
+            repeating: kAudioObjectUnknown,
+            count: Int(size) / MemoryLayout<AudioDeviceID>.size
+        )
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &devices
+        ) == noErr else { return [] }
+        return devices
+    }
+
+    private static func defaultInputDeviceID() -> AudioDeviceID? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var deviceID = AudioDeviceID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &deviceID
+        ) == noErr, deviceID != kAudioObjectUnknown else { return nil }
+        return deviceID
+    }
+
+    private static func hasInput(_ deviceID: AudioDeviceID) -> Bool {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreams,
+            mScope: kAudioDevicePropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var size: UInt32 = 0
+        return AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size) == noErr && size > 0
+    }
+
+    private static func isAlive(_ deviceID: AudioDeviceID) -> Bool {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceIsAlive,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var value: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        return AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &value) == noErr
+            && value != 0
+    }
+
+    private static func name(for deviceID: AudioDeviceID) -> String? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioObjectPropertyName,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var value: CFString = "" as CFString
+        var size = UInt32(MemoryLayout<CFString>.size)
+        let status = withUnsafeMutablePointer(to: &value) {
+            AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, $0)
+        }
+        return status == noErr ? value as String : nil
+    }
+}
+
+final class WalkieTalkieMicrophone: @unchecked Sendable {
     static let sampleRate = 16_000.0
+
+    private let queue = DispatchQueue(label: "in.werai.walkie-microphone", qos: .userInitiated)
     private var engine: AVAudioEngine?
+    private var activeSessionID: String?
+    private var configurationObserver: NSObjectProtocol?
 
     static func requestAccess() async -> Bool {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
@@ -19,11 +146,62 @@ final class WalkieTalkieMicrophone {
         }
     }
 
-    func start(handler: @escaping (Data) -> Void) throws {
-        stop()
+    func start(
+        sessionID: String,
+        inputDeviceUID: String? = nil,
+        handler: @escaping @Sendable (Data) -> Void,
+        failureHandler: @escaping @Sendable (Error) -> Void
+    ) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            queue.async { [weak self] in
+                guard let self else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                do {
+                    try self.startOnQueue(
+                        sessionID: sessionID,
+                        inputDeviceUID: inputDeviceUID,
+                        handler: handler,
+                        failureHandler: failureHandler
+                    )
+                    continuation.resume(returning: ())
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    func stop(sessionID: String? = nil) {
+        queue.async { [weak self] in
+            guard let self,
+                  sessionID == nil || self.activeSessionID == sessionID
+            else { return }
+            self.stopOnQueue()
+        }
+    }
+
+    private func startOnQueue(
+        sessionID: String,
+        inputDeviceUID: String?,
+        handler: @escaping @Sendable (Data) -> Void,
+        failureHandler: @escaping @Sendable (Error) -> Void
+    ) throws {
+        stopOnQueue()
         let engine = AVAudioEngine()
         let input = engine.inputNode
         try? input.setVoiceProcessingEnabled(true)
+        if input.isVoiceProcessingEnabled {
+            input.voiceProcessingOtherAudioDuckingConfiguration = .init(
+                enableAdvancedDucking: false,
+                duckingLevel: .min
+            )
+        }
+        // Enabling voice processing replaces the input audio unit. Apply the
+        // selected CoreAudio device afterwards so that reconfiguration cannot
+        // silently return capture to the system default.
+        try VoiceInputCatalog.apply(inputDeviceUID, to: input)
         let inputFormat = input.outputFormat(forBus: 0)
         guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0,
               let outputFormat = AVAudioFormat(
@@ -58,36 +236,114 @@ final class WalkieTalkieMicrophone {
         engine.prepare()
         do {
             try engine.start()
-            self.engine = engine
         } catch {
             input.removeTap(onBus: 0)
             throw error
         }
+
+        self.engine = engine
+        activeSessionID = sessionID
+        configurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: nil
+        ) { [weak self, weak engine] _ in
+            guard let self, let engine else { return }
+            self.queue.async {
+                guard self.engine === engine, self.activeSessionID == sessionID else { return }
+                do {
+                    try self.startOnQueue(
+                        sessionID: sessionID,
+                        inputDeviceUID: inputDeviceUID,
+                        handler: handler,
+                        failureHandler: failureHandler
+                    )
+                } catch {
+                    self.stopOnQueue()
+                    failureHandler(error)
+                }
+            }
+        }
     }
 
-    func stop() {
-        guard let engine else { return }
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
-        self.engine = nil
+    private func stopOnQueue() {
+        if let observer = configurationObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        configurationObserver = nil
+        if let engine {
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+        }
+        engine = nil
+        activeSessionID = nil
     }
 
-    deinit { stop() }
+    deinit {
+        if let observer = configurationObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        if let engine {
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+        }
+    }
 }
 
-final class WalkieTalkiePlayer {
+struct WalkieTalkiePlaybackTracker {
+    private(set) var lastSequences = [String: UInt64]()
+
+    mutating func begin(_ sessionID: String) { lastSequences[sessionID] = 0 }
+
+    mutating func accepts(sessionID: String, sequence: UInt64) -> Bool {
+        let last = lastSequences[sessionID] ?? 0
+        guard sequence > last else { return false }
+        lastSequences[sessionID] = sequence
+        return true
+    }
+
+    mutating func end(_ sessionID: String) { lastSequences.removeValue(forKey: sessionID) }
+
+    static func shouldResetBuffer(
+        scheduledFrames: AVAudioFramePosition,
+        incomingFrames: AVAudioFramePosition,
+        maximumFrames: AVAudioFramePosition
+    ) -> Bool {
+        scheduledFrames + incomingFrames > maximumFrames
+    }
+}
+
+final class WalkieTalkiePlayer: @unchecked Sendable {
+    private final class Session {
+        let id: String
+        let senderID: String
+        var senderName: String
+        let player: AVAudioPlayerNode
+        var scheduledFrames: AVAudioFramePosition = 0
+        var bufferGeneration: UInt64 = 0
+        var timeoutWorkItem: DispatchWorkItem?
+
+        init(id: String, senderID: String, senderName: String, player: AVAudioPlayerNode) {
+            self.id = id
+            self.senderID = senderID
+            self.senderName = senderName
+            self.player = player
+        }
+    }
+
     private let queue = DispatchQueue(label: "in.werai.walkie-playback", qos: .userInteractive)
     private let engine = AVAudioEngine()
-    private let player = AVAudioPlayerNode()
     static let playbackFormat = AVAudioFormat(
         standardFormatWithSampleRate: WalkieTalkieMicrophone.sampleRate,
         channels: 1
     )!
     private let format = playbackFormat
-    private var sessionID: String?
-    private var lastSequence: UInt64 = 0
-    private var timeoutWorkItem: DispatchWorkItem?
+    private let stateHandler: @Sendable (String, String, Bool) -> Void
+    private var sessions = [String: Session]()
+    private var tracker = WalkieTalkiePlaybackTracker()
+    private var configurationObserver: NSObjectProtocol?
     private var muted = false
+    private let maximumBufferedFrames = AVAudioFramePosition(WalkieTalkieMicrophone.sampleRate * 0.18)
 
     static func makePlaybackBuffer(fromPCM16Mono data: Data) -> AVAudioPCMBuffer? {
         guard !data.isEmpty,
@@ -113,9 +369,15 @@ final class WalkieTalkiePlayer {
         return buffer
     }
 
-    init() {
-        engine.attach(player)
-        engine.connect(player, to: engine.mainMixerNode, format: format)
+    init(stateHandler: @escaping @Sendable (String, String, Bool) -> Void = { _, _, _ in }) {
+        self.stateHandler = stateHandler
+        configurationObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: nil
+        ) { [weak self] _ in
+            self?.queue.async { self?.recoverAfterConfigurationChange() }
+        }
     }
 
     func accept(_ message: WalkieTalkieMessage) {
@@ -129,76 +391,160 @@ final class WalkieTalkiePlayer {
         queue.async { [weak self] in
             guard let self else { return }
             self.muted = muted
-            if muted { self.stopOnQueue() }
+            if muted { self.stopAllOnQueue() }
         }
     }
 
     func stop() {
-        queue.sync { stopOnQueue() }
+        queue.sync { stopAllOnQueue() }
     }
 
     private func acceptOnQueue(_ message: WalkieTalkieMessage) {
         switch message.kind {
         case .began:
-            _ = beginSession(message.sessionID)
+            _ = beginSession(message)
         case .audio:
-            if sessionID != message.sessionID || !engine.isRunning {
-                guard beginSession(message.sessionID) else { return }
-            }
-            guard message.sequence > lastSequence,
-                  let data = message.pcm16Mono,
-                  let buffer = Self.makePlaybackBuffer(fromPCM16Mono: data)
+            guard let data = message.pcm16Mono,
+                  !data.isEmpty,
+                  data.count <= 8_192,
+                  data.count.isMultiple(of: MemoryLayout<Int16>.size)
             else { return }
-            lastSequence = message.sequence
-            player.scheduleBuffer(buffer)
-            if !player.isPlaying { player.play() }
-            armTimeout(for: message.sessionID)
+            let session = sessions[message.sessionID] ?? beginSession(message)
+            guard let session,
+                  tracker.accepts(sessionID: message.sessionID, sequence: message.sequence)
+            else { return }
+            session.senderName = message.senderName
+            schedule(data, for: session)
+            armTimeout(for: session)
         case .ended:
-            guard sessionID == message.sessionID else { return }
-            stopOnQueue()
+            stopSession(message.sessionID)
         }
     }
 
     @discardableResult
-    private func beginSession(_ id: String) -> Bool {
-        timeoutWorkItem?.cancel()
-        player.stop()
-        sessionID = id
-        lastSequence = 0
-        if !engine.isRunning {
-            engine.prepare()
-            try? engine.start()
+    private func beginSession(_ message: WalkieTalkieMessage) -> Session? {
+        if let existing = sessions[message.sessionID] {
+            existing.senderName = message.senderName
+            armTimeout(for: existing)
+            return existing
         }
-        guard engine.isRunning else {
-            sessionID = nil
-            return false
+        let player = AVAudioPlayerNode()
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: format)
+        guard ensureEngineRunning() else {
+            engine.disconnectNodeOutput(player)
+            engine.detach(player)
+            return nil
         }
+        let session = Session(
+            id: message.sessionID,
+            senderID: message.senderID,
+            senderName: message.senderName,
+            player: player
+        )
+        sessions[message.sessionID] = session
+        tracker.begin(message.sessionID)
         player.play()
-        armTimeout(for: id)
-        return true
+        stateHandler(session.senderID, session.senderName, true)
+        armTimeout(for: session)
+        return session
     }
 
-    private func armTimeout(for id: String) {
-        timeoutWorkItem?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self, self.sessionID == id else { return }
-            self.stopOnQueue()
+    private func schedule(_ data: Data, for session: Session) {
+        guard ensureEngineRunning() else {
+            stopSession(session.id)
+            return
         }
-        timeoutWorkItem = work
+        guard let buffer = Self.makePlaybackBuffer(fromPCM16Mono: data) else { return }
+        let frames = buffer.frameLength
+
+        if WalkieTalkiePlaybackTracker.shouldResetBuffer(
+            scheduledFrames: session.scheduledFrames,
+            incomingFrames: AVAudioFramePosition(frames),
+            maximumFrames: maximumBufferedFrames
+        ) {
+            session.player.stop()
+            session.scheduledFrames = 0
+            session.bufferGeneration &+= 1
+        }
+        session.scheduledFrames += AVAudioFramePosition(frames)
+        let sessionID = session.id
+        let bufferGeneration = session.bufferGeneration
+        session.player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+            self?.queue.async {
+                guard let self,
+                      let current = self.sessions[sessionID],
+                      current === session,
+                      current.bufferGeneration == bufferGeneration
+                else { return }
+                current.scheduledFrames = max(0, current.scheduledFrames - AVAudioFramePosition(frames))
+            }
+        }
+        if !session.player.isPlaying, engine.isRunning { session.player.play() }
+    }
+
+    private func ensureEngineRunning() -> Bool {
+        if engine.isRunning { return true }
+        engine.prepare()
+        do {
+            try engine.start()
+            return engine.isRunning
+        } catch {
+            return false
+        }
+    }
+
+    private func recoverAfterConfigurationChange() {
+        engine.stop()
+        for session in sessions.values {
+            session.player.stop()
+            session.scheduledFrames = 0
+            session.bufferGeneration &+= 1
+        }
+        guard ensureEngineRunning() else {
+            stopAllOnQueue()
+            return
+        }
+        for session in sessions.values where !session.player.isPlaying {
+            session.player.play()
+        }
+    }
+
+    private func armTimeout(for session: Session) {
+        session.timeoutWorkItem?.cancel()
+        let sessionID = session.id
+        let work = DispatchWorkItem { [weak self] in self?.stopSession(sessionID) }
+        session.timeoutWorkItem = work
         queue.asyncAfter(deadline: .now() + 1.5, execute: work)
     }
 
-    private func stopOnQueue() {
-        timeoutWorkItem?.cancel()
-        timeoutWorkItem = nil
-        player.stop()
-        sessionID = nil
-        lastSequence = 0
+    private func stopSession(_ id: String) {
+        guard let session = sessions.removeValue(forKey: id) else {
+            tracker.end(id)
+            return
+        }
+        session.timeoutWorkItem?.cancel()
+        session.player.stop()
+        engine.disconnectNodeOutput(session.player)
+        engine.detach(session.player)
+        tracker.end(id)
+        stateHandler(session.senderID, session.senderName, false)
+        if sessions.isEmpty { engine.pause() }
+    }
+
+    private func stopAllOnQueue() {
+        for id in Array(sessions.keys) { stopSession(id) }
+        engine.stop()
     }
 
     deinit {
-        timeoutWorkItem?.cancel()
-        player.stop()
+        if let observer = configurationObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        for session in sessions.values {
+            session.timeoutWorkItem?.cancel()
+            session.player.stop()
+        }
         engine.stop()
     }
 }

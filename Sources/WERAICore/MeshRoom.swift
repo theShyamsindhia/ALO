@@ -57,6 +57,7 @@ public struct MeshRoomEvent: Codable, Sendable, Equatable, Identifiable {
     public let roomID: String
     public let version: MeshVersion
     public let kind: MeshRoomEventKind
+    public let senderID: String?
     public let sender: String?
     public let text: String?
     public let sentNanos: UInt64?
@@ -74,6 +75,7 @@ public struct MeshRoomEvent: Codable, Sendable, Equatable, Identifiable {
         roomID: String,
         version: MeshVersion,
         kind: MeshRoomEventKind,
+        senderID: String? = nil,
         sender: String? = nil,
         text: String? = nil,
         sentNanos: UInt64? = nil,
@@ -90,6 +92,7 @@ public struct MeshRoomEvent: Codable, Sendable, Equatable, Identifiable {
         self.roomID = roomID
         self.version = version
         self.kind = kind
+        self.senderID = senderID
         self.sender = sender
         self.text = text
         self.sentNanos = sentNanos
@@ -244,6 +247,7 @@ public struct MeshEnvelope: Codable, Sendable {
     public let displayName: String?
     public let deviceIcon: String?
     public let deviceColorHex: String?
+    public private(set) var profileImageData: Data?
     public let appVersion: String?
     public let events: [MeshRoomEvent]?
     public let event: MeshRoomEvent?
@@ -268,6 +272,7 @@ public struct MeshEnvelope: Codable, Sendable {
         displayName: String? = nil,
         deviceIcon: String? = nil,
         deviceColorHex: String? = nil,
+        profileImageData: Data? = nil,
         appVersion: String? = nil,
         events: [MeshRoomEvent]? = nil,
         event: MeshRoomEvent? = nil,
@@ -291,6 +296,7 @@ public struct MeshEnvelope: Codable, Sendable {
         self.displayName = displayName
         self.deviceIcon = deviceIcon
         self.deviceColorHex = deviceColorHex
+        self.profileImageData = DeviceAppearance.sanitizedProfileImageData(profileImageData)
         self.appVersion = appVersion
         self.events = events
         self.event = event
@@ -313,6 +319,10 @@ public struct MeshEnvelope: Codable, Sendable {
         var data = try JSONEncoder().encode(self)
         data.append(0x0A)
         return data
+    }
+
+    fileprivate mutating func sanitizeProfileImageData() {
+        profileImageData = DeviceAppearance.sanitizedProfileImageData(profileImageData)
     }
 }
 
@@ -340,7 +350,8 @@ public final class MeshEnvelopeDecoder {
                 buffer.removeAll()
                 return messages
             }
-            if let message = try? JSONDecoder().decode(MeshEnvelope.self, from: line) {
+            if var message = try? JSONDecoder().decode(MeshEnvelope.self, from: line) {
+                message.sanitizeProfileImageData()
                 messages.append(message)
             }
         }

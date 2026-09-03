@@ -2,10 +2,12 @@ import CoreGraphics
 import Foundation
 import WERAICore
 
+@MainActor
 final class HostSession {
     private var host: HostServer?
     private var localReceiver: Receiver?
     private var audioSource: AudioSource?
+    private var videoPicker: ScreenContentPicker?
     private var videoCapture: ScreenVideoCapture?
     private var videoEncoder: VideoEncoder?
     private var nowPlayingMonitor: NowPlayingMonitor?
@@ -121,6 +123,8 @@ final class HostSession {
         muteTap = nil
         try? await audioSource?.stop()
         audioSource = nil
+        videoPicker?.cancel()
+        videoPicker = nil
         await videoCapture?.stop()
         videoCapture = nil
         videoEncoder?.stop()
@@ -162,17 +166,21 @@ final class HostSession {
 
     func setVideoEnabled(_ enabled: Bool) async throws {
         if enabled {
-            guard videoCapture == nil, let host else { return }
-            let displayID = CGMainDisplayID()
-            guard displayID != kCGNullDirectDisplay, CGDisplayIsActive(displayID) != 0 else {
-                throw WERAIError("This Mac's main display is not available for screen sharing.")
+            guard videoPicker == nil, videoCapture == nil, let host else { return }
+            let picker = ScreenContentPicker()
+            videoPicker = picker
+            defer {
+                if videoPicker === picker { videoPicker = nil }
             }
+            let filter = try await picker.selectDisplayOrWindow()
+            try Task.checkCancellation()
+            guard self.host === host else { throw CancellationError() }
             let encoder = VideoEncoder { frame in host.acceptVideo(frame) }
             let capture = ScreenVideoCapture()
             videoEncoder = encoder
             videoCapture = capture
             do {
-                try await capture.start(displayID: displayID) { pixelBuffer, captureTimeNanos in
+                try await capture.start(filter: filter) { pixelBuffer, captureTimeNanos in
                     encoder.encode(pixelBuffer, captureTimeNanos: captureTimeNanos)
                 } stopped: { [weak self, weak capture] error in
                     Task { @MainActor in
@@ -180,6 +188,10 @@ final class HostSession {
                         let handled = await self.handleVideoCaptureStopped(capture, error: error)
                         if handled { self.videoStoppedHandler(error) }
                     }
+                }
+                try Task.checkCancellation()
+                guard self.host === host, videoCapture === capture else {
+                    throw CancellationError()
                 }
                 host.setVideoEnabled(true)
             } catch {
@@ -190,6 +202,8 @@ final class HostSession {
                 throw error
             }
         } else {
+            videoPicker?.cancel()
+            videoPicker = nil
             host?.setVideoEnabled(false)
             await videoCapture?.stop()
             videoCapture = nil
@@ -218,6 +232,8 @@ final class HostSession {
             muteTap.stop()
         }
         if let audioSource { Task { try? await audioSource.stop() } }
+        videoPicker?.cancel()
+        videoPicker = nil
         localReceiver?.stop()
         nowPlayingMonitor?.stop()
         host?.setVideoEnabled(false)

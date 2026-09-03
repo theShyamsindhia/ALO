@@ -49,7 +49,7 @@ enum RecordingErrorPresentation {
         guard isPermissionFailure(error, screenCaptureAccess: screenCaptureAccess) else {
             return error.localizedDescription
         }
-        return "macOS denied recording access to ALO. For audio, enable ALO under System Audio Recording Only (or Screen & System Audio Recording). Video sharing requires Screen & System Audio Recording. Then restart ALO once."
+        return "macOS denied recording access to ALO. Enable ALO under Screen & System Audio Recording, then try broadcasting again. If macOS asks, restart ALO once."
     }
 
     private static func errorChain(startingAt error: Error) -> [NSError] {

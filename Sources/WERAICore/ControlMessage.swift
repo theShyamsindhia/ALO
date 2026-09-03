@@ -9,12 +9,17 @@ public enum RoomMediaCommand: String, Codable, Sendable, Equatable {
 }
 
 public struct RoomParticipant: Codable, Sendable, Equatable, Identifiable {
+    private enum CodingKeys: String, CodingKey {
+        case id, name, volume, isMuted, icon, colorHex, profileImageData
+    }
+
     public let id: String
     public let name: String
     public let volume: Double
     public let isMuted: Bool
     public let icon: String?
     public let colorHex: String?
+    public let profileImageData: Data?
 
     public init(
         id: String,
@@ -22,7 +27,8 @@ public struct RoomParticipant: Codable, Sendable, Equatable, Identifiable {
         volume: Double = 1,
         isMuted: Bool = false,
         icon: String? = nil,
-        colorHex: String? = nil
+        colorHex: String? = nil,
+        profileImageData: Data? = nil
     ) {
         self.id = id
         self.name = name
@@ -30,6 +36,20 @@ public struct RoomParticipant: Codable, Sendable, Equatable, Identifiable {
         self.isMuted = isMuted
         self.icon = icon
         self.colorHex = colorHex
+        self.profileImageData = DeviceAppearance.sanitizedProfileImageData(profileImageData)
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        name = try values.decode(String.self, forKey: .name)
+        volume = try values.decode(Double.self, forKey: .volume)
+        isMuted = try values.decode(Bool.self, forKey: .isMuted)
+        icon = try values.decodeIfPresent(String.self, forKey: .icon)
+        colorHex = try values.decodeIfPresent(String.self, forKey: .colorHex)
+        profileImageData = DeviceAppearance.sanitizedProfileImageData(
+            try values.decodeIfPresent(Data.self, forKey: .profileImageData)
+        )
     }
 }
 

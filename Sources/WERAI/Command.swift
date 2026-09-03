@@ -145,6 +145,14 @@ enum WERAICommand {
             displayName = DeviceDisplayName.generated(from: nodeID)
             defaults.set(displayName, forKey: "meshDeviceDisplayName")
         }
+        let generatedAppearance = DeviceAppearance.generated(from: nodeID)
+        let appearance = DeviceAppearance(
+            icon: defaults.string(forKey: "meshDeviceIcon") ?? generatedAppearance.icon,
+            colorHex: defaults.string(forKey: "meshDeviceColorHex") ?? generatedAppearance.colorHex
+        )
+        let profileImageData = DeviceAppearance.sanitizedProfileImageData(
+            defaults.data(forKey: "meshDeviceProfileImageData")
+        )
 
         func report(_ value: String) {
             print("ALO_QA status=\(value)")
@@ -157,6 +165,9 @@ enum WERAICommand {
             room: room,
             nodeID: nodeID,
             displayName: displayName,
+            deviceIcon: appearance.icon,
+            deviceColorHex: appearance.colorHex,
+            profileImageData: profileImageData,
             initialEvents: store.loadEvents(roomID: room.id),
             statusHandler: report,
             identityHandler: { id, name in report("identity \(name) \(id)") },
@@ -165,7 +176,7 @@ enum WERAICommand {
             nowPlayingHandler: { media in
                 report("media \(media.isPlaying == false ? "paused" : "playing-or-unknown")")
             },
-            chatHandler: { _, _, _ in },
+            chatHandler: { _, _, _, _ in },
             queueHandler: { _ in },
             videoHandler: { _ in },
             peerVersionHandler: { report("peer-version \($0)") },

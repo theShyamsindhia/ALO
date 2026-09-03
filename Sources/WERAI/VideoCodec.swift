@@ -5,6 +5,36 @@ import Foundation
 import VideoToolbox
 import WERAICore
 
+final class VideoPresentationResyncGate: @unchecked Sendable {
+    struct Admission: Sendable {
+        fileprivate let generation: UInt64
+    }
+
+    private let lock = NSLock()
+    private var generation: UInt64 = 0
+    private var minimumCaptureTimeNanos: UInt64?
+
+    func reset(atOrAfterCaptureNanos cutoverCaptureNanos: UInt64?) {
+        lock.withLock {
+            generation &+= 1
+            minimumCaptureTimeNanos = cutoverCaptureNanos
+        }
+    }
+
+    func admission(forCaptureTimeNanos captureTimeNanos: UInt64) -> Admission? {
+        lock.withLock {
+            if let minimumCaptureTimeNanos, captureTimeNanos < minimumCaptureTimeNanos {
+                return nil
+            }
+            return Admission(generation: generation)
+        }
+    }
+
+    func isCurrent(_ admission: Admission) -> Bool {
+        lock.withLock { admission.generation == generation }
+    }
+}
+
 final class VideoEncoder {
     typealias FrameHandler = (VideoFrame) -> Void
 
@@ -178,6 +208,7 @@ final class VideoDecoder {
     private let timingLock = NSLock()
     private var clockOffsetNanos: Int64?
     private var targetLatencyNanos = RoomTiming.defaultPlayoutDelayNanos
+    private let resyncGate = VideoPresentationResyncGate()
 
     init(imageHandler: @escaping ImageHandler) {
         self.imageHandler = imageHandler
@@ -196,10 +227,27 @@ final class VideoDecoder {
     }
 
     func accept(_ frame: VideoFrame) {
-        queue.async { [weak self] in self?.decodeOnQueue(frame) }
+        guard let admission = resyncGate.admission(
+            forCaptureTimeNanos: frame.captureTimeNanos
+        ) else { return }
+        queue.async { [weak self] in
+            self?.decodeOnQueue(frame, admission: admission)
+        }
+    }
+
+    func forceResync(atOrAfterCaptureNanos cutoverCaptureNanos: UInt64? = nil) {
+        resyncGate.reset(atOrAfterCaptureNanos: cutoverCaptureNanos)
+        queue.async { [weak self] in
+            guard let self else { return }
+            if let session {
+                VTDecompressionSessionWaitForAsynchronousFrames(session)
+            }
+            hasDecodedFrame = false
+        }
     }
 
     func stop() {
+        resyncGate.reset(atOrAfterCaptureNanos: nil)
         queue.sync {
             if let session {
                 VTDecompressionSessionWaitForAsynchronousFrames(session)
@@ -212,7 +260,11 @@ final class VideoDecoder {
         }
     }
 
-    private func decodeOnQueue(_ frame: VideoFrame) {
+    private func decodeOnQueue(
+        _ frame: VideoFrame,
+        admission: VideoPresentationResyncGate.Admission
+    ) {
+        guard resyncGate.isCurrent(admission) else { return }
         if frame.isKeyframe, !frame.parameterSet1.isEmpty, !frame.parameterSet2.isEmpty {
             let sets = [frame.parameterSet1, frame.parameterSet2]
             if sets != currentParameterSets {
@@ -230,13 +282,18 @@ final class VideoDecoder {
             infoFlagsOut: nil
         ) { [weak self] status, _, imageBuffer, _, _ in
             guard status == noErr, let self, let imageBuffer,
+                  self.resyncGate.isCurrent(admission),
                   let image = self.context.createCGImage(CIImage(cvPixelBuffer: imageBuffer), from: CIImage(cvPixelBuffer: imageBuffer).extent)
             else { return }
             if !self.hasDecodedFrame {
                 self.hasDecodedFrame = true
                 print("Shared screen synchronized to audio.")
             }
-            self.present(image, captureTimeNanos: frame.captureTimeNanos)
+            self.present(
+                image,
+                captureTimeNanos: frame.captureTimeNanos,
+                admission: admission
+            )
         }
         if status != noErr {
             fputs("Video decode failed: \(status)\n", stderr)
@@ -290,7 +347,11 @@ final class VideoDecoder {
         return true
     }
 
-    private func present(_ image: CGImage, captureTimeNanos: UInt64) {
+    private func present(
+        _ image: CGImage,
+        captureTimeNanos: UInt64,
+        admission: VideoPresentationResyncGate.Admission
+    ) {
         timingLock.lock()
         let offset = clockOffsetNanos
         let delay = targetLatencyNanos
@@ -302,10 +363,11 @@ final class VideoDecoder {
         let target = localCapture &+ delay
         let now = MonotonicClock.nowNanos()
         if target <= now {
-            imageHandler(image)
+            if resyncGate.isCurrent(admission) { imageHandler(image) }
             return
         }
-        displayQueue.asyncAfter(deadline: .now() + .nanoseconds(Int(clamping: target - now))) { [imageHandler] in
+        displayQueue.asyncAfter(deadline: .now() + .nanoseconds(Int(clamping: target - now))) { [imageHandler, resyncGate] in
+            guard resyncGate.isCurrent(admission) else { return }
             imageHandler(image)
         }
     }

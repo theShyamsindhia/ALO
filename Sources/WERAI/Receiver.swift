@@ -375,7 +375,9 @@ final class Receiver {
                     case "queue_update":
                         self.queueHandler?(message.mediaQueue ?? [])
                     case "resync":
-                        self.player.forceResync(atOrAfterCaptureNanos: message.hostNanos)
+                        let cutoverCaptureNanos = message.hostNanos
+                        self.player.forceResync(atOrAfterCaptureNanos: cutoverCaptureNanos)
+                        self.videoDecoder.forceResync(atOrAfterCaptureNanos: cutoverCaptureNanos)
                     default:
                         break
                     }

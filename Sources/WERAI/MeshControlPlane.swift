@@ -3,7 +3,8 @@ import Foundation
 import Network
 import WERAICore
 
-final class MeshControlPlane {
+final class MeshControlPlane: @unchecked Sendable {
+    static let identityEnvelopeType = "display_name"
     private struct PendingRoomAction {
         let envelope: MeshEnvelope
         let broadcasterID: String
@@ -18,6 +19,7 @@ final class MeshControlPlane {
         var displayName: String?
         var deviceIcon: String?
         var deviceColorHex: String?
+        var profileImageData: Data?
         var appVersion: String?
         let localNonce = UUID().uuidString
         var authenticated = false
@@ -33,6 +35,7 @@ final class MeshControlPlane {
     private var displayName: String
     private var deviceIcon: String
     private var deviceColorHex: String
+    private var profileImageData: Data?
     private let queue = DispatchQueue(label: "in.werai.mesh.control", qos: .userInteractive)
     private let replicaHandler: (MeshRoomReplica) -> Void
     private let participantsHandler: ([RoomParticipant]) -> Void
@@ -70,6 +73,7 @@ final class MeshControlPlane {
         displayName: String,
         deviceIcon: String? = nil,
         deviceColorHex: String? = nil,
+        profileImageData: Data? = nil,
         appVersion: String = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0",
         initialEvents: [MeshRoomEvent] = [],
         listenerReadyHandler: ((NWEndpoint.Port) -> Void)? = nil,
@@ -83,9 +87,14 @@ final class MeshControlPlane {
         self.room = room
         self.nodeID = nodeID
         self.displayName = displayName
-        let appearance = DeviceAppearance.generated(from: nodeID)
-        self.deviceIcon = deviceIcon ?? appearance.icon
-        self.deviceColorHex = deviceColorHex ?? appearance.colorHex
+        let generatedAppearance = DeviceAppearance.generated(from: nodeID)
+        let appearance = DeviceAppearance(
+            icon: deviceIcon ?? generatedAppearance.icon,
+            colorHex: deviceColorHex ?? generatedAppearance.colorHex
+        )
+        self.deviceIcon = appearance.icon
+        self.deviceColorHex = appearance.colorHex
+        self.profileImageData = DeviceAppearance.sanitizedProfileImageData(profileImageData)
         self.appVersion = appVersion
         self.peerVersionHandler = peerVersionHandler
         self.mediaCommandHandler = mediaCommandHandler
@@ -146,7 +155,7 @@ final class MeshControlPlane {
     }
 
     func stop() {
-        queue.sync {
+        queue.async { [self] in
             isStopped = true
             browser?.cancel()
             listener?.cancel()
@@ -165,7 +174,13 @@ final class MeshControlPlane {
     }
 
     func publishChat(_ text: String) {
-        publish(kind: .chat, sender: displayName, text: String(text.prefix(2_000)), sentNanos: MonotonicClock.nowNanos())
+        publish(
+            kind: .chat,
+            senderID: nodeID,
+            sender: displayName,
+            text: String(text.prefix(2_000)),
+            sentNanos: MonotonicClock.nowNanos()
+        )
     }
 
     func publishQueueAdd(_ item: RoomQueueItem) { publish(kind: .queueAdd, queueItem: item) }
@@ -174,21 +189,49 @@ final class MeshControlPlane {
     func updateIdentity(name: String, icon: String, colorHex: String) {
         queue.async { [weak self] in
             guard let self else { return }
-            let trimmed = String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(40))
-            guard !trimmed.isEmpty else { return }
-            let appearance = DeviceAppearance(icon: icon, colorHex: colorHex)
-            displayName = trimmed
-            deviceIcon = appearance.icon
-            deviceColorHex = appearance.colorHex
-            publishParticipants()
-            broadcast(MeshEnvelope(
-                type: "device_identity",
-                nodeID: nodeID,
-                displayName: trimmed,
-                deviceIcon: appearance.icon,
-                deviceColorHex: appearance.colorHex
-            ))
+            updateIdentityOnQueue(
+                name: name,
+                icon: icon,
+                colorHex: colorHex,
+                profileImageData: profileImageData
+            )
         }
+    }
+
+    func updateIdentity(name: String, icon: String, colorHex: String, profileImageData: Data?) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            updateIdentityOnQueue(
+                name: name,
+                icon: icon,
+                colorHex: colorHex,
+                profileImageData: profileImageData
+            )
+        }
+    }
+
+    private func updateIdentityOnQueue(
+        name: String,
+        icon: String,
+        colorHex: String,
+        profileImageData: Data?
+    ) {
+        let trimmed = String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(40))
+        guard !trimmed.isEmpty else { return }
+        let appearance = DeviceAppearance(icon: icon, colorHex: colorHex)
+        displayName = trimmed
+        deviceIcon = appearance.icon
+        deviceColorHex = appearance.colorHex
+        self.profileImageData = DeviceAppearance.sanitizedProfileImageData(profileImageData)
+        publishParticipants()
+        broadcast(MeshEnvelope(
+            type: Self.identityEnvelopeType,
+            nodeID: nodeID,
+            displayName: trimmed,
+            deviceIcon: appearance.icon,
+            deviceColorHex: appearance.colorHex,
+            profileImageData: self.profileImageData
+        ))
     }
 
     func publishWalkieTalkie(_ message: WalkieTalkieMessage) {
@@ -315,6 +358,7 @@ final class MeshControlPlane {
 
     private func publish(
         kind: MeshRoomEventKind,
+        senderID: String? = nil,
         sender: String? = nil,
         text: String? = nil,
         sentNanos: UInt64? = nil,
@@ -333,6 +377,7 @@ final class MeshControlPlane {
                 roomID: room.id,
                 version: replica.nextVersion(nodeID: nodeID),
                 kind: kind,
+                senderID: senderID,
                 sender: sender,
                 text: text,
                 sentNanos: sentNanos,
@@ -414,6 +459,7 @@ final class MeshControlPlane {
             displayName: displayName,
             deviceIcon: deviceIcon,
             deviceColorHex: deviceColorHex,
+            profileImageData: profileImageData,
             appVersion: appVersion,
             authNonce: room.isPrivate ? link.localNonce : nil
         )
@@ -486,8 +532,13 @@ final class MeshControlPlane {
             link.nodeID = remoteID
             link.displayName = envelope.displayName
             let remoteAppearance = DeviceAppearance.generated(from: remoteID)
-            link.deviceIcon = envelope.deviceIcon ?? remoteAppearance.icon
-            link.deviceColorHex = envelope.deviceColorHex ?? remoteAppearance.colorHex
+            let sanitizedAppearance = DeviceAppearance(
+                icon: envelope.deviceIcon ?? remoteAppearance.icon,
+                colorHex: envelope.deviceColorHex ?? remoteAppearance.colorHex
+            )
+            link.deviceIcon = sanitizedAppearance.icon
+            link.deviceColorHex = sanitizedAppearance.colorHex
+            link.profileImageData = DeviceAppearance.sanitizedProfileImageData(envelope.profileImageData)
             link.appVersion = envelope.appVersion
             if room.isPrivate {
                 guard let nonce = envelope.authNonce, nonce.count <= 128,
@@ -631,6 +682,7 @@ final class MeshControlPlane {
             link.displayName = name
             link.deviceIcon = appearance.icon
             link.deviceColorHex = appearance.colorHex
+            link.profileImageData = DeviceAppearance.sanitizedProfileImageData(envelope.profileImageData)
             publishParticipants()
         case "walkie_talkie":
             guard let message = envelope.walkieTalkie,
@@ -666,7 +718,8 @@ final class MeshControlPlane {
             id: nodeID,
             name: displayName,
             icon: deviceIcon,
-            colorHex: deviceColorHex
+            colorHex: deviceColorHex,
+            profileImageData: profileImageData
         )
         let remote = peers.compactMap { id, link in
             link.displayName.map {
@@ -675,7 +728,8 @@ final class MeshControlPlane {
                     id: id,
                     name: $0,
                     icon: link.deviceIcon ?? appearance.icon,
-                    colorHex: link.deviceColorHex ?? appearance.colorHex
+                    colorHex: link.deviceColorHex ?? appearance.colorHex,
+                    profileImageData: link.profileImageData
                 )
             }
         }

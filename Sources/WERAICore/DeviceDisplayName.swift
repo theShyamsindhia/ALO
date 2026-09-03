@@ -28,12 +28,13 @@ public enum DeviceDisplayName {
 
 public struct DeviceAppearance: Sendable, Equatable {
     public static let icons = [
-        "laptopcomputer", "desktopcomputer", "headphones", "hifispeaker.fill",
-        "gamecontroller.fill", "sparkles", "bolt.fill", "paperplane.fill",
+        "🐶", "🐱", "🦊", "🐼", "🐸", "🐙", "🦄", "🦋",
+        "🐯", "🐨", "🐧", "🦉", "🐬", "🐳", "🦖", "🤖",
     ]
     public static let colors = [
         "E45B69", "7C6FF2", "2AA7A1", "E2903A", "3F86E8", "A95BC4", "5A9A54", "D9578B",
     ]
+    public static let maximumProfileImageBytes = 16 * 1_024
 
     public let icon: String
     public let colorHex: String
@@ -53,5 +54,10 @@ public struct DeviceAppearance: Sendable, Equatable {
             icon: icons[Int(hash % UInt64(icons.count))],
             colorHex: colors[Int((hash / UInt64(icons.count)) % UInt64(colors.count))]
         )
+    }
+
+    public static func sanitizedProfileImageData(_ data: Data?) -> Data? {
+        guard let data, !data.isEmpty, data.count <= maximumProfileImageBytes else { return nil }
+        return data
     }
 }

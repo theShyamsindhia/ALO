@@ -23,7 +23,12 @@ binary="dist/alo"
 cli_archive="dist/alo-cli-macos-$archive_suffix.zip"
 app="dist/ALO.app"
 codesign_identity="${WERAI_CODESIGN_IDENTITY:--}"
-codesign_arguments=(--force --sign "$codesign_identity" --identifier in.werai.audio)
+codesign_arguments=(
+    --force
+    --sign "$codesign_identity"
+    --identifier in.werai.audio
+    --entitlements Resources/ALO.entitlements
+)
 if [[ "$codesign_identity" != "-" ]]; then
     codesign_arguments+=(--options runtime)
     if [[ "${WERAI_CODESIGN_TIMESTAMP:-automatic}" == "none" ]]; then
@@ -99,7 +104,6 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$binary" "$app/Contents/MacOS/alo"
 cp Resources/Info.plist "$app/Contents/Info.plist"
 cp dist/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
-cp -R Resources/LandingArt "$app/Contents/Resources/LandingArt"
 if [[ "$codesign_identity" == "-" ]]; then
     run_codesign "${codesign_arguments[@]}" \
         --requirements Resources/WERAI.requirements \
