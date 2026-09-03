@@ -5,6 +5,13 @@ import WERAICore
 
 final class MeshControlPlane: @unchecked Sendable {
     static let identityEnvelopeType = "display_name"
+    private struct WalkieMessageKey: Hashable {
+        let senderID: String
+        let sessionID: String
+        let kind: String
+        let sequence: UInt64
+        let targetID: String?
+    }
     private struct PendingRoomAction {
         let envelope: MeshEnvelope
         let broadcasterID: String
@@ -61,11 +68,15 @@ final class MeshControlPlane: @unchecked Sendable {
     private var seenRoomActionIDs = Set<String>()
     private var roomActionIDOrder = [String]()
     private var acceptedRoomActionIDs = Set<String>()
+    private var seenWalkieMessages = Set<WalkieMessageKey>()
+    private var seenWalkieMessageOrder = [WalkieMessageKey]()
     private var pendingRoomActions = [String: PendingRoomAction]()
     private var isStopped = true
     private let heartbeatIntervalNanos: UInt64 = 400_000_000
     private let broadcasterLeaseNanos: UInt64 = 2_400_000_000
     private let maximumSyncEvents = 2_000
+    private let maximumRememberedWalkieMessages = 8_192
+    private let maximumWalkieTalkieHopCount: UInt8 = 8
 
     init(
         room: RoomConfiguration,
@@ -170,6 +181,8 @@ final class MeshControlPlane: @unchecked Sendable {
             reconnectWorkItems.removeAll()
             reconnectAttempts.removeAll()
             pendingRoomActions.removeAll()
+            seenWalkieMessages.removeAll()
+            seenWalkieMessageOrder.removeAll()
         }
     }
 
@@ -238,16 +251,19 @@ final class MeshControlPlane: @unchecked Sendable {
         queue.async { [weak self] in
             guard let self,
                   message.senderID == nodeID,
-                  message.senderName.utf8.count <= 160,
-                  message.sessionID.utf8.count <= 128,
-                  (message.pcm16Mono?.count ?? 0) <= 8_192
+                  isValidWalkieTalkie(message)
             else { return }
-            let envelope = MeshEnvelope(type: "walkie_talkie", walkieTalkie: message)
-            if let targetID = message.targetID {
-                if let link = peers[targetID] { send(envelope, to: link) }
-            } else {
-                broadcast(envelope)
-            }
+            guard rememberWalkieTalkie(message) else { return }
+            routeWalkieTalkie(
+                MeshEnvelope(
+                    type: "walkie_talkie",
+                    nodeID: nodeID,
+                    walkieTalkieHopCount: 0,
+                    walkieTalkie: message
+                ),
+                message: message,
+                excluding: nil
+            )
         }
     }
 
@@ -685,14 +701,32 @@ final class MeshControlPlane: @unchecked Sendable {
             link.profileImageData = DeviceAppearance.sanitizedProfileImageData(envelope.profileImageData)
             publishParticipants()
         case "walkie_talkie":
+            let hopCount = envelope.walkieTalkieHopCount ?? 0
             guard let message = envelope.walkieTalkie,
-                  message.senderID == remoteID,
-                  message.senderName.utf8.count <= 160,
-                  message.sessionID.utf8.count <= 128,
-                  message.targetID == nil || message.targetID == nodeID,
-                  (message.pcm16Mono?.count ?? 0) <= 8_192
+                  isValidWalkieTalkie(message),
+                  Self.isValidWalkieTalkieOrigin(
+                      senderID: message.senderID,
+                      remoteID: remoteID,
+                      envelopeOriginID: envelope.nodeID,
+                      hopCount: hopCount
+                  ),
+                  hopCount <= maximumWalkieTalkieHopCount,
+                  rememberWalkieTalkie(message)
             else { return }
-            walkieTalkieHandler(message)
+            if message.targetID == nil || message.targetID == nodeID {
+                walkieTalkieHandler(message)
+            }
+            guard message.targetID != nodeID, hopCount < maximumWalkieTalkieHopCount else { return }
+            routeWalkieTalkie(
+                MeshEnvelope(
+                    type: "walkie_talkie",
+                    nodeID: message.senderID,
+                    walkieTalkieHopCount: hopCount + 1,
+                    walkieTalkie: message
+                ),
+                message: message,
+                excluding: link
+            )
         default:
             break
         }
@@ -711,6 +745,64 @@ final class MeshControlPlane: @unchecked Sendable {
         }
         replicaHandler(replica)
         for event in inserted { broadcast(MeshEnvelope(type: "event", event: event), excluding: source) }
+    }
+
+    private func isValidWalkieTalkie(_ message: WalkieTalkieMessage) -> Bool {
+        guard !message.senderID.isEmpty,
+              message.senderID.utf8.count <= 128,
+              !message.senderName.isEmpty,
+              message.senderName.utf8.count <= 160,
+              !message.sessionID.isEmpty,
+              message.sessionID.utf8.count <= 128,
+              (message.targetID?.utf8.count ?? 0) <= 128
+        else { return false }
+        guard message.kind == .audio else { return message.pcm16Mono == nil }
+        guard let data = message.pcm16Mono else { return false }
+        return !data.isEmpty && data.count <= 8_192 && data.count.isMultiple(of: MemoryLayout<Int16>.size)
+    }
+
+    static func isValidWalkieTalkieOrigin(
+        senderID: String,
+        remoteID: String,
+        envelopeOriginID: String?,
+        hopCount: UInt8
+    ) -> Bool {
+        if hopCount == 0 {
+            return senderID == remoteID && (envelopeOriginID == nil || envelopeOriginID == senderID)
+        }
+        return envelopeOriginID == senderID
+    }
+
+    private func rememberWalkieTalkie(_ message: WalkieTalkieMessage) -> Bool {
+        let key = WalkieMessageKey(
+            senderID: message.senderID,
+            sessionID: message.sessionID,
+            kind: message.kind.rawValue,
+            sequence: message.sequence,
+            targetID: message.targetID
+        )
+        guard seenWalkieMessages.insert(key).inserted else { return false }
+        seenWalkieMessageOrder.append(key)
+        if seenWalkieMessageOrder.count > maximumRememberedWalkieMessages {
+            let expired = Array(seenWalkieMessageOrder.prefix(1_024))
+            seenWalkieMessageOrder.removeFirst(expired.count)
+            for key in expired { seenWalkieMessages.remove(key) }
+        }
+        return true
+    }
+
+    private func routeWalkieTalkie(
+        _ envelope: MeshEnvelope,
+        message: WalkieTalkieMessage,
+        excluding source: Link?
+    ) {
+        if let targetID = message.targetID,
+           let target = peers[targetID],
+           target !== source {
+            send(envelope, to: target)
+        } else {
+            broadcast(envelope, excluding: source)
+        }
     }
 
     private func publishParticipants() {

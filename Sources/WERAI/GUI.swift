@@ -299,6 +299,7 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
                 WalkieTalkieBar(model: model, showsCloseButton: false)
                 FloatingRoomView(model: model, presentation: .menuBar)
             }
+            .padding(FloatingMetrics.popoverInset)
         )
 
         model.$unreadMessageCount
@@ -360,8 +361,11 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
 
     private var panelSize: NSSize {
         NSSize(
-            width: FloatingMetrics.width,
-            height: model.floatingPanelHeight + FloatingMetrics.walkieBarHeight + 8
+            width: FloatingMetrics.width + FloatingMetrics.popoverInset * 2,
+            height: model.floatingPanelHeight
+                + FloatingMetrics.walkieBarHeight
+                + 8
+                + FloatingMetrics.popoverInset * 2
         )
     }
 
@@ -534,9 +538,12 @@ struct RoomMessage: Identifiable, Equatable {
 }
 
 private enum FloatingMetrics {
-    static let width: CGFloat = 520
+    static let width: CGFloat = 560
     static let barHeight: CGFloat = 58
     static let cornerRadius: CGFloat = 22
+    static let windowInset: CGFloat = 4
+    static let popoverInset: CGFloat = 6
+    static var windowWidth: CGFloat { width + windowInset * 2 }
     static let separatorHeight: CGFloat = 1
     static let expansionDuration: TimeInterval = 0.24
     static let messagePreviewHeight: CGFloat = 116
@@ -546,71 +553,245 @@ private enum FloatingMetrics {
     static let permissionHeight: CGFloat = 244
     static let walkieBarHeight: CGFloat = 96
 
+    static func windowHeight(for contentHeight: CGFloat) -> CGFloat {
+        contentHeight + windowInset * 2
+    }
+
     static func peopleHeight(count: Int) -> CGFloat {
         min(420, max(268, CGFloat(count * 64 + 148)))
     }
 }
 
 @MainActor
-private final class DevicePhotoSelectionController: NSObject {
-    private(set) var data: Data?
-    let imageView = NSImageView()
+private final class DeviceIdentityEditorController: NSObject, NSWindowDelegate {
+    private let panel: NSPanel
+    private let saveAction: (String, String, String, Data?) -> Void
+    private let closeAction: () -> Void
 
-    init(data: Data?) {
-        self.data = data
+    init(
+        name: String,
+        icon: String,
+        colorHex: String,
+        profileImageData: Data?,
+        saveAction: @escaping (String, String, String, Data?) -> Void,
+        closeAction: @escaping () -> Void
+    ) {
+        self.saveAction = saveAction
+        self.closeAction = closeAction
+        panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 410),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
         super.init()
-        imageView.imageScaling = .scaleProportionallyUpOrDown
-        imageView.imageFrameStyle = .photo
-        imageView.image = data.flatMap(NSImage.init(data:))
+        panel.title = "Customize this Mac"
+        panel.isReleasedWhenClosed = false
+        panel.delegate = self
+        panel.contentView = NSHostingView(
+            rootView: DeviceIdentityEditorView(
+                initialName: name,
+                initialIcon: icon,
+                initialColorHex: colorHex,
+                initialProfileImageData: profileImageData,
+                onSave: { [weak self] name, icon, color, photo in
+                    self?.saveAction(name, icon, color, photo)
+                    self?.panel.close()
+                },
+                onCancel: { [weak self] in self?.panel.close() }
+            )
+        )
     }
 
-    func makeView() -> NSView {
-        let choose = NSButton(title: data == nil ? "Choose Photo…" : "Change Photo…", target: self, action: #selector(choosePhoto))
-        let remove = NSButton(title: "Remove", target: self, action: #selector(removePhoto))
-        remove.isEnabled = data != nil
-        remove.tag = 1
-        let actions = NSStackView(views: [choose, remove])
-        actions.orientation = .vertical
-        actions.alignment = .leading
-        actions.spacing = 6
-        imageView.frame = NSRect(x: 0, y: 0, width: 64, height: 64)
-        let row = NSStackView(views: [imageView, actions])
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.spacing = 12
-        return row
+    func show() {
+        panel.center()
+        panel.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
-    @objc private func choosePhoto() {
-        let panel = NSOpenPanel()
-        panel.title = "Choose a device profile photo"
-        panel.allowedContentTypes = [.image]
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        do {
-            data = try DeviceProfileImage.normalizedData(from: Data(contentsOf: url))
-            imageView.image = data.flatMap(NSImage.init(data:))
-            setRemoveEnabled(true)
-        } catch {
-            let alert = NSAlert(error: error)
-            alert.messageText = "That photo could not be used"
-            alert.runModal()
+    func windowWillClose(_ notification: Notification) {
+        closeAction()
+    }
+}
+
+private struct DeviceIdentityEditorView: View {
+    @State private var name: String
+    @State private var icon: String
+    @State private var colorHex: String
+    @State private var profileImageData: Data?
+    @State private var choosesPhoto = false
+    @State private var photoError: String?
+    @State private var nameError: String?
+    @FocusState private var nameFocused: Bool
+
+    let onSave: (String, String, String, Data?) -> Void
+    let onCancel: () -> Void
+
+    init(
+        initialName: String,
+        initialIcon: String,
+        initialColorHex: String,
+        initialProfileImageData: Data?,
+        onSave: @escaping (String, String, String, Data?) -> Void,
+        onCancel: @escaping () -> Void
+    ) {
+        _name = State(initialValue: initialName)
+        _icon = State(initialValue: initialIcon)
+        _colorHex = State(initialValue: initialColorHex)
+        _profileImageData = State(initialValue: initialProfileImageData)
+        self.onSave = onSave
+        self.onCancel = onCancel
+    }
+
+    private var normalizedName: String {
+        String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(40))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 14) {
+                DeviceAvatar(
+                    emoji: icon,
+                    colorHex: colorHex,
+                    profileImageData: profileImageData,
+                    size: 58
+                )
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(normalizedName.isEmpty ? "This Mac" : normalizedName)
+                        .font(.system(size: 15, weight: .semibold))
+                        .lineLimit(1)
+                    Text("This profile appears to everyone in your rooms.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Palette.secondary)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Device name")
+                        .font(.system(size: 11, weight: .semibold))
+                    Spacer()
+                    Text("\(name.count)/40")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(Palette.muted)
+                }
+                TextField("e.g. Studio Mac", text: $name)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($nameFocused)
+                    .accessibilityLabel("Device name")
+                    .onChange(of: name) { _, newValue in
+                        if newValue.count > 40 { name = String(newValue.prefix(40)) }
+                        if !normalizedName.isEmpty { nameError = nil }
+                    }
+                if let nameError {
+                    Text(nameError)
+                        .font(.system(size: 10))
+                        .foregroundStyle(Palette.red)
+                }
+            }
+
+            HStack(alignment: .top, spacing: 20) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Emoji")
+                        .font(.system(size: 11, weight: .semibold))
+                    Picker("Emoji", selection: $icon) {
+                        ForEach(DeviceAppearance.icons, id: \.self) { emoji in
+                            Text(emoji).tag(emoji)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 108)
+                    .accessibilityLabel("Device emoji")
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Color")
+                        .font(.system(size: 11, weight: .semibold))
+                    HStack(spacing: 5) {
+                        ForEach(Array(DeviceAppearance.colors.enumerated()), id: \.element) { index, color in
+                            Button { colorHex = color } label: {
+                                Circle()
+                                    .fill(Color.deviceIdentity(color))
+                                    .frame(width: 23, height: 23)
+                                    .overlay(
+                                        Circle().stroke(
+                                            colorHex == color ? Palette.ink : Palette.strokeStrong,
+                                            lineWidth: colorHex == color ? 2 : 1
+                                        )
+                                    )
+                                    .padding(3)
+                                    .contentShape(Circle())
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Profile color \(index + 1)")
+                            .accessibilityValue(colorHex == color ? "Selected" : "")
+                        }
+                    }
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 7) {
+                Text("Profile photo · optional")
+                    .font(.system(size: 11, weight: .semibold))
+                HStack(spacing: 10) {
+                    Button(profileImageData == nil ? "Choose photo…" : "Change photo…") {
+                        choosesPhoto = true
+                    }
+                    .buttonStyle(PillButtonStyle(filled: false))
+                    if profileImageData != nil {
+                        Button("Remove photo") {
+                            profileImageData = nil
+                            photoError = nil
+                        }
+                        .buttonStyle(PillButtonStyle(filled: false))
+                    }
+                    Spacer()
+                    Text("Square crop · up to 128 px")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Palette.muted)
+                }
+                if let photoError {
+                    Text(photoError)
+                        .font(.system(size: 10))
+                        .foregroundStyle(Palette.red)
+                        .accessibilityLabel("Photo error: \(photoError)")
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            HStack {
+                Spacer()
+                Button("Cancel", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                Button("Save changes") {
+                    guard !normalizedName.isEmpty else {
+                        nameError = "Enter a device name."
+                        nameFocused = true
+                        return
+                    }
+                    onSave(normalizedName, icon, colorHex, profileImageData)
+                }
+                .keyboardShortcut(.defaultAction)
+            }
         }
-    }
-
-    @objc private func removePhoto() {
-        data = nil
-        imageView.image = nil
-        setRemoveEnabled(false)
-    }
-
-    private func setRemoveEnabled(_ enabled: Bool) {
-        guard let stack = imageView.superview as? NSStackView,
-              let actions = stack.arrangedSubviews.last as? NSStackView,
-              let remove = actions.arrangedSubviews.compactMap({ $0 as? NSButton }).first(where: { $0.tag == 1 })
-        else { return }
-        remove.isEnabled = enabled
+        .padding(24)
+        .frame(width: 460, height: 410)
+        .tint(Palette.controlAccent)
+        .onAppear { nameFocused = true }
+        .fileImporter(isPresented: $choosesPhoto, allowedContentTypes: [.image]) { result in
+            do {
+                let url = try result.get()
+                let accessed = url.startAccessingSecurityScopedResource()
+                defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+                profileImageData = try DeviceProfileImage.normalizedData(from: Data(contentsOf: url))
+                photoError = nil
+            } catch is CancellationError {
+                return
+            } catch {
+                photoError = error.localizedDescription
+            }
+        }
     }
 }
 
@@ -707,6 +888,7 @@ final class WERAIViewModel: ObservableObject {
     private let roomStore = RoomStore()
     private let nodeID: String
     private var localNowPlayingMonitor: NowPlayingMonitor?
+    private var deviceIdentityEditor: DeviceIdentityEditorController?
     private var incomingMessagePreviewTask: Task<Void, Never>?
     private var activeRoom: String?
     private var activeRoomConfiguration: RoomConfiguration?
@@ -758,9 +940,11 @@ final class WERAIViewModel: ObservableObject {
         incomingCallsMuted = defaults.bool(forKey: Self.incomingCallsMutedKey)
         voiceInputDevices = VoiceInputCatalog.availableDevices()
         let savedVoiceInput = defaults.string(forKey: Self.voiceInputUIDKey)
-        selectedVoiceInputUID = voiceInputDevices.contains(where: { $0.id == savedVoiceInput })
+        selectedVoiceInputUID = voiceInputDevices.contains(where: {
+            $0.id == savedVoiceInput && !$0.isSystemDefault
+        })
             ? savedVoiceInput
-            : voiceInputDevices.first(where: \.isSystemDefault)?.id
+            : nil
         selectedRoomID = savedRooms.first?.id
         roomBrowser = MeshRoomBrowser(
             updateHandler: { [weak self] rooms in
@@ -1159,18 +1343,20 @@ final class WERAIViewModel: ObservableObject {
 
     func refreshVoiceInputs() {
         voiceInputDevices = VoiceInputCatalog.availableDevices()
-        if let selectedVoiceInputUID,
-           voiceInputDevices.contains(where: { $0.id == selectedVoiceInputUID }) {
+        guard let selectedVoiceInputUID else { return }
+        if voiceInputDevices.contains(where: { $0.id == selectedVoiceInputUID }) {
             return
         }
-        selectedVoiceInputUID = voiceInputDevices.first(where: \.isSystemDefault)?.id
-        UserDefaults.standard.set(selectedVoiceInputUID, forKey: Self.voiceInputUIDKey)
+        self.selectedVoiceInputUID = nil
+        UserDefaults.standard.removeObject(forKey: Self.voiceInputUIDKey)
     }
 
-    func selectVoiceInput(_ uid: String) {
-        guard voiceInputDevices.contains(where: { $0.id == uid }), selectedVoiceInputUID != uid else { return }
+    func selectVoiceInput(_ uid: String?) {
+        guard uid == nil || voiceInputDevices.contains(where: { $0.id == uid }) else { return }
+        guard selectedVoiceInputUID != uid else { return }
         selectedVoiceInputUID = uid
-        UserDefaults.standard.set(uid, forKey: Self.voiceInputUIDKey)
+        if let uid { UserDefaults.standard.set(uid, forKey: Self.voiceInputUIDKey) }
+        else { UserDefaults.standard.removeObject(forKey: Self.voiceInputUIDKey) }
         if walkieLineOpen {
             let target = selectedWalkieTargetID
             stopWalkieTalkie(preserveOpenLine: true)
@@ -1255,61 +1441,55 @@ final class WERAIViewModel: ObservableObject {
     }
 
     func editDeviceIdentity() {
-        let alert = NSAlert()
-        alert.messageText = "Customize this Mac"
-        alert.informativeText = "Your name, emoji, color, and optional photo appear to everyone in your rooms."
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
-
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 10
-        stack.frame = NSRect(x: 0, y: 0, width: 340, height: 210)
-        let photoController = DevicePhotoSelectionController(data: currentDeviceProfileImageData)
-        let nameField = NSTextField(string: currentUserName)
-        nameField.placeholderString = "Device name"
-        nameField.frame.size.width = 340
-        let emojiPicker = NSPopUpButton()
-        for emoji in DeviceAppearance.icons {
-            emojiPicker.addItem(withTitle: emoji)
+        if let deviceIdentityEditor {
+            deviceIdentityEditor.show()
+            return
         }
-        emojiPicker.selectItem(withTitle: currentDeviceIcon)
-        let colorPicker = NSPopUpButton()
-        for color in DeviceAppearance.colors { colorPicker.addItem(withTitle: color) }
-        colorPicker.selectItem(withTitle: currentDeviceColorHex)
-        stack.addArrangedSubview(NSTextField(labelWithString: "DEVICE NAME"))
-        stack.addArrangedSubview(nameField)
-        let identityRow = NSStackView(views: [emojiPicker, colorPicker])
-        identityRow.orientation = .horizontal
-        identityRow.spacing = 8
-        stack.addArrangedSubview(NSTextField(labelWithString: "EMOJI AND COLOR"))
-        stack.addArrangedSubview(identityRow)
-        stack.addArrangedSubview(NSTextField(labelWithString: "PROFILE PHOTO (OPTIONAL)"))
-        stack.addArrangedSubview(photoController.makeView())
-        alert.accessoryView = stack
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let name = String(nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).prefix(40))
+        let editor = DeviceIdentityEditorController(
+            name: currentUserName,
+            icon: currentDeviceIcon,
+            colorHex: currentDeviceColorHex,
+            profileImageData: currentDeviceProfileImageData,
+            saveAction: { [weak self] name, icon, colorHex, photo in
+                self?.saveDeviceIdentity(
+                    name: name,
+                    icon: icon,
+                    colorHex: colorHex,
+                    profileImageData: photo
+                )
+            },
+            closeAction: { [weak self] in self?.deviceIdentityEditor = nil }
+        )
+        deviceIdentityEditor = editor
+        editor.show()
+    }
+
+    private func saveDeviceIdentity(
+        name: String,
+        icon: String,
+        colorHex: String,
+        profileImageData: Data?
+    ) {
         guard !name.isEmpty else { return }
         let appearance = DeviceAppearance(
-            icon: emojiPicker.titleOfSelectedItem ?? currentDeviceIcon,
-            colorHex: colorPicker.titleOfSelectedItem ?? currentDeviceColorHex
+            icon: icon,
+            colorHex: colorHex
         )
         currentUserName = name
         currentDeviceIcon = appearance.icon
         currentDeviceColorHex = appearance.colorHex
-        currentDeviceProfileImageData = photoController.data
+        currentDeviceProfileImageData = profileImageData
         let defaults = UserDefaults.standard
         defaults.set(name, forKey: "meshDeviceDisplayName")
         defaults.set(appearance.icon, forKey: "meshDeviceIcon")
         defaults.set(appearance.colorHex, forKey: "meshDeviceColorHex")
-        if let data = photoController.data { defaults.set(data, forKey: Self.deviceProfileImageKey) }
+        if let profileImageData { defaults.set(profileImageData, forKey: Self.deviceProfileImageKey) }
         else { defaults.removeObject(forKey: Self.deviceProfileImageKey) }
         meshSession?.updateIdentity(
             name: name,
             icon: appearance.icon,
             colorHex: appearance.colorHex,
-            profileImageData: photoController.data
+            profileImageData: profileImageData
         )
     }
 
@@ -2277,7 +2457,9 @@ private struct FloatingRoomView: View {
     var body: some View {
         Group {
             if presentation == .floating {
-                roomContent.floatingSurface(cornerRadius: FloatingMetrics.cornerRadius)
+                roomContent
+                    .floatingSurface(cornerRadius: FloatingMetrics.cornerRadius)
+                    .padding(FloatingMetrics.windowInset)
             } else {
                 roomContent.background(Palette.opaqueSurface)
             }
@@ -2402,12 +2584,10 @@ private struct FloatingRoomView: View {
                         .fill(model.audioIsRendering ? Palette.syncText : Palette.secondary)
                         .frame(width: 5, height: 5)
                         .accessibilityHidden(true)
-                    Text(model.nowPlaying.title == nil
-                        ? "\(model.participants.count) listening · \(model.roomSyncLabel)"
-                        : "\(model.roomTitle) · \(model.roomSyncLabel)")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(Palette.detailText)
-                    .lineLimit(1)
+                    ViewThatFits(in: .horizontal) {
+                        statusLabel(compact: false)
+                        statusLabel(compact: true)
+                    }
                 }
             }
         }
@@ -2420,6 +2600,22 @@ private struct FloatingRoomView: View {
         } else {
             identity
         }
+    }
+
+    private func statusLabel(compact: Bool) -> some View {
+        let text: String
+        if model.nowPlaying.title == nil {
+            text = compact
+                ? "\(model.participants.count) · \(model.roomSyncLabel)"
+                : "\(model.participants.count) listening · \(model.roomSyncLabel)"
+        } else {
+            text = compact ? model.roomSyncLabel : "\(model.roomTitle) · \(model.roomSyncLabel)"
+        }
+        return Text(text)
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(Palette.detailText)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
     }
 
     private var artworkTile: some View {
@@ -3297,7 +3493,9 @@ private struct WalkieTalkieBar: View {
     var body: some View {
         Group {
             if showsCloseButton {
-                controls.glass(cornerRadius: 22)
+                controls
+                    .glass(cornerRadius: 22)
+                    .padding(FloatingMetrics.windowInset)
             } else {
                 controls.floatingSurface(cornerRadius: 16)
             }
@@ -3326,7 +3524,17 @@ private struct WalkieTalkieBar: View {
                 Spacer(minLength: 4)
 
                 Menu {
-                    ForEach(model.voiceInputDevices) { input in
+                    Button {
+                        model.selectVoiceInput(nil)
+                    } label: {
+                        if model.selectedVoiceInputUID == nil {
+                            Label("System Default", systemImage: "checkmark")
+                        } else {
+                            Text("System Default")
+                        }
+                    }
+                    Divider()
+                    ForEach(model.voiceInputDevices.filter { !$0.isSystemDefault }) { input in
                         Button {
                             model.selectVoiceInput(input.id)
                         } label: {
@@ -3340,13 +3548,18 @@ private struct WalkieTalkieBar: View {
                     Divider()
                     Button("Refresh Microphones") { model.refreshVoiceInputs() }
                 } label: {
-                    Label(selectedMicrophoneName, systemImage: "mic.fill")
-                        .font(.system(size: 10, weight: .semibold))
-                        .lineLimit(1)
+                    ViewThatFits(in: .horizontal) {
+                        Label(selectedMicrophoneName, systemImage: "mic.fill")
+                            .fixedSize(horizontal: true, vertical: false)
+                        Label("Microphone", systemImage: "mic.fill")
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .font(.system(size: 10, weight: .semibold))
+                    .lineLimit(1)
                 }
                 .menuStyle(.borderlessButton)
-                .frame(maxWidth: 150)
-                .help("Choose the microphone used for voice")
+                .frame(maxWidth: 184)
+                .help("Microphone: \(selectedMicrophoneName)")
 
                 if showsCloseButton {
                     Button(action: model.hideWalkieBar) {
@@ -3438,7 +3651,11 @@ private struct WalkieTalkieBar: View {
     }
 
     private var selectedMicrophoneName: String {
-        model.voiceInputDevices.first(where: { $0.id == model.selectedVoiceInputUID })?.name
+        guard let selectedVoiceInputUID = model.selectedVoiceInputUID else {
+            let defaultName = model.voiceInputDevices.first(where: \.isSystemDefault)?.name
+            return defaultName.map { "System Default · \($0)" } ?? "System Default"
+        }
+        return model.voiceInputDevices.first(where: { $0.id == selectedVoiceInputUID })?.name
             ?? "System microphone"
     }
 
@@ -3486,8 +3703,8 @@ private final class WalkieTalkieWindowController {
             contentRect: NSRect(
                 x: 0,
                 y: 0,
-                width: FloatingMetrics.width,
-                height: FloatingMetrics.walkieBarHeight
+                width: FloatingMetrics.windowWidth,
+                height: FloatingMetrics.windowHeight(for: FloatingMetrics.walkieBarHeight)
             ),
             styleMask: [.borderless],
             backing: .buffered,
@@ -3540,8 +3757,8 @@ private final class FloatingRoomWindowController {
             contentRect: NSRect(
                 x: 0,
                 y: 0,
-                width: FloatingMetrics.width,
-                height: model.floatingPanelHeight
+                width: FloatingMetrics.windowWidth,
+                height: FloatingMetrics.windowHeight(for: model.floatingPanelHeight)
             ),
             styleMask: [.borderless],
             backing: .buffered,
@@ -3603,9 +3820,9 @@ private final class FloatingRoomWindowController {
         pendingShrink?.cancel()
         pendingShrink = nil
 
-        let height = model.floatingPanelHeight
+        let height = FloatingMetrics.windowHeight(for: model.floatingPanelHeight)
         guard abs(panel.frame.height - height) > 0.5
-                || abs(panel.frame.width - FloatingMetrics.width) > 0.5 else { return }
+                || abs(panel.frame.width - FloatingMetrics.windowWidth) > 0.5 else { return }
         let shouldAnimate = animated
             && panel.isVisible
             && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -3630,7 +3847,7 @@ private final class FloatingRoomWindowController {
         let fixedBottomEdge = panel.frame.minY
         let screenFrame = (panel.screen ?? NSScreen.main)?.visibleFrame
         var frame = panel.frame
-        frame.size = NSSize(width: FloatingMetrics.width, height: height)
+        frame.size = NSSize(width: FloatingMetrics.windowWidth, height: height)
         frame.origin.y = fixedBottomEdge
         if let screenFrame {
             frame.origin.x = min(max(frame.origin.x, screenFrame.minX), screenFrame.maxX - frame.width)

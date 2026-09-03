@@ -89,7 +89,6 @@ final class MeshSession {
     private final class CallbackRelay {
         var replica: (MeshRoomReplica) -> Void = { _ in }
         var participants: ([RoomParticipant]) -> Void = { _ in }
-        var walkieTalkie: (WalkieTalkieMessage) -> Void = { _ in }
     }
     private let callbackRelay: CallbackRelay
 
@@ -170,11 +169,12 @@ final class MeshSession {
         self.videoHandler = videoHandler
         self.errorHandler = errorHandler
         self.walkieTalkieTransmissionEndedHandler = walkieTalkieTransmissionEndedHandler
-        self.walkieTalkiePlayer = WalkieTalkiePlayer { senderID, senderName, active in
+        let walkieTalkiePlayer = WalkieTalkiePlayer { senderID, senderName, active in
             DispatchQueue.main.async {
                 walkieTalkieStateHandler(senderID, senderName, active)
             }
         }
+        self.walkieTalkiePlayer = walkieTalkiePlayer
         self.replicaPersistenceHandler = replicaPersistenceHandler
         self.control = MeshControlPlane(
             room: room,
@@ -200,12 +200,11 @@ final class MeshSession {
                 mediaRelay.handleResync(targetID, broadcasterID: broadcasterID, epoch: broadcasterEpoch)
             },
             walkieTalkieHandler: { message in
-                DispatchQueue.main.async { relay.walkieTalkie(message) }
+                walkieTalkiePlayer.accept(message)
             }
         )
         relay.replica = { [weak self] in self?.apply($0) }
         relay.participants = participantsHandler
-        relay.walkieTalkie = { [weak self] message in self?.receiveWalkieTalkie(message) }
     }
 
     func start(broadcastInitially: Bool) throws {
@@ -686,7 +685,4 @@ final class MeshSession {
         return hostSession.requestResync(participantID: targetID)
     }
 
-    private func receiveWalkieTalkie(_ message: WalkieTalkieMessage) {
-        walkieTalkiePlayer.accept(message)
-    }
 }

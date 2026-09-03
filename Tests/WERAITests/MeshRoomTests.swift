@@ -618,6 +618,101 @@ struct MeshRoomTests {
         #expect(resyncs.count == 1)
     }
 
+    @Test("Open-line and targeted voice audio cross a relayed mesh path")
+    func walkieTalkieAudioCrossesRelay() throws {
+        let room = RoomConfiguration(name: "Relayed voice test", creatorPeerID: "a")
+        let a = MeshProbe()
+        let b = MeshProbe()
+        let c = MeshProbe()
+        let bReady = PortProbe()
+        let cReady = PortProbe()
+        let bWalkie = WalkieProbe()
+        let cWalkie = WalkieProbe()
+        let nodeA = makeNode(room: room, id: "a", probe: a, ports: PortProbe())
+        let nodeB = MeshControlPlane(
+            room: room,
+            nodeID: "b",
+            displayName: "B",
+            listenerReadyHandler: { bReady.set($0) },
+            replicaHandler: { b.update(replica: $0) },
+            participantsHandler: { b.update(participants: $0) },
+            walkieTalkieHandler: { bWalkie.add($0) }
+        )
+        let nodeC = MeshControlPlane(
+            room: room,
+            nodeID: "c",
+            displayName: "C",
+            listenerReadyHandler: { cReady.set($0) },
+            replicaHandler: { c.update(replica: $0) },
+            participantsHandler: { c.update(participants: $0) },
+            walkieTalkieHandler: { cWalkie.add($0) }
+        )
+        try nodeA.start(advertise: false)
+        try nodeB.start(advertise: false)
+        try nodeC.start(advertise: false)
+        defer { nodeA.stop(); nodeB.stop(); nodeC.stop() }
+        guard let portB = bReady.wait(), let portC = cReady.wait() else {
+            Issue.record("Mesh listeners did not start")
+            return
+        }
+        nodeA.connectForTesting(to: .hostPort(host: "127.0.0.1", port: portB))
+        nodeB.connectForTesting(to: .hostPort(host: "127.0.0.1", port: portC))
+        #expect(waitUntil { a.participantCount == 2 && b.participantCount == 3 && c.participantCount == 2 })
+
+        let broadcastPCM = Data([0x00, 0x40, 0x00, 0xC0])
+        nodeA.publishWalkieTalkie(.init(
+            kind: .began,
+            senderID: "a",
+            senderName: "A",
+            targetID: nil,
+            sessionID: "open-line"
+        ))
+        nodeA.publishWalkieTalkie(.init(
+            kind: .audio,
+            senderID: "a",
+            senderName: "A",
+            targetID: nil,
+            sessionID: "open-line",
+            sequence: 1,
+            pcm16Mono: broadcastPCM
+        ))
+        #expect(waitUntil { bWalkie.audio(sessionID: "open-line") == broadcastPCM })
+        #expect(waitUntil { cWalkie.audio(sessionID: "open-line") == broadcastPCM })
+
+        let targetedPCM = Data([0x00, 0x20, 0x00, 0xE0])
+        nodeA.publishWalkieTalkie(.init(
+            kind: .audio,
+            senderID: "a",
+            senderName: "A",
+            targetID: "c",
+            sessionID: "targeted-relay",
+            sequence: 1,
+            pcm16Mono: targetedPCM
+        ))
+        #expect(waitUntil { cWalkie.audio(sessionID: "targeted-relay") == targetedPCM })
+        #expect(bWalkie.audio(sessionID: "targeted-relay") == nil)
+        #expect(WalkieTalkiePlayer.makePlaybackBuffer(fromPCM16Mono: targetedPCM) != nil)
+    }
+
+    @Test("Walkie relay validates direct origins before accepting forwarded audio")
+    func walkieTalkieRelayOriginValidation() {
+        #expect(MeshControlPlane.isValidWalkieTalkieOrigin(
+            senderID: "a", remoteID: "a", envelopeOriginID: nil, hopCount: 0
+        ))
+        #expect(MeshControlPlane.isValidWalkieTalkieOrigin(
+            senderID: "a", remoteID: "a", envelopeOriginID: "a", hopCount: 0
+        ))
+        #expect(!MeshControlPlane.isValidWalkieTalkieOrigin(
+            senderID: "a", remoteID: "b", envelopeOriginID: "a", hopCount: 0
+        ))
+        #expect(MeshControlPlane.isValidWalkieTalkieOrigin(
+            senderID: "a", remoteID: "b", envelopeOriginID: "a", hopCount: 1
+        ))
+        #expect(!MeshControlPlane.isValidWalkieTalkieOrigin(
+            senderID: "a", remoteID: "b", envelopeOriginID: "b", hopCount: 1
+        ))
+    }
+
     @Test("Room controls retry until the broadcaster media session accepts them")
     func roomActionAcknowledgementFollowsMediaAcceptance() throws {
         let room = RoomConfiguration(name: "Control retry test", creatorPeerID: "a")
@@ -886,6 +981,11 @@ private final class WalkieProbe: @unchecked Sendable {
     private var messages = [WalkieTalkieMessage]()
     var count: Int { lock.withLock { messages.count } }
     func add(_ message: WalkieTalkieMessage) { lock.withLock { messages.append(message) } }
+    func audio(sessionID: String) -> Data? {
+        lock.withLock {
+            messages.first { $0.kind == .audio && $0.sessionID == sessionID }?.pcm16Mono
+        }
+    }
 }
 
 private final class MediaCommandProbe: @unchecked Sendable {

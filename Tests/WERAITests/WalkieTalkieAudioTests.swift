@@ -67,6 +67,11 @@ struct WalkieTalkieAudioTests {
 
         #expect(Set(devices.map(\.id)).count == devices.count)
         #expect(devices.filter(\.isSystemDefault).count <= 1)
+        #expect(!devices.contains { $0.id == VirtualAudioDevice.uid })
+        #expect(VoiceInputCatalog.usesSystemDefault(nil))
+        if let systemDefault = devices.first(where: \.isSystemDefault) {
+            #expect(VoiceInputCatalog.usesSystemDefault(systemDefault.id))
+        }
     }
 
     @Test("Concurrent talkers receive independent Float32 playback buffers")

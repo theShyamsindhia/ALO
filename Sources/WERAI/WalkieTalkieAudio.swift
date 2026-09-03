@@ -15,8 +15,10 @@ enum VoiceInputCatalog {
         let defaultID = defaultInputDeviceID()
         let devices: [VoiceInputDevice] = allDeviceIDs().compactMap { deviceID in
             guard isAlive(deviceID),
+                  !isHidden(deviceID),
                   hasInput(deviceID),
                   let uid = VirtualAudioDevice.uid(for: deviceID),
+                  uid != VirtualAudioDevice.uid,
                   let name = name(for: deviceID)
             else { return nil }
             return VoiceInputDevice(id: uid, name: name, isSystemDefault: deviceID == defaultID)
@@ -38,6 +40,10 @@ enum VoiceInputCatalog {
         guard var deviceID = VirtualAudioDevice.deviceID(uid: uid),
               isAlive(deviceID), hasInput(deviceID)
         else { throw WERAIError("The selected microphone is no longer available.") }
+        // Let AVAudioEngine follow the system input normally. Setting the same
+        // device explicitly forces a HAL route onto VoiceProcessingIO and can
+        // leave its capture path running without producing frames.
+        guard deviceID != defaultInputDeviceID() else { return }
         guard let audioUnit = inputNode.audioUnit else {
             throw WERAIError("ALO could not prepare the selected microphone.")
         }
@@ -52,6 +58,12 @@ enum VoiceInputCatalog {
         guard status == noErr else {
             throw WERAIError("ALO could not use the selected microphone (OSStatus \(status)).")
         }
+    }
+
+    static func usesSystemDefault(_ uid: String?) -> Bool {
+        guard let uid else { return true }
+        guard let deviceID = VirtualAudioDevice.deviceID(uid: uid) else { return false }
+        return deviceID == defaultInputDeviceID()
     }
 
     private static func allDeviceIDs() -> [AudioDeviceID] {
@@ -104,6 +116,19 @@ enum VoiceInputCatalog {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
+        var value: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        return AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &value) == noErr
+            && value != 0
+    }
+
+    private static func isHidden(_ deviceID: AudioDeviceID) -> Bool {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyIsHidden,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectHasProperty(deviceID, &address) else { return false }
         var value: UInt32 = 0
         var size = UInt32(MemoryLayout<UInt32>.size)
         return AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &value) == noErr
@@ -191,16 +216,17 @@ final class WalkieTalkieMicrophone: @unchecked Sendable {
         stopOnQueue()
         let engine = AVAudioEngine()
         let input = engine.inputNode
-        try? input.setVoiceProcessingEnabled(true)
-        if input.isVoiceProcessingEnabled {
-            input.voiceProcessingOtherAudioDuckingConfiguration = .init(
-                enableAdvancedDucking: false,
-                duckingLevel: .min
-            )
+        if VoiceInputCatalog.usesSystemDefault(inputDeviceUID) {
+            try? input.setVoiceProcessingEnabled(true)
+            if input.isVoiceProcessingEnabled {
+                input.voiceProcessingOtherAudioDuckingConfiguration = .init(
+                    enableAdvancedDucking: false,
+                    duckingLevel: .min
+                )
+            }
         }
-        // Enabling voice processing replaces the input audio unit. Apply the
-        // selected CoreAudio device afterwards so that reconfiguration cannot
-        // silently return capture to the system default.
+        // VoiceProcessingIO follows the system input. Explicit device routing
+        // stays on the standard input unit, where CurrentDevice is supported.
         try VoiceInputCatalog.apply(inputDeviceUID, to: input)
         let inputFormat = input.outputFormat(forBus: 0)
         guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0,

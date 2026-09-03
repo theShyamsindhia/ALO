@@ -263,6 +263,7 @@ public struct MeshEnvelope: Codable, Sendable {
     public let mediaCommand: RoomMediaCommand?
     public let targetID: String?
     public let actionAttempt: UInt64?
+    public let walkieTalkieHopCount: UInt8?
     public let walkieTalkie: WalkieTalkieMessage?
 
     public init(
@@ -288,6 +289,7 @@ public struct MeshEnvelope: Codable, Sendable {
         mediaCommand: RoomMediaCommand? = nil,
         targetID: String? = nil,
         actionAttempt: UInt64? = nil,
+        walkieTalkieHopCount: UInt8? = nil,
         walkieTalkie: WalkieTalkieMessage? = nil
     ) {
         self.type = type
@@ -312,6 +314,7 @@ public struct MeshEnvelope: Codable, Sendable {
         self.mediaCommand = mediaCommand
         self.targetID = targetID
         self.actionAttempt = actionAttempt
+        self.walkieTalkieHopCount = walkieTalkieHopCount
         self.walkieTalkie = walkieTalkie
     }
 
