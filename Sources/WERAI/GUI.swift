@@ -43,7 +43,7 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
         installTerminationSignalHandlers()
         installMainMenu()
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1_040, height: 720),
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 620),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -52,7 +52,7 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.backgroundColor = .windowBackgroundColor
-        window.minSize = NSSize(width: 860, height: 600)
+        window.minSize = NSSize(width: 500, height: 540)
         window.contentView = NSHostingView(rootView: WERAIView(model: model))
         window.center()
         window.isReleasedWhenClosed = false
@@ -495,7 +495,7 @@ private final class PinnedWalkieStatusController {
             entry.0.button?.wantsLayer = true
             entry.0.button?.layer?.cornerRadius = 6
             entry.0.button?.layer?.backgroundColor = incomingSpeakerIDs.contains(participant.id)
-                ? NSColor.systemPink.withAlphaComponent(0.42).cgColor
+                ? NSColor.systemGreen.withAlphaComponent(0.45).cgColor
                 : NSColor.clear.cgColor
             entry.0.button?.toolTip = "Click to open/close · hold to talk to \(participant.name)"
         }
@@ -579,17 +579,13 @@ private final class DeviceIdentityEditorController: NSObject, NSWindowDelegate {
         self.saveAction = saveAction
         self.closeAction = closeAction
         panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 500, height: 448),
-            styleMask: [.titled, .closable, .fullSizeContentView],
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 410),
+            styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
         super.init()
         panel.title = "Customize this Mac"
-        panel.titleVisibility = .hidden
-        panel.titlebarAppearsTransparent = true
-        panel.backgroundColor = .white
-        panel.isMovableByWindowBackground = true
         panel.isReleasedWhenClosed = false
         panel.delegate = self
         panel.contentView = NSHostingView(
@@ -652,93 +648,79 @@ private struct DeviceIdentityEditorView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .center, spacing: 16) {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 14) {
                 DeviceAvatar(
                     emoji: icon,
                     colorHex: colorHex,
                     profileImageData: profileImageData,
-                    size: 64
+                    size: 58
                 )
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("THIS MAC")
-                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                        .tracking(0.8)
-                        .foregroundStyle(LandingPalette.accent)
-                    Text(normalizedName.isEmpty ? "Make it recognizable" : normalizedName)
-                        .font(.system(size: 20, weight: .semibold))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(normalizedName.isEmpty ? "This Mac" : normalizedName)
+                        .font(.system(size: 15, weight: .semibold))
                         .lineLimit(1)
-                    Text("This identity appears to everyone in the room.")
+                    Text("This profile appears to everyone in your rooms.")
                         .font(.system(size: 11))
-                        .foregroundStyle(LandingPalette.secondary)
+                        .foregroundStyle(Palette.secondary)
                 }
             }
-            .padding(.bottom, 24)
 
-            editorLabel("DEVICE NAME", trailing: "\(name.count)/40")
-            TextField("Studio Mac", text: $name)
-                .textFieldStyle(.plain)
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(LandingPalette.ink)
-                .focused($nameFocused)
-                .accessibilityLabel("Device name")
-                .padding(.horizontal, 12)
-                .frame(height: 40)
-                .background(LandingPalette.field)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .stroke(nameError == nil ? LandingPalette.line : Palette.red, lineWidth: 1)
-                )
-                .onChange(of: name) { _, newValue in
-                    if newValue.count > 40 { name = String(newValue.prefix(40)) }
-                    if !normalizedName.isEmpty { nameError = nil }
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("Device name")
+                        .font(.system(size: 11, weight: .semibold))
+                    Spacer()
+                    Text("\(name.count)/40")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundStyle(Palette.muted)
                 }
-            if let nameError {
-                Text(nameError)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(Palette.red)
-                    .padding(.top, 5)
+                TextField("e.g. Studio Mac", text: $name)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($nameFocused)
+                    .accessibilityLabel("Device name")
+                    .onChange(of: name) { _, newValue in
+                        if newValue.count > 40 { name = String(newValue.prefix(40)) }
+                        if !normalizedName.isEmpty { nameError = nil }
+                    }
+                if let nameError {
+                    Text(nameError)
+                        .font(.system(size: 10))
+                        .foregroundStyle(Palette.red)
+                }
             }
 
-            HStack(alignment: .top, spacing: 24) {
-                VStack(alignment: .leading, spacing: 9) {
-                    editorLabel("ICON")
-                    LazyVGrid(columns: Array(repeating: GridItem(.fixed(30), spacing: 5), count: 8), spacing: 5) {
-                        ForEach(DeviceAppearance.icons, id: \.self) { candidate in
-                            Button { icon = candidate } label: {
-                                Text(candidate)
-                                    .font(.system(size: 15))
-                                    .frame(width: 30, height: 30)
-                                    .background(icon == candidate ? LandingPalette.selection : LandingPalette.field)
-                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                            .stroke(icon == candidate ? LandingPalette.accent : LandingPalette.line, lineWidth: 1)
-                                    )
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Device icon \(candidate)")
-                            .accessibilityValue(icon == candidate ? "Selected" : "")
+            HStack(alignment: .top, spacing: 20) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Emoji")
+                        .font(.system(size: 11, weight: .semibold))
+                    Picker("Emoji", selection: $icon) {
+                        ForEach(DeviceAppearance.icons, id: \.self) { emoji in
+                            Text(emoji).tag(emoji)
                         }
                     }
+                    .labelsHidden()
+                    .frame(width: 108)
+                    .accessibilityLabel("Device emoji")
                 }
 
-                VStack(alignment: .leading, spacing: 9) {
-                    editorLabel("COLOR")
-                    LazyVGrid(columns: Array(repeating: GridItem(.fixed(26), spacing: 6), count: 4), spacing: 6) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Color")
+                        .font(.system(size: 11, weight: .semibold))
+                    HStack(spacing: 5) {
                         ForEach(Array(DeviceAppearance.colors.enumerated()), id: \.element) { index, color in
                             Button { colorHex = color } label: {
                                 Circle()
                                     .fill(Color.deviceIdentity(color))
-                                    .frame(width: 20, height: 20)
-                                    .padding(3)
+                                    .frame(width: 23, height: 23)
                                     .overlay(
                                         Circle().stroke(
-                                            colorHex == color ? LandingPalette.ink : LandingPalette.line,
+                                            colorHex == color ? Palette.ink : Palette.strokeStrong,
                                             lineWidth: colorHex == color ? 2 : 1
                                         )
                                     )
+                                    .padding(3)
+                                    .contentShape(Circle())
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel("Profile color \(index + 1)")
@@ -747,45 +729,40 @@ private struct DeviceIdentityEditorView: View {
                     }
                 }
             }
-            .padding(.top, 20)
 
-            HStack(spacing: 10) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("PROFILE PHOTO")
-                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                        .tracking(0.7)
-                    Text("Optional · square crop · 128 px")
-                        .font(.system(size: 9))
-                        .foregroundStyle(LandingPalette.secondary)
-                }
-                Spacer()
-                Button(profileImageData == nil ? "Choose photo" : "Change photo") {
-                    choosesPhoto = true
-                }
-                .buttonStyle(LandingEditorButtonStyle(filled: false))
-                if profileImageData != nil {
-                    Button("Remove") {
-                        profileImageData = nil
-                        photoError = nil
+            VStack(alignment: .leading, spacing: 7) {
+                Text("Profile photo · optional")
+                    .font(.system(size: 11, weight: .semibold))
+                HStack(spacing: 10) {
+                    Button(profileImageData == nil ? "Choose photo…" : "Change photo…") {
+                        choosesPhoto = true
                     }
-                    .buttonStyle(LandingEditorButtonStyle(filled: false))
+                    .buttonStyle(PillButtonStyle(filled: false))
+                    if profileImageData != nil {
+                        Button("Remove photo") {
+                            profileImageData = nil
+                            photoError = nil
+                        }
+                        .buttonStyle(PillButtonStyle(filled: false))
+                    }
+                    Spacer()
+                    Text("Square crop · up to 128 px")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Palette.muted)
+                }
+                if let photoError {
+                    Text(photoError)
+                        .font(.system(size: 10))
+                        .foregroundStyle(Palette.red)
+                        .accessibilityLabel("Photo error: \(photoError)")
                 }
             }
-            .padding(.top, 20)
-            if let photoError {
-                Text(photoError)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(Palette.red)
-                    .padding(.top, 5)
-                    .accessibilityLabel("Photo error: \(photoError)")
-            }
 
-            Spacer(minLength: 18)
+            Spacer(minLength: 0)
 
-            HStack(spacing: 8) {
+            HStack {
                 Spacer()
                 Button("Cancel", action: onCancel)
-                    .buttonStyle(LandingEditorButtonStyle(filled: false))
                     .keyboardShortcut(.cancelAction)
                 Button("Save changes") {
                     guard !normalizedName.isEmpty else {
@@ -795,18 +772,12 @@ private struct DeviceIdentityEditorView: View {
                     }
                     onSave(normalizedName, icon, colorHex, profileImageData)
                 }
-                .buttonStyle(LandingEditorButtonStyle(filled: true))
                 .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(.top, 46)
-        .padding(.horizontal, 26)
-        .padding(.bottom, 22)
-        .frame(width: 500, height: 448)
-        .background(LandingPalette.background)
-        .foregroundStyle(LandingPalette.ink)
-        .tint(LandingPalette.accent)
-        .preferredColorScheme(.light)
+        .padding(24)
+        .frame(width: 460, height: 410)
+        .tint(Palette.controlAccent)
         .onAppear { nameFocused = true }
         .fileImporter(isPresented: $choosesPhoto, allowedContentTypes: [.image]) { result in
             do {
@@ -821,23 +792,6 @@ private struct DeviceIdentityEditorView: View {
                 photoError = error.localizedDescription
             }
         }
-    }
-
-    @ViewBuilder
-    private func editorLabel(_ title: String, trailing: String? = nil) -> some View {
-        HStack {
-            Text(title)
-                .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                .tracking(0.7)
-            Spacer()
-            if let trailing {
-                Text(trailing)
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundStyle(LandingPalette.muted)
-            }
-        }
-        .foregroundStyle(LandingPalette.secondary)
-        .padding(.bottom, 7)
     }
 }
 
@@ -2107,47 +2061,60 @@ private struct WERAIView: View {
             }
             if model.permissionNotice { permissionOverlay }
         }
-        .frame(minWidth: 860, minHeight: 600)
+        .frame(minWidth: 500, minHeight: 540)
         .tint(LandingPalette.accent)
         .preferredColorScheme(.light)
         .ignoresSafeArea()
     }
 
     private var idleView: some View {
-        HStack(spacing: 18) {
-            setupConsole
-                .frame(width: 282)
-
-            LandingArtworkSlideshow()
-                .aspectRatio(1, contentMode: .fit)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
-        }
+        setupConsole
+            .frame(maxWidth: 460, maxHeight: 540)
         .padding(.top, 40)
-        .padding(.horizontal, 20)
-        .padding(.bottom, 20)
+        .padding(.horizontal, 28)
+        .padding(.bottom, 24)
     }
 
     private var setupConsole: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("ALO")
-                    .font(.system(size: 14, weight: .bold))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(model.mode == .share ? "Create a room" : "Your rooms")
+                        .font(.system(size: 19, weight: .semibold))
+                    Text(model.mode == .share ? "Anyone in the room can broadcast." : "Nearby and saved on this Mac")
+                        .font(.system(size: 11))
+                        .foregroundStyle(LandingPalette.secondary)
+                }
                 Spacer()
                 Button(action: model.editDeviceIdentity) {
-                    DeviceAvatar(
-                        emoji: model.currentDeviceIcon,
-                        colorHex: model.currentDeviceColorHex,
-                        profileImageData: model.currentDeviceProfileImageData,
-                        size: 24
-                    )
+                    HStack(spacing: 7) {
+                        DeviceAvatar(
+                            emoji: model.currentDeviceIcon,
+                            colorHex: model.currentDeviceColorHex,
+                            profileImageData: model.currentDeviceProfileImageData,
+                            size: 26
+                        )
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(model.currentUserName)
+                                .font(.system(size: 10, weight: .semibold))
+                                .lineLimit(1)
+                            Text("Rename this Mac")
+                                .font(.system(size: 8))
+                                .foregroundStyle(LandingPalette.secondary)
+                        }
+                        Image(systemName: "pencil")
+                            .font(.system(size: 8, weight: .semibold))
+                            .foregroundStyle(LandingPalette.secondary)
+                    }
+                    .padding(.horizontal, 8)
+                    .frame(height: 36)
+                    .background(LandingPalette.field)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .help("Change this Mac's room name, emoji, color, or photo")
-                Text(versionLabel)
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundStyle(LandingPalette.secondary)
             }
-            .padding(.bottom, 44)
+            .padding(.bottom, 24)
 
             if model.mode == .share {
                 createRoomPanel
@@ -2155,11 +2122,10 @@ private struct WERAIView: View {
                 roomList
             }
 
-            Spacer(minLength: 24)
+            Spacer(minLength: 16)
 
-            Text("LOCAL  /  P2P  /  FREE")
-                .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                .tracking(0.6)
+            Text("ALO  \(versionLabel)  ·  LOCAL P2P")
+                .font(.system(size: 9, weight: .medium, design: .monospaced))
                 .foregroundStyle(LandingPalette.muted)
         }
         .padding(.horizontal, 10)
@@ -2168,15 +2134,6 @@ private struct WERAIView: View {
 
     private var createRoomPanel: some View {
         VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text("Create a room")
-                    .font(.system(size: 17, weight: .semibold))
-                Text("Name it now. Anyone inside can broadcast later.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(LandingPalette.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
             VStack(alignment: .leading, spacing: 7) {
                 Text("ROOM NAME")
                     .font(.system(size: 9, weight: .semibold, design: .monospaced))
@@ -2222,14 +2179,6 @@ private struct WERAIView: View {
 
     private var roomList: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("Join a room")
-                .font(.system(size: 17, weight: .semibold))
-            Text("Nearby and previously joined")
-                .font(.system(size: 11))
-                .foregroundStyle(LandingPalette.secondary)
-                .padding(.top, 4)
-                .padding(.bottom, 14)
-
             ScrollView {
                 LazyVStack(spacing: 0) {
                     if model.roomChoices.isEmpty {
@@ -3363,28 +3312,6 @@ private struct LandingPrimaryButtonStyle: ButtonStyle {
     }
 }
 
-private struct LandingEditorButtonStyle: ButtonStyle {
-    let filled: Bool
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundStyle(filled ? Color.white : LandingPalette.ink)
-            .padding(.horizontal, 13)
-            .frame(height: 34)
-            .background(filled ? LandingPalette.ink : LandingPalette.field)
-            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .stroke(filled ? Color.clear : LandingPalette.line, lineWidth: 1)
-            )
-            .scaleEffect(!reduceMotion && configuration.isPressed ? 0.98 : 1)
-            .opacity(configuration.isPressed ? 0.82 : 1)
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: configuration.isPressed)
-    }
-}
-
 private struct LandingChoiceButtonStyle: ButtonStyle {
     let active: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -3523,10 +3450,11 @@ private struct WalkieTalkieTargetIcon: View {
         )
             .overlay {
                 Circle().stroke(
-                    incoming ? Palette.controlAccent : outgoing ? Color.white : selected ? Palette.ink.opacity(0.7) : Color.clear,
-                    lineWidth: incoming ? 3 : 2
+                    incoming ? Color.green : outgoing ? Color.white : selected ? Palette.ink.opacity(0.7) : Color.clear,
+                    lineWidth: incoming ? 4 : 2
                 )
             }
+            .shadow(color: incoming ? Color.green.opacity(0.75) : .clear, radius: 8)
             .scaleEffect(incoming || outgoing ? 1.08 : 1)
             .contentShape(Circle())
             .onLongPressGesture(
@@ -3586,13 +3514,12 @@ private struct WalkieTalkieBar: View {
                 Image(systemName: "waveform.badge.mic")
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(Palette.controlAccent)
-                Text("VOICE LINE")
-                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                    .tracking(0.7)
+                Text("VOICE")
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
                     .foregroundStyle(Palette.controlIcon)
                 Text(voiceStatus)
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(model.walkieTalking ? Palette.accentText : Palette.controlIcon.opacity(0.72))
+                    .foregroundStyle(model.walkieTalking ? Color.green : Palette.controlIcon.opacity(0.75))
                     .lineLimit(1)
                 Spacer(minLength: 4)
 
@@ -3648,8 +3575,7 @@ private struct WalkieTalkieBar: View {
 
             HStack(spacing: 8) {
                 Text("TALK TO")
-                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                    .tracking(0.6)
+                    .font(.system(size: 9, weight: .bold, design: .rounded))
                     .foregroundStyle(Palette.controlIcon.opacity(0.6))
 
                 walkieTarget(id: nil, name: "Everyone", icon: "👥", colorHex: "3F86E8")
@@ -3676,11 +3602,11 @@ private struct WalkieTalkieBar: View {
                         systemImage: model.walkieLineOpen ? "phone.down.fill" : "phone.fill"
                     )
                     .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(model.walkieLineOpen ? Palette.selectedControlText : Palette.controlIcon)
+                    .foregroundStyle(model.walkieLineOpen ? Color.white : Palette.controlIcon)
                     .padding(.horizontal, 9)
                     .frame(height: 34)
-                    .background(model.walkieLineOpen ? Palette.controlAccent : Palette.messageSurface)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .background(model.walkieLineOpen ? Color.green.opacity(0.8) : Palette.messageSurface)
+                    .clipShape(Capsule())
                 }
                 .buttonStyle(.plain)
                 .disabled(remoteParticipants.isEmpty)
@@ -3703,7 +3629,7 @@ private struct WalkieTalkieBar: View {
                         .foregroundStyle(Palette.controlIcon)
                         .frame(width: 30, height: 34)
                         .background(Palette.messageSurface)
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .clipShape(Capsule())
                 }
                 .menuStyle(.borderlessButton)
                 .frame(width: 34)
@@ -4081,94 +4007,6 @@ private struct AmbientBackground: View {
                 .offset(x: 390, y: -260)
         }
         .ignoresSafeArea()
-    }
-}
-
-private struct LandingArtworkSlideshow: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var currentIndex = 0
-    private let timer = Timer.publish(every: 8, on: .main, in: .common).autoconnect()
-
-    var body: some View {
-        let artworkURLs = LandingArtworkCatalog.imageURLs
-        ZStack {
-            if artworkURLs.isEmpty {
-                LandingPalette.selection
-            } else {
-                ForEach([currentIndex], id: \.self) { index in
-                    if let image = LandingArtworkCache.shared.image(for: artworkURLs[index]) {
-                        Image(nsImage: image)
-                            .resizable()
-                            .scaledToFill()
-                            .transition(.opacity)
-                    }
-                }
-            }
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .stroke(LandingPalette.line, lineWidth: 1)
-        )
-        .onReceive(timer) { _ in
-            guard !reduceMotion, NSApp.isActive, artworkURLs.count > 1 else { return }
-            let nextIndex = (currentIndex + 1) % artworkURLs.count
-            _ = LandingArtworkCache.shared.image(for: artworkURLs[nextIndex])
-            withAnimation(.easeInOut(duration: 1.1)) {
-                currentIndex = nextIndex
-            }
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("ALO artwork slideshow")
-    }
-}
-
-private enum LandingArtworkCatalog {
-    private static let filenames = [
-        "12-rice-path.jpg",
-        "08-picnic.jpg",
-        "09-red-hood.jpg",
-        "01-cloud-path.jpg",
-        "02-stadium.jpg",
-        "03-field-walk.jpg",
-        "04-gathering.jpg",
-        "05-birds-garden.jpg",
-        "06-ocean-hill.jpg",
-        "07-garden-chairs.jpg",
-        "10-garden-work.jpg",
-        "11-flock.jpg",
-        "13-rice-house.jpg",
-        "14-circuit.jpg",
-    ]
-
-    static let imageURLs: [URL] = {
-        let fileManager = FileManager.default
-        let packagedDirectory = Bundle.main.resourceURL?.appendingPathComponent("LandingArt", isDirectory: true)
-        let developmentDirectory = URL(fileURLWithPath: fileManager.currentDirectoryPath, isDirectory: true)
-            .appendingPathComponent("Resources/LandingArt", isDirectory: true)
-
-        for directory in [packagedDirectory, developmentDirectory].compactMap({ $0 }) {
-            let urls = filenames.map { directory.appendingPathComponent($0) }
-            if urls.allSatisfy({ fileManager.fileExists(atPath: $0.path) }) { return urls }
-        }
-        return []
-    }()
-}
-
-@MainActor
-private final class LandingArtworkCache {
-    static let shared = LandingArtworkCache()
-    private let images: NSCache<NSURL, NSImage> = {
-        let cache = NSCache<NSURL, NSImage>()
-        cache.countLimit = 3
-        return cache
-    }()
-
-    func image(for url: URL) -> NSImage? {
-        if let cached = images.object(forKey: url as NSURL) { return cached }
-        guard let image = NSImage(contentsOf: url) else { return nil }
-        images.setObject(image, forKey: url as NSURL)
-        return image
     }
 }
 
