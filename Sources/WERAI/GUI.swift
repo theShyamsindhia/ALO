@@ -1128,7 +1128,8 @@ final class WERAIViewModel: ObservableObject {
         })
             ? savedVoiceInput
             : nil
-        selectedRoomID = savedRooms.first?.id
+        selectedRoomID = lastJoinedRoomStore.roomToRestore(from: savedRooms)?.id
+            ?? savedRooms.first?.id
         roomBrowser = MeshRoomBrowser(
             updateHandler: { [weak self] rooms in
                 DispatchQueue.main.async {
@@ -1144,13 +1145,6 @@ final class WERAIViewModel: ObservableObject {
             }
         )
         roomBrowser.start()
-        if let room = lastJoinedRoomStore.roomToRestore(from: savedRooms) {
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.phase == .idle else { return }
-                self.selectedRoomID = room.id
-                self.open(room, broadcastInitially: false)
-            }
-        }
     }
 
     var normalizedRoomName: String { roomName.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -2662,24 +2656,29 @@ private struct WERAIView: View {
     }
 
     private var setupConsole: some View {
-        VStack(spacing: 0) {
-            ZStack(alignment: .bottom) {
-                setupPortrait
+        ZStack {
+            SetupBackground()
+            LinearGradient(
+                colors: [
+                    Color.black.opacity(0.42),
+                    Color.black.opacity(0.02),
+                    Color.black.opacity(0.30),
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
 
+            VStack(spacing: 0) {
+                setupIdentityHeader
                 if model.mode == .share {
                     createRoomPanel
-                        .transition(setupSheetTransition)
                 } else {
                     roomList
-                        .transition(setupSheetTransition)
                 }
+                setupFooter
             }
-            .frame(height: 364)
-
-            setupFooter
         }
-        .frame(width: 286)
-        .background(Color.white)
+        .frame(width: 286, height: 406)
         .clipShape(RoundedRectangle(cornerRadius: 27, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 27, style: .continuous)
@@ -2689,64 +2688,45 @@ private struct WERAIView: View {
         .animation(reduceMotion ? nil : .smooth(duration: 0.32), value: model.mode)
     }
 
-    private var setupSheetTransition: AnyTransition {
-        reduceMotion
-            ? .opacity
-            : .move(edge: .bottom).combined(with: .opacity)
-    }
-
-    private var setupPortrait: some View {
-        ZStack {
-            SetupBackground()
-            LinearGradient(
-                colors: [
-                    Color.black.opacity(0.48),
-                    Color.black.opacity(0.04),
-                    Color.black.opacity(0.38),
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-
-            VStack(spacing: 0) {
-                VStack(spacing: 1) {
-                    Text("WERAI")
-                        .font(.system(size: 7, weight: .black, design: .rounded))
-                        .tracking(0.8)
-                    Text("CONNECT THROUGH SOUND · \(versionLabel)")
-                        .font(.system(size: 4, weight: .bold, design: .rounded))
-                        .tracking(0.65)
-                        .opacity(0.74)
-                }
-                .padding(.top, 14)
-
-                Button(action: model.editDeviceIdentity) {
-                    DeviceAvatar(
-                        emoji: model.currentDeviceIcon,
-                        colorHex: model.currentDeviceColorHex,
-                        profileImageData: model.currentDeviceProfileImageData,
-                        size: 52
-                    )
-                    .overlay(Circle().stroke(Color.white, lineWidth: 3))
-                    .shadow(color: Color.black.opacity(0.34), radius: 12, y: 5)
-                }
-                .buttonStyle(PressScaleButtonStyle())
-                .help("Edit \(model.currentUserName)")
-                .accessibilityLabel("Edit this Mac's room identity")
-                .padding(.top, 20)
-
-                Text(model.currentUserName)
-                    .font(.system(size: 10, weight: .black, design: .rounded))
-                    .padding(.top, 7)
-
-                Spacer()
+    private var setupIdentityHeader: some View {
+        VStack(spacing: 0) {
+            VStack(spacing: 1) {
+                Text("WERAI")
+                    .font(.system(size: 7, weight: .black, design: .rounded))
+                    .tracking(0.8)
+                Text("CONNECT THROUGH SOUND · \(versionLabel)")
+                    .font(.system(size: 4, weight: .bold, design: .rounded))
+                    .tracking(0.65)
+                    .opacity(0.78)
             }
-            .foregroundStyle(Color.white)
-            .shadow(color: Color.black.opacity(0.4), radius: 5, y: 1)
+            .padding(.top, 11)
+
+            Button(action: model.editDeviceIdentity) {
+                DeviceAvatar(
+                    emoji: model.currentDeviceIcon,
+                    colorHex: model.currentDeviceColorHex,
+                    profileImageData: model.currentDeviceProfileImageData,
+                    size: 46
+                )
+                .overlay(Circle().stroke(Color.white, lineWidth: 3))
+                .shadow(color: Color.black.opacity(0.30), radius: 9, y: 4)
+            }
+            .buttonStyle(PressScaleButtonStyle())
+            .help("Edit \(model.currentUserName)")
+            .accessibilityLabel("Edit this Mac's room identity")
+            .padding(.top, 10)
+
+            Text(model.currentUserName)
+                .font(.system(size: 10, weight: .black, design: .rounded))
+                .lineLimit(1)
+                .padding(.horizontal, 18)
+                .padding(.top, 5)
+
+            Spacer(minLength: 7)
         }
-        .frame(width: 278, height: 360)
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .padding(.top, 4)
+        .frame(height: 116)
+        .foregroundStyle(Color.white)
+        .shadow(color: Color.black.opacity(0.38), radius: 4, y: 1)
     }
 
     private var setupFooter: some View {
@@ -2785,7 +2765,18 @@ private struct WERAIView: View {
                 .tracking(-0.4)
                 .foregroundStyle(SetupPalette.ink)
         }
-        .frame(height: 42)
+        .frame(height: 48)
+        .background {
+            ZStack {
+                Rectangle().fill(.ultraThinMaterial)
+                Rectangle().fill(Color.white.opacity(0.48))
+            }
+        }
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Color.white.opacity(0.46))
+                .frame(height: 1)
+        }
     }
 
     private var createRoomPanel: some View {
@@ -2830,7 +2821,7 @@ private struct WERAIView: View {
                     Image(systemName: model.createPrivateRoom ? "checkmark.circle.fill" : "circle")
                 }
             }
-            .buttonStyle(SetupDrawerButtonStyle(active: model.createPrivateRoom))
+            .buttonStyle(SetupPanelButtonStyle(active: model.createPrivateRoom))
             .help(model.createPrivateRoom ? "Private space" : "Public space")
             .accessibilityLabel(model.createPrivateRoom ? "Make space public" : "Make space private")
 
@@ -2843,13 +2834,13 @@ private struct WERAIView: View {
                     Image(systemName: "arrow.right")
                 }
             }
-            .buttonStyle(SetupPrimaryDrawerButtonStyle())
+            .buttonStyle(SetupPrimaryPanelButtonStyle())
             .disabled(!model.canStartSharing)
         }
         .padding(18)
-        .frame(width: 278, height: 242)
-        .background(SetupPalette.surfaceStrong)
-        .clipShape(UnevenRoundedRectangle(topLeadingRadius: 24, topTrailingRadius: 24))
+        .frame(width: 270, height: 242)
+        .background { SetupBlurredPanel() }
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .foregroundStyle(SetupPalette.ink)
         .onAppear {
             NSApp.activate(ignoringOtherApps: true)
@@ -2873,7 +2864,7 @@ private struct WERAIView: View {
                 Button(action: model.refreshRooms) {
                     Image(systemName: "arrow.clockwise")
                 }
-                .buttonStyle(SetupDrawerIconButtonStyle())
+                .buttonStyle(SetupPanelIconButtonStyle())
                 .help("Refresh nearby spaces")
                 .accessibilityLabel("Refresh nearby spaces")
             }
@@ -2932,9 +2923,9 @@ private struct WERAIView: View {
                     }
             }
         }
-        .frame(width: 278, height: 242)
-        .background(SetupPalette.surfaceStrong)
-        .clipShape(UnevenRoundedRectangle(topLeadingRadius: 24, topTrailingRadius: 24))
+        .frame(width: 270, height: 242)
+        .background { SetupBlurredPanel() }
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .foregroundStyle(SetupPalette.ink)
     }
 
@@ -4106,7 +4097,7 @@ private struct SetupFooterButtonStyle: ButtonStyle {
     }
 }
 
-private struct SetupDrawerIconButtonStyle: ButtonStyle {
+private struct SetupPanelIconButtonStyle: ButtonStyle {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func makeBody(configuration: Configuration) -> some View {
@@ -4121,7 +4112,7 @@ private struct SetupDrawerIconButtonStyle: ButtonStyle {
     }
 }
 
-private struct SetupDrawerButtonStyle: ButtonStyle {
+private struct SetupPanelButtonStyle: ButtonStyle {
     let active: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -4139,7 +4130,7 @@ private struct SetupDrawerButtonStyle: ButtonStyle {
     }
 }
 
-private struct SetupPrimaryDrawerButtonStyle: ButtonStyle {
+private struct SetupPrimaryPanelButtonStyle: ButtonStyle {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.isEnabled) private var isEnabled
 
@@ -5073,6 +5064,37 @@ private struct SetupBackground: View {
             .frame(width: geometry.size.width, height: geometry.size.height)
         }
         .ignoresSafeArea()
+    }
+}
+
+private struct SetupBlurredPanel: View {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(reduceTransparency ? AnyShapeStyle(Color.white) : AnyShapeStyle(.ultraThinMaterial))
+            if !reduceTransparency {
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .fill(Color.white.opacity(0.50))
+            }
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(Color.white.opacity(0.72), lineWidth: 1)
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 21, style: .continuous)
+                .stroke(Color.white.opacity(0.34), lineWidth: 1)
+                .padding(1)
+                .mask(
+                    LinearGradient(
+                        colors: [.white, .clear],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+        }
     }
 }
 
