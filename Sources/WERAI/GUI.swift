@@ -43,7 +43,7 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
         installTerminationSignalHandlers()
         installMainMenu()
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 620),
+            contentRect: NSRect(x: 0, y: 0, width: 1_040, height: 720),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -52,7 +52,7 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.backgroundColor = .windowBackgroundColor
-        window.minSize = NSSize(width: 500, height: 540)
+        window.minSize = NSSize(width: 860, height: 600)
         window.contentView = NSHostingView(rootView: WERAIView(model: model))
         window.center()
         window.isReleasedWhenClosed = false
@@ -495,7 +495,7 @@ private final class PinnedWalkieStatusController {
             entry.0.button?.wantsLayer = true
             entry.0.button?.layer?.cornerRadius = 6
             entry.0.button?.layer?.backgroundColor = incomingSpeakerIDs.contains(participant.id)
-                ? NSColor.systemGreen.withAlphaComponent(0.45).cgColor
+                ? NSColor.systemBlue.withAlphaComponent(0.38).cgColor
                 : NSColor.clear.cgColor
             entry.0.button?.toolTip = "Click to open/close · hold to talk to \(participant.name)"
         }
@@ -579,13 +579,18 @@ private final class DeviceIdentityEditorController: NSObject, NSWindowDelegate {
         self.saveAction = saveAction
         self.closeAction = closeAction
         panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 410),
-            styleMask: [.titled, .closable],
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 430),
+            styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         super.init()
         panel.title = "Customize this Mac"
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.isMovableByWindowBackground = true
         panel.isReleasedWhenClosed = false
         panel.delegate = self
         panel.contentView = NSHostingView(
@@ -658,10 +663,10 @@ private struct DeviceIdentityEditorView: View {
                 )
                 VStack(alignment: .leading, spacing: 3) {
                     Text(normalizedName.isEmpty ? "This Mac" : normalizedName)
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.system(size: 17, weight: .semibold, design: .rounded))
                         .lineLimit(1)
                     Text("This profile appears to everyone in your rooms.")
-                        .font(.system(size: 11))
+                        .font(.system(size: 11, design: .rounded))
                         .foregroundStyle(Palette.secondary)
                 }
             }
@@ -676,7 +681,16 @@ private struct DeviceIdentityEditorView: View {
                         .foregroundStyle(Palette.muted)
                 }
                 TextField("e.g. Studio Mac", text: $name)
-                    .textFieldStyle(.roundedBorder)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .padding(.horizontal, 14)
+                    .frame(height: 44)
+                    .background(Palette.composer)
+                    .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            .stroke(nameError == nil ? Palette.strokeStrong : Palette.red, lineWidth: 1)
+                    )
                     .focused($nameFocused)
                     .accessibilityLabel("Device name")
                     .onChange(of: name) { _, newValue in
@@ -763,6 +777,7 @@ private struct DeviceIdentityEditorView: View {
             HStack {
                 Spacer()
                 Button("Cancel", action: onCancel)
+                    .buttonStyle(PillButtonStyle(filled: false))
                     .keyboardShortcut(.cancelAction)
                 Button("Save changes") {
                     guard !normalizedName.isEmpty else {
@@ -772,11 +787,15 @@ private struct DeviceIdentityEditorView: View {
                     }
                     onSave(normalizedName, icon, colorHex, profileImageData)
                 }
+                .buttonStyle(PillButtonStyle(filled: true))
                 .keyboardShortcut(.defaultAction)
             }
         }
-        .padding(24)
-        .frame(width: 460, height: 410)
+        .padding(.top, 44)
+        .padding(.horizontal, 28)
+        .padding(.bottom, 24)
+        .frame(width: 480, height: 430)
+        .background(AmbientBackground(isLive: false))
         .tint(Palette.controlAccent)
         .onAppear { nameFocused = true }
         .fileImporter(isPresented: $choosesPhoto, allowedContentTypes: [.image]) { result in
@@ -2048,11 +2067,7 @@ private struct WERAIView: View {
 
     var body: some View {
         ZStack {
-            if model.phase == .idle {
-                LandingPalette.background
-            } else {
-                AmbientBackground(isLive: model.phase == .live)
-            }
+            AmbientBackground(isLive: model.phase == .live)
             switch model.phase {
             case .idle: idleView
             case .starting: progressView
@@ -2061,29 +2076,48 @@ private struct WERAIView: View {
             }
             if model.permissionNotice { permissionOverlay }
         }
-        .frame(minWidth: 500, minHeight: 540)
-        .tint(LandingPalette.accent)
-        .preferredColorScheme(.light)
+        .frame(minWidth: 860, minHeight: 600)
+        .tint(Palette.controlAccent)
         .ignoresSafeArea()
     }
 
     private var idleView: some View {
-        setupConsole
-            .frame(maxWidth: 460, maxHeight: 540)
-        .padding(.top, 40)
-        .padding(.horizontal, 28)
-        .padding(.bottom, 24)
+        HStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Listen together.")
+                    .font(.system(size: 38, weight: .semibold, design: .rounded))
+                    .tracking(-1.2)
+                    .foregroundStyle(Palette.ink)
+                Text("One room for synchronized sound, conversation, and an optional shared screen.")
+                    .font(.system(size: 14, weight: .regular, design: .rounded))
+                    .foregroundStyle(Palette.secondary)
+                    .lineSpacing(3)
+                    .frame(maxWidth: 360, alignment: .leading)
+                Text("ALO \(versionLabel) · LOCAL · PEER-TO-PEER · FREE")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .tracking(0.9)
+                    .foregroundStyle(Palette.muted)
+                    .padding(.top, 8)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            setupConsole
+                .frame(width: 510)
+        }
+        .padding(.horizontal, 72)
+        .padding(.top, 34)
     }
 
     private var setupConsole: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(spacing: 14) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(model.mode == .share ? "Create a room" : "Your rooms")
-                        .font(.system(size: 19, weight: .semibold))
-                    Text(model.mode == .share ? "Anyone in the room can broadcast." : "Nearby and saved on this Mac")
-                        .font(.system(size: 11))
-                        .foregroundStyle(LandingPalette.secondary)
+                        .font(.system(size: 18, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Palette.ink)
+                    Text(model.mode == .share ? "Create the group first. Anyone can broadcast afterward." : "Nearby and previously joined rooms")
+                        .font(.system(size: 11, design: .rounded))
+                        .foregroundStyle(Palette.secondary)
                 }
                 Spacer()
                 Button(action: model.editDeviceIdentity) {
@@ -2098,135 +2132,118 @@ private struct WERAIView: View {
                             Text(model.currentUserName)
                                 .font(.system(size: 10, weight: .semibold))
                                 .lineLimit(1)
-                            Text("Rename this Mac")
+                            Text("This Mac")
                                 .font(.system(size: 8))
-                                .foregroundStyle(LandingPalette.secondary)
+                                .foregroundStyle(Palette.secondary)
                         }
-                        Image(systemName: "pencil")
-                            .font(.system(size: 8, weight: .semibold))
-                            .foregroundStyle(LandingPalette.secondary)
                     }
-                    .padding(.horizontal, 8)
+                    .padding(.horizontal, 10)
                     .frame(height: 36)
-                    .background(LandingPalette.field)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .background(Palette.messageSurface)
+                    .clipShape(Capsule())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PressScaleButtonStyle())
                 .help("Change this Mac's room name, emoji, color, or photo")
             }
-            .padding(.bottom, 24)
 
             if model.mode == .share {
                 createRoomPanel
             } else {
                 roomList
             }
-
-            Spacer(minLength: 16)
-
-            Text("ALO  \(versionLabel)  ·  LOCAL P2P")
-                .font(.system(size: 9, weight: .medium, design: .monospaced))
-                .foregroundStyle(LandingPalette.muted)
         }
-        .padding(.horizontal, 10)
-        .foregroundStyle(LandingPalette.ink)
+        .padding(18)
+        .glass(cornerRadius: 24)
     }
 
     private var createRoomPanel: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 7) {
-                Text("ROOM NAME")
-                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                    .tracking(0.6)
-                    .foregroundStyle(LandingPalette.secondary)
-                TextField("Night room", text: $model.roomName)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(LandingPalette.ink)
-                    .focused($roomNameFocused)
-                    .onSubmit(model.startSharing)
-                    .padding(.horizontal, 12)
-                    .frame(height: 42)
-                    .background(LandingPalette.field)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .stroke(roomNameFocused ? LandingPalette.accent : LandingPalette.line, lineWidth: 1)
+        VStack(spacing: 12) {
+            TextField("Room name", text: $model.roomName)
+                .textFieldStyle(.plain)
+                .font(.system(size: 17, weight: .medium, design: .rounded))
+                .foregroundStyle(Palette.ink)
+                .focused($roomNameFocused)
+                .onSubmit(model.startSharing)
+                .padding(.horizontal, 16)
+                .frame(height: 52)
+                .background(Palette.composer)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(roomNameFocused ? Palette.controlAccent : Palette.strokeStrong, lineWidth: roomNameFocused ? 2 : 1)
+                )
+
+            HStack(spacing: 8) {
+                Button {
+                    model.createPrivateRoom.toggle()
+                } label: {
+                    Label(
+                        model.createPrivateRoom ? "Private" : "Public",
+                        systemImage: model.createPrivateRoom ? "lock.fill" : "person.3.fill"
                     )
-            }
-
-            HStack(spacing: 6) {
-                Button("Public") { model.createPrivateRoom = false }
-                    .buttonStyle(LandingChoiceButtonStyle(active: !model.createPrivateRoom))
-                Button("Private") { model.createPrivateRoom = true }
-                    .buttonStyle(LandingChoiceButtonStyle(active: model.createPrivateRoom))
-            }
-
-            Button("Create room", action: model.startSharing)
-                .buttonStyle(LandingPrimaryButtonStyle())
-                .disabled(!model.canStartSharing)
-
-            Button {
-                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) {
-                    model.mode = .listen
                 }
-            } label: {
-                Label("Back to rooms", systemImage: "arrow.left")
+                .buttonStyle(ToolButtonStyle(active: model.createPrivateRoom))
+                Spacer()
+                Button("Back") {
+                    withAnimation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.86)) {
+                        model.mode = .listen
+                    }
+                }
+                .buttonStyle(PillButtonStyle(filled: false))
+                Button("Create room", action: model.startSharing)
+                    .buttonStyle(PillButtonStyle(filled: true))
+                    .disabled(!model.canStartSharing)
             }
-            .buttonStyle(LandingLinkButtonStyle())
         }
     }
 
     private var roomList: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(spacing: 10) {
             ScrollView {
-                LazyVStack(spacing: 0) {
+                LazyVStack(spacing: 8) {
                     if model.roomChoices.isEmpty {
-                        VStack(alignment: .leading, spacing: 7) {
-                            Text("Looking nearby…")
-                                .font(.system(size: 12, weight: .medium))
-                            Text("Rooms you join will stay here.")
-                                .font(.system(size: 10))
-                                .foregroundStyle(LandingPalette.secondary)
+                        VStack(spacing: 8) {
+                            Image(systemName: "dot.radiowaves.left.and.right")
+                                .font(.system(size: 22))
+                                .foregroundStyle(Palette.accent)
+                            Text("Looking for rooms on your network…")
+                                .font(.system(size: 12, design: .rounded))
+                                .foregroundStyle(Palette.secondary)
                         }
-                        .frame(maxWidth: .infinity, minHeight: 96, alignment: .leading)
+                        .frame(maxWidth: .infinity, minHeight: 150)
                     } else {
                         ForEach(model.roomChoices) { room in roomCard(room) }
                     }
                 }
+                .padding(2)
             }
-            .frame(maxHeight: 300)
+            .frame(maxHeight: 270)
 
             if model.selectedRoomConfiguration?.isPrivate == true,
                model.selectedRoomConfiguration?.accessKey == nil {
-                VStack(alignment: .leading, spacing: 8) {
-                    TextField("Private room invite key", text: $model.privateRoomKey)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 12, weight: .medium, design: .monospaced))
-                        .padding(.horizontal, 12)
-                        .frame(height: 40)
-                        .background(LandingPalette.field)
-                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .stroke(LandingPalette.line, lineWidth: 1)
-                        )
-                    Button("Open private room", action: model.joinSelectedRoom)
-                        .buttonStyle(LandingPrimaryButtonStyle())
-                        .disabled(!model.canJoin)
-                }
-                .padding(.top, 12)
+                TextField("Private room invite key", text: $model.privateRoomKey)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .padding(.horizontal, 14)
+                    .frame(height: 42)
+                    .background(Palette.composer)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
-
-            Button {
-                withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) {
-                    model.mode = .share
+            HStack {
+                Text("Rooms stay saved on this Mac")
+                    .font(.system(size: 10, design: .rounded))
+                    .foregroundStyle(Palette.muted)
+                Spacer()
+                Button("Create room") {
+                    withAnimation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.86)) {
+                        model.mode = .share
+                    }
                 }
-            } label: {
-                Label("Create a room", systemImage: "plus")
+                .buttonStyle(PillButtonStyle(filled: false))
+                Button("Open room", action: model.joinSelectedRoom)
+                    .buttonStyle(PillButtonStyle(filled: true))
+                    .disabled(!model.canJoin)
             }
-            .buttonStyle(LandingLinkButtonStyle(accented: true))
-            .padding(.top, 18)
         }
     }
 
@@ -2234,58 +2251,53 @@ private struct WERAIView: View {
         let nearby = model.nearbyRooms.first(where: { $0.id == room.id })
         let saved = model.savedRooms.contains(where: { $0.id == room.id })
         let selected = model.selectedRoomID == room.id
-        let needsInviteKey = room.isPrivate && room.accessKey == nil
         return HStack(spacing: 12) {
             Button {
                 model.selectedRoomID = room.id
                 model.privateRoomKey = ""
             } label: {
-                HStack(spacing: 9) {
-                    Circle()
-                        .fill(nearby == nil ? LandingPalette.muted : LandingPalette.accent)
-                        .frame(width: 6, height: 6)
+                HStack(spacing: 12) {
+                    Image(systemName: room.isPrivate ? "lock.fill" : "person.3.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(selected ? Palette.selectedControlText : Palette.accent)
+                        .frame(width: 34, height: 34)
+                        .background(selected ? Palette.controlAccent : Palette.accentSoft)
+                        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
                     VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 5) {
-                            Text(room.name)
-                                .font(.system(size: 12, weight: .semibold))
-                            if room.isPrivate {
-                                Image(systemName: "lock.fill")
-                                    .font(.system(size: 8, weight: .semibold))
-                            }
-                        }
+                        Text(room.name)
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .foregroundStyle(Palette.ink)
                         Text(nearby.map { "Nearby · \($0.peerCount) \($0.peerCount == 1 ? "person" : "people")" } ?? "Saved on this Mac")
-                            .font(.system(size: 9, weight: .medium, design: .monospaced))
-                            .foregroundStyle(LandingPalette.secondary)
+                            .font(.system(size: 10, design: .rounded))
+                            .foregroundStyle(nearby == nil ? Palette.secondary : Palette.accentText)
                     }
+                    Spacer()
+                    Image(systemName: selected ? "checkmark.circle.fill" : "chevron.right")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(selected ? Palette.controlAccent : Palette.muted)
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
 
-            Spacer(minLength: 4)
-
-            Button(needsInviteKey ? "Unlock" : "Join") {
-                model.selectedRoomID = room.id
-                model.privateRoomKey = ""
-                if !needsInviteKey { model.joinSelectedRoom() }
-            }
-            .buttonStyle(LandingRoomButtonStyle(active: selected))
-
             if saved {
                 Button { model.forgetRoom(roomID: room.id) } label: {
                     Image(systemName: "trash")
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(LandingPalette.muted)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(Palette.secondary)
                 }
-                .buttonStyle(.plain)
-                .frame(width: 18, height: 28)
+                .buttonStyle(FlatToolButtonStyle(active: false))
                 .help("Forget this room on this Mac")
             }
         }
-        .padding(.horizontal, 8)
-        .frame(height: 52)
-        .background(selected ? LandingPalette.selection : Color.clear)
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .padding(.horizontal, 12)
+        .frame(height: 58)
+        .background(selected ? Palette.accentSoft.opacity(0.7) : Palette.composer)
+        .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 15, style: .continuous)
+                .stroke(selected ? Palette.controlAccent.opacity(0.5) : Palette.strokeStrong, lineWidth: 1)
+        )
     }
 
     private var progressView: some View {
@@ -3294,67 +3306,6 @@ private struct FlatToolButtonStyle: ButtonStyle {
     }
 }
 
-private struct LandingPrimaryButtonStyle: ButtonStyle {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.isEnabled) private var isEnabled
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(Color.white)
-            .frame(maxWidth: .infinity)
-            .frame(height: 40)
-            .background(LandingPalette.ink)
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .scaleEffect(!reduceMotion && configuration.isPressed ? 0.98 : 1)
-            .opacity(isEnabled ? (configuration.isPressed ? 0.86 : 1) : 0.34)
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: configuration.isPressed)
-    }
-}
-
-private struct LandingChoiceButtonStyle: ButtonStyle {
-    let active: Bool
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 10, weight: .medium))
-            .foregroundStyle(active ? LandingPalette.ink : LandingPalette.secondary)
-            .padding(.horizontal, 12)
-            .frame(height: 30)
-            .background(active ? LandingPalette.selection : LandingPalette.field)
-            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-            .scaleEffect(!reduceMotion && configuration.isPressed ? 0.97 : 1)
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: configuration.isPressed)
-    }
-}
-
-private struct LandingLinkButtonStyle: ButtonStyle {
-    var accented = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(accented ? LandingPalette.accent : LandingPalette.secondary)
-            .opacity(configuration.isPressed ? 0.58 : 1)
-            .offset(y: !reduceMotion && configuration.isPressed ? 1 : 0)
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.1), value: configuration.isPressed)
-    }
-}
-
-private struct LandingRoomButtonStyle: ButtonStyle {
-    let active: Bool
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 9, weight: .semibold, design: .monospaced))
-            .textCase(.uppercase)
-            .foregroundStyle(active ? LandingPalette.accent : LandingPalette.ink)
-            .opacity(configuration.isPressed ? 0.5 : 1)
-    }
-}
-
 private struct InlineActionButtonStyle: ButtonStyle {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -3450,11 +3401,10 @@ private struct WalkieTalkieTargetIcon: View {
         )
             .overlay {
                 Circle().stroke(
-                    incoming ? Color.green : outgoing ? Color.white : selected ? Palette.ink.opacity(0.7) : Color.clear,
-                    lineWidth: incoming ? 4 : 2
+                    incoming ? Palette.controlAccent : outgoing ? Color.white : selected ? Palette.ink.opacity(0.7) : Color.clear,
+                    lineWidth: incoming ? 3 : 2
                 )
             }
-            .shadow(color: incoming ? Color.green.opacity(0.75) : .clear, radius: 8)
             .scaleEffect(incoming || outgoing ? 1.08 : 1)
             .contentShape(Circle())
             .onLongPressGesture(
@@ -3519,7 +3469,7 @@ private struct WalkieTalkieBar: View {
                     .foregroundStyle(Palette.controlIcon)
                 Text(voiceStatus)
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(model.walkieTalking ? Color.green : Palette.controlIcon.opacity(0.75))
+                    .foregroundStyle(model.walkieTalking ? Palette.accentText : Palette.controlIcon.opacity(0.75))
                     .lineLimit(1)
                 Spacer(minLength: 4)
 
@@ -3605,7 +3555,7 @@ private struct WalkieTalkieBar: View {
                     .foregroundStyle(model.walkieLineOpen ? Color.white : Palette.controlIcon)
                     .padding(.horizontal, 9)
                     .frame(height: 34)
-                    .background(model.walkieLineOpen ? Color.green.opacity(0.8) : Palette.messageSurface)
+                    .background(model.walkieLineOpen ? Palette.controlAccent : Palette.messageSurface)
                     .clipShape(Capsule())
                 }
                 .buttonStyle(.plain)
@@ -4132,34 +4082,16 @@ private extension View {
     }
 }
 
-private enum LandingPalette {
-    static let background = Color.white
-    static let ink = Color(red: 0.075, green: 0.08, blue: 0.07)
-    static let secondary = Color(red: 0.39, green: 0.41, blue: 0.37)
-    static let muted = Color(red: 0.64, green: 0.66, blue: 0.61)
-    static let line = Color(red: 0.89, green: 0.90, blue: 0.87)
-    static let field = Color(red: 0.965, green: 0.97, blue: 0.95)
-    static let selection = Color(red: 0.92, green: 0.95, blue: 0.84)
-    static let accent = Color(red: 0.20, green: 0.39, blue: 0.22)
-}
-
 private enum Palette {
     static let canvas = Color(nsColor: .windowBackgroundColor)
     static let ink = Color(nsColor: .labelColor)
     static let secondary = Color(nsColor: .secondaryLabelColor)
     static let muted = Color(nsColor: .tertiaryLabelColor)
     static let controlAccent = adaptive(
-        light: NSColor(red: 0.72, green: 0.18, blue: 0.29, alpha: 1),
-        dark: NSColor(red: 0.95, green: 0.40, blue: 0.42, alpha: 1),
-        highContrastLight: NSColor(red: 0.55, green: 0.09, blue: 0.20, alpha: 1),
-        highContrastDark: NSColor(red: 1.00, green: 0.54, blue: 0.53, alpha: 1)
+        light: NSColor(red: 0.08, green: 0.34, blue: 0.70, alpha: 1),
+        dark: NSColor(red: 0.29, green: 0.61, blue: 0.93, alpha: 1)
     )
-    static let selectedControlText = adaptive(
-        light: .white,
-        dark: NSColor(red: 0.13, green: 0.03, blue: 0.06, alpha: 1),
-        highContrastLight: .white,
-        highContrastDark: .black
-    )
+    static let selectedControlText = Color(nsColor: .selectedControlTextColor)
     static let controlIcon = Color(nsColor: .labelColor)
     static let composer = Color(nsColor: .textBackgroundColor).opacity(0.9)
     static let opaqueSurface = Color(nsColor: .windowBackgroundColor)
@@ -4173,10 +4105,10 @@ private enum Palette {
     )
     static let accent = controlAccent
     static let accentText = adaptive(
-        light: NSColor(red: 0.56, green: 0.11, blue: 0.23, alpha: 1),
-        dark: NSColor(red: 1.00, green: 0.60, blue: 0.59, alpha: 1),
-        highContrastLight: NSColor(red: 0.42, green: 0.05, blue: 0.15, alpha: 1),
-        highContrastDark: NSColor(red: 1.00, green: 0.82, blue: 0.80, alpha: 1)
+        light: NSColor(red: 0.05, green: 0.25, blue: 0.58, alpha: 1),
+        dark: NSColor(red: 0.68, green: 0.83, blue: 1.0, alpha: 1),
+        highContrastLight: NSColor(red: 0.02, green: 0.16, blue: 0.43, alpha: 1),
+        highContrastDark: NSColor(red: 0.80, green: 0.90, blue: 1.0, alpha: 1)
     )
     static let syncText = accentText
     static let detailText = adaptive(
@@ -4187,18 +4119,18 @@ private enum Palette {
     )
     static let accentDark = accentText
     static let accentSoft = adaptive(
-        light: NSColor(red: 0.97, green: 0.87, blue: 0.88, alpha: 1),
-        dark: NSColor(red: 0.20, green: 0.08, blue: 0.13, alpha: 1)
+        light: NSColor(red: 0.82, green: 0.88, blue: 0.97, alpha: 1),
+        dark: NSColor(red: 0.08, green: 0.13, blue: 0.25, alpha: 1)
     )
     static let artworkFallback = accentSoft
     static let blueSoft = adaptive(
-        light: NSColor(red: 0.85, green: 0.87, blue: 0.97, alpha: 1),
-        dark: NSColor(red: 0.09, green: 0.10, blue: 0.27, alpha: 1)
+        light: NSColor(red: 0.72, green: 0.82, blue: 0.95, alpha: 1),
+        dark: NSColor(red: 0.10, green: 0.16, blue: 0.31, alpha: 1)
     )
-    static let video = Color(red: 0.045, green: 0.035, blue: 0.09)
+    static let video = Color(red: 0.055, green: 0.070, blue: 0.12)
     static let red = Color(nsColor: .systemRed)
     static let redSoft = Color(nsColor: .systemRed).opacity(0.16)
-    static let shadow = Color(red: 0.17, green: 0.04, blue: 0.18).opacity(0.18)
+    static let shadow = Color(red: 0.025, green: 0.055, blue: 0.12).opacity(0.18)
 
     private static func adaptive(
         light: NSColor,
