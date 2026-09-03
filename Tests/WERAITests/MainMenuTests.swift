@@ -27,4 +27,22 @@ struct MainMenuTests {
         #expect(commands["Redo"]?.2 == NSEvent.ModifierFlags([.command, .shift]))
         #expect(editMenu.items.filter { !$0.isSeparatorItem }.allSatisfy { $0.target == nil })
     }
+
+    @Test("Album artwork produces a restrained dominant accent")
+    func artworkAccent() throws {
+        let image = NSImage(size: NSSize(width: 8, height: 8))
+        image.lockFocus()
+        NSColor(red: 0.92, green: 0.18, blue: 0.12, alpha: 1).setFill()
+        NSRect(x: 0, y: 0, width: 8, height: 8).fill()
+        image.unlockFocus()
+
+        let hex = try #require(ArtworkTheme.accentHex(from: image.tiffRepresentation))
+        let value = try #require(UInt64(hex, radix: 16))
+        let red = (value >> 16) & 0xFF
+        let green = (value >> 8) & 0xFF
+        let blue = value & 0xFF
+        #expect(red > green)
+        #expect(red > blue)
+        #expect(red < 220)
+    }
 }

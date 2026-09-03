@@ -2,6 +2,7 @@ import AppKit
 import AVFoundation
 import Combine
 import CoreGraphics
+import ImageIO
 import QuartzCore
 import SwiftUI
 import UniformTypeIdentifiers
@@ -626,6 +627,10 @@ struct RoomMessage: Identifiable, Equatable {
     let sentNanos: UInt64
 }
 
+private enum ChatScrollTarget: Hashable {
+    case bottom
+}
+
 private enum FloatingMetrics {
     static let width: CGFloat = 560
     static let barHeight: CGFloat = 58
@@ -984,6 +989,7 @@ final class WERAIViewModel: ObservableObject {
     @Published var messages = [RoomMessage]()
     @Published var draftMessage = ""
     @Published var unreadMessageCount = 0
+    @Published private(set) var firstUnreadMessageID: UUID?
     @Published private(set) var incomingMessagePreview: RoomMessage?
     @Published var mediaQueue = [RoomQueueItem]()
     @Published var queueURL = ""
@@ -1012,6 +1018,7 @@ final class WERAIViewModel: ObservableObject {
     @Published var incomingCallsMuted: Bool
     @Published var roomHasVideo = false
     @Published var nowPlaying = NowPlayingMedia()
+    @Published private(set) var roomAccentHex: String?
     @Published var localNowPlaying = NowPlayingMedia()
     @Published private(set) var audioIsRendering = false
     @Published var experience: Experience = .audio
@@ -1133,6 +1140,9 @@ final class WERAIViewModel: ObservableObject {
             audioIsRendering: audioIsRendering,
             hasMedia: !nowPlaying.isEmpty
         )
+    }
+    var roomAccentColor: Color {
+        roomAccentHex.map(Color.deviceIdentity) ?? Palette.controlAccent
     }
     var roomSyncLabel: String {
         if !hasBroadcaster { return "No broadcaster" }
@@ -1989,6 +1999,11 @@ final class WERAIViewModel: ObservableObject {
         }
     }
 
+    func markChatPresented() {
+        unreadMessageCount = 0
+        firstUnreadMessageID = nil
+    }
+
     func toggleFloatingVideo() {
         guard roomHasVideo else { return }
         dismissIncomingMessagePreview()
@@ -2206,6 +2221,9 @@ final class WERAIViewModel: ObservableObject {
                 let chatIsVisible = self.floatingSection == .chat
                     && (!self.floatingBarHidden || self.menuBarPopoverVisible)
                 if senderID != self.currentParticipantID, !chatIsVisible {
+                    if self.firstUnreadMessageID == nil {
+                        self.firstUnreadMessageID = self.messages[self.messages.count - 1].id
+                    }
                     self.unreadMessageCount += 1
                     if self.floatingSection == .collapsed {
                         self.presentIncomingMessagePreview(self.messages[self.messages.count - 1])
@@ -2223,7 +2241,17 @@ final class WERAIViewModel: ObservableObject {
 
     private var nowPlayingCallback: (NowPlayingMedia) -> Void {
         { [weak self] media in
-            DispatchQueue.main.async { self?.nowPlaying = media }
+            let accentHex = ArtworkTheme.accentHex(from: media.artworkData)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let sameTrack = self.nowPlaying.title == media.title
+                    && self.nowPlaying.artist == media.artist
+                    && self.nowPlaying.album == media.album
+                self.nowPlaying = media
+                if media.artworkData != nil || !sameTrack {
+                    self.roomAccentHex = accentHex
+                }
+            }
         }
     }
 
@@ -2287,6 +2315,7 @@ final class WERAIViewModel: ObservableObject {
         participants = []
         messages = []
         unreadMessageCount = 0
+        firstUnreadMessageID = nil
         dismissIncomingMessagePreview()
         mediaQueue = []
         queueURL = ""
@@ -2299,6 +2328,7 @@ final class WERAIViewModel: ObservableObject {
         videoBroadcastTimeoutTask?.cancel()
         videoBroadcastTimeoutTask = nil
         nowPlaying = NowPlayingMedia()
+        roomAccentHex = nil
         localNowPlaying = NowPlayingMedia()
         audioIsRendering = false
         experience = .audio
@@ -2829,6 +2859,14 @@ private struct FloatingRoomView: View {
             : .smooth(duration: FloatingMetrics.expansionDuration)
     }
 
+    private var themeAnimation: Animation? {
+        reduceMotion ? nil : .easeInOut(duration: 1.1)
+    }
+
+    private var roomAccent: Color {
+        model.roomAccentColor
+    }
+
     private var messageTransition: AnyTransition {
         reduceMotion
             ? .opacity
@@ -2910,7 +2948,9 @@ private struct FloatingRoomView: View {
                 roomContent.background(Palette.opaqueSurface)
             }
         }
-        .tint(Palette.controlAccent)
+        .tint(roomAccent)
+        .environment(\.roomAccent, roomAccent)
+        .animation(themeAnimation, value: model.roomAccentHex)
     }
 
     private var roomContent: some View {
@@ -2930,6 +2970,13 @@ private struct FloatingRoomView: View {
             roomBar
         }
         .frame(width: FloatingMetrics.width, height: roomContentHeight, alignment: .bottom)
+        .background(
+            LinearGradient(
+                colors: [roomAccent.opacity(0.12), roomAccent.opacity(0.035)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
         .animation(panelAnimation, value: model.floatingSection)
         .animation(panelAnimation, value: model.permissionNotice)
         .animation(panelAnimation, value: model.participants.count)
@@ -3009,7 +3056,7 @@ private struct FloatingRoomView: View {
                     .lineLimit(1)
                 HStack(spacing: 4) {
                     Circle()
-                        .fill(model.audioIsRendering ? Palette.syncText : Palette.secondary)
+                        .fill(model.audioIsRendering ? roomAccent : Palette.secondary)
                         .frame(width: 5, height: 5)
                         .accessibilityHidden(true)
                     ViewThatFits(in: .horizontal) {
@@ -3059,10 +3106,10 @@ private struct FloatingRoomView: View {
                     .aspectRatio(contentMode: .fill)
             } else {
                 ZStack {
-                    Palette.artworkFallback
+                    roomAccent.opacity(0.15)
                     Image(systemName: "music.note")
                         .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(Palette.accentText)
+                        .foregroundStyle(roomAccent)
                 }
             }
         }
@@ -3093,22 +3140,23 @@ private struct FloatingRoomView: View {
                 .foregroundStyle(active ? Palette.selectedControlText : Palette.controlIcon)
                 .frame(width: 34, height: 32)
                 .contentShape(Rectangle())
-                .overlay(alignment: .topTrailing) {
-                if badge > 0 {
-                    Circle()
-                        .fill(Palette.red)
-                        .frame(width: 8, height: 8)
-                        .overlay(Circle().stroke(Palette.opaqueSurface, lineWidth: 1))
-                        .offset(x: -2, y: 3)
-                        .transition(
-                            reduceMotion
-                                ? .opacity
-                                : .scale(scale: 0.35, anchor: .bottomLeading).combined(with: .opacity)
-                        )
-                }
-            }
         }
         .buttonStyle(FlatToolButtonStyle(active: active))
+        .overlay(alignment: .topTrailing) {
+            if badge > 0 {
+                Circle()
+                    .fill(Palette.red)
+                    .frame(width: 8, height: 8)
+                    .overlay(Circle().stroke(Palette.opaqueSurface, lineWidth: 1))
+                    .offset(x: 3, y: -7)
+                    .transition(
+                        reduceMotion
+                            ? .opacity
+                            : .scale(scale: 0.35, anchor: .bottomLeading).combined(with: .opacity)
+                    )
+            }
+        }
+        .zIndex(badge > 0 ? 1 : 0)
         .disabled(disabled)
         .opacity(disabled ? 0.36 : 1)
         .help(help)
@@ -3321,15 +3369,30 @@ private struct FloatingRoomView: View {
                                 .id(message.id)
                                 .transition(messageTransition)
                         }
+                        Color.clear
+                            .frame(height: 1)
+                            .id(ChatScrollTarget.bottom)
                     }
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
                 }
                 .scrollIndicators(.hidden)
-                .onChange(of: model.messages.count) {
-                    if let last = model.messages.last {
+                .onAppear {
+                    let firstUnread = model.firstUnreadMessageID
+                    DispatchQueue.main.async {
+                        if let firstUnread {
+                            proxy.scrollTo(firstUnread, anchor: .top)
+                        } else {
+                            proxy.scrollTo(ChatScrollTarget.bottom, anchor: .bottom)
+                        }
+                        model.markChatPresented()
+                    }
+                }
+                .onChange(of: model.messages.last?.id) {
+                    guard model.messages.last != nil else { return }
+                    DispatchQueue.main.async {
                         withAnimation(reduceMotion ? nil : .snappy(duration: 0.24, extraBounce: 0.04)) {
-                            proxy.scrollTo(last.id, anchor: .bottom)
+                            proxy.scrollTo(ChatScrollTarget.bottom, anchor: .bottom)
                         }
                     }
                 }
@@ -3399,7 +3462,7 @@ private struct FloatingRoomView: View {
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(Palette.selectedControlText)
                     .frame(width: 26, height: 26)
-                    .background(Palette.controlAccent)
+                    .background(roomAccent)
                     .clipShape(Circle())
             }
             .buttonStyle(PressScaleButtonStyle())
@@ -3416,7 +3479,7 @@ private struct FloatingRoomView: View {
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .stroke(
-                    composerFocused ? Palette.controlAccent : Palette.strokeStrong,
+                    composerFocused ? roomAccent : Palette.strokeStrong,
                     lineWidth: 1
                 )
         )
@@ -3456,7 +3519,7 @@ private struct FloatingRoomView: View {
                     .foregroundStyle(own ? Palette.selectedControlText : Palette.ink)
                     .padding(.horizontal, 11)
                     .padding(.vertical, 8)
-                    .background(own ? Palette.controlAccent : Palette.messageSurface)
+                    .background(own ? roomAccent : Palette.messageSurface)
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                     .textSelection(.enabled)
             }
@@ -3729,13 +3792,25 @@ private struct FloatingRoomView: View {
     }
 }
 
+private struct RoomAccentKey: EnvironmentKey {
+    static let defaultValue = Palette.controlAccent
+}
+
+private extension EnvironmentValues {
+    var roomAccent: Color {
+        get { self[RoomAccentKey.self] }
+        set { self[RoomAccentKey.self] = newValue }
+    }
+}
+
 private struct FlatToolButtonStyle: ButtonStyle {
     let active: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.roomAccent) private var roomAccent
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .background(active ? Palette.controlAccent : configuration.isPressed ? Palette.controlHover : Color.clear)
+            .background(active ? roomAccent : configuration.isPressed ? Palette.controlHover : Color.clear)
             .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
             .scaleEffect(!reduceMotion && configuration.isPressed ? 0.985 : 1)
             .animation(reduceMotion ? nil : .snappy(duration: 0.22, extraBounce: 0.08), value: configuration.isPressed)
@@ -3794,6 +3869,7 @@ private struct SetupActionButtonStyle: ButtonStyle {
 
 private struct InlineActionButtonStyle: ButtonStyle {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.roomAccent) private var roomAccent
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -3801,7 +3877,7 @@ private struct InlineActionButtonStyle: ButtonStyle {
             .foregroundStyle(Palette.selectedControlText)
             .padding(.horizontal, 10)
             .frame(height: 26)
-            .background(Palette.controlAccent.opacity(configuration.isPressed ? 0.78 : 1))
+            .background(roomAccent.opacity(configuration.isPressed ? 0.78 : 1))
             .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
             .scaleEffect(!reduceMotion && configuration.isPressed ? 0.98 : 1)
     }
@@ -3936,7 +4012,7 @@ private struct WalkieTalkieTargetIcon: View {
         .overlay {
             ZStack {
                 Circle().stroke(
-                    selected ? Color.accentColor.opacity(outgoing ? 1 : 0.55) : Color.clear,
+                    selected ? model.roomAccentColor.opacity(outgoing ? 1 : 0.55) : Color.clear,
                     lineWidth: 3
                 )
                 Circle()
@@ -4019,6 +4095,7 @@ private struct WalkieTalkieTargetIcon: View {
 private struct WalkieTalkieBar: View {
     @ObservedObject var model: WERAIViewModel
     var showsCloseButton = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Group {
@@ -4034,6 +4111,8 @@ private struct WalkieTalkieBar: View {
             }
         }
         .onAppear(perform: model.refreshVoiceInputs)
+        .environment(\.roomAccent, model.roomAccentColor)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 1.1), value: model.roomAccentHex)
     }
 
     private var controls: some View {
@@ -4148,6 +4227,7 @@ private struct WalkieTalkieBar: View {
             minHeight: FloatingMetrics.walkieBarHeight,
             maxHeight: FloatingMetrics.walkieBarHeight
         )
+        .background(model.roomAccentColor.opacity(0.06))
     }
 
     private var remoteParticipants: [RoomParticipant] {
@@ -4225,22 +4305,30 @@ private struct WalkieTalkieBar: View {
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            ZStack(alignment: .topTrailing) {
-                Image(systemName: icon)
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 30, height: 30)
-                if badge > 0 {
-                    Text("\(min(badge, 99))")
-                        .font(.system(size: 7, weight: .bold))
-                        .foregroundStyle(Color.white)
-                        .padding(.horizontal, 3)
-                        .frame(minWidth: 12, minHeight: 12)
-                        .background(Palette.red)
-                        .clipShape(Capsule())
-                }
-            }
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: 30, height: 30)
         }
         .buttonStyle(FlatToolButtonStyle(active: active))
+        .overlay(alignment: .topTrailing) {
+            if badge > 0 {
+                Text("\(min(badge, 99))")
+                    .font(.system(size: 7, weight: .bold))
+                    .foregroundStyle(Color.white)
+                    .padding(.horizontal, 3)
+                    .frame(minWidth: 12, minHeight: 12)
+                    .background(Palette.red)
+                    .clipShape(Capsule())
+                    .overlay(Capsule().stroke(Palette.opaqueSurface, lineWidth: 1))
+                    .offset(x: 5, y: -9)
+                    .transition(
+                        reduceMotion
+                            ? .opacity
+                            : .scale(scale: 0.35, anchor: .bottomLeading).combined(with: .opacity)
+                    )
+            }
+        }
+        .zIndex(badge > 0 ? 1 : 0)
         .help(help)
         .accessibilityLabel(help)
     }
@@ -4650,6 +4738,7 @@ private struct PillButtonStyle: ButtonStyle {
     let filled: Bool
     var destructive = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.roomAccent) private var roomAccent
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -4657,7 +4746,7 @@ private struct PillButtonStyle: ButtonStyle {
             .foregroundStyle(filled ? Palette.selectedControlText : destructive ? Palette.red : Palette.ink)
             .padding(.horizontal, 15)
             .frame(height: 36)
-            .background(filled ? Palette.controlAccent : destructive ? Palette.redSoft : Palette.messageSurface)
+            .background(filled ? roomAccent : destructive ? Palette.redSoft : Palette.messageSurface)
             .clipShape(Capsule())
             .scaleEffect(!reduceMotion && configuration.isPressed ? 0.97 : 1)
             .animation(reduceMotion ? nil : .spring(response: 0.22, dampingFraction: 0.8), value: configuration.isPressed)
@@ -4830,6 +4919,90 @@ private enum SetupPalette {
     static let muted = Color(red: 0.42, green: 0.46, blue: 0.40)
     static let stroke = Color.black.opacity(0.10)
     static let surface = Color.white.opacity(0.78)
+}
+
+enum ArtworkTheme {
+    static func accentHex(from data: Data?) -> String? {
+        guard let data,
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateThumbnailAtIndex(
+                source,
+                0,
+                [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                    kCGImageSourceThumbnailMaxPixelSize: 32,
+                ] as CFDictionary
+              )
+        else { return nil }
+
+        let sampleSize = 8
+        var pixels = [UInt8](repeating: 0, count: sampleSize * sampleSize * 4)
+        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        let drewImage = pixels.withUnsafeMutableBytes { bytes -> Bool in
+            guard let address = bytes.baseAddress,
+                  let context = CGContext(
+                    data: address,
+                    width: sampleSize,
+                    height: sampleSize,
+                    bitsPerComponent: 8,
+                    bytesPerRow: sampleSize * 4,
+                    space: colorSpace,
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                        | CGBitmapInfo.byteOrder32Big.rawValue
+                  )
+            else { return false }
+            context.interpolationQuality = .low
+            context.draw(image, in: CGRect(x: 0, y: 0, width: sampleSize, height: sampleSize))
+            return true
+        }
+        guard drewImage else { return nil }
+
+        var redTotal = 0.0
+        var greenTotal = 0.0
+        var blueTotal = 0.0
+        var weightTotal = 0.0
+        for offset in stride(from: 0, to: pixels.count, by: 4) where pixels[offset + 3] > 16 {
+            let red = Double(pixels[offset]) / 255
+            let green = Double(pixels[offset + 1]) / 255
+            let blue = Double(pixels[offset + 2]) / 255
+            let maximum = max(red, green, blue)
+            let minimum = min(red, green, blue)
+            let saturation = maximum == 0 ? 0 : (maximum - minimum) / maximum
+            let luminance = red * 0.2126 + green * 0.7152 + blue * 0.0722
+            let weight = max(0.06, saturation) * (0.45 + luminance * 0.55)
+            redTotal += red * weight
+            greenTotal += green * weight
+            blueTotal += blue * weight
+            weightTotal += weight
+        }
+        guard weightTotal > 0 else { return nil }
+
+        let average = NSColor(
+            srgbRed: redTotal / weightTotal,
+            green: greenTotal / weightTotal,
+            blue: blueTotal / weightTotal,
+            alpha: 1
+        )
+        var hue: CGFloat = 0
+        var saturation: CGFloat = 0
+        var brightness: CGFloat = 0
+        average.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: nil)
+        guard saturation >= 0.08 else { return nil }
+
+        let accent = NSColor(
+            calibratedHue: hue,
+            saturation: min(0.68, max(0.34, saturation * 1.08)),
+            brightness: min(0.70, max(0.50, brightness)),
+            alpha: 1
+        ).usingColorSpace(.sRGB) ?? average
+        return String(
+            format: "%02X%02X%02X",
+            Int((accent.redComponent * 255).rounded()),
+            Int((accent.greenComponent * 255).rounded()),
+            Int((accent.blueComponent * 255).rounded())
+        )
+    }
 }
 
 private extension Color {
