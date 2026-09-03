@@ -35,11 +35,9 @@ on this Mac:
 
 The first time a Mac broadcasts, macOS asks for **Screen & System Audio Recording**
 permission. ALO uses that permission for system audio only while that Mac is the active
-broadcaster. This grant covers broadcasting audio and optional display/window video. macOS may
-also ask once for **System Audio Recording Only** so ALO can suppress the source app's immediate
-local sound and play the same synchronized return heard by the room. That second grant is
-optional: declining it never blocks broadcasting or screen sharing, but the broadcaster's local
-sound may lead the room. No separate speaker output or audio driver is installed.
+broadcaster. This single grant covers audio and optional display/window video; ALO does not
+request the separate **System Audio Recording Only** permission. After the first grant,
+restart ALO once before broadcasting. No separate speaker output or audio driver is installed.
 
 After the room connects, the setup window disappears and the room moves into the
 menu bar. Click the cat to reveal the compact controls; the same surface grows
@@ -124,9 +122,9 @@ its generated device name, emoji, color, and optional profile photo. Identity ch
 and propagate to the current room immediately. The walkie bar can be dismissed with its
 close button; the same controls remain available from ALO's menu-bar popover.
 
-ALO leaves the selected physical output unchanged. When optional system-audio access is granted,
-it privately suppresses the original local render only after synchronized playback is ready,
-avoiding feedback without adding a device to the Sound picker.
+ALO leaves the selected physical output unchanged. The source app remains the broadcaster's
+local playback while ScreenCaptureKit sends the same media to the synchronized room timeline.
+No additional device appears in the Sound picker.
 
 ## Share a ready binary
 

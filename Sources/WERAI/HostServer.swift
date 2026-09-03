@@ -60,9 +60,10 @@ final class HostServer {
     private var mediaQueue = [RoomQueueItem]()
     private var groupPlayoutDelayNanos = RoomTiming.defaultPlayoutDelayNanos
     private var lastGroupDelayAdjustmentNanos: UInt64 = 0
-    // Nil until the first identified remote listener is present while audio is
-    // flowing. Once established, later joiners inherit (but cannot retime) the
-    // active timeline.
+    // Nil until the first audio packet. Once the timeline is active, only clients
+    // already joined at that instant may influence its adaptive shared delay.
+    // In particular, a first listener arriving after playback starts must inherit
+    // the live delay rather than retiming every running player one second later.
     private var timingEligibleClients: Set<ObjectIdentifier>?
 
     init(
@@ -163,10 +164,7 @@ final class HostServer {
             )
             guard !packets.isEmpty else { return }
             let audioClientEntries = self.clients.filter { $0.value.audio != nil }
-            let hasIdentifiedRemoteListener = audioClientEntries.contains { _, client in
-                client.id != nil && client.id != self.localParticipantID
-            }
-            if self.timingEligibleClients == nil, hasIdentifiedRemoteListener {
+            if self.timingEligibleClients == nil {
                 self.timingEligibleClients = Set(audioClientEntries.compactMap { identifier, client in
                     client.id != nil ? identifier : nil
                 })
@@ -601,10 +599,18 @@ final class HostServer {
 
         groupPlayoutDelayNanos = next
         lastGroupDelayAdjustmentNanos = now
-        broadcast(ControlMessage(
-            type: "sync_timing",
-            playoutDelayNanos: groupPlayoutDelayNanos
-        ))
+        // The broadcaster hears its direct source and is not a delayed room
+        // output. Retiming its muted local receiver only creates misleading
+        // Recovering/Synced status changes.
+        for client in clients.values where client.id != localParticipantID {
+            sendTiming(to: client)
+        }
+        if roomPlaybackIsPlaying, lastAudioCaptureNanos != nil {
+            // Changing target latency under a running SynchronizedPlayer moves
+            // its timeline anchor and can start a self-resync loop. Follow the
+            // ordered timing message with one shared future capture boundary.
+            _ = sendCoordinatedResync(targetID: nil, nowNanos: now)
+        }
         print("Room timing adjusted to \(groupPlayoutDelayNanos / 1_000_000) ms.")
     }
 
