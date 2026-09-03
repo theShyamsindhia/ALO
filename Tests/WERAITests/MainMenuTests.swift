@@ -45,4 +45,19 @@ struct MainMenuTests {
         #expect(red > blue)
         #expect(red < 220)
     }
+
+    @Test("Album artwork preserves more than one usable atmosphere color")
+    func artworkPalette() throws {
+        let image = NSImage(size: NSSize(width: 12, height: 8))
+        image.lockFocus()
+        NSColor(red: 0.88, green: 0.16, blue: 0.12, alpha: 1).setFill()
+        NSRect(x: 0, y: 0, width: 6, height: 8).fill()
+        NSColor(red: 0.10, green: 0.32, blue: 0.90, alpha: 1).setFill()
+        NSRect(x: 6, y: 0, width: 6, height: 8).fill()
+        image.unlockFocus()
+
+        let palette = try #require(ArtworkTheme.palette(from: image.tiffRepresentation))
+        #expect(palette.hexes.count == 3)
+        #expect(Set(palette.hexes).count >= 2)
+    }
 }

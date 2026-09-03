@@ -76,7 +76,7 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
         @MainActor static func height(for model: WERAIViewModel) -> CGFloat {
             switch model.phase {
             case .idle:
-                guard model.mode == .listen else { return 260 }
+                guard model.mode == .listen else { return 310 }
                 let roomCount = model.roomChoices.count
                 let listHeight: CGFloat
                 if roomCount == 0 {
@@ -87,7 +87,7 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
                 }
                 let privateKeyHeight: CGFloat = model.selectedRoomConfiguration?.isPrivate == true
                     && model.selectedRoomConfiguration?.accessKey == nil ? 52 : 0
-                return 184 + listHeight + privateKeyHeight
+                return 238 + listHeight + privateKeyHeight
             case .starting:
                 return 270
             case .failed:
@@ -1057,6 +1057,7 @@ final class WERAIViewModel: ObservableObject {
     @Published var roomHasVideo = false
     @Published var nowPlaying = NowPlayingMedia()
     @Published private(set) var roomAccentHex: String?
+    @Published private(set) var roomArtworkPalette: ArtworkPalette?
     @Published var localNowPlaying = NowPlayingMedia()
     @Published private(set) var audioIsRendering = false
     @Published var experience: Experience = .audio
@@ -1190,6 +1191,10 @@ final class WERAIViewModel: ObservableObject {
     }
     var roomAccentColor: Color {
         roomAccentHex.map(Color.deviceIdentity) ?? Palette.controlAccent
+    }
+    var roomAtmosphereColors: [Color] {
+        roomArtworkPalette?.hexes.map(Color.deviceIdentity)
+            ?? [Palette.controlAccent, Palette.accentSoft, Palette.blueSoft]
     }
     var roomSyncLabel: String {
         if !hasBroadcaster { return "No broadcaster" }
@@ -2407,15 +2412,16 @@ final class WERAIViewModel: ObservableObject {
 
     private var nowPlayingCallback: (NowPlayingMedia) -> Void {
         { [weak self] media in
-            let accentHex = ArtworkTheme.accentHex(from: media.artworkData)
+            let artworkPalette = ArtworkTheme.palette(from: media.artworkData)
             DispatchQueue.main.async {
                 guard let self else { return }
                 let sameTrack = self.nowPlaying.title == media.title
                     && self.nowPlaying.artist == media.artist
                     && self.nowPlaying.album == media.album
                 self.nowPlaying = media
-                if media.artworkData != nil || !sameTrack {
-                    self.roomAccentHex = accentHex
+                if (media.artworkData != nil || !sameTrack), self.roomArtworkPalette != artworkPalette {
+                    self.roomArtworkPalette = artworkPalette
+                    self.roomAccentHex = artworkPalette?.accentHex
                 }
             }
         }
@@ -2496,6 +2502,7 @@ final class WERAIViewModel: ObservableObject {
         videoBroadcastTimeoutTask = nil
         nowPlaying = NowPlayingMedia()
         roomAccentHex = nil
+        roomArtworkPalette = nil
         localNowPlaying = NowPlayingMedia()
         audioIsRendering = false
         experience = .audio
@@ -2657,31 +2664,52 @@ private struct WERAIView: View {
 
     private var idleView: some View {
         setupConsole
-            .padding(.top, 34)
+            .padding(.top, 28)
             .padding(.horizontal, 20)
             .padding(.bottom, 18)
     }
 
     private var setupConsole: some View {
-        VStack(spacing: 16) {
-            HStack {
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(model.mode == .share ? "New room" : "Rooms")
-                            .font(.system(size: 24, weight: .black, design: .rounded))
-                            .tracking(-0.7)
-                        Text(versionLabel)
-                            .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                            .opacity(0.62)
+        VStack(spacing: 14) {
+            ZStack(alignment: .topTrailing) {
+                VStack(spacing: 4) {
+                    Text("ALO · \(versionLabel)")
+                        .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                        .tracking(0.7)
+                        .opacity(0.74)
+
+                    Button(action: model.editDeviceIdentity) {
+                        DeviceAvatar(
+                            emoji: model.currentDeviceIcon,
+                            colorHex: model.currentDeviceColorHex,
+                            profileImageData: model.currentDeviceProfileImageData,
+                            size: 44
+                        )
+                        .overlay(Circle().stroke(Color.white.opacity(0.86), lineWidth: 2))
+                        .shadow(color: Color.black.opacity(0.28), radius: 10, y: 4)
                     }
+                    .buttonStyle(PressScaleButtonStyle())
+                    .help("Edit \(model.currentUserName)")
+                    .accessibilityLabel("Edit this Mac's room identity")
+
+                    Text(model.currentUserName)
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+
+                    Text(model.mode == .share ? "Create a room" : "Your rooms")
+                        .font(.system(size: 22, weight: .black, design: .rounded))
+                        .tracking(-0.6)
+                        .padding(.top, 3)
+
                     Text(model.mode == .share
-                        ? "Choose a name, then invite your people."
+                        ? "Name the space, then bring people in."
                         : "Saved here and live on your Wi-Fi.")
-                        .font(.system(size: 11, weight: .medium, design: .rounded))
-                        .opacity(0.72)
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .opacity(0.82)
                 }
                 .foregroundStyle(Color.white)
-                Spacer()
+                .shadow(color: Color.black.opacity(0.48), radius: 8, y: 2)
+                .frame(maxWidth: .infinity)
+
                 if model.mode == .listen {
                     Button(action: model.refreshRooms) {
                         Image(systemName: "arrow.clockwise")
@@ -2690,17 +2718,6 @@ private struct WERAIView: View {
                     .help("Refresh nearby rooms")
                     .accessibilityLabel("Refresh nearby rooms")
                 }
-                Button(action: model.editDeviceIdentity) {
-                    DeviceAvatar(
-                        emoji: model.currentDeviceIcon,
-                        colorHex: model.currentDeviceColorHex,
-                        profileImageData: model.currentDeviceProfileImageData,
-                        size: 28
-                    )
-                }
-                .buttonStyle(SetupIconButtonStyle(onImage: true))
-                .help("Edit \(model.currentUserName)")
-                .accessibilityLabel("Edit this Mac's room identity")
             }
 
             if model.mode == .share {
@@ -2803,7 +2820,7 @@ private struct WERAIView: View {
                 RoundedRectangle(cornerRadius: 22, style: .continuous)
                     .fill(.ultraThinMaterial)
                 RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .fill(SetupPalette.surface)
+                    .fill(SetupPalette.surfaceStrong)
             }
             .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
             .overlay(
@@ -2868,7 +2885,7 @@ private struct WERAIView: View {
                 HStack(spacing: 12) {
                     Image(systemName: room.isPrivate ? "lock.fill" : "person.3.fill")
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(selected ? Palette.selectedControlText : Palette.accent)
+                        .foregroundStyle(selected ? Color.white : Palette.accent)
                         .frame(width: 36, height: 36)
                         .background(selected ? Palette.controlAccent : Palette.accentSoft)
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -2878,7 +2895,7 @@ private struct WERAIView: View {
                             .foregroundStyle(SetupPalette.ink)
                         Text(nearby.map { "Nearby · \($0.peerCount) \($0.peerCount == 1 ? "person" : "people")" } ?? "Saved on this Mac")
                             .font(.system(size: 10, design: .rounded))
-                            .foregroundStyle(nearby == nil ? SetupPalette.secondary : Palette.accentText)
+                            .foregroundStyle(nearby == nil ? SetupPalette.secondary : SetupPalette.live)
                     }
                     Spacer()
                     Image(systemName: selected ? "checkmark.circle.fill" : "chevron.right")
@@ -3117,7 +3134,7 @@ private struct FloatingRoomView: View {
         }
         .tint(roomAccent)
         .environment(\.roomAccent, roomAccent)
-        .animation(themeAnimation, value: model.roomAccentHex)
+        .animation(themeAnimation, value: model.roomArtworkPalette)
     }
 
     private var roomContent: some View {
@@ -3137,13 +3154,7 @@ private struct FloatingRoomView: View {
             roomBar
         }
         .frame(width: FloatingMetrics.width, height: roomContentHeight, alignment: .bottom)
-        .background(
-            LinearGradient(
-                colors: [roomAccent.opacity(0.12), roomAccent.opacity(0.035)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        )
+        .background(ArtworkAtmosphere(colors: model.roomAtmosphereColors))
         .animation(panelAnimation, value: model.floatingSection)
         .animation(panelAnimation, value: model.permissionNotice)
         .animation(panelAnimation, value: model.participants.count)
@@ -3995,7 +4006,7 @@ private struct SetupIconButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 13, weight: .bold))
-            .foregroundStyle(filled || active ? Palette.selectedControlText : onImage ? SetupPalette.ink : Palette.controlIcon)
+            .foregroundStyle(filled || active ? Color.white : onImage ? SetupPalette.ink : Palette.controlIcon)
             .frame(width: 38, height: 38)
             .background(filled || active ? Palette.controlAccent : onImage ? SetupPalette.surface : Palette.messageSurface)
             .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
@@ -4019,7 +4030,7 @@ private struct SetupActionButtonStyle: ButtonStyle {
         configuration.label
             .font(.system(size: 11, weight: .semibold, design: .rounded))
             .labelStyle(.titleAndIcon)
-            .foregroundStyle(filled || active ? Palette.selectedControlText : SetupPalette.ink)
+            .foregroundStyle(filled || active ? Color.white : SetupPalette.ink)
             .padding(.horizontal, 13)
             .frame(height: 38)
             .background(filled || active ? Palette.controlAccent : SetupPalette.surface)
@@ -4279,7 +4290,7 @@ private struct WalkieTalkieBar: View {
         }
         .onAppear(perform: model.refreshVoiceInputs)
         .environment(\.roomAccent, model.roomAccentColor)
-        .animation(reduceMotion ? nil : .easeInOut(duration: 1.1), value: model.roomAccentHex)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 1.1), value: model.roomArtworkPalette)
     }
 
     private var controls: some View {
@@ -4401,7 +4412,7 @@ private struct WalkieTalkieBar: View {
             minHeight: FloatingMetrics.walkieBarHeight,
             maxHeight: FloatingMetrics.walkieBarHeight
         )
-        .background(model.roomAccentColor.opacity(0.06))
+        .background(ArtworkAtmosphere(colors: model.roomAtmosphereColors, strength: 0.72))
     }
 
     private var remoteParticipants: [RoomParticipant] {
@@ -4862,6 +4873,74 @@ private struct AmbientBackground: View {
     }
 }
 
+private struct ArtworkAtmosphere: View {
+    let colors: [Color]
+    var strength = 1.0
+
+    var body: some View {
+        let primary = colors.first ?? Palette.controlAccent
+        let secondary = colors.dropFirst().first ?? Palette.accentSoft
+        let tertiary = colors.dropFirst(2).first ?? Palette.blueSoft
+
+        return GeometryReader { geometry in
+            let reach = max(geometry.size.width, geometry.size.height)
+            ZStack {
+                Palette.opaqueSurface
+                RadialGradient(
+                    colors: [primary.opacity(0.34 * strength), .clear],
+                    center: .topLeading,
+                    startRadius: 0,
+                    endRadius: reach * 0.82
+                )
+                RadialGradient(
+                    colors: [secondary.opacity(0.28 * strength), .clear],
+                    center: .bottomTrailing,
+                    startRadius: 0,
+                    endRadius: reach * 0.72
+                )
+                RadialGradient(
+                    colors: [tertiary.opacity(0.18 * strength), .clear],
+                    center: UnitPoint(x: 0.76, y: 0.18),
+                    startRadius: 0,
+                    endRadius: reach * 0.56
+                )
+                Palette.opaqueSurface.opacity(0.42)
+                StaticGrain()
+                    .blendMode(.softLight)
+                    .opacity(0.11 * strength)
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+        }
+        .clipped()
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+private struct StaticGrain: View {
+    var body: some View {
+        Canvas(opaque: false, rendersAsynchronously: true) { context, size in
+            let count = min(520, max(120, Int(size.width * size.height / 1_100)))
+            for index in 0..<count {
+                let x = unit(index, salt: 17.3) * size.width
+                let y = unit(index, salt: 61.7) * size.height
+                let side = 0.55 + unit(index, salt: 9.1) * 0.85
+                let tone = index.isMultiple(of: 2) ? Color.white : Color.black
+                let opacity = 0.18 + unit(index, salt: 42.9) * 0.34
+                context.fill(
+                    Path(CGRect(x: x, y: y, width: side, height: side)),
+                    with: .color(tone.opacity(opacity))
+                )
+            }
+        }
+    }
+
+    private func unit(_ index: Int, salt: Double) -> CGFloat {
+        let raw = sin(Double(index) * 12.9898 + salt) * 43_758.5453
+        return CGFloat(raw - floor(raw))
+    }
+}
+
 private struct SetupBackground: View {
     var body: some View {
         GeometryReader { geometry in
@@ -4877,7 +4956,7 @@ private struct SetupBackground: View {
                     AmbientBackground(isLive: false)
                 }
                 LinearGradient(
-                    colors: [Color.black.opacity(0.42), Color.black.opacity(0.08), Color.black.opacity(0.18)],
+                    colors: [Color.black.opacity(0.56), Color.black.opacity(0.10), Color.black.opacity(0.28)],
                     startPoint: .top,
                     endPoint: .bottom
                 )
@@ -5091,12 +5170,97 @@ private enum SetupPalette {
     static let ink = Color(red: 0.055, green: 0.075, blue: 0.055)
     static let secondary = Color(red: 0.23, green: 0.28, blue: 0.22)
     static let muted = Color(red: 0.42, green: 0.46, blue: 0.40)
+    static let live = Color(red: 0.035, green: 0.28, blue: 0.16)
     static let stroke = Color.black.opacity(0.10)
-    static let surface = Color.white.opacity(0.78)
+    static let surface = Color.white.opacity(0.90)
+    static let surfaceStrong = Color.white.opacity(0.95)
+}
+
+struct ArtworkPalette: Equatable {
+    let accentHex: String
+    let secondaryHex: String
+    let tertiaryHex: String
+
+    var hexes: [String] { [accentHex, secondaryHex, tertiaryHex] }
 }
 
 enum ArtworkTheme {
+    private struct HueBucket {
+        var red: CGFloat = 0
+        var green: CGFloat = 0
+        var blue: CGFloat = 0
+        var weight: CGFloat = 0
+
+        mutating func add(red: CGFloat, green: CGFloat, blue: CGFloat, weight: CGFloat) {
+            self.red += red * weight
+            self.green += green * weight
+            self.blue += blue * weight
+            self.weight += weight
+        }
+
+        var average: NSColor? {
+            guard weight > 0 else { return nil }
+            return NSColor(
+                srgbRed: red / weight,
+                green: green / weight,
+                blue: blue / weight,
+                alpha: 1
+            )
+        }
+    }
+
     static func accentHex(from data: Data?) -> String? {
+        palette(from: data)?.accentHex
+    }
+
+    static func palette(from data: Data?) -> ArtworkPalette? {
+        guard let pixels = sampledPixels(from: data) else { return nil }
+        let bucketCount = 12
+        var buckets = [HueBucket](repeating: HueBucket(), count: bucketCount)
+
+        for offset in stride(from: 0, to: pixels.count, by: 4) where pixels[offset + 3] > 16 {
+            let red = CGFloat(pixels[offset]) / 255
+            let green = CGFloat(pixels[offset + 1]) / 255
+            let blue = CGFloat(pixels[offset + 2]) / 255
+            let color = NSColor(srgbRed: red, green: green, blue: blue, alpha: 1)
+            var hue: CGFloat = 0
+            var saturation: CGFloat = 0
+            var brightness: CGFloat = 0
+            color.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: nil)
+            guard saturation >= 0.08, brightness >= 0.06 else { continue }
+
+            let luminance = red * 0.2126 + green * 0.7152 + blue * 0.0722
+            let weight = saturation * (0.42 + luminance * 0.58)
+            let index = min(bucketCount - 1, Int(hue * CGFloat(bucketCount)))
+            buckets[index].add(red: red, green: green, blue: blue, weight: weight)
+        }
+
+        let ranked = buckets.indices
+            .filter { buckets[$0].weight > 0 }
+            .sorted { buckets[$0].weight > buckets[$1].weight }
+        guard let primaryIndex = ranked.first else { return nil }
+
+        var selected = [primaryIndex]
+        for index in ranked.dropFirst() {
+            let isDistinct = selected.allSatisfy {
+                let distance = abs(index - $0)
+                return min(distance, bucketCount - distance) >= 2
+            }
+            if isDistinct {
+                selected.append(index)
+                if selected.count == 3 { break }
+            }
+        }
+        while selected.count < 3 { selected.append(primaryIndex) }
+
+        guard let accent = calibratedHex(from: buckets[selected[0]], role: 0),
+              let secondary = calibratedHex(from: buckets[selected[1]], role: 1),
+              let tertiary = calibratedHex(from: buckets[selected[2]], role: 2)
+        else { return nil }
+        return ArtworkPalette(accentHex: accent, secondaryHex: secondary, tertiaryHex: tertiary)
+    }
+
+    private static func sampledPixels(from data: Data?) -> [UInt8]? {
         guard let data,
               let source = CGImageSourceCreateWithData(data as CFData, nil),
               let image = CGImageSourceCreateThumbnailAtIndex(
@@ -5105,12 +5269,12 @@ enum ArtworkTheme {
                 [
                     kCGImageSourceCreateThumbnailFromImageAlways: true,
                     kCGImageSourceCreateThumbnailWithTransform: true,
-                    kCGImageSourceThumbnailMaxPixelSize: 32,
+                    kCGImageSourceThumbnailMaxPixelSize: 40,
                 ] as CFDictionary
               )
         else { return nil }
 
-        let sampleSize = 8
+        let sampleSize = 12
         var pixels = [UInt8](repeating: 0, count: sampleSize * sampleSize * 4)
         let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
         let drewImage = pixels.withUnsafeMutableBytes { bytes -> Bool in
@@ -5130,51 +5294,41 @@ enum ArtworkTheme {
             context.draw(image, in: CGRect(x: 0, y: 0, width: sampleSize, height: sampleSize))
             return true
         }
-        guard drewImage else { return nil }
+        return drewImage ? pixels : nil
+    }
 
-        var redTotal = 0.0
-        var greenTotal = 0.0
-        var blueTotal = 0.0
-        var weightTotal = 0.0
-        for offset in stride(from: 0, to: pixels.count, by: 4) where pixels[offset + 3] > 16 {
-            let red = Double(pixels[offset]) / 255
-            let green = Double(pixels[offset + 1]) / 255
-            let blue = Double(pixels[offset + 2]) / 255
-            let maximum = max(red, green, blue)
-            let minimum = min(red, green, blue)
-            let saturation = maximum == 0 ? 0 : (maximum - minimum) / maximum
-            let luminance = red * 0.2126 + green * 0.7152 + blue * 0.0722
-            let weight = max(0.06, saturation) * (0.45 + luminance * 0.55)
-            redTotal += red * weight
-            greenTotal += green * weight
-            blueTotal += blue * weight
-            weightTotal += weight
-        }
-        guard weightTotal > 0 else { return nil }
-
-        let average = NSColor(
-            srgbRed: redTotal / weightTotal,
-            green: greenTotal / weightTotal,
-            blue: blueTotal / weightTotal,
-            alpha: 1
-        )
+    private static func calibratedHex(from bucket: HueBucket, role: Int) -> String? {
+        guard let average = bucket.average else { return nil }
         var hue: CGFloat = 0
         var saturation: CGFloat = 0
         var brightness: CGFloat = 0
         average.getHue(&hue, saturation: &saturation, brightness: &brightness, alpha: nil)
-        guard saturation >= 0.08 else { return nil }
 
-        let accent = NSColor(
+        let targetSaturation: ClosedRange<CGFloat>
+        let targetBrightness: ClosedRange<CGFloat>
+        switch role {
+        case 1:
+            targetSaturation = 0.28...0.62
+            targetBrightness = 0.38...0.62
+        case 2:
+            targetSaturation = 0.30...0.64
+            targetBrightness = 0.56...0.76
+        default:
+            targetSaturation = 0.34...0.68
+            targetBrightness = 0.50...0.70
+        }
+
+        let color = NSColor(
             calibratedHue: hue,
-            saturation: min(0.68, max(0.34, saturation * 1.08)),
-            brightness: min(0.70, max(0.50, brightness)),
+            saturation: min(targetSaturation.upperBound, max(targetSaturation.lowerBound, saturation * 1.06)),
+            brightness: min(targetBrightness.upperBound, max(targetBrightness.lowerBound, brightness)),
             alpha: 1
         ).usingColorSpace(.sRGB) ?? average
         return String(
             format: "%02X%02X%02X",
-            Int((accent.redComponent * 255).rounded()),
-            Int((accent.greenComponent * 255).rounded()),
-            Int((accent.blueComponent * 255).rounded())
+            Int((color.redComponent * 255).rounded()),
+            Int((color.greenComponent * 255).rounded()),
+            Int((color.blueComponent * 255).rounded())
         )
     }
 }
