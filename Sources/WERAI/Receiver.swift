@@ -47,6 +47,7 @@ final class Receiver {
     private var audioConnections = [NWConnection]()
     private var videoConnections = [NWConnection]()
     private var lastSyncReportNanos: UInt64 = 0
+    private var locallyForcedPlaybackMuted = false
 
     init(
         requestedRoom: String?,
@@ -208,6 +209,24 @@ final class Receiver {
         }
     }
 
+    /// Changes playback only on this Receiver without publishing participant
+    /// mixer state to the room.
+    func setLocalPlaybackMuted(_ muted: Bool) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.locallyForcedPlaybackMuted = muted
+            self.player.setLevel(volume: 1, muted: muted)
+        }
+    }
+
+    /// Dims synchronized room media while locally-rendered voice is audible.
+    /// Participant volume and mute remain owned by `setLocalLevel`.
+    func setVoiceDuckingActive(_ active: Bool) {
+        queue.async { [weak self] in
+            self?.player.setVoiceDuckingActive(active)
+        }
+    }
+
     func setRoomPlayback(playing: Bool) {
         sendRoomMediaCommand(playing ? .play : .pause)
     }
@@ -366,7 +385,7 @@ final class Receiver {
                     case "level":
                         self.player.setLevel(
                             volume: message.volume ?? 1,
-                            muted: message.muted ?? false
+                            muted: (message.muted ?? false) || self.locallyForcedPlaybackMuted
                         )
                     case "chat":
                         if let sender = message.sender, let text = message.text {

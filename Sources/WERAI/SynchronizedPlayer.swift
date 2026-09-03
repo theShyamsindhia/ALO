@@ -4,6 +4,47 @@ import CoreAudio
 import Foundation
 import WERAICore
 
+struct MediaDuckingEnvelope {
+    static let duckedGain = 0.30
+    static let attackNanos: UInt64 = 60_000_000
+    static let releaseNanos: UInt64 = 350_000_000
+
+    private(set) var gain = 1.0
+    private var startGain = 1.0
+    private var targetGain = 1.0
+    private var transitionStartNanos: UInt64 = 0
+    private var transitionDurationNanos: UInt64 = 1
+
+    mutating func setDucked(_ ducked: Bool, at nowNanos: UInt64) {
+        _ = advance(to: nowNanos)
+        let target = ducked ? Self.duckedGain : 1
+        guard target != targetGain else { return }
+        startGain = gain
+        targetGain = target
+        transitionStartNanos = nowNanos
+        transitionDurationNanos = ducked ? Self.attackNanos : Self.releaseNanos
+    }
+
+    @discardableResult
+    mutating func advance(to nowNanos: UInt64) -> Double {
+        guard gain != targetGain else { return gain }
+        let elapsed = nowNanos > transitionStartNanos ? nowNanos - transitionStartNanos : 0
+        let progress = min(1, Double(elapsed) / Double(transitionDurationNanos))
+        gain = startGain + (targetGain - startGain) * progress
+        return gain
+    }
+
+    mutating func reset() { self = Self() }
+
+    static func effectiveGain(
+        participantVolume: Double,
+        muted: Bool,
+        duckingGain: Double
+    ) -> Double {
+        muted ? 0 : min(max(participantVolume, 0), 1) * duckingGain
+    }
+}
+
 final class SynchronizedPlayer {
     static let targetLatencyNanos = RoomTiming.defaultPlayoutDelayNanos
     static let hardResyncThresholdNanos: UInt64 = 100_000_000
@@ -39,6 +80,7 @@ final class SynchronizedPlayer {
     private var participantMuted = false
     private var playbackIsActive = false
     private var roomPlaybackIsPlaying = true
+    private var duckingEnvelope = MediaDuckingEnvelope()
     private var resyncCutoverCaptureNanos: UInt64?
     private(set) var configurationChangeCount: UInt64 = 0
 
@@ -99,6 +141,7 @@ final class SynchronizedPlayer {
     }
 
     func maintainSync() {
+        applyOutputGain(nowNanos: MonotonicClock.nowNanos())
         guard roomPlaybackIsPlaying else {
             setPlaybackActive(false)
             return
@@ -239,6 +282,8 @@ final class SynchronizedPlayer {
         setPlaybackActive(false)
         playbackWatchdog.reset()
         driftRecovery.reset()
+        duckingEnvelope.reset()
+        applyOutputGain(nowNanos: MonotonicClock.nowNanos())
     }
 
     func setTargetLatencyNanos(_ nanos: UInt64) {
@@ -249,6 +294,12 @@ final class SynchronizedPlayer {
         participantVolume = min(max(volume, 0), 1)
         participantMuted = muted
         applyOutputGain()
+    }
+
+    func setVoiceDuckingActive(_ active: Bool) {
+        let now = MonotonicClock.nowNanos()
+        duckingEnvelope.setDucked(active, at: now)
+        applyOutputGain(nowNanos: now)
     }
 
     func setRoomPlayback(playing: Bool) {
@@ -272,8 +323,17 @@ final class SynchronizedPlayer {
     }
 
     private func applyOutputGain() {
-        player.volume = participantMuted ? 0 : Float(participantVolume)
-        updatePlaybackActivity(nowNanos: MonotonicClock.nowNanos())
+        applyOutputGain(nowNanos: MonotonicClock.nowNanos())
+    }
+
+    private func applyOutputGain(nowNanos: UInt64) {
+        let duckingGain = duckingEnvelope.advance(to: nowNanos)
+        player.volume = Float(MediaDuckingEnvelope.effectiveGain(
+            participantVolume: participantVolume,
+            muted: participantMuted,
+            duckingGain: duckingGain
+        ))
+        updatePlaybackActivity(nowNanos: nowNanos)
     }
 
     private func updatePlaybackActivity(nowNanos: UInt64) {

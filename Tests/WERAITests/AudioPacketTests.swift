@@ -74,6 +74,79 @@ struct AudioPacketTests {
         #expect(decoded?.walkieTalkie?.targetID == "mac-b")
     }
 
+    @Test("Voice packets encode one canonical recipient snapshot")
+    func voiceRecipientSnapshotRoundTrip() throws {
+        let message = WalkieTalkieMessage(
+            kind: .audio,
+            senderID: "mac-a",
+            senderName: "Ada",
+            targetID: nil,
+            targetIDs: ["mac-c", "mac-b"],
+            sessionID: "voice-many",
+            sequence: 3,
+            pcm16Mono: Data([0, 0])
+        )
+        let decoded = MeshEnvelopeDecoder().append(
+            try MeshEnvelope(type: "walkie_talkie", walkieTalkie: message).encodedLine()
+        ).first?.walkieTalkie
+
+        #expect(decoded?.targetIDs == ["mac-b", "mac-c"])
+        #expect(decoded?.recipientIDs == ["mac-b", "mac-c"])
+        #expect(WalkieTalkieMessage(
+            kind: .began, senderID: "a", senderName: "A", targetID: nil,
+            targetIDs: [], sessionID: "silent"
+        ).recipientIDs == [])
+    }
+
+    @Test("Open Line requires a local Join line action before becoming connected")
+    func openLineInvitationLifecycle() throws {
+        var caller = OpenLineSessionState(localID: "caller")
+        var invitee = OpenLineSessionState(localID: "invitee")
+        let pendingInvite = caller.invite(
+            peerID: "invitee", localName: "Caller", invitationID: "line-1"
+        )
+        let invite = try #require(pendingInvite)
+
+        #expect(invitee.receive(invite) == .incomingInvitation(OpenLineInvitation(
+            id: "line-1", callerID: "caller", callerName: "Caller", inviteeID: "invitee"
+        )))
+        #expect(invitee.state == .invited(try #require(invitee.state.invitation)))
+
+        let pendingJoin = invitee.join(invitationID: "line-1", localName: "Invitee")
+        let join = try #require(pendingJoin)
+        #expect(caller.receive(join) == .joined(try #require(caller.state.invitation)))
+        #expect(caller.state == .connected(try #require(caller.state.invitation)))
+        #expect(invitee.state == .connected(try #require(invitee.state.invitation)))
+
+        let pendingEnd = caller.end(localName: "Caller")
+        let end = try #require(pendingEnd)
+        let connectedInvitation = try #require(invitee.state.invitation)
+        #expect(invitee.receive(end) == .ended(connectedInvitation))
+        #expect(caller.state == .idle)
+        #expect(invitee.state == .idle)
+    }
+
+    @Test("Stale and crossed Open Line messages converge safely")
+    func staleAndCrossedOpenLineMessages() throws {
+        var a = OpenLineSessionState(localID: "a")
+        var b = OpenLineSessionState(localID: "b")
+        let pendingFromA = a.invite(peerID: "b", localName: "A", invitationID: "z-line")
+        let pendingFromB = b.invite(peerID: "a", localName: "B", invitationID: "a-line")
+        let fromA = try #require(pendingFromA)
+        let fromB = try #require(pendingFromB)
+
+        #expect(a.receive(fromB) != .ignored)
+        #expect(b.receive(fromA) == .ignored)
+        #expect(a.state.invitation?.id == "a-line")
+        #expect(b.state.invitation?.id == "a-line")
+
+        let staleJoin = OpenLineMessage(
+            kind: .join, invitationID: "z-line", senderID: "b", senderName: "B", targetID: "a"
+        )
+        #expect(a.receive(staleJoin) == .ignored)
+        #expect(a.state.invitation?.id == "a-line")
+    }
+
     @Test func roomMessagesCarryPresenceAndChat() throws {
         let decoder = ControlLineDecoder()
         let roomParticipants = [

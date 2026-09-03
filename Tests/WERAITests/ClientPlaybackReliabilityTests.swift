@@ -4,6 +4,75 @@ import Testing
 @testable import WERAICore
 
 struct ClientPlaybackReliabilityTests {
+    @Test("Talk selection is additive and Everyone is a present-device snapshot") @MainActor
+    func talkTargetSelection() {
+        let initial: Set<String> = ["mac-a", "mac-b"]
+        var selected = WERAIViewModel.toggledTalkTargets(
+            [], targetID: nil, currentlyPresent: initial
+        )
+        #expect(selected == initial)
+
+        // A device that arrives later is not silently added to a live route.
+        let afterJoin: Set<String> = ["mac-a", "mac-b", "mac-c"]
+        #expect(selected == initial)
+        selected = WERAIViewModel.toggledTalkTargets(
+            selected, targetID: "mac-c", currentlyPresent: afterJoin
+        )
+        #expect(selected == afterJoin)
+        selected = WERAIViewModel.toggledTalkTargets(
+            selected, targetID: "mac-b", currentlyPresent: afterJoin
+        )
+        #expect(selected == ["mac-a", "mac-c"])
+
+        selected = WERAIViewModel.toggledTalkTargets(
+            selected, targetID: nil, currentlyPresent: afterJoin
+        )
+        #expect(selected == afterJoin)
+        selected = WERAIViewModel.toggledTalkTargets(
+            selected, targetID: nil, currentlyPresent: afterJoin
+        )
+        #expect(selected.isEmpty)
+    }
+
+    @Test("Voice input restart preserves Talk and Open Line recipients")
+    func voiceInputRestartRecipients() {
+        let invitation = OpenLineInvitation(
+            id: "line-1",
+            callerID: "local",
+            callerName: "Local",
+            inviteeID: "line-peer"
+        )
+
+        #expect(MeshSession.effectiveVoiceTargets(
+            talkTargetIDs: ["talk-peer", "local"],
+            openLineState: .connected(invitation),
+            localID: "local"
+        ) == ["talk-peer", "line-peer"])
+        #expect(MeshSession.effectiveVoiceTargets(
+            talkTargetIDs: ["talk-peer"],
+            openLineState: .invited(invitation),
+            localID: "local"
+        ) == ["talk-peer"])
+    }
+
+    @Test("Media ducking reaches 30 percent with a short attack and gentle release")
+    func voiceDuckingEnvelope() {
+        var envelope = MediaDuckingEnvelope()
+        envelope.setDucked(true, at: 1_000_000_000)
+
+        #expect(abs(envelope.advance(to: 1_030_000_000) - 0.65) < 0.000_001)
+        #expect(abs(envelope.advance(to: 1_060_000_000) - 0.30) < 0.000_001)
+
+        envelope.setDucked(false, at: 1_060_000_000)
+        #expect(abs(envelope.advance(to: 1_235_000_000) - 0.65) < 0.000_001)
+        #expect(abs(envelope.advance(to: 1_410_000_000) - 1.0) < 0.000_001)
+        #expect(MediaDuckingEnvelope.effectiveGain(
+            participantVolume: 0.5, muted: false, duckingGain: 0.3
+        ) == 0.15)
+        #expect(MediaDuckingEnvelope.effectiveGain(
+            participantVolume: 0.5, muted: true, duckingGain: 1
+        ) == 0)
+    }
     @Test @MainActor func videoControlStartsAudioAndVideoWhenNoBroadcasterVideoExists() {
         #expect(WERAIViewModel.videoControlIntent(
             isLive: true,

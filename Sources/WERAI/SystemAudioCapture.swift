@@ -1,5 +1,6 @@
 import AVFoundation
 import CoreMedia
+import CoreGraphics
 import Foundation
 import ScreenCaptureKit
 import WERAICore
@@ -24,11 +25,15 @@ final class SystemAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             self.audioHandler = audioHandler
         }
 
+        // macOS 15 can return an incomplete display list when discovery is
+        // restricted to on-screen windows. Audio capture only needs a
+        // display-backed filter, so request the complete display list.
         let content = try await SCShareableContent.excludingDesktopWindows(
             false,
-            onScreenWindowsOnly: true
+            onScreenWindowsOnly: false
         )
-        guard let display = content.displays.first else {
+        guard let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() })
+                ?? content.displays.first else {
             throw WERAIError("No display is available for system-audio capture.")
         }
 

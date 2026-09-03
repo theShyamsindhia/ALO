@@ -21,12 +21,14 @@ final class MeshSession {
     private let replicaPersistenceHandler: (MeshRoomReplica) -> Void
     private let errorHandler: (Error) -> Void
     private let walkieTalkieTransmissionEndedHandler: (Error) -> Void
+    private let incomingOpenLineInvitationHandler: (OpenLineInvitation) -> Void
+    private let openLineStateHandler: (OpenLineState) -> Void
     private let walkieTalkieMicrophone = WalkieTalkieMicrophone()
     private let walkieTalkiePlayer: WalkieTalkiePlayer
     private final class WalkieTransmissionState: @unchecked Sendable {
         struct Active {
             let id: String
-            let targetID: String?
+            var targetIDs: Set<String>?
             let name: String
             var sequence: UInt64
         }
@@ -34,8 +36,8 @@ final class MeshSession {
         private let lock = NSLock()
         private var active: Active?
 
-        func begin(id: String, targetID: String?, name: String) {
-            lock.withLock { active = Active(id: id, targetID: targetID, name: name, sequence: 0) }
+        func begin(id: String, targetIDs: Set<String>?, name: String) {
+            lock.withLock { active = Active(id: id, targetIDs: targetIDs, name: name, sequence: 0) }
         }
 
         func activeID() -> String? { lock.withLock { active?.id } }
@@ -50,6 +52,16 @@ final class MeshSession {
             }
         }
 
+        func updateTargets(_ targetIDs: Set<String>) -> (active: Active, removed: Set<String>, added: Set<String>)? {
+            lock.withLock {
+                guard var current = active else { return nil }
+                let previous = current.targetIDs ?? []
+                current.targetIDs = targetIDs
+                active = current
+                return (current, previous.subtracting(targetIDs), targetIDs.subtracting(previous))
+            }
+        }
+
         func nextMessage(nodeID: String, sessionID: String, data: Data) -> WalkieTalkieMessage? {
             lock.withLock {
                 guard var current = active, current.id == sessionID else { return nil }
@@ -59,7 +71,8 @@ final class MeshSession {
                     kind: .audio,
                     senderID: nodeID,
                     senderName: current.name,
-                    targetID: current.targetID,
+                    targetID: nil,
+                    targetIDs: current.targetIDs,
                     sessionID: current.id,
                     sequence: current.sequence,
                     pcm16Mono: data
@@ -82,6 +95,9 @@ final class MeshSession {
     private var localVolume = 1.0
     private var localParticipantMuted = false
     private var walkieStartGeneration: Int?
+    private var incomingVoicePlaybackActive = false
+    private var walkieTalkieTargets = Set<String>()
+    private var openLineSessionState: OpenLineSessionState
 
     var isBroadcasting: Bool { replica.broadcaster?.nodeID == nodeID }
     var hasBroadcaster: Bool { replica.broadcaster != nil }
@@ -89,6 +105,8 @@ final class MeshSession {
     private final class CallbackRelay {
         var replica: (MeshRoomReplica) -> Void = { _ in }
         var participants: ([RoomParticipant]) -> Void = { _ in }
+        var openLine: (OpenLineMessage) -> Void = { _ in }
+        var voiceActivity: (Bool) -> Void = { _ in }
     }
     private let callbackRelay: CallbackRelay
 
@@ -143,6 +161,8 @@ final class MeshSession {
         errorHandler: @escaping (Error) -> Void = { _ in },
         walkieTalkieStateHandler: @escaping (String, String, Bool) -> Void = { _, _, _ in },
         walkieTalkieTransmissionEndedHandler: @escaping (Error) -> Void = { _ in },
+        incomingOpenLineInvitationHandler: @escaping (OpenLineInvitation) -> Void = { _ in },
+        openLineStateHandler: @escaping (OpenLineState) -> Void = { _ in },
         replicaPersistenceHandler: @escaping (MeshRoomReplica) -> Void = { _ in }
     ) {
         let relay = CallbackRelay()
@@ -169,11 +189,19 @@ final class MeshSession {
         self.videoHandler = videoHandler
         self.errorHandler = errorHandler
         self.walkieTalkieTransmissionEndedHandler = walkieTalkieTransmissionEndedHandler
-        let walkieTalkiePlayer = WalkieTalkiePlayer { senderID, senderName, active in
-            DispatchQueue.main.async {
-                walkieTalkieStateHandler(senderID, senderName, active)
+        self.incomingOpenLineInvitationHandler = incomingOpenLineInvitationHandler
+        self.openLineStateHandler = openLineStateHandler
+        self.openLineSessionState = OpenLineSessionState(localID: nodeID)
+        let walkieTalkiePlayer = WalkieTalkiePlayer(
+            stateHandler: { senderID, senderName, active in
+                DispatchQueue.main.async {
+                    walkieTalkieStateHandler(senderID, senderName, active)
+                }
+            },
+            playbackActivityHandler: { active in
+                DispatchQueue.main.async { relay.voiceActivity(active) }
             }
-        }
+        )
         self.walkieTalkiePlayer = walkieTalkiePlayer
         self.replicaPersistenceHandler = replicaPersistenceHandler
         self.control = MeshControlPlane(
@@ -201,10 +229,19 @@ final class MeshSession {
             },
             walkieTalkieHandler: { message in
                 walkieTalkiePlayer.accept(message)
+            },
+            openLineHandler: { message in
+                DispatchQueue.main.async { relay.openLine(message) }
             }
         )
         relay.replica = { [weak self] in self?.apply($0) }
         relay.participants = participantsHandler
+        relay.openLine = { [weak self] in self?.receiveOpenLine($0) }
+        relay.voiceActivity = { [weak self] active in
+            self?.incomingVoicePlaybackActive = active
+            self?.receiver?.setVoiceDuckingActive(active)
+            self?.hostSession?.setVoiceDuckingActive(active)
+        }
     }
 
     func start(broadcastInitially: Bool) throws {
@@ -274,11 +311,55 @@ final class MeshSession {
         generation: Int,
         inputDeviceUID: String? = nil
     ) async throws -> String? {
-        guard targetID != nodeID else { return nil }
+        if let targetID {
+            return try await updateWalkieTalkieTargets(
+                [targetID], generation: generation, inputDeviceUID: inputDeviceUID
+            )
+        }
+        // Compatibility for the old call site. New UI should pass an explicit
+        // snapshot to updateWalkieTalkieTargets(_:generation:inputDeviceUID:).
+        return try await beginVoiceCapture(
+            targetIDs: nil, generation: generation, inputDeviceUID: inputDeviceUID
+        )
+    }
+
+    func updateWalkieTalkieTargets(
+        _ targetIDs: Set<String>,
+        generation: Int,
+        inputDeviceUID: String? = nil
+    ) async throws -> String? {
+        walkieTalkieTargets = targetIDs.subtracting([nodeID])
+        return try await reconcileVoiceCapture(
+            generation: generation, inputDeviceUID: inputDeviceUID
+        )
+    }
+
+    /// Rebuilds the microphone engine while retaining every active reason for
+    /// capture (latched Talk, push-to-talk, and either side of an Open Line).
+    func reconfigureVoiceInput(
+        generation: Int,
+        inputDeviceUID: String?
+    ) async throws -> String? {
+        let targets = effectiveVoiceTargets()
+        guard !targets.isEmpty else { return nil }
+        forceEndVoiceCapture()
+        return try await beginVoiceCapture(
+            targetIDs: targets,
+            generation: generation,
+            inputDeviceUID: inputDeviceUID
+        )
+    }
+
+    private func beginVoiceCapture(
+        targetIDs: Set<String>?,
+        generation: Int,
+        inputDeviceUID: String?
+    ) async throws -> String? {
+        if let targetIDs, targetIDs.isEmpty { return nil }
         walkieStartGeneration = generation
         guard await WalkieTalkieMicrophone.requestAccess() else {
             throw WERAIError(
-                "Microphone access is needed for push-to-talk. Enable ALO in Privacy & Security → Microphone."
+                "Microphone access is needed for Talk and Open Line. Enable ALO in Privacy & Security → Microphone."
             )
         }
         guard walkieStartGeneration == generation else { throw CancellationError() }
@@ -287,7 +368,7 @@ final class MeshSession {
         }
         let sessionID = UUID().uuidString
         let senderName = displayName
-        walkieTransmissionState.begin(id: sessionID, targetID: targetID, name: senderName)
+        walkieTransmissionState.begin(id: sessionID, targetIDs: targetIDs, name: senderName)
         let transmissionState = walkieTransmissionState
         let controlPlane = control
         let localNodeID = nodeID
@@ -309,8 +390,9 @@ final class MeshSession {
                         guard let self,
                               self.walkieTransmissionState.activeID() == sessionID
                         else { return }
+                        self.endOpenLine()
                         self.endWalkieTalkie(sessionID: sessionID)
-                        self.statusHandler("Voice line stopped: \(error.localizedDescription)")
+                        self.statusHandler("Talk stopped: \(error.localizedDescription)")
                         self.walkieTalkieTransmissionEndedHandler(error)
                     }
                 }
@@ -326,7 +408,8 @@ final class MeshSession {
                 kind: .began,
                 senderID: nodeID,
                 senderName: senderName,
-                targetID: targetID,
+                targetID: nil,
+                targetIDs: targetIDs,
                 sessionID: sessionID
             ))
             return sessionID
@@ -337,7 +420,166 @@ final class MeshSession {
         }
     }
 
+    private func effectiveVoiceTargets() -> Set<String> {
+        Self.effectiveVoiceTargets(
+            talkTargetIDs: walkieTalkieTargets,
+            openLineState: openLineSessionState.state,
+            localID: nodeID
+        )
+    }
+
+    nonisolated static func effectiveVoiceTargets(
+        talkTargetIDs: Set<String>,
+        openLineState: OpenLineState,
+        localID: String
+    ) -> Set<String> {
+        var targets = talkTargetIDs
+        switch openLineState {
+        case .inviting(let invitation), .connected(let invitation):
+            let peerID = invitation.callerID == localID ? invitation.inviteeID : invitation.callerID
+            targets.insert(peerID)
+        case .idle, .invited:
+            break
+        }
+        targets.remove(localID)
+        return targets
+    }
+
+    private func reconcileVoiceCapture(
+        generation: Int,
+        inputDeviceUID: String?
+    ) async throws -> String? {
+        let targets = effectiveVoiceTargets()
+        guard !targets.isEmpty else {
+            forceEndVoiceCapture()
+            return nil
+        }
+        if let update = walkieTransmissionState.updateTargets(targets) {
+            publishTargetDelta(update)
+            return update.active.id
+        }
+        return try await beginVoiceCapture(
+            targetIDs: targets, generation: generation, inputDeviceUID: inputDeviceUID
+        )
+    }
+
+    private func reconcileExistingVoiceCapture() {
+        let targets = effectiveVoiceTargets()
+        guard !targets.isEmpty else {
+            forceEndVoiceCapture()
+            return
+        }
+        if let update = walkieTransmissionState.updateTargets(targets) {
+            publishTargetDelta(update)
+        }
+    }
+
+    private func publishTargetDelta(
+        _ update: (active: WalkieTransmissionState.Active, removed: Set<String>, added: Set<String>)
+    ) {
+        if !update.removed.isEmpty {
+            control.publishWalkieTalkie(WalkieTalkieMessage(
+                kind: .ended,
+                senderID: nodeID,
+                senderName: update.active.name,
+                targetID: nil,
+                targetIDs: update.removed,
+                sessionID: update.active.id,
+                sequence: update.active.sequence
+            ))
+        }
+        if !update.added.isEmpty {
+            control.publishWalkieTalkie(WalkieTalkieMessage(
+                kind: .began,
+                senderID: nodeID,
+                senderName: update.active.name,
+                targetID: nil,
+                targetIDs: update.added,
+                sessionID: update.active.id,
+                sequence: update.active.sequence
+            ))
+        }
+    }
+
+    func sendOpenLineInvitation(
+        to targetID: String,
+        generation: Int,
+        inputDeviceUID: String? = nil
+    ) async throws -> String? {
+        guard let message = openLineSessionState.invite(peerID: targetID, localName: displayName) else {
+            return nil
+        }
+        let previous = OpenLineSessionState(localID: nodeID)
+        do {
+            _ = try await reconcileVoiceCapture(
+                generation: generation, inputDeviceUID: inputDeviceUID
+            )
+        } catch {
+            openLineSessionState = previous
+            openLineStateHandler(.idle)
+            throw error
+        }
+        control.publishOpenLine(message)
+        openLineStateHandler(openLineSessionState.state)
+        return message.invitationID
+    }
+
+    func respondToOpenLine(
+        invitationID: String,
+        accept: Bool,
+        generation: Int,
+        inputDeviceUID: String? = nil
+    ) async throws {
+        let prior = openLineSessionState
+        let message = accept
+            ? openLineSessionState.join(invitationID: invitationID, localName: displayName)
+            : openLineSessionState.decline(invitationID: invitationID, localName: displayName)
+        guard let message else { return }
+        if accept {
+            do {
+                _ = try await reconcileVoiceCapture(
+                    generation: generation, inputDeviceUID: inputDeviceUID
+                )
+            } catch {
+                openLineSessionState = prior
+                throw error
+            }
+        } else {
+            reconcileExistingVoiceCapture()
+        }
+        control.publishOpenLine(message)
+        openLineStateHandler(openLineSessionState.state)
+    }
+
+    func endOpenLine() {
+        guard let message = openLineSessionState.end(localName: displayName) else { return }
+        control.publishOpenLine(message)
+        reconcileExistingVoiceCapture()
+        openLineStateHandler(.idle)
+    }
+
+    private func receiveOpenLine(_ message: OpenLineMessage) {
+        let transition = openLineSessionState.receive(message)
+        guard transition != .ignored else { return }
+        // Remote signaling may remove an existing capture reason, but can never
+        // add one: only the local Join line action starts the invitee microphone.
+        reconcileExistingVoiceCapture()
+        if case .incomingInvitation(let invitation) = transition {
+            incomingOpenLineInvitationHandler(invitation)
+        }
+        openLineStateHandler(openLineSessionState.state)
+    }
+
     func endWalkieTalkie(sessionID: String? = nil) {
+        if sessionID == nil {
+            walkieTalkieTargets.removeAll()
+            reconcileExistingVoiceCapture()
+            return
+        }
+        forceEndVoiceCapture(sessionID: sessionID)
+    }
+
+    private func forceEndVoiceCapture(sessionID: String? = nil) {
         if sessionID == nil { walkieStartGeneration = nil }
         let active = walkieTransmissionState.take(expectedID: sessionID)
         guard let active else { return }
@@ -346,7 +588,8 @@ final class MeshSession {
             kind: .ended,
             senderID: nodeID,
             senderName: active.name,
-            targetID: active.targetID,
+            targetID: nil,
+            targetIDs: active.targetIDs,
             sessionID: active.id,
             sequence: active.sequence
         ))
@@ -426,6 +669,7 @@ final class MeshSession {
     func stop() async {
         guard !isStopped else { return }
         isStopped = true
+        endOpenLine()
         endWalkieTalkie()
         walkieTalkiePlayer.stop()
         intendsToBroadcast = false
@@ -451,6 +695,7 @@ final class MeshSession {
     func stopImmediately() {
         guard !isStopped else { return }
         isStopped = true
+        endOpenLine()
         endWalkieTalkie()
         walkieTalkiePlayer.stop()
         intendsToBroadcast = false
@@ -565,6 +810,7 @@ final class MeshSession {
                         await host.stop()
                         return
                     }
+                    host.setVoiceDuckingActive(incomingVoicePlaybackActive)
                     if initialVideoEnabled,
                        let current = replica.broadcaster,
                        current.nodeID == nodeID {
@@ -627,6 +873,7 @@ final class MeshSession {
                     )
                     self.receiver = receiver
                     try receiver.start()
+                    receiver.setVoiceDuckingActive(incomingVoicePlaybackActive)
                     receiver.setLocalLevel(
                         volume: localVolume,
                         muted: localParticipantMuted || incomingMediaMuted

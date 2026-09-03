@@ -487,6 +487,19 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
             .removeDuplicates()
             .sink { [weak self] phase in self?.updatePhase(phase) }
             .store(in: &observers)
+        Publishers.CombineLatest4(
+            model.$walkieTalking.removeDuplicates(),
+            model.$walkieStarting.removeDuplicates(),
+            model.$openLineState.removeDuplicates(),
+            model.$incomingWalkieSpeakerIDs.removeDuplicates()
+        )
+        .sink { [weak self] talking, starting, lineState, incoming in
+            self?.updateVoiceIndicator(
+                transmitting: talking || starting || lineState.isSendingMicrophone,
+                receiving: !incoming.isEmpty
+            )
+        }
+        .store(in: &observers)
         model.$floatingBarHidden
             .removeDuplicates()
             .dropFirst()
@@ -578,6 +591,12 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
         )
         statusItem.button?.image?.isTemplate = true
     }
+
+    private func updateVoiceIndicator(transmitting: Bool, receiving: Bool) {
+        statusItem.button?.contentTintColor = transmitting
+            ? .systemOrange
+            : receiving ? .systemGreen : nil
+    }
 }
 
 private final class StatusUnreadBadgeView: NSView {
@@ -598,123 +617,6 @@ private final class StatusUnreadBadgeView: NSView {
         nil
     }
 }
-
-#if false // Per-device menu-bar voice targets are intentionally disabled.
-@MainActor
-private final class PinnedWalkieStatusController {
-    private final class Target: NSObject {
-        weak var owner: PinnedWalkieStatusController?
-        let participantID: String
-        var pressedAt: TimeInterval = 0
-        var latched = false
-        var suppressMouseUp = false
-
-        init(owner: PinnedWalkieStatusController, participantID: String) {
-            self.owner = owner
-            self.participantID = participantID
-        }
-
-        @MainActor @objc func handle(_ sender: Any?) { owner?.handle(self) }
-    }
-
-    private let model: WERAIViewModel
-    private var items = [String: (NSStatusItem, Target)]()
-    private var observers = Set<AnyCancellable>()
-
-    init(model: WERAIViewModel) {
-        self.model = model
-        Publishers.CombineLatest4(
-            model.$phase.removeDuplicates(),
-            model.$participants,
-            model.$pinnedWalkieDeviceIDs,
-            model.$incomingWalkieSpeakerIDs.removeDuplicates()
-        )
-        .sink { [weak self] phase, participants, pinned, incomingSpeakerIDs in
-            self?.update(
-                phase: phase,
-                participants: participants,
-                pinned: pinned,
-                incomingSpeakerIDs: incomingSpeakerIDs
-            )
-        }
-        .store(in: &observers)
-    }
-
-    private func update(
-        phase: WERAIViewModel.Phase,
-        participants: [RoomParticipant],
-        pinned: Set<String>,
-        incomingSpeakerIDs: Set<String>
-    ) {
-        let available = phase == .live
-            ? participants.filter { pinned.contains($0.id) && $0.id != model.currentParticipantID }
-            : []
-        let wanted = Set(available.map(\.id))
-        for id in items.keys.filter({ !wanted.contains($0) }) {
-            guard let entry = items.removeValue(forKey: id) else { continue }
-            if entry.1.latched { model.setWalkiePressed(false, targetID: id) }
-            NSStatusBar.system.removeStatusItem(entry.0)
-        }
-        for participant in available {
-            let entry: (NSStatusItem, Target)
-            if let existing = items[participant.id] {
-                entry = existing
-            } else {
-                let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-                let target = Target(owner: self, participantID: participant.id)
-                item.button?.target = target
-                item.button?.action = #selector(Target.handle(_:))
-                item.button?.sendAction(on: [.leftMouseDown, .leftMouseUp])
-                entry = (item, target)
-                items[participant.id] = entry
-            }
-            let appearance = DeviceAppearance.generated(from: participant.id)
-            let emoji = participant.icon ?? appearance.icon
-            let color = NSColor.deviceIdentity(participant.colorHex ?? appearance.colorHex)
-            entry.0.button?.image = NSImage.deviceAvatar(
-                emoji: emoji,
-                color: color,
-                profileImageData: participant.profileImageData,
-                size: 18
-            )
-            entry.0.button?.image?.isTemplate = false
-            entry.0.button?.wantsLayer = true
-            entry.0.button?.layer?.cornerRadius = 6
-            entry.0.button?.layer?.backgroundColor = incomingSpeakerIDs.contains(participant.id)
-                ? NSColor.systemBlue.withAlphaComponent(0.38).cgColor
-                : NSColor.clear.cgColor
-            entry.0.button?.toolTip = "Click to open/close · hold to talk to \(participant.name)"
-        }
-    }
-
-    private func handle(_ target: Target) {
-        guard let event = NSApp.currentEvent else { return }
-        switch event.type {
-        case .leftMouseDown:
-            if target.latched {
-                target.latched = false
-                target.suppressMouseUp = true
-                model.setWalkiePressed(false, targetID: target.participantID)
-            } else {
-                for entry in items.values { entry.1.latched = false }
-                target.pressedAt = event.timestamp
-                target.suppressMouseUp = false
-                model.setWalkiePressed(true, targetID: target.participantID)
-            }
-        case .leftMouseUp:
-            if target.suppressMouseUp {
-                target.suppressMouseUp = false
-            } else if event.timestamp - target.pressedAt < 0.28 {
-                target.latched = true
-            } else {
-                model.setWalkiePressed(false, targetID: target.participantID)
-            }
-        default:
-            break
-        }
-    }
-}
-#endif
 
 struct RoomMessage: Identifiable, Equatable {
     let id = UUID()
@@ -739,6 +641,7 @@ private enum FloatingMetrics {
     static let videoHeight: CGFloat = 476
     static let permissionHeight: CGFloat = 244
     static let walkieBarHeight: CGFloat = 50
+    static let walkieDragHandleHeight: CGFloat = 16
     static let walkieBarMinWidth: CGFloat = 220
     static let walkieBarMaxWidth: CGFloat = 720
 
@@ -1094,11 +997,14 @@ final class WERAIViewModel: ObservableObject {
     @Published var currentDeviceColorHex = DeviceAppearance.colors[0]
     @Published var currentDeviceProfileImageData: Data?
     @Published var currentParticipantID: String?
-    @Published var selectedWalkieTargetID: String?
+    /// Menu-bar selections remain live until they are clicked again. The
+    /// floating bar keeps a separate, momentary push-to-talk selection.
+    @Published private(set) var latchedTalkTargetIDs = Set<String>()
+    @Published private(set) var pushToTalkTargetIDs = Set<String>()
     @Published private(set) var walkieTalking = false
-    @Published private(set) var walkieLineOpen = false
     @Published private(set) var walkieStarting = false
     @Published private(set) var incomingWalkieSpeakerIDs = Set<String>()
+    @Published private(set) var openLineState: OpenLineState = .idle
     @Published private(set) var voiceInputDevices = [VoiceInputDevice]()
     @Published var selectedVoiceInputUID: String?
     @Published var walkieBarHidden: Bool
@@ -1111,6 +1017,7 @@ final class WERAIViewModel: ObservableObject {
     @Published var experience: Experience = .audio
     @Published var mediaSwitchBusy = false
     @Published var permissionNotice = false
+    @Published private(set) var recordingRestartRequired = false
     @Published var floatingSection: FloatingSection = .collapsed
     @Published var floatingBarHidden: Bool
     @Published private(set) var menuBarPopoverVisible = false
@@ -1124,6 +1031,8 @@ final class WERAIViewModel: ObservableObject {
     private var localNowPlayingMonitor: NowPlayingMonitor?
     private var deviceIdentityEditor: DeviceIdentityEditorController?
     private var incomingMessagePreviewTask: Task<Void, Never>?
+    private var openLineInvitationTimeoutTask: Task<Void, Never>?
+    private var screenRecordingRequestAttempted = false
     private var activeRoom: String?
     private var activeRoomConfiguration: RoomConfiguration?
     private var isLeavingRoom = false
@@ -1228,6 +1137,7 @@ final class WERAIViewModel: ObservableObject {
     var roomSyncLabel: String {
         if !hasBroadcaster { return "No broadcaster" }
         if nowPlaying.isPlaying == false { return "Paused" }
+        if isHost { return nowPlaying.isEmpty ? "Waiting for audio" : "Broadcasting" }
         if audioIsRendering { return "Synced" }
         return nowPlaying.isEmpty ? "Waiting for audio" : "Recovering audio…"
     }
@@ -1383,17 +1293,39 @@ final class WERAIViewModel: ObservableObject {
                     self.statusText = "\(senderName) is talking to you"
                 } else {
                     self.incomingWalkieSpeakerIDs.remove(senderID)
-                    if self.incomingWalkieSpeakerIDs.isEmpty { self.statusText = "Voice line quiet" }
+                    if self.incomingWalkieSpeakerIDs.isEmpty { self.statusText = "Talk is off" }
                 }
             },
             walkieTalkieTransmissionEndedHandler: { [weak self] error in
                 guard let self else { return }
                 self.walkieGeneration += 1
                 self.walkieTalking = false
-                self.walkieLineOpen = false
                 self.walkieStarting = false
+                self.latchedTalkTargetIDs.removeAll()
+                self.pushToTalkTargetIDs.removeAll()
                 self.errorMessage = self.readable(error)
-                self.statusText = "Voice line stopped"
+                self.statusText = "Talk stopped"
+            },
+            incomingOpenLineInvitationHandler: { [weak self] invitation in
+                guard let self else { return }
+                self.statusText = "\(invitation.callerName) invited you to open a line"
+            },
+            openLineStateHandler: { [weak self] state in
+                guard let self else { return }
+                self.openLineState = state
+                self.openLineInvitationTimeoutTask?.cancel()
+                self.openLineInvitationTimeoutTask = nil
+                switch state {
+                case .idle:
+                    if self.incomingWalkieSpeakerIDs.isEmpty { self.statusText = "Talk is off" }
+                case .inviting(let invitation):
+                    self.statusText = "Waiting for \(self.openLinePeerName(invitation)) to join the line"
+                    self.scheduleOpenLineInvitationTimeout(invitation, incoming: false)
+                case .connected(let invitation):
+                    self.statusText = "Line open with \(self.openLinePeerName(invitation))"
+                case .invited(let invitation):
+                    self.scheduleOpenLineInvitationTimeout(invitation, incoming: true)
+                }
             },
             replicaPersistenceHandler: { [weak self] replica in
                 self?.roomStore.saveEvents(replica.events, roomID: room.id)
@@ -1487,6 +1419,7 @@ final class WERAIViewModel: ObservableObject {
             self.statusText = "Video broadcast did not start · try again"
             self.errorMessage = "ALO could not finish taking over audio and starting full-screen sharing."
             self.videoBroadcastTimeoutTask = nil
+            Task { try? await self.meshSession?.setVideoEnabled(false) }
         }
     }
 
@@ -1546,30 +1479,154 @@ final class WERAIViewModel: ObservableObject {
         }
     }
 
-    func setWalkiePressed(_ pressed: Bool, targetID: String?) {
+    func isTalkTargetSelected(_ targetID: String?) -> Bool {
+        let remoteIDs = currentRemoteParticipantIDs
+        guard !remoteIDs.isEmpty else { return false }
+        if let targetID { return latchedTalkTargetIDs.contains(targetID) }
+        return remoteIDs.isSubset(of: latchedTalkTargetIDs)
+    }
+
+    /// Menu-bar behavior: click once to keep talking to a device, and click
+    /// again to stop. "Everyone" captures the devices that are present now.
+    func toggleTalkTarget(_ targetID: String?) {
+        let remoteIDs = currentRemoteParticipantIDs
+        guard !remoteIDs.isEmpty else {
+            statusText = "No other device is available for Talk"
+            return
+        }
+        latchedTalkTargetIDs = Self.toggledTalkTargets(
+            latchedTalkTargetIDs,
+            targetID: targetID,
+            currentlyPresent: remoteIDs
+        )
+        reconcileTalkTargets()
+    }
+
+    static func toggledTalkTargets(
+        _ selected: Set<String>,
+        targetID: String?,
+        currentlyPresent: Set<String>
+    ) -> Set<String> {
+        var result = selected.intersection(currentlyPresent)
+        if let targetID {
+            guard currentlyPresent.contains(targetID) else { return result }
+            if result.remove(targetID) == nil { result.insert(targetID) }
+        } else if currentlyPresent.isSubset(of: result) {
+            result.subtract(currentlyPresent)
+        } else {
+            result.formUnion(currentlyPresent)
+        }
+        return result
+    }
+
+    /// Floating-bar behavior: the selected recipients exist only while the
+    /// pointer is held down. It never changes menu-bar selections.
+    func setPushToTalkPressed(_ pressed: Bool, targetID: String?) {
         if pressed {
-            if walkieLineOpen {
-                guard selectedWalkieTargetID != targetID else { return }
-                selectedWalkieTargetID = targetID
-                stopWalkieTalkie(preserveOpenLine: true)
-                startWalkieTalkie(targetID: targetID, keepOpen: true)
+            let remoteIDs = currentRemoteParticipantIDs
+            guard !remoteIDs.isEmpty else {
+                statusText = "No other device is available for Talk"
                 return
             }
-            selectedWalkieTargetID = targetID
-            if walkieTalking { stopWalkieTalkie() }
-            startWalkieTalkie(targetID: targetID, keepOpen: false)
-        } else if !walkieLineOpen {
-            stopWalkieTalkie()
+            if let targetID {
+                guard remoteIDs.contains(targetID) else { return }
+                pushToTalkTargetIDs = [targetID]
+            } else {
+                pushToTalkTargetIDs = remoteIDs
+            }
+        } else {
+            pushToTalkTargetIDs.removeAll()
+        }
+        reconcileTalkTargets()
+    }
+
+    func inviteToOpenLine(_ targetID: String) {
+        guard currentRemoteParticipantIDs.contains(targetID), let meshSession else { return }
+        walkieGeneration += 1
+        let generation = walkieGeneration
+        Task {
+            do {
+                _ = try await meshSession.sendOpenLineInvitation(
+                    to: targetID,
+                    generation: generation,
+                    inputDeviceUID: selectedVoiceInputUID
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                guard generation == walkieGeneration else { return }
+                errorMessage = readable(error)
+                statusText = "Unable to open the line"
+            }
         }
     }
 
-    func toggleOpenWalkieLine() {
-        if walkieLineOpen {
-            walkieLineOpen = false
-            stopWalkieTalkie()
-        } else {
-            walkieLineOpen = true
-            startWalkieTalkie(targetID: selectedWalkieTargetID, keepOpen: true)
+    func respondToOpenLine(_ invitation: OpenLineInvitation, accept: Bool) {
+        guard let meshSession else { return }
+        walkieGeneration += 1
+        let generation = walkieGeneration
+        Task {
+            do {
+                try await meshSession.respondToOpenLine(
+                    invitationID: invitation.id,
+                    accept: accept,
+                    generation: generation,
+                    inputDeviceUID: selectedVoiceInputUID
+                )
+                statusText = accept
+                    ? "Line open with \(invitation.callerName)"
+                    : "Open line invitation declined"
+            } catch is CancellationError {
+                return
+            } catch {
+                guard generation == walkieGeneration else { return }
+                errorMessage = readable(error)
+                statusText = accept ? "Unable to join the line" : "Unable to decline the invitation"
+            }
+        }
+    }
+
+    func endOpenLine() {
+        meshSession?.endOpenLine()
+        statusText = "Line closed"
+    }
+
+    func openLinePeerName(_ invitation: OpenLineInvitation) -> String {
+        let peerID = invitation.callerID == currentParticipantID
+            ? invitation.inviteeID
+            : invitation.callerID
+        return participants.first(where: { $0.id == peerID })?.name
+            ?? (invitation.callerID == peerID ? invitation.callerName : "the other Mac")
+    }
+
+    var incomingOpenLineInvitation: OpenLineInvitation? {
+        guard case .invited(let invitation) = openLineState else { return nil }
+        return invitation
+    }
+
+    func isOpenLinePeer(_ participantID: String) -> Bool {
+        guard let invitation = openLineState.invitation else { return false }
+        return invitation.callerID == participantID || invitation.inviteeID == participantID
+    }
+
+    private func scheduleOpenLineInvitationTimeout(
+        _ invitation: OpenLineInvitation,
+        incoming: Bool
+    ) {
+        openLineInvitationTimeoutTask?.cancel()
+        openLineInvitationTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(30))
+            guard !Task.isCancelled, let self else { return }
+            if incoming,
+               case .invited(let current) = self.openLineState,
+               current.id == invitation.id {
+                self.respondToOpenLine(invitation, accept: false)
+            } else if !incoming,
+                      case .inviting(let current) = self.openLineState,
+                      current.id == invitation.id {
+                self.endOpenLine()
+                self.statusText = "No answer from \(self.openLinePeerName(invitation))"
+            }
         }
     }
 
@@ -1589,52 +1646,37 @@ final class WERAIViewModel: ObservableObject {
         selectedVoiceInputUID = uid
         if let uid { UserDefaults.standard.set(uid, forKey: Self.voiceInputUIDKey) }
         else { UserDefaults.standard.removeObject(forKey: Self.voiceInputUIDKey) }
-        if walkieLineOpen {
-            let target = selectedWalkieTargetID
-            stopWalkieTalkie(preserveOpenLine: true)
-            startWalkieTalkie(targetID: target, keepOpen: true)
+        if !effectiveTalkTargetIDs.isEmpty || openLineState.isSendingMicrophone {
+            reconfigureVoiceInput()
         }
     }
 
-    private func startWalkieTalkie(targetID: String?, keepOpen: Bool) {
+    private func reconfigureVoiceInput() {
         guard phase == .live, let meshSession else { return }
-        let remoteIDs = Set(participants.lazy.filter { $0.id != self.currentParticipantID }.map(\.id))
-        guard !remoteIDs.isEmpty, targetID.map(remoteIDs.contains) ?? true else {
-            walkieLineOpen = false
-            statusText = "No other Mac is available for voice"
-            return
-        }
-        if walkieTalking {
-            if keepOpen { walkieLineOpen = true }
-            return
-        }
+        let talkTargets = effectiveTalkTargetIDs.intersection(currentRemoteParticipantIDs)
+        guard !talkTargets.isEmpty || openLineState.isSendingMicrophone else { return }
         walkieGeneration += 1
         let generation = walkieGeneration
         walkieStarting = true
-        statusText = "Requesting microphone access"
+        statusText = "Changing microphone for Talk/Open Line"
         Task {
-            let microphoneAllowed = await WalkieTalkieMicrophone.requestAccess()
-            guard generation == walkieGeneration else { return }
-            guard microphoneAllowed else {
-                walkieStarting = false
-                walkieTalking = false
-                walkieLineOpen = false
-                presentMicrophoneAccessHelp()
-                return
-            }
-            walkieStarting = false
-            walkieTalking = true
-            statusText = targetID.flatMap { id in participants.first(where: { $0.id == id })?.name }
-                .map { "Talking to \($0)" } ?? "Talking to everyone"
             do {
-                let sessionID = try await meshSession.beginWalkieTalkie(
-                    targetID: targetID,
+                _ = try await meshSession.reconfigureVoiceInput(
                     generation: generation,
                     inputDeviceUID: selectedVoiceInputUID
                 )
-                guard generation == walkieGeneration, walkieTalking else {
-                    if let sessionID { meshSession.endWalkieTalkie(sessionID: sessionID) }
-                    return
+                guard generation == walkieGeneration else { return }
+                walkieStarting = false
+                walkieTalking = !talkTargets.isEmpty
+                if case .inviting(let invitation) = openLineState {
+                    statusText = "Waiting for \(openLinePeerName(invitation)) to join the line"
+                } else if case .connected(let invitation) = openLineState {
+                    statusText = "Line open with \(openLinePeerName(invitation))"
+                } else {
+                    let names = participants.filter { talkTargets.contains($0.id) }.map(\.name)
+                    statusText = talkTargets == currentRemoteParticipantIDs
+                        ? "Talking to everyone"
+                        : "Talking to \(ListFormatter.localizedString(byJoining: names))"
                 }
             } catch is CancellationError {
                 return
@@ -1642,9 +1684,74 @@ final class WERAIViewModel: ObservableObject {
                 guard generation == walkieGeneration else { return }
                 walkieStarting = false
                 walkieTalking = false
-                walkieLineOpen = false
                 errorMessage = readable(error)
-                statusText = "Push-to-talk could not start"
+                statusText = "Unable to change the Talk/Open Line microphone"
+            }
+        }
+    }
+
+    private var currentRemoteParticipantIDs: Set<String> {
+        Set(participants.lazy.filter { $0.id != self.currentParticipantID }.map(\.id))
+    }
+
+    private var effectiveTalkTargetIDs: Set<String> {
+        latchedTalkTargetIDs.union(pushToTalkTargetIDs)
+    }
+
+    private func reconcileTalkTargets() {
+        guard phase == .live, let meshSession else { return }
+        let targets = effectiveTalkTargetIDs.intersection(currentRemoteParticipantIDs)
+        walkieGeneration += 1
+        let generation = walkieGeneration
+        if targets.isEmpty {
+            walkieStarting = false
+            walkieTalking = false
+            meshSession.endWalkieTalkie()
+            if incomingWalkieSpeakerIDs.isEmpty, case .idle = openLineState {
+                statusText = "Talk is off"
+            }
+            return
+        }
+        if !walkieTalking {
+            walkieStarting = true
+            statusText = "Starting Talk"
+        }
+        Task {
+            let microphoneAllowed = await WalkieTalkieMicrophone.requestAccess()
+            guard generation == walkieGeneration else { return }
+            guard microphoneAllowed else {
+                walkieStarting = false
+                walkieTalking = false
+                latchedTalkTargetIDs.removeAll()
+                pushToTalkTargetIDs.removeAll()
+                presentMicrophoneAccessHelp()
+                return
+            }
+            do {
+                _ = try await meshSession.updateWalkieTalkieTargets(
+                    targets,
+                    generation: generation,
+                    inputDeviceUID: selectedVoiceInputUID
+                )
+                guard generation == walkieGeneration else { return }
+                walkieStarting = false
+                walkieTalking = true
+                let names = participants
+                    .filter { targets.contains($0.id) }
+                    .map(\.name)
+                statusText = targets == currentRemoteParticipantIDs
+                    ? "Talking to everyone"
+                    : "Talking to \(ListFormatter.localizedString(byJoining: names))"
+            } catch is CancellationError {
+                return
+            } catch {
+                guard generation == walkieGeneration else { return }
+                walkieStarting = false
+                walkieTalking = false
+                latchedTalkTargetIDs.removeAll()
+                pushToTalkTargetIDs.removeAll()
+                errorMessage = readable(error)
+                statusText = "Unable to start Talk"
             }
         }
     }
@@ -1653,8 +1760,8 @@ final class WERAIViewModel: ObservableObject {
         statusText = "Microphone access is off"
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Voice needs microphone access"
-        alert.informativeText = "Allow ALO in Privacy & Security → Microphone, then try again. Listening to rooms does not require this permission."
+        alert.messageText = "Talk and Open Line need microphone access"
+        alert.informativeText = "Allow ALO in Privacy & Security → Microphone to use Talk or Open Line. Listening to rooms does not require this permission."
         alert.addButton(withTitle: "Open Microphone Settings")
         alert.addButton(withTitle: "Not Now")
         if alert.runModal() == .alertFirstButtonReturn,
@@ -1663,13 +1770,14 @@ final class WERAIViewModel: ObservableObject {
         }
     }
 
-    private func stopWalkieTalkie(preserveOpenLine: Bool = false) {
+    private func stopWalkieTalkie() {
         walkieGeneration += 1
         walkieStarting = false
         walkieTalking = false
+        latchedTalkTargetIDs.removeAll()
+        pushToTalkTargetIDs.removeAll()
         meshSession?.endWalkieTalkie()
-        if !preserveOpenLine { walkieLineOpen = false }
-        if incomingWalkieSpeakerIDs.isEmpty { statusText = "Voice line quiet" }
+        if incomingWalkieSpeakerIDs.isEmpty { statusText = "Talk is off" }
     }
 
     func editDeviceIdentity() {
@@ -1767,6 +1875,19 @@ final class WERAIViewModel: ObservableObject {
         videoFullscreen = false
         floatingBarHidden = false
         UserDefaults.standard.set(false, forKey: Self.floatingBarPreferenceKey)
+    }
+
+    func showChatInFloatingBar() {
+        dismissIncomingMessagePreview()
+        showFloatingBar()
+        floatingSection = .chat
+        unreadMessageCount = 0
+    }
+
+    func showPeopleInFloatingBar() {
+        dismissIncomingMessagePreview()
+        showFloatingBar()
+        floatingSection = .people
     }
 
     func setMenuBarPopoverVisible(_ visible: Bool) {
@@ -1939,6 +2060,17 @@ final class WERAIViewModel: ObservableObject {
         permissionNotice = false
     }
 
+    var recordingPermissionTitle: String {
+        recordingRestartRequired ? "Restart ALO to finish setup" : "Allow screen and audio recording"
+    }
+
+    var recordingPermissionGuidance: String {
+        if recordingRestartRequired {
+            return "Access was granted. Restart ALO before broadcasting your screen or system audio."
+        }
+        return "Open Recording Settings, turn on ALO under Screen & System Audio Recording, then restart ALO."
+    }
+
     func openPrivacySettings() {
         guard let url = URL(
             string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
@@ -1967,16 +2099,38 @@ final class WERAIViewModel: ObservableObject {
     }
 
     private func ensureScreenRecordingPermission() -> Bool {
-        guard CGPreflightScreenCaptureAccess() else {
+        switch RecordingErrorPresentation.accessStep(
+            preflightGranted: CGPreflightScreenCaptureAccess(),
+            requestedThisLaunch: screenRecordingRequestAttempted
+        ) {
+        case .proceed:
+            permissionNotice = false
+            recordingRestartRequired = false
+            return true
+        case .requestSystemAccess:
+            screenRecordingRequestAttempted = true
             let granted = CGRequestScreenCaptureAccess()
-            permissionNotice = !granted
+            recordingRestartRequired = granted
+            permissionNotice = true
             statusText = granted
-                ? "Recording access granted · starting broadcast"
-                : "ALO needs Screen & System Audio Recording to broadcast"
-            return granted
+                ? "Restart ALO to finish recording access"
+                : "Allow ALO under Screen & System Audio Recording"
+            // Apple documents that ScreenCaptureKit capture needs a fresh app
+            // process after the first grant. Do not immediately start a stream
+            // that will fail and look like the permission was ignored.
+            return false
+        case .restartRequired:
+            recordingRestartRequired = true
+            permissionNotice = true
+            statusText = "Restart ALO to finish recording access"
+            return false
+        case .showSettings:
+            permissionNotice = true
+            statusText = recordingRestartRequired
+                ? "Restart ALO to finish recording access"
+                : "Allow ALO under Screen & System Audio Recording"
+            return false
         }
-        permissionNotice = false
-        return true
     }
 
     private var identityCallback: (String, String) -> Void {
@@ -1995,9 +2149,17 @@ final class WERAIViewModel: ObservableObject {
                 self.participants = Self.mergingParticipants(participants, preserving: self.participants)
                 let liveIDs = Set(participants.map(\.id))
                 self.incomingWalkieSpeakerIDs.formIntersection(liveIDs)
-                if let selected = self.selectedWalkieTargetID, !liveIDs.contains(selected) {
-                    self.stopWalkieTalkie()
-                    self.selectedWalkieTargetID = nil
+                let previousTargets = self.effectiveTalkTargetIDs
+                self.latchedTalkTargetIDs.formIntersection(liveIDs)
+                self.pushToTalkTargetIDs.formIntersection(liveIDs)
+                if self.effectiveTalkTargetIDs != previousTargets {
+                    self.reconcileTalkTargets()
+                }
+                if let invitation = self.openLineState.invitation {
+                    let peerID = invitation.callerID == self.currentParticipantID
+                        ? invitation.inviteeID
+                        : invitation.callerID
+                    if !liveIDs.contains(peerID) { self.endOpenLine() }
                 }
             }
         }
@@ -2015,7 +2177,7 @@ final class WERAIViewModel: ObservableObject {
                     self.videoBroadcastTimeoutTask = nil
                     self.experience = .video
                     self.floatingSection = .video
-                    self.statusText = "Audio and this Mac's main display are live"
+                    self.statusText = "Audio and the selected display or window are live"
                 }
                 if !enabled {
                     self.videoFullscreen = false
@@ -2116,9 +2278,12 @@ final class WERAIViewModel: ObservableObject {
         walkieGeneration += 1
         walkieStarting = false
         walkieTalking = false
-        walkieLineOpen = false
+        openLineInvitationTimeoutTask?.cancel()
+        openLineInvitationTimeoutTask = nil
+        openLineState = .idle
         incomingWalkieSpeakerIDs.removeAll()
-        selectedWalkieTargetID = nil
+        latchedTalkTargetIDs.removeAll()
+        pushToTalkTargetIDs.removeAll()
         participants = []
         messages = []
         unreadMessageCount = 0
@@ -2574,27 +2739,26 @@ private struct WERAIView: View {
                     .foregroundStyle(Palette.muted)
                 }
                 VStack(alignment: .leading, spacing: 7) {
-                    Text("Allow broadcasting")
+                    Text(model.recordingPermissionTitle)
                         .font(.system(size: 19, weight: .semibold, design: .rounded))
                         .foregroundStyle(Palette.ink)
-                    Text("Turn on ALO under Screen & System Audio Recording. macOS normally applies the grant immediately; restart ALO once only if it still asks.")
+                    Text(model.recordingPermissionGuidance)
                         .font(.system(size: 12, design: .rounded))
                         .foregroundStyle(Palette.secondary)
                         .lineSpacing(3)
                 }
                 HStack(spacing: 9) {
-                    Button(action: model.openPrivacySettings) {
-                        Image(systemName: "gearshape")
+                    if model.recordingRestartRequired {
+                        Button("Restart ALO", action: model.restartApplication)
+                            .buttonStyle(PillButtonStyle(filled: true))
+                        Button("Open settings", action: model.openPrivacySettings)
+                            .buttonStyle(PillButtonStyle(filled: false))
+                    } else {
+                        Button("Open settings", action: model.openPrivacySettings)
+                            .buttonStyle(PillButtonStyle(filled: true))
+                        Button("Restart ALO", action: model.restartApplication)
+                            .buttonStyle(PillButtonStyle(filled: false))
                     }
-                    .buttonStyle(SetupIconButtonStyle(filled: true))
-                    .help("Open Recording Settings")
-                    .accessibilityLabel("Open Recording Settings")
-                    Button(action: model.restartApplication) {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .buttonStyle(SetupIconButtonStyle())
-                    .help("Restart ALO")
-                    .accessibilityLabel("Restart ALO")
                 }
             }
             .padding(24)
@@ -2808,6 +2972,14 @@ private struct FloatingRoomView: View {
                 help: model.videoControlHelp
             ) { model.toggleVideoFromFloatingBar() }
             .keyboardShortcut("3", modifiers: .command)
+
+            if presentation == .floating {
+                roomBarButton(
+                    icon: "eye.slash",
+                    active: false,
+                    help: "Hide media controls"
+                ) { model.hideFloatingBar() }
+            }
 
             Divider().frame(height: 20)
 
@@ -3487,18 +3659,25 @@ private struct FloatingRoomView: View {
                 .background(Palette.artworkFallback)
                 .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
             VStack(alignment: .leading, spacing: 4) {
-                Text("Broadcasting needs recording access")
+                Text(model.recordingPermissionTitle)
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(Palette.ink)
-                Text("Enable ALO under Screen & System Audio Recording, then broadcast again. Restart ALO once only if macOS still asks.")
+                Text(model.recordingPermissionGuidance)
                     .font(.system(size: 11))
                     .foregroundStyle(Palette.secondary)
             }
             Spacer()
-            Button("Recording Settings", action: model.openPrivacySettings)
-                .buttonStyle(PillButtonStyle(filled: true))
-            Button("Restart", action: model.restartApplication)
-                .buttonStyle(PillButtonStyle(filled: false))
+            if model.recordingRestartRequired {
+                Button("Restart ALO", action: model.restartApplication)
+                    .buttonStyle(PillButtonStyle(filled: true))
+                Button("Open settings", action: model.openPrivacySettings)
+                    .buttonStyle(PillButtonStyle(filled: false))
+            } else {
+                Button("Open settings", action: model.openPrivacySettings)
+                    .buttonStyle(PillButtonStyle(filled: true))
+                Button("Restart ALO", action: model.restartApplication)
+                    .buttonStyle(PillButtonStyle(filled: false))
+            }
             Button(action: model.dismissPermissionNotice) {
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .semibold))
@@ -3663,16 +3842,16 @@ private struct WindowDragRegion: NSViewRepresentable {
     }
 }
 
-private struct WindowDragHandle: View {
+private struct BottomDragHandle: View {
     var body: some View {
-        Image(systemName: "circle.grid.2x3.fill")
-            .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(Palette.controlIcon.opacity(0.5))
-            .frame(width: 24, height: 40)
-            .overlay(WindowDragRegion())
+        Capsule()
+            .fill(Palette.controlIcon.opacity(0.34))
+            .frame(width: 72, height: 4)
+            .frame(width: 132, height: 16)
             .contentShape(Rectangle())
-            .help("Drag to move voice controls")
-            .accessibilityLabel("Drag voice controls")
+            .overlay(WindowDragRegion())
+            .help("Drag to move the Talk bar")
+            .accessibilityLabel("Drag the Talk bar")
     }
 }
 
@@ -3700,6 +3879,20 @@ private struct DeviceAvatar: View {
     }
 }
 
+private enum TalkTargetInteraction: Equatable {
+    case toggle
+    case hold
+}
+
+private extension OpenLineState {
+    var isSendingMicrophone: Bool {
+        switch self {
+        case .inviting, .connected: true
+        case .idle, .invited: false
+        }
+    }
+}
+
 private struct WalkieTalkieTargetIcon: View {
     @ObservedObject var model: WERAIViewModel
     let id: String?
@@ -3707,45 +3900,119 @@ private struct WalkieTalkieTargetIcon: View {
     let icon: String
     let colorHex: String
     let profileImageData: Data?
+    let interaction: TalkTargetInteraction
     @State private var isPressed = false
 
     var body: some View {
-        let selected = model.selectedWalkieTargetID == id
-        let incoming = id.map(model.incomingWalkieSpeakerIDs.contains) ?? false
+        let selected = interaction == .toggle ? model.isTalkTargetSelected(id) : isPushToTalkSelected
+        let incoming = id.map(model.incomingWalkieSpeakerIDs.contains)
+            ?? !model.incomingWalkieSpeakerIDs.isEmpty
         let outgoing = model.walkieTalking && selected
+        let linePeer = id.map(model.isOpenLinePeer) ?? false
+        Group {
+            if interaction == .toggle {
+                Button { model.toggleTalkTarget(id) } label: { avatar }
+                    .buttonStyle(.plain)
+            } else {
+                avatar
+                    .onLongPressGesture(
+                        minimumDuration: .infinity,
+                        maximumDistance: 18,
+                        pressing: { pressed in
+                            guard pressed != isPressed else { return }
+                            isPressed = pressed
+                            model.setPushToTalkPressed(pressed, targetID: id)
+                        },
+                        perform: {}
+                    )
+                    .onDisappear {
+                        if isPressed {
+                            isPressed = false
+                            model.setPushToTalkPressed(false, targetID: id)
+                        }
+                    }
+            }
+        }
+        .overlay {
+            ZStack {
+                Circle().stroke(
+                    selected ? Color.accentColor.opacity(outgoing ? 1 : 0.55) : Color.clear,
+                    lineWidth: 3
+                )
+                Circle()
+                    .stroke(incoming ? Color.green : Color.clear, lineWidth: 3)
+                    .padding(outgoing ? -4 : 0)
+                Circle()
+                    .stroke(linePeer ? lineColor : Color.clear, style: StrokeStyle(lineWidth: 2, dash: [3, 2]))
+                    .padding(-7)
+            }
+        }
+        .shadow(color: incoming ? Color.green.opacity(0.65) : .clear, radius: 7)
+        .frame(width: 40, height: 40)
+        .contentShape(Circle())
+        .contextMenu {
+            if let id {
+                if interaction == .toggle {
+                    switch model.openLineState {
+                    case .idle:
+                        Button("Open line with \(name)") { model.inviteToOpenLine(id) }
+                    case .invited(let invitation) where model.isOpenLinePeer(id):
+                        Button("Join line") { model.respondToOpenLine(invitation, accept: true) }
+                        Button("Decline") { model.respondToOpenLine(invitation, accept: false) }
+                    case .inviting, .invited, .connected:
+                        Button("Close line") { model.endOpenLine() }
+                            .disabled(!model.isOpenLinePeer(id))
+                    }
+                    Divider()
+                }
+                Button("Sync \(name)") {
+                    if let participant = model.participants.first(where: { $0.id == id }) {
+                        model.syncParticipant(participant)
+                    }
+                }
+            }
+        }
+        .help(helpText(selected: selected, incoming: incoming))
+        .accessibilityLabel(interaction == .toggle ? "Talk to \(name)" : "Hold to talk to \(name)")
+        .accessibilityValue(accessibilityValue(selected: selected, incoming: incoming, linePeer: linePeer))
+    }
+
+    private var avatar: some View {
         DeviceAvatar(
             emoji: icon,
             colorHex: colorHex,
             profileImageData: profileImageData,
-            size: 32
+            size: 30
         )
-            .overlay {
-                Circle().stroke(
-                    incoming ? Palette.controlAccent : outgoing ? Color.white : selected ? Palette.ink.opacity(0.7) : Color.clear,
-                    lineWidth: incoming ? 3 : 2
-                )
-            }
-            .scaleEffect(incoming || outgoing ? 1.08 : 1)
-            .contentShape(Circle())
-            .onLongPressGesture(
-                minimumDuration: .infinity,
-                maximumDistance: 18,
-                pressing: { pressed in
-                    guard pressed != isPressed else { return }
-                    isPressed = pressed
-                    model.setWalkiePressed(pressed, targetID: id)
-                },
-                perform: {}
-            )
-            .onDisappear {
-                if isPressed {
-                    isPressed = false
-                    model.setWalkiePressed(false, targetID: id)
-                }
-            }
-            .help("Hold to talk to \(name)")
-            .accessibilityLabel("Hold to talk to \(name)")
-            .accessibilityValue(incoming ? "Talking to you" : outgoing ? "You are talking" : selected ? "Selected" : "")
+    }
+
+    private var isPushToTalkSelected: Bool {
+        let remoteIDs = Set(model.participants.lazy.filter { $0.id != model.currentParticipantID }.map(\.id))
+        guard !remoteIDs.isEmpty else { return false }
+        if let id { return model.pushToTalkTargetIDs.contains(id) }
+        return remoteIDs.isSubset(of: model.pushToTalkTargetIDs)
+    }
+
+    private var lineColor: Color {
+        switch model.openLineState {
+        case .connected: Color.purple
+        case .inviting, .invited: Color.orange
+        case .idle: Color.clear
+        }
+    }
+
+    private func helpText(selected: Bool, incoming: Bool) -> String {
+        if incoming { return "\(name) is speaking · \(interaction == .toggle ? "Click to talk back" : "Hold to talk back")" }
+        if interaction == .hold { return "Hold to talk to \(name)" }
+        return selected ? "Click to stop talking to \(name)" : "Click to talk to \(name) · Right-click to open a line"
+    }
+
+    private func accessibilityValue(selected: Bool, incoming: Bool, linePeer: Bool) -> String {
+        var states = [String]()
+        if selected { states.append("Talking to this device") }
+        if incoming { states.append("This device is speaking") }
+        if linePeer { states.append("Open line participant") }
+        return states.joined(separator: ", ")
     }
 }
 
@@ -3756,9 +4023,12 @@ private struct WalkieTalkieBar: View {
     var body: some View {
         Group {
             if showsCloseButton {
-                controls
-                    .glass(cornerRadius: 22)
-                    .padding(FloatingMetrics.windowInset)
+                VStack(spacing: 2) {
+                    controls.glass(cornerRadius: 22)
+                    BottomDragHandle()
+                }
+                .padding(.horizontal, FloatingMetrics.windowInset)
+                .padding(.top, FloatingMetrics.windowInset)
             } else {
                 controls.background(Palette.opaqueSurface)
             }
@@ -3768,11 +4038,8 @@ private struct WalkieTalkieBar: View {
 
     private var controls: some View {
         HStack(spacing: 8) {
-            if showsCloseButton {
-                WindowDragHandle()
-            }
 
-            walkieTarget(id: nil, name: "Everyone", icon: "👥", colorHex: "3F86E8")
+                walkieTarget(id: nil, name: "Everyone", icon: "👥", colorHex: "3F86E8")
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
@@ -3793,23 +4060,29 @@ private struct WalkieTalkieBar: View {
             .scrollClipDisabled()
             .frame(maxWidth: .infinity)
 
+            openLineControls
+
             communicationButton(
                 icon: model.unreadMessageCount > 0 ? "bubble.left.and.text.bubble.right.fill" : "bubble.left.and.text.bubble.right",
                 active: model.floatingSection == .chat,
                 badge: model.unreadMessageCount,
                 help: "Conversation"
-            ) { model.showChat() }
+            ) {
+                showsCloseButton ? model.showChatInFloatingBar() : model.showChat()
+            }
             .keyboardShortcut("1", modifiers: .command)
 
             communicationButton(
                 icon: model.floatingSection == .people ? "person.2.fill" : "person.2",
                 active: model.floatingSection == .people,
                 help: "People and volume"
-            ) { model.showPeople() }
+            ) {
+                showsCloseButton ? model.showPeopleInFloatingBar() : model.showPeople()
+            }
             .keyboardShortcut("2", modifiers: .command)
 
             Menu {
-                    Menu("Microphone") {
+                    Menu("Microphone input") {
                         Button {
                             model.selectVoiceInput(nil)
                         } label: {
@@ -3832,13 +4105,9 @@ private struct WalkieTalkieBar: View {
                             }
                         }
                         Divider()
-                        Button("Refresh Microphones") { model.refreshVoiceInputs() }
+                        Button("Refresh microphones") { model.refreshVoiceInputs() }
                     }
                     Divider()
-                    Button(model.walkieLineOpen ? "Close open voice line" : "Keep selected voice line open") {
-                        model.toggleOpenWalkieLine()
-                    }
-                    .disabled(remoteParticipants.isEmpty)
                     Button(model.incomingCallsMuted ? "Unmute incoming voice" : "Mute incoming voice") {
                         model.toggleIncomingCallsMute()
                     }
@@ -3846,7 +4115,7 @@ private struct WalkieTalkieBar: View {
                         model.toggleIncomingMediaMute()
                     }
                     Divider()
-                    Button(model.walkieBarHidden ? "Show voice floating bar" : "Hide voice floating bar") {
+                    Button(model.walkieBarHidden ? "Show Talk bar" : "Hide Talk bar") {
                         model.walkieBarHidden ? model.showWalkieBar() : model.hideWalkieBar()
                     }
                     Button(model.floatingBarHidden ? "Show media floating bar" : "Hide media floating bar") {
@@ -3859,18 +4128,18 @@ private struct WalkieTalkieBar: View {
             }
             .menuStyle(.borderlessButton)
             .fixedSize(horizontal: true, vertical: false)
-            .help("Voice settings · \(selectedMicrophoneName)")
+            .help("Talk settings · \(selectedMicrophoneName)")
 
-            if showsCloseButton {
-                Button(action: model.hideWalkieBar) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 10, weight: .bold))
-                        .frame(width: 24, height: 24)
+                if showsCloseButton {
+                    Button(action: model.hideWalkieBar) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .bold))
+                            .frame(width: 24, height: 24)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Hide Talk bar")
+                    .accessibilityLabel("Hide Talk bar")
                 }
-                .buttonStyle(.plain)
-                .help("Hide voice controls")
-                .accessibilityLabel("Hide voice controls")
-            }
         }
         .padding(.horizontal, 10)
         .frame(
@@ -3899,6 +4168,37 @@ private struct WalkieTalkieBar: View {
             ?? "System Default Microphone"
     }
 
+    @ViewBuilder
+    private var openLineControls: some View {
+        switch model.openLineState {
+        case .idle:
+            EmptyView()
+        case .invited(let invitation):
+            communicationButton(
+                icon: "phone.fill",
+                active: true,
+                help: "Join line with \(invitation.callerName)"
+            ) { model.respondToOpenLine(invitation, accept: true) }
+            communicationButton(
+                icon: "phone.down.fill",
+                active: false,
+                help: "Decline open line invitation"
+            ) { model.respondToOpenLine(invitation, accept: false) }
+        case .inviting(let invitation):
+            communicationButton(
+                icon: "phone.arrow.up.right.fill",
+                active: true,
+                help: "Waiting for \(model.openLinePeerName(invitation)) to join · Click to close"
+            ) { model.endOpenLine() }
+        case .connected(let invitation):
+            communicationButton(
+                icon: "phone.down.fill",
+                active: true,
+                help: "Close line with \(model.openLinePeerName(invitation))"
+            ) { model.endOpenLine() }
+        }
+    }
+
     private func walkieTarget(
         id: String?,
         name: String,
@@ -3912,7 +4212,8 @@ private struct WalkieTalkieBar: View {
             name: name,
             icon: icon,
             colorHex: colorHex,
-            profileImageData: profileImageData
+            profileImageData: profileImageData,
+            interaction: showsCloseButton ? .hold : .toggle
         )
     }
 
@@ -3959,7 +4260,9 @@ private final class WalkieTalkieWindowController {
                 y: 0,
                 width: FloatingMetrics.walkieBarWidth(participantCount: model.participants.count)
                     + FloatingMetrics.windowInset * 2,
-                height: FloatingMetrics.windowHeight(for: FloatingMetrics.walkieBarHeight)
+                height: FloatingMetrics.windowHeight(
+                    for: FloatingMetrics.walkieBarHeight + FloatingMetrics.walkieDragHandleHeight
+                )
             ),
             styleMask: [.borderless, .resizable],
             backing: .buffered,
@@ -3977,11 +4280,15 @@ private final class WalkieTalkieWindowController {
         panel.isReleasedWhenClosed = false
         panel.minSize = NSSize(
             width: FloatingMetrics.walkieBarMinWidth + FloatingMetrics.windowInset * 2,
-            height: FloatingMetrics.windowHeight(for: FloatingMetrics.walkieBarHeight)
+            height: FloatingMetrics.windowHeight(
+                for: FloatingMetrics.walkieBarHeight + FloatingMetrics.walkieDragHandleHeight
+            )
         )
         panel.maxSize = NSSize(
             width: FloatingMetrics.walkieBarMaxWidth + FloatingMetrics.windowInset * 2,
-            height: FloatingMetrics.windowHeight(for: FloatingMetrics.walkieBarHeight)
+            height: FloatingMetrics.windowHeight(
+                for: FloatingMetrics.walkieBarHeight + FloatingMetrics.walkieDragHandleHeight
+            )
         )
         let hostingView = NSHostingView(rootView: WalkieTalkieBar(model: model))
         hostingView.sizingOptions = []

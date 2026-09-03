@@ -472,10 +472,9 @@ final class HostServer {
     ) -> Bool {
         guard let data = try? coordinatedResyncMessage(nowNanos: nowNanos).encodedLine() else { return false }
         if let targetID {
-            // The broadcaster's local receiver is the room's audible reference.
-            // Resetting it stops the only local playback path while SourceMuteTap
-            // keeps the original application muted. Listener resyncs should align
-            // to that reference, never interrupt it.
+            // The broadcaster's local receiver is not a listener resync target.
+            // Its source application is the local audible path, so resetting the
+            // return stream must never interrupt the broadcaster's own playback.
             if targetID == localParticipantID { return true }
             guard let target = clients.values.first(where: { $0.id == targetID }) else { return false }
             send(data, over: target.control)

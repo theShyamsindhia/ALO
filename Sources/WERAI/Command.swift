@@ -72,6 +72,7 @@ enum WERAICommand {
             capturesSystemMediaCommands: false
         )
         try localReceiver.start()
+        localReceiver.setLocalPlaybackMuted(true)
 
         let capture = SystemAudioCapture()
         do {
@@ -86,19 +87,12 @@ enum WERAICommand {
             )
         }
 
-        guard #available(macOS 14.2, *) else {
-            throw WERAIError("Synchronized source playback requires macOS 14.2 or newer.")
-        }
-        let muteTap = SourceMuteTap()
-        try muteTap.start()
-
-        print("Streaming system audio; this Mac is playing through the synchronized path too.")
+        print("Streaming system audio; this Mac keeps using the source application's local playback.")
         print("Keep this process running; press Control-C to stop.")
         await stayAlive(
             capturing: capture,
             hosting: host,
-            localReceiver: localReceiver,
-            muteTap: muteTap
+            localReceiver: localReceiver
         )
     }
 
@@ -215,14 +209,12 @@ enum WERAICommand {
     private static func stayAlive(
         capturing: SystemAudioCapture,
         hosting: HostServer,
-        localReceiver: Receiver,
-        muteTap: AnyObject
+        localReceiver: Receiver
     ) async {
         while !Task.isCancelled {
             _ = capturing
             _ = hosting
             _ = localReceiver
-            _ = muteTap
             try? await Task.sleep(nanoseconds: 3_600_000_000_000)
         }
     }

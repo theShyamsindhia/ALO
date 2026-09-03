@@ -184,6 +184,7 @@ enum VoiceInputCatalog {
 
 final class WalkieTalkieMicrophone: @unchecked Sendable {
     static let sampleRate = 16_000.0
+    static let packetFrames = 320
 
     private let queue = DispatchQueue(label: "in.werai.walkie-microphone", qos: .userInitiated)
     private var engine: AVAudioEngine?
@@ -263,6 +264,7 @@ final class WalkieTalkieMicrophone: @unchecked Sendable {
               let converter = AVAudioConverter(from: inputFormat, to: outputFormat)
         else { throw WERAIError("This Mac does not have an available microphone input.") }
 
+        let packetizer = VoicePacketizer(framesPerPacket: Self.packetFrames)
         input.installTap(onBus: 0, bufferSize: 960, format: inputFormat) { buffer, _ in
             let ratio = outputFormat.sampleRate / inputFormat.sampleRate
             let capacity = AVAudioFrameCount(ceil(Double(buffer.frameLength) * ratio)) + 8
@@ -281,7 +283,13 @@ final class WalkieTalkieMicrophone: @unchecked Sendable {
             guard status != .error, converted.frameLength > 0,
                   let samples = converted.int16ChannelData?[0]
             else { return }
-            handler(Data(bytes: samples, count: Int(converted.frameLength) * MemoryLayout<Int16>.size))
+            let convertedData = Data(
+                bytes: samples,
+                count: Int(converted.frameLength) * MemoryLayout<Int16>.size
+            )
+            for packet in packetizer.append(convertedData) {
+                handler(packet)
+            }
         }
         engine.prepare()
         do {
@@ -340,6 +348,31 @@ final class WalkieTalkieMicrophone: @unchecked Sendable {
     }
 }
 
+/// Turns converter output (whose size follows the hardware callback) into stable
+/// 20 ms wire packets. The input tap invokes this object serially.
+final class VoicePacketizer: @unchecked Sendable {
+    let framesPerPacket: Int
+    private var pending = Data()
+
+    init(framesPerPacket: Int = WalkieTalkieMicrophone.packetFrames) {
+        self.framesPerPacket = framesPerPacket
+    }
+
+    var bytesPerPacket: Int { framesPerPacket * MemoryLayout<Int16>.size }
+    var pendingByteCount: Int { pending.count }
+
+    func append(_ data: Data) -> [Data] {
+        guard !data.isEmpty else { return [] }
+        pending.append(data)
+        var packets = [Data]()
+        while pending.count >= bytesPerPacket {
+            packets.append(Data(pending.prefix(bytesPerPacket)))
+            pending.removeFirst(bytesPerPacket)
+        }
+        return packets
+    }
+}
+
 struct WalkieTalkiePlaybackTracker {
     private(set) var lastSequences = [String: UInt64]()
 
@@ -354,12 +387,115 @@ struct WalkieTalkiePlaybackTracker {
 
     mutating func end(_ sessionID: String) { lastSequences.removeValue(forKey: sessionID) }
 
-    static func shouldResetBuffer(
+    static func shouldDropIncomingBuffer(
         scheduledFrames: AVAudioFramePosition,
         incomingFrames: AVAudioFramePosition,
         maximumFrames: AVAudioFramePosition
     ) -> Bool {
         scheduledFrames + incomingFrames > maximumFrames
+    }
+}
+
+struct VoicePlaybackSessionLifecycle {
+    private(set) var isEnding = false
+
+    mutating func markEnding() { isEnding = true }
+
+    mutating func beginRequiresReplacement() -> Bool {
+        defer { isEnding = false }
+        return isEnding
+    }
+}
+
+struct VoiceJitterBuffer {
+    enum Output: Equatable {
+        case audio(Data)
+        case silence(frames: Int)
+    }
+
+    let startupPacketCount: Int
+    let maximumGapPackets: UInt64
+    let maximumPendingPackets: Int
+    private(set) var expectedSequence: UInt64?
+    private(set) var isStarted = false
+    private(set) var pending = [UInt64: Data]()
+    private(set) var lateDropCount = 0
+    private(set) var concealedPacketCount = 0
+
+    init(
+        startupPacketCount: Int = 4,
+        maximumGapPackets: UInt64 = 2,
+        maximumPendingPackets: Int = 8
+    ) {
+        self.startupPacketCount = max(1, startupPacketCount)
+        self.maximumGapPackets = max(1, maximumGapPackets)
+        self.maximumPendingPackets = max(self.startupPacketCount, maximumPendingPackets)
+    }
+
+    mutating func insert(sequence: UInt64, data: Data) -> [Output] {
+        if isStarted, let expectedSequence, sequence < expectedSequence {
+            lateDropCount += 1
+            return []
+        }
+        guard pending[sequence] == nil else {
+            lateDropCount += 1
+            return []
+        }
+        pending[sequence] = data
+        while pending.count > maximumPendingPackets, let oldest = pending.keys.min() {
+            pending.removeValue(forKey: oldest)
+            lateDropCount += 1
+        }
+
+        if !isStarted {
+            expectedSequence = pending.keys.min()
+            guard contiguousPacketCount() >= startupPacketCount else { return [] }
+            isStarted = true
+        }
+        return drain(force: false)
+    }
+
+    mutating func finish() -> [Output] {
+        guard !pending.isEmpty else { return [] }
+        if expectedSequence == nil { expectedSequence = pending.keys.min() }
+        isStarted = true
+        return drain(force: true)
+    }
+
+    private func contiguousPacketCount() -> Int {
+        guard var sequence = expectedSequence else { return 0 }
+        var count = 0
+        while pending[sequence] != nil {
+            count += 1
+            sequence &+= 1
+        }
+        return count
+    }
+
+    private mutating func drain(force: Bool) -> [Output] {
+        var output = [Output]()
+        while let expected = expectedSequence {
+            if let data = pending.removeValue(forKey: expected) {
+                output.append(.audio(data))
+                expectedSequence = expected &+ 1
+                continue
+            }
+            guard let next = pending.keys.min(), next > expected else { break }
+            let gap = next - expected
+            if gap <= maximumGapPackets, force || pending.count >= 2 {
+                output.append(.silence(frames: WalkieTalkieMicrophone.packetFrames))
+                concealedPacketCount += 1
+                expectedSequence = expected &+ 1
+                continue
+            }
+            if gap > maximumGapPackets {
+                lateDropCount += Int(min(gap, UInt64(Int.max)))
+                expectedSequence = next
+                continue
+            }
+            break
+        }
+        return output
     }
 }
 
@@ -370,8 +506,11 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
         var senderName: String
         let player: AVAudioPlayerNode
         var scheduledFrames: AVAudioFramePosition = 0
-        var bufferGeneration: UInt64 = 0
+        var jitter = VoiceJitterBuffer()
+        var isActive = false
+        var lifecycle = VoicePlaybackSessionLifecycle()
         var timeoutWorkItem: DispatchWorkItem?
+        var inactivityWorkItem: DispatchWorkItem?
 
         init(id: String, senderID: String, senderName: String, player: AVAudioPlayerNode) {
             self.id = id
@@ -389,11 +528,13 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
     )!
     private let format = playbackFormat
     private let stateHandler: @Sendable (String, String, Bool) -> Void
+    private let playbackActivityHandler: @Sendable (Bool) -> Void
     private var sessions = [String: Session]()
     private var tracker = WalkieTalkiePlaybackTracker()
     private var configurationObserver: NSObjectProtocol?
     private var muted = false
-    private let maximumBufferedFrames = AVAudioFramePosition(WalkieTalkieMicrophone.sampleRate * 0.18)
+    private var activeSessionCount = 0
+    private let maximumBufferedFrames = AVAudioFramePosition(WalkieTalkieMicrophone.sampleRate * 0.20)
 
     static func makePlaybackBuffer(fromPCM16Mono data: Data) -> AVAudioPCMBuffer? {
         guard !data.isEmpty,
@@ -419,8 +560,12 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
         return buffer
     }
 
-    init(stateHandler: @escaping @Sendable (String, String, Bool) -> Void = { _, _, _ in }) {
+    init(
+        stateHandler: @escaping @Sendable (String, String, Bool) -> Void = { _, _, _ in },
+        playbackActivityHandler: @escaping @Sendable (Bool) -> Void = { _ in }
+    ) {
         self.stateHandler = stateHandler
+        self.playbackActivityHandler = playbackActivityHandler
         configurationObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange,
             object: engine,
@@ -460,23 +605,30 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
                   data.count.isMultiple(of: MemoryLayout<Int16>.size)
             else { return }
             let session = sessions[message.sessionID] ?? beginSession(message)
-            guard let session,
-                  tracker.accepts(sessionID: message.sessionID, sequence: message.sequence)
-            else { return }
+            guard let session else { return }
             session.senderName = message.senderName
-            schedule(data, for: session)
+            let output = session.jitter.insert(sequence: message.sequence, data: data)
+            schedule(output, for: session)
             armTimeout(for: session)
         case .ended:
-            stopSession(message.sessionID)
+            finishSession(message.sessionID)
         }
     }
 
     @discardableResult
     private func beginSession(_ message: WalkieTalkieMessage) -> Session? {
         if let existing = sessions[message.sessionID] {
-            existing.senderName = message.senderName
-            armTimeout(for: existing)
-            return existing
+            if existing.lifecycle.beginRequiresReplacement() {
+                // A target can be removed and re-added quickly while the final
+                // buffers from its `.ended` message are still rendering. Replace
+                // the old object so its callbacks cannot mutate the revived
+                // session, and give the new stream a fresh jitter timeline.
+                stopSession(message.sessionID)
+            } else {
+                existing.senderName = message.senderName
+                armTimeout(for: existing)
+                return existing
+            }
         }
         let player = AVAudioPlayerNode()
         engine.attach(player)
@@ -494,10 +646,21 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
         )
         sessions[message.sessionID] = session
         tracker.begin(message.sessionID)
-        player.play()
-        stateHandler(session.senderID, session.senderName, true)
         armTimeout(for: session)
         return session
+    }
+
+    private func schedule(_ output: [VoiceJitterBuffer.Output], for session: Session) {
+        for item in output {
+            let data: Data
+            switch item {
+            case .audio(let audio):
+                data = audio
+            case .silence(let frames):
+                data = Data(count: frames * MemoryLayout<Int16>.size)
+            }
+            schedule(data, for: session)
+        }
     }
 
     private func schedule(_ data: Data, for session: Session) {
@@ -508,29 +671,34 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
         guard let buffer = Self.makePlaybackBuffer(fromPCM16Mono: data) else { return }
         let frames = buffer.frameLength
 
-        if WalkieTalkiePlaybackTracker.shouldResetBuffer(
+        if WalkieTalkiePlaybackTracker.shouldDropIncomingBuffer(
             scheduledFrames: session.scheduledFrames,
             incomingFrames: AVAudioFramePosition(frames),
             maximumFrames: maximumBufferedFrames
         ) {
-            session.player.stop()
-            session.scheduledFrames = 0
-            session.bufferGeneration &+= 1
+            // Keep already-queued speech continuous. Dropping this newest frame
+            // bounds latency without flushing the player's render queue.
+            return
         }
         session.scheduledFrames += AVAudioFramePosition(frames)
+        session.inactivityWorkItem?.cancel()
+        session.inactivityWorkItem = nil
         let sessionID = session.id
-        let bufferGeneration = session.bufferGeneration
-        session.player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+        session.player.scheduleBuffer(buffer, completionCallbackType: .dataRendered) { [weak self] _ in
             self?.queue.async {
                 guard let self,
                       let current = self.sessions[sessionID],
-                      current === session,
-                      current.bufferGeneration == bufferGeneration
+                      current === session
                 else { return }
                 current.scheduledFrames = max(0, current.scheduledFrames - AVAudioFramePosition(frames))
+                if current.scheduledFrames == 0 {
+                    if current.lifecycle.isEnding { self.stopSession(sessionID) }
+                    else { self.armPlaybackInactivity(for: current) }
+                }
             }
         }
         if !session.player.isPlaying, engine.isRunning { session.player.play() }
+        setSessionActive(session, true)
     }
 
     private func ensureEngineRunning() -> Bool {
@@ -549,7 +717,7 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
         for session in sessions.values {
             session.player.stop()
             session.scheduledFrames = 0
-            session.bufferGeneration &+= 1
+            setSessionActive(session, false)
         }
         guard ensureEngineRunning() else {
             stopAllOnQueue()
@@ -568,6 +736,47 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
         queue.asyncAfter(deadline: .now() + 1.5, execute: work)
     }
 
+    /// Network delivery and render callbacks do not land at perfectly even
+    /// intervals. A short hangover prevents the speaking indicator and media
+    /// ducking from pulsing between otherwise-continuous 20 ms packets.
+    private func armPlaybackInactivity(for session: Session) {
+        session.inactivityWorkItem?.cancel()
+        let sessionID = session.id
+        let work = DispatchWorkItem { [weak self, weak session] in
+            guard let self, let session,
+                  self.sessions[sessionID] === session,
+                  session.scheduledFrames == 0,
+                  !session.lifecycle.isEnding
+            else { return }
+            self.setSessionActive(session, false)
+        }
+        session.inactivityWorkItem = work
+        queue.asyncAfter(deadline: .now() + .milliseconds(180), execute: work)
+    }
+
+    private func finishSession(_ id: String) {
+        guard let session = sessions[id] else {
+            tracker.end(id)
+            return
+        }
+        session.lifecycle.markEnding()
+        session.timeoutWorkItem?.cancel()
+        session.inactivityWorkItem?.cancel()
+        schedule(session.jitter.finish(), for: session)
+        if session.scheduledFrames == 0 { stopSession(id) }
+    }
+
+    private func setSessionActive(_ session: Session, _ active: Bool) {
+        guard session.isActive != active else { return }
+        session.isActive = active
+        activeSessionCount += active ? 1 : -1
+        activeSessionCount = max(0, activeSessionCount)
+        stateHandler(session.senderID, session.senderName, active)
+        if (active && activeSessionCount == 1) || (!active && activeSessionCount == 0) {
+            playbackActivityHandler(active)
+        }
+    }
+
     private func stopSession(_ id: String) {
         guard let session = sessions.removeValue(forKey: id) else {
             tracker.end(id)
@@ -578,7 +787,7 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
         engine.disconnectNodeOutput(session.player)
         engine.detach(session.player)
         tracker.end(id)
-        stateHandler(session.senderID, session.senderName, false)
+        setSessionActive(session, false)
         if sessions.isEmpty { engine.pause() }
     }
 
@@ -593,6 +802,7 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
         }
         for session in sessions.values {
             session.timeoutWorkItem?.cancel()
+            session.inactivityWorkItem?.cancel()
             session.player.stop()
         }
         engine.stop()

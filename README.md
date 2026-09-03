@@ -36,8 +36,8 @@ on this Mac:
 The first time a Mac broadcasts, macOS asks for **Screen & System Audio Recording**
 permission. ALO uses that permission for system audio only while that Mac is the active
 broadcaster. This single grant covers audio and optional display/window video; ALO does not
-request the separate **System Audio Recording Only** permission. Restart ALO only if macOS
-still reports the old permission state. No separate speaker output or audio driver is installed.
+request the separate **System Audio Recording Only** permission. After the first grant,
+restart ALO once before broadcasting. No separate speaker output or audio driver is installed.
 
 After the room connects, the setup window disappears and the room moves into the
 menu bar. Click the cat to reveal the compact controls; the same surface grows
@@ -98,8 +98,8 @@ media timeline. When the active broadcaster also enables video, ALO opens the na
 sharing picker. Choose one display or one window; cancelling the picker leaves video off.
 The selected content is then streamed to the room.
 Every Mac may also ask for **Local Network** access.
-Grant recording access in System Settings → Privacy & Security, then use **Restart ALO** if
-macOS asks you to restart it.
+Grant recording access in System Settings → Privacy & Security, then use **Restart ALO**
+before the first broadcast.
 
 If the Screen Recording switch is already on but macOS still refuses access, quit old
 copies of ALO, turn the switch off and on once, and restart the current app. Do not

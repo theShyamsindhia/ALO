@@ -628,6 +628,8 @@ struct MeshRoomTests {
         let cReady = PortProbe()
         let bWalkie = WalkieProbe()
         let cWalkie = WalkieProbe()
+        let bOpenLine = OpenLineProbe()
+        let cOpenLine = OpenLineProbe()
         let nodeA = makeNode(room: room, id: "a", probe: a, ports: PortProbe())
         let nodeB = MeshControlPlane(
             room: room,
@@ -636,7 +638,8 @@ struct MeshRoomTests {
             listenerReadyHandler: { bReady.set($0) },
             replicaHandler: { b.update(replica: $0) },
             participantsHandler: { b.update(participants: $0) },
-            walkieTalkieHandler: { bWalkie.add($0) }
+            walkieTalkieHandler: { bWalkie.add($0) },
+            openLineHandler: { bOpenLine.add($0) }
         )
         let nodeC = MeshControlPlane(
             room: room,
@@ -645,7 +648,8 @@ struct MeshRoomTests {
             listenerReadyHandler: { cReady.set($0) },
             replicaHandler: { c.update(replica: $0) },
             participantsHandler: { c.update(participants: $0) },
-            walkieTalkieHandler: { cWalkie.add($0) }
+            walkieTalkieHandler: { cWalkie.add($0) },
+            openLineHandler: { cOpenLine.add($0) }
         )
         try nodeA.start(advertise: false)
         try nodeB.start(advertise: false)
@@ -692,6 +696,30 @@ struct MeshRoomTests {
         #expect(waitUntil { cWalkie.audio(sessionID: "targeted-relay") == targetedPCM })
         #expect(bWalkie.audio(sessionID: "targeted-relay") == nil)
         #expect(WalkieTalkiePlayer.makePlaybackBuffer(fromPCM16Mono: targetedPCM) != nil)
+
+        let groupPCM = Data([0x00, 0x10])
+        nodeA.publishWalkieTalkie(.init(
+            kind: .audio,
+            senderID: "a",
+            senderName: "A",
+            targetID: nil,
+            targetIDs: ["b", "c"],
+            sessionID: "recipient-snapshot",
+            sequence: 1,
+            pcm16Mono: groupPCM
+        ))
+        #expect(waitUntil { bWalkie.audio(sessionID: "recipient-snapshot") == groupPCM })
+        #expect(waitUntil { cWalkie.audio(sessionID: "recipient-snapshot") == groupPCM })
+
+        nodeA.publishOpenLine(.init(
+            kind: .invite,
+            invitationID: "line-relay",
+            senderID: "a",
+            senderName: "A",
+            targetID: "c"
+        ))
+        #expect(waitUntil { cOpenLine.count == 1 })
+        #expect(bOpenLine.count == 0)
     }
 
     @Test("Walkie relay validates direct origins before accepting forwarded audio")
@@ -711,6 +739,57 @@ struct MeshRoomTests {
         #expect(!MeshControlPlane.isValidWalkieTalkieOrigin(
             senderID: "a", remoteID: "b", envelopeOriginID: "b", hopCount: 1
         ))
+
+        let fullMesh = MeshControlPlane.walkieTalkieRoutePlan(
+            recipientIDs: ["b", "c", "d", "e"],
+            directlyConnectedIDs: ["b", "c", "d", "e"]
+        )
+        #expect(fullMesh.destinationIDs == ["b", "c", "d", "e"])
+        #expect(fullMesh.unresolvedIDs.isEmpty)
+
+        let sparseMesh = MeshControlPlane.walkieTalkieRoutePlan(
+            recipientIDs: ["e"],
+            directlyConnectedIDs: ["b", "c"]
+        )
+        #expect(sparseMesh.destinationIDs == ["b", "c"])
+        #expect(sparseMesh.unresolvedIDs == ["e"])
+    }
+
+    @Test("Explicit Talk recipients remain targeted for legacy clients")
+    func explicitWalkieRecipientsAreLegacySafe() throws {
+        let logical = WalkieTalkieMessage(
+            kind: .audio,
+            senderID: "a",
+            senderName: "A",
+            targetID: nil,
+            targetIDs: ["c", "b"],
+            sessionID: "private-talk",
+            sequence: 7,
+            pcm16Mono: Data([0, 1])
+        )
+
+        let wireMessages = MeshControlPlane.legacySafeWalkieTalkieMessages(logical)
+        #expect(wireMessages.map(\.targetID) == ["b", "c"])
+        #expect(wireMessages.map(\.recipientIDs) == [["b"], ["c"]])
+
+        for message in wireMessages {
+            let line = try MeshEnvelope(
+                type: "walkie_talkie",
+                walkieTalkie: message
+            ).encodedLine()
+            let legacy = try JSONDecoder().decode(LegacyWalkieEnvelope.self, from: line)
+            #expect(legacy.walkieTalkie.targetID == message.targetID)
+            #expect(legacy.walkieTalkie.targetID != nil)
+        }
+
+        let broadcast = WalkieTalkieMessage(
+            kind: .began,
+            senderID: "a",
+            senderName: "A",
+            targetID: nil,
+            sessionID: "everyone"
+        )
+        #expect(MeshControlPlane.legacySafeWalkieTalkieMessages(broadcast) == [broadcast])
     }
 
     @Test("Room controls retry until the broadcaster media session accepts them")
@@ -934,6 +1013,14 @@ struct MeshRoomTests {
     }
 }
 
+private struct LegacyWalkieEnvelope: Decodable {
+    let walkieTalkie: LegacyWalkieMessage
+}
+
+private struct LegacyWalkieMessage: Decodable {
+    let targetID: String?
+}
+
 private final class PortProbe: @unchecked Sendable {
     private let lock = NSLock()
     private let semaphore = DispatchSemaphore(value: 0)
@@ -986,6 +1073,13 @@ private final class WalkieProbe: @unchecked Sendable {
             messages.first { $0.kind == .audio && $0.sessionID == sessionID }?.pcm16Mono
         }
     }
+}
+
+private final class OpenLineProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var messages = [OpenLineMessage]()
+    var count: Int { lock.withLock { messages.count } }
+    func add(_ message: OpenLineMessage) { lock.withLock { messages.append(message) } }
 }
 
 private final class MediaCommandProbe: @unchecked Sendable {

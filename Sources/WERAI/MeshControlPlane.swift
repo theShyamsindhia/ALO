@@ -10,7 +10,13 @@ final class MeshControlPlane: @unchecked Sendable {
         let sessionID: String
         let kind: String
         let sequence: UInt64
-        let targetID: String?
+        let targetIDs: [String]?
+    }
+    private struct OpenLineMessageKey: Hashable {
+        let invitationID: String
+        let kind: String
+        let senderID: String
+        let targetID: String
     }
     private struct PendingRoomAction {
         let envelope: MeshEnvelope
@@ -50,6 +56,7 @@ final class MeshControlPlane: @unchecked Sendable {
     private let mediaCommandHandler: (RoomMediaCommand, String, UInt64) -> Bool
     private let resyncRequestHandler: (String?, String, UInt64) -> Bool
     private let walkieTalkieHandler: (WalkieTalkieMessage) -> Void
+    private let openLineHandler: (OpenLineMessage) -> Void
     private let appVersion: String
     private let listenerReadyHandler: ((NWEndpoint.Port) -> Void)?
     private var replica: MeshRoomReplica
@@ -70,6 +77,8 @@ final class MeshControlPlane: @unchecked Sendable {
     private var acceptedRoomActionIDs = Set<String>()
     private var seenWalkieMessages = Set<WalkieMessageKey>()
     private var seenWalkieMessageOrder = [WalkieMessageKey]()
+    private var seenOpenLineMessages = Set<OpenLineMessageKey>()
+    private var seenOpenLineMessageOrder = [OpenLineMessageKey]()
     private var pendingRoomActions = [String: PendingRoomAction]()
     private var isStopped = true
     private let heartbeatIntervalNanos: UInt64 = 400_000_000
@@ -93,7 +102,8 @@ final class MeshControlPlane: @unchecked Sendable {
         peerVersionHandler: @escaping (String) -> Void = { _ in },
         mediaCommandHandler: @escaping (RoomMediaCommand, String, UInt64) -> Bool = { _, _, _ in true },
         resyncRequestHandler: @escaping (String?, String, UInt64) -> Bool = { _, _, _ in true },
-        walkieTalkieHandler: @escaping (WalkieTalkieMessage) -> Void = { _ in }
+        walkieTalkieHandler: @escaping (WalkieTalkieMessage) -> Void = { _ in },
+        openLineHandler: @escaping (OpenLineMessage) -> Void = { _ in }
     ) {
         self.room = room
         self.nodeID = nodeID
@@ -111,6 +121,7 @@ final class MeshControlPlane: @unchecked Sendable {
         self.mediaCommandHandler = mediaCommandHandler
         self.resyncRequestHandler = resyncRequestHandler
         self.walkieTalkieHandler = walkieTalkieHandler
+        self.openLineHandler = openLineHandler
         self.replica = MeshRoomReplica(events: initialEvents)
         self.listenerReadyHandler = listenerReadyHandler
         self.replicaHandler = replicaHandler
@@ -253,13 +264,36 @@ final class MeshControlPlane: @unchecked Sendable {
                   message.senderID == nodeID,
                   isValidWalkieTalkie(message)
             else { return }
-            guard rememberWalkieTalkie(message) else { return }
-            routeWalkieTalkie(
+            for wireMessage in Self.legacySafeWalkieTalkieMessages(message) {
+                guard rememberWalkieTalkie(wireMessage) else { continue }
+                routeWalkieTalkie(
+                    MeshEnvelope(
+                        type: "walkie_talkie",
+                        nodeID: nodeID,
+                        walkieTalkieHopCount: 0,
+                        walkieTalkieRelayTargetIDs: wireMessage.recipientIDs.map { $0.sorted() },
+                        walkieTalkie: wireMessage
+                    ),
+                    message: wireMessage,
+                    excluding: nil
+                )
+            }
+        }
+    }
+
+    func publishOpenLine(_ message: OpenLineMessage) {
+        queue.async { [weak self] in
+            guard let self,
+                  message.senderID == nodeID,
+                  isValidOpenLine(message),
+                  rememberOpenLine(message)
+            else { return }
+            routeOpenLine(
                 MeshEnvelope(
-                    type: "walkie_talkie",
+                    type: "open_line",
                     nodeID: nodeID,
                     walkieTalkieHopCount: 0,
-                    walkieTalkie: message
+                    openLine: message
                 ),
                 message: message,
                 excluding: nil
@@ -713,16 +747,45 @@ final class MeshControlPlane: @unchecked Sendable {
                   hopCount <= maximumWalkieTalkieHopCount,
                   rememberWalkieTalkie(message)
             else { return }
-            if message.targetID == nil || message.targetID == nodeID {
+            if message.recipientIDs == nil || message.recipientIDs?.contains(nodeID) == true {
                 walkieTalkieHandler(message)
             }
-            guard message.targetID != nodeID, hopCount < maximumWalkieTalkieHopCount else { return }
+            guard hopCount < maximumWalkieTalkieHopCount else { return }
+            let relayRecipients = envelope.walkieTalkieRelayTargetIDs.map(Set.init)
+                ?? message.recipientIDs
             routeWalkieTalkie(
                 MeshEnvelope(
                     type: "walkie_talkie",
                     nodeID: message.senderID,
                     walkieTalkieHopCount: hopCount + 1,
+                    walkieTalkieRelayTargetIDs: relayRecipients.map { $0.sorted() },
                     walkieTalkie: message
+                ),
+                message: message,
+                relayRecipients: relayRecipients,
+                excluding: link
+            )
+        case "open_line":
+            let hopCount = envelope.walkieTalkieHopCount ?? 0
+            guard let message = envelope.openLine,
+                  isValidOpenLine(message),
+                  Self.isValidWalkieTalkieOrigin(
+                      senderID: message.senderID,
+                      remoteID: remoteID,
+                      envelopeOriginID: envelope.nodeID,
+                      hopCount: hopCount
+                  ),
+                  hopCount <= maximumWalkieTalkieHopCount,
+                  rememberOpenLine(message)
+            else { return }
+            if message.targetID == nodeID { openLineHandler(message) }
+            guard message.targetID != nodeID, hopCount < maximumWalkieTalkieHopCount else { return }
+            routeOpenLine(
+                MeshEnvelope(
+                    type: "open_line",
+                    nodeID: message.senderID,
+                    walkieTalkieHopCount: hopCount + 1,
+                    openLine: message
                 ),
                 message: message,
                 excluding: link
@@ -756,9 +819,48 @@ final class MeshControlPlane: @unchecked Sendable {
               message.sessionID.utf8.count <= 128,
               (message.targetID?.utf8.count ?? 0) <= 128
         else { return false }
+        if let targetIDs = message.targetIDs {
+            guard targetIDs.count <= 256,
+                  targetIDs.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 128 }),
+                  Set(targetIDs).count == targetIDs.count
+            else { return false }
+            if let targetID = message.targetID {
+                guard targetIDs == [targetID] else { return false }
+            }
+        }
         guard message.kind == .audio else { return message.pcm16Mono == nil }
         guard let data = message.pcm16Mono else { return false }
         return !data.isEmpty && data.count <= 8_192 && data.count.isMultiple(of: MemoryLayout<Int16>.size)
+    }
+
+    /// Explicit recipient snapshots are split into one targeted message per
+    /// peer. Older clients ignore `targetIDs`, so retaining a non-nil
+    /// `targetID` prevents a private Talk/Open Line stream from becoming their
+    /// legacy `targetID == nil` broadcast sentinel.
+    static func legacySafeWalkieTalkieMessages(
+        _ message: WalkieTalkieMessage
+    ) -> [WalkieTalkieMessage] {
+        guard let recipients = message.recipientIDs else { return [message] }
+        return recipients.sorted().map { recipientID in
+            WalkieTalkieMessage(
+                kind: message.kind,
+                senderID: message.senderID,
+                senderName: message.senderName,
+                targetID: recipientID,
+                targetIDs: [recipientID],
+                sessionID: message.sessionID,
+                sequence: message.sequence,
+                pcm16Mono: message.pcm16Mono
+            )
+        }
+    }
+
+    private func isValidOpenLine(_ message: OpenLineMessage) -> Bool {
+        !message.invitationID.isEmpty && message.invitationID.utf8.count <= 128 &&
+            !message.senderID.isEmpty && message.senderID.utf8.count <= 128 &&
+            !message.senderName.isEmpty && message.senderName.utf8.count <= 160 &&
+            !message.targetID.isEmpty && message.targetID.utf8.count <= 128 &&
+            message.senderID != message.targetID
     }
 
     static func isValidWalkieTalkieOrigin(
@@ -779,7 +881,7 @@ final class MeshControlPlane: @unchecked Sendable {
             sessionID: message.sessionID,
             kind: message.kind.rawValue,
             sequence: message.sequence,
-            targetID: message.targetID
+            targetIDs: message.recipientIDs.map { $0.sorted() }
         )
         guard seenWalkieMessages.insert(key).inserted else { return false }
         seenWalkieMessageOrder.append(key)
@@ -791,15 +893,75 @@ final class MeshControlPlane: @unchecked Sendable {
         return true
     }
 
+    private func rememberOpenLine(_ message: OpenLineMessage) -> Bool {
+        let key = OpenLineMessageKey(
+            invitationID: message.invitationID,
+            kind: message.kind.rawValue,
+            senderID: message.senderID,
+            targetID: message.targetID
+        )
+        guard seenOpenLineMessages.insert(key).inserted else { return false }
+        seenOpenLineMessageOrder.append(key)
+        if seenOpenLineMessageOrder.count > maximumRememberedWalkieMessages {
+            let expired = Array(seenOpenLineMessageOrder.prefix(1_024))
+            seenOpenLineMessageOrder.removeFirst(expired.count)
+            for key in expired { seenOpenLineMessages.remove(key) }
+        }
+        return true
+    }
+
     private func routeWalkieTalkie(
         _ envelope: MeshEnvelope,
         message: WalkieTalkieMessage,
+        relayRecipients: Set<String>? = nil,
         excluding source: Link?
     ) {
-        if let targetID = message.targetID,
-           let target = peers[targetID],
-           target !== source {
-            send(envelope, to: target)
+        let recipientsToRoute = relayRecipients ?? message.recipientIDs
+        guard let recipients = recipientsToRoute else {
+            broadcast(envelope, excluding: source)
+            return
+        }
+        let remaining = recipients.subtracting([nodeID])
+        guard !remaining.isEmpty else { return }
+        let plan = Self.walkieTalkieRoutePlan(
+            recipientIDs: remaining,
+            directlyConnectedIDs: Set(peers.keys)
+        )
+        // With unresolved peers, the plan uses every direct branch once because
+        // this node does not know which sparse branch contains each peer.
+        let links: [Link] = plan.destinationIDs.compactMap { peers[$0] }.filter { $0 !== source }
+        let routed = MeshEnvelope(
+            type: "walkie_talkie",
+            nodeID: envelope.nodeID,
+            walkieTalkieHopCount: envelope.walkieTalkieHopCount,
+            walkieTalkieRelayTargetIDs: plan.unresolvedIDs.sorted(),
+            walkieTalkie: message
+        )
+        // With no unresolved recipients this is a terminal copy, so a direct
+        // recipient cannot relay it to the other direct recipients.
+        send(routed, to: links)
+    }
+
+    static func walkieTalkieRoutePlan(
+        recipientIDs: Set<String>,
+        directlyConnectedIDs: Set<String>
+    ) -> (destinationIDs: Set<String>, unresolvedIDs: Set<String>) {
+        let unresolved = recipientIDs.subtracting(directlyConnectedIDs)
+        return (
+            destinationIDs: unresolved.isEmpty
+                ? recipientIDs.intersection(directlyConnectedIDs)
+                : directlyConnectedIDs,
+            unresolvedIDs: unresolved
+        )
+    }
+
+    private func routeOpenLine(
+        _ envelope: MeshEnvelope,
+        message: OpenLineMessage,
+        excluding source: Link?
+    ) {
+        if let target = peers[message.targetID], target !== source {
+            send(envelope, to: [target])
         } else {
             broadcast(envelope, excluding: source)
         }
@@ -1049,11 +1211,19 @@ final class MeshControlPlane: @unchecked Sendable {
     }
 
     private func broadcast(_ envelope: MeshEnvelope, excluding source: Link? = nil) {
-        for link in peers.values where link !== source { send(envelope, to: link) }
+        send(envelope, to: peers.values.filter { $0 !== source })
     }
 
     private func send(_ envelope: MeshEnvelope, to link: Link) {
+        send(envelope, to: [link])
+    }
+
+    private func send(_ envelope: MeshEnvelope, to links: [Link]) {
         guard let data = try? envelope.encodedLine() else { return }
+        for link in links { send(data, to: link) }
+    }
+
+    private func send(_ data: Data, to link: Link) {
         link.connection.send(content: data, completion: .contentProcessed { _ in })
     }
 }

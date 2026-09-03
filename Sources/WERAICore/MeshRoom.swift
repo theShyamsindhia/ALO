@@ -264,7 +264,11 @@ public struct MeshEnvelope: Codable, Sendable {
     public let targetID: String?
     public let actionAttempt: UInt64?
     public let walkieTalkieHopCount: UInt8?
+    /// Explicit recipients that still need routing after this hop. An empty
+    /// array makes a direct-recipient envelope terminal.
+    public let walkieTalkieRelayTargetIDs: [String]?
     public let walkieTalkie: WalkieTalkieMessage?
+    public let openLine: OpenLineMessage?
 
     public init(
         type: String,
@@ -290,7 +294,9 @@ public struct MeshEnvelope: Codable, Sendable {
         targetID: String? = nil,
         actionAttempt: UInt64? = nil,
         walkieTalkieHopCount: UInt8? = nil,
-        walkieTalkie: WalkieTalkieMessage? = nil
+        walkieTalkieRelayTargetIDs: [String]? = nil,
+        walkieTalkie: WalkieTalkieMessage? = nil,
+        openLine: OpenLineMessage? = nil
     ) {
         self.type = type
         self.room = room
@@ -315,7 +321,9 @@ public struct MeshEnvelope: Codable, Sendable {
         self.targetID = targetID
         self.actionAttempt = actionAttempt
         self.walkieTalkieHopCount = walkieTalkieHopCount
+        self.walkieTalkieRelayTargetIDs = walkieTalkieRelayTargetIDs
         self.walkieTalkie = walkieTalkie
+        self.openLine = openLine
     }
 
     public func encodedLine() throws -> Data {

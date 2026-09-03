@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import ScreenCaptureKit
 import WERAICore
 
 @MainActor
@@ -13,7 +14,6 @@ final class HostSession {
     private var nowPlayingMonitor: NowPlayingMonitor?
     private var playbackController: SystemPlaybackController?
     private var shouldPauseSourceOnStop = false
-    private var muteTap: AnyObject?
     private var videoStoppedHandler: (Error) -> Void = { _ in }
     func start(
         roomName: String,
@@ -66,17 +66,6 @@ final class HostSession {
             shouldPauseSourceOnStop = true
             try Task.checkCancellation()
 
-            guard #available(macOS 14.2, *) else {
-                throw WERAIError("ALO requires macOS 14.2 or newer.")
-            }
-            statusHandler("Synchronizing this Mac")
-            let muteTap = SourceMuteTap()
-            try await Task.detached(priority: .userInitiated) {
-                try muteTap.start()
-            }.value
-            self.muteTap = muteTap
-            try Task.checkCancellation()
-
             statusHandler("Broadcasting this Mac · waiting for audio")
             let localReceiver = try Receiver(
                 requestedRoom: roomName,
@@ -84,7 +73,7 @@ final class HostSession {
                 capturesSystemMediaCommands: false,
                 statusHandler: { status in
                     if status == .playing {
-                        statusHandler("This Mac is playing in sync")
+                        statusHandler("Broadcasting this Mac")
                     } else if status == .silent {
                         statusHandler("Broadcasting this Mac · waiting for audio")
                     }
@@ -98,6 +87,12 @@ final class HostSession {
                 videoHandler: videoHandler
             )
             try localReceiver.start()
+            // ScreenCaptureKit's combined Screen & System Audio permission is
+            // sufficient for broadcasting. Do not start SourceMuteTap here: it
+            // invokes macOS's separate System Audio Recording Only permission.
+            // The source app remains the broadcaster's local playback, so mute
+            // only this synchronized return to avoid hearing a delayed duplicate.
+            localReceiver.setLocalPlaybackMuted(true)
             self.localReceiver = localReceiver
             try Task.checkCancellation()
 
@@ -117,13 +112,9 @@ final class HostSession {
         // capture and room route have been removed.
         if shouldPauseSourceOnStop { _ = playbackController?.perform(.pause) }
         shouldPauseSourceOnStop = false
-        if #available(macOS 14.2, *), let muteTap = muteTap as? SourceMuteTap {
-            muteTap.stop()
-        }
-        muteTap = nil
         try? await audioSource?.stop()
         audioSource = nil
-        videoPicker?.cancel()
+        videoPicker?.deactivate()
         videoPicker = nil
         await videoCapture?.stop()
         videoCapture = nil
@@ -154,6 +145,11 @@ final class HostSession {
         host?.setParticipantLevel(id: id, volume: volume, muted: muted)
     }
 
+    /// Applies voice ducking to the broadcaster's own synchronized receiver.
+    func setVoiceDuckingActive(_ active: Bool) {
+        localReceiver?.setVoiceDuckingActive(active)
+    }
+
     @discardableResult
     func sendRoomMediaCommand(_ command: RoomMediaCommand) -> Bool {
         host?.sendRoomMediaCommand(command) ?? false
@@ -166,15 +162,22 @@ final class HostSession {
 
     func setVideoEnabled(_ enabled: Bool) async throws {
         if enabled {
-            guard videoPicker == nil, videoCapture == nil, let host else { return }
+            guard videoPicker == nil, videoCapture == nil else {
+                throw WERAIError("A display or window selection is already active.")
+            }
+            guard let host else { throw CancellationError() }
             let picker = ScreenContentPicker()
             videoPicker = picker
-            defer {
+            let filter: SCContentFilter
+            do {
+                filter = try await picker.selectDisplayOrWindow()
+                try Task.checkCancellation()
+                guard self.host === host else { throw CancellationError() }
+            } catch {
+                picker.deactivate()
                 if videoPicker === picker { videoPicker = nil }
+                throw error
             }
-            let filter = try await picker.selectDisplayOrWindow()
-            try Task.checkCancellation()
-            guard self.host === host else { throw CancellationError() }
             let encoder = VideoEncoder { frame in host.acceptVideo(frame) }
             let capture = ScreenVideoCapture()
             videoEncoder = encoder
@@ -195,6 +198,8 @@ final class HostSession {
                 }
                 host.setVideoEnabled(true)
             } catch {
+                picker.deactivate()
+                if videoPicker === picker { videoPicker = nil }
                 if videoCapture === capture { videoCapture = nil }
                 if videoEncoder === encoder { videoEncoder = nil }
                 await capture.stop()
@@ -202,7 +207,7 @@ final class HostSession {
                 throw error
             }
         } else {
-            videoPicker?.cancel()
+            videoPicker?.deactivate()
             videoPicker = nil
             host?.setVideoEnabled(false)
             await videoCapture?.stop()
@@ -215,6 +220,8 @@ final class HostSession {
     @MainActor
     private func handleVideoCaptureStopped(_ capture: ScreenVideoCapture, error: Error) async -> Bool {
         guard videoCapture === capture else { return false }
+        videoPicker?.deactivate()
+        videoPicker = nil
         videoCapture = nil
         let encoder = videoEncoder
         videoEncoder = nil
@@ -228,11 +235,8 @@ final class HostSession {
     func stopImmediately() {
         if shouldPauseSourceOnStop { _ = playbackController?.perform(.pause) }
         shouldPauseSourceOnStop = false
-        if #available(macOS 14.2, *), let muteTap = muteTap as? SourceMuteTap {
-            muteTap.stop()
-        }
         if let audioSource { Task { try? await audioSource.stop() } }
-        videoPicker?.cancel()
+        videoPicker?.deactivate()
         videoPicker = nil
         localReceiver?.stop()
         nowPlayingMonitor?.stop()

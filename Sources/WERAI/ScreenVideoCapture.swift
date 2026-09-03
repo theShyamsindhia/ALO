@@ -46,12 +46,29 @@ final class ScreenContentPicker: NSObject, SCContentSharingPickerObserver {
         )
     }
 
+    /// Keep the system picker active while its stream is alive. Deactivation
+    /// happens only when sharing stops or selection fails.
+    func deactivate() {
+        isCancelled = true
+        if let continuation {
+            self.continuation = nil
+            continuation.resume(throwing: CancellationError())
+        }
+        let picker = SCContentSharingPicker.shared
+        picker.remove(self)
+        picker.isActive = false
+    }
+
     nonisolated func contentSharingPicker(
         _ picker: SCContentSharingPicker,
         didUpdateWith filter: SCContentFilter,
         for stream: SCStream?
     ) {
-        Task { @MainActor in finish(with: .success(filter), picker: picker) }
+        Task { @MainActor in
+            guard let continuation else { return }
+            self.continuation = nil
+            continuation.resume(returning: filter)
+        }
     }
 
     nonisolated func contentSharingPicker(_ picker: SCContentSharingPicker, didCancelFor stream: SCStream?) {

@@ -13,9 +13,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.13.11</string>
+    <string>0.13.12</string>
     <key>CFBundleVersion</key>
-    <string>42</string>
+    <string>43</string>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © 2026 Shyam Sindiya</string>
     <key>CFBundleIconFile</key>
@@ -27,9 +27,9 @@
     <key>NSHighResolutionCapable</key>
     <true/>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>ALO uses this Mac's microphone only while you hold push-to-talk or keep a voice line open.</string>
+	<string>ALO uses this Mac's microphone only while you use Talk or join an Open Line.</string>
 	<key>NSScreenCaptureUsageDescription</key>
-	<string>ALO uses Screen &amp; System Audio Recording only when you broadcast room audio or your main display.</string>
+	<string>ALO records the display or window and system audio you choose only while you are broadcasting.</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>ALO finds and streams audio, shared screens, room messages, and current track artwork to Macs on your local network.</string>
     <key>NSBonjourServices</key>

@@ -111,17 +111,92 @@ struct WalkieTalkieAudioTests {
         #expect(tracker.lastSequences["bob"] == 1)
     }
 
-    @Test("Voice backlog is reset before it becomes audibly stale")
+    @Test("Incoming voice is dropped before queued audio becomes stale")
     func boundedVoiceBacklog() {
-        #expect(!WalkieTalkiePlaybackTracker.shouldResetBuffer(
+        #expect(!WalkieTalkiePlaybackTracker.shouldDropIncomingBuffer(
             scheduledFrames: 2_000,
             incomingFrames: 640,
             maximumFrames: 2_880
         ))
-        #expect(WalkieTalkiePlaybackTracker.shouldResetBuffer(
+        #expect(WalkieTalkiePlaybackTracker.shouldDropIncomingBuffer(
             scheduledFrames: 2_500,
             incomingFrames: 640,
             maximumFrames: 2_880
         ))
+    }
+
+    @Test("A rapid began after ended replaces the draining receiver session")
+    func endedSessionRequiresFreshReceiverState() {
+        var lifecycle = VoicePlaybackSessionLifecycle()
+
+        let initialBeginNeedsReplacement = lifecycle.beginRequiresReplacement()
+        #expect(!initialBeginNeedsReplacement)
+        lifecycle.markEnding()
+        #expect(lifecycle.isEnding)
+        let revivedBeginNeedsReplacement = lifecycle.beginRequiresReplacement()
+        #expect(revivedBeginNeedsReplacement)
+        #expect(!lifecycle.isEnding)
+    }
+
+    @Test("Microphone chunks are packetized into exact 20 ms frames")
+    func exactVoicePacketization() throws {
+        let packetizer = VoicePacketizer()
+        let source = Data((0..<1_280).map { UInt8($0 % 251) })
+
+        #expect(packetizer.append(source.prefix(117)).isEmpty)
+        let first = packetizer.append(source[117..<790])
+        let second = packetizer.append(source[790...])
+
+        #expect(first.count == 1)
+        #expect(second.count == 1)
+        #expect(first[0].count == 640)
+        #expect(second[0].count == 640)
+        #expect(first[0] + second[0] == source)
+        #expect(packetizer.pendingByteCount == 0)
+    }
+
+    @Test("Voice jitter buffer waits 80 ms and restores packet order")
+    func jitterBufferStartupAndOrdering() {
+        var jitter = VoiceJitterBuffer()
+        let p1 = Data([1, 0])
+        let p2 = Data([2, 0])
+        let p3 = Data([3, 0])
+        let p4 = Data([4, 0])
+
+        #expect(jitter.insert(sequence: 2, data: p2).isEmpty)
+        #expect(jitter.insert(sequence: 1, data: p1).isEmpty)
+        #expect(jitter.insert(sequence: 4, data: p4).isEmpty)
+        let output = jitter.insert(sequence: 3, data: p3)
+
+        #expect(output == [.audio(p1), .audio(p2), .audio(p3), .audio(p4)])
+        #expect(jitter.isStarted)
+        #expect(jitter.expectedSequence == 5)
+    }
+
+    @Test("Voice jitter buffer conceals a small gap and rejects its late packet")
+    func jitterBufferGapConcealment() {
+        var jitter = VoiceJitterBuffer(startupPacketCount: 1)
+        let packet = Data([1, 0])
+
+        #expect(jitter.insert(sequence: 1, data: packet) == [.audio(packet)])
+        #expect(jitter.insert(sequence: 3, data: packet).isEmpty)
+        #expect(jitter.insert(sequence: 4, data: packet) == [
+            .silence(frames: 320), .audio(packet), .audio(packet),
+        ])
+        #expect(jitter.concealedPacketCount == 1)
+        #expect(jitter.insert(sequence: 2, data: packet).isEmpty)
+        #expect(jitter.lateDropCount == 1)
+    }
+
+    @Test("Voice jitter buffer bounds a session that never becomes contiguous")
+    func jitterBufferPendingBound() {
+        var jitter = VoiceJitterBuffer(startupPacketCount: 4, maximumPendingPackets: 4)
+        for sequence in stride(from: UInt64(1), through: 11, by: 2) {
+            _ = jitter.insert(sequence: sequence, data: Data([UInt8(sequence), 0]))
+        }
+
+        #expect(jitter.pending.count == 4)
+        #expect(jitter.pending.keys.min() == 5)
+        #expect(jitter.lateDropCount == 2)
     }
 }
