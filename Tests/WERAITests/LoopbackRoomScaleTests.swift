@@ -647,6 +647,74 @@ struct LoopbackRoomScaleTests {
         #expect(broadcasterOutput.resyncCutovers.last == firstListener.resyncCutovers.last)
     }
 
+    @Test("A listener joining after broadcaster playback begins inherits the active timeline")
+    func lateListenerCannotRetimeActiveBroadcaster() throws {
+        let ready = DispatchSemaphore(value: 0)
+        let state = PortState()
+        let host = HostServer(
+            roomName: "Late-listener timing test \(UUID().uuidString)",
+            advertise: false,
+            listenerReadyHandler: { port in
+                state.set(port)
+                ready.signal()
+            },
+            localParticipantID: "loopback-peer-109"
+        )
+        try host.start()
+        defer { host.stop() }
+        guard ready.wait(timeout: .now() + 3) == .success, let port = state.port else {
+            throw LoopbackTestError.hostDidNotStart
+        }
+
+        let broadcasterOutput = HeadlessLoopbackPeer(index: 109)
+        try broadcasterOutput.start(hostPort: port)
+        defer { broadcasterOutput.stop() }
+        guard broadcasterOutput.waitUntilJoined(timeout: 3) else {
+            throw LoopbackTestError.peerDidNotJoin
+        }
+
+        let samples = [Int16](
+            repeating: 0,
+            count: Int(AudioPacket.framesPerPacket) * Int(AudioPacket.channelCount)
+        )
+        let playbackStart = MonotonicClock.nowNanos()
+        host.acceptAudio(samples: samples, captureTimeNanos: playbackStart)
+        #expect(waitUntil(timeout: 2) { broadcasterOutput.packetCount == 1 })
+
+        let lateListener = HeadlessLoopbackPeer(index: 110)
+        try lateListener.start(hostPort: port)
+        defer { lateListener.stop() }
+        guard lateListener.waitUntilJoined(timeout: 3) else {
+            throw LoopbackTestError.peerDidNotJoin
+        }
+
+        host.acceptAudio(
+            samples: samples,
+            captureTimeNanos: playbackStart + 20_000_000
+        )
+        #expect(waitUntil(timeout: 2) { lateListener.packetCount >= 1 })
+        #expect(lateListener.playoutDelays.last == RoomTiming.defaultPlayoutDelayNanos)
+
+        lateListener.recommendPlayoutDelay(RoomTiming.maximumPlayoutDelayNanos)
+        lateListener.sendPing()
+        #expect(lateListener.waitForPong(timeout: 2))
+        Thread.sleep(forTimeInterval: 0.1)
+
+        #expect(lateListener.playoutDelays.last == RoomTiming.defaultPlayoutDelayNanos)
+        #expect(broadcasterOutput.playoutDelays.last == RoomTiming.defaultPlayoutDelayNanos)
+        #expect(lateListener.resyncCommandCount == 0)
+        #expect(broadcasterOutput.resyncCommandCount == 0)
+
+        let packetsBeforeRecommendation = lateListener.packetCount
+        host.acceptAudio(
+            samples: samples,
+            captureTimeNanos: playbackStart + 40_000_000
+        )
+        #expect(waitUntil(timeout: 2) {
+            lateListener.packetCount > packetsBeforeRecommendation
+        })
+    }
+
     private func runRoom(
         peerCount: Int,
         linkBitsPerSecond: UInt64?,

@@ -59,10 +59,11 @@ final class HostServer {
     private var lastAudioCaptureNanos: UInt64?
     private var mediaQueue = [RoomQueueItem]()
     private var groupPlayoutDelayNanos = RoomTiming.defaultPlayoutDelayNanos
-    // Nil until an audio packet sees at least one real listener. Capture starts
-    // before the broadcaster's local Receiver in production, so freezing an
-    // empty set would permanently disable adaptation. Once the first listener
-    // cohort exists, later joiners inherit rather than retime the live room.
+    // Nil until an audio packet sees at least one identified audible output.
+    // The set contains only remote outputs that were already present at that
+    // first playback boundary. It may intentionally be empty when the
+    // broadcaster's local Receiver starts alone: a later listener must inherit
+    // that established timeline instead of retiming and resetting it.
     private var timingEligibleClients: Set<ObjectIdentifier>?
 
     init(
@@ -164,19 +165,17 @@ final class HostServer {
             guard !packets.isEmpty else { return }
             let audioClientEntries = self.clients.filter { $0.value.audio != nil }
             if self.timingEligibleClients == nil {
-                let firstRemoteListeners = audioClientEntries.compactMap {
+                let identifiedOutputs = audioClientEntries.filter { $0.value.id != nil }
+                let initialRemoteListeners = identifiedOutputs.compactMap {
                     identifier, client -> ObjectIdentifier? in
                     guard let id = client.id, id != self.localParticipantID else { return nil }
                     return identifier
                 }
-                // Production capture starts before the broadcaster's local
-                // Receiver connects. Do not freeze eligibility to an empty set
-                // on those first packets: the first real listener must still be
-                // able to raise the shared buffer for the room. Once at least
-                // one listener is present, freeze this cohort so later joiners
-                // cannot retime an established live timeline.
-                if !firstRemoteListeners.isEmpty {
-                    self.timingEligibleClients = Set(firstRemoteListeners)
+                // Capture can start before any Receiver has joined the media
+                // server, so an entirely empty transport does not establish a
+                // timeline. The broadcaster's identified local output does.
+                if !identifiedOutputs.isEmpty {
+                    self.timingEligibleClients = Set(initialRemoteListeners)
                 }
             }
 
