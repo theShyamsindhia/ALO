@@ -751,13 +751,12 @@ private enum FloatingMetrics {
     static let queueHeight: CGFloat = 392
     static let videoHeight: CGFloat = 476
     static let permissionHeight: CGFloat = 244
-    static let walkieBarHeight: CGFloat = 50
-    static let walkieDragHandleHeight: CGFloat = 16
-    static let walkieBarMinWidth: CGFloat = 220
+    static let walkieBarHeight: CGFloat = 56
+    static let walkieBarMinWidth: CGFloat = 300
     static let walkieBarMaxWidth: CGFloat = 720
 
     static func walkieBarWidth(participantCount: Int) -> CGFloat {
-        min(walkieBarMaxWidth, max(walkieBarMinWidth, CGFloat(participantCount) * 40 + 204))
+        min(walkieBarMaxWidth, max(walkieBarMinWidth, CGFloat(participantCount) * 40 + 252))
     }
 
     static func windowHeight(for contentHeight: CGFloat) -> CGFloat {
@@ -4123,6 +4122,28 @@ private struct FlatToolButtonStyle: ButtonStyle {
     }
 }
 
+private struct WalkieActionButtonStyle: ButtonStyle {
+    let active: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.roomAccent) private var roomAccent
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(active ? Palette.selectedControlText : Palette.controlIcon)
+            .background(
+                active
+                    ? roomAccent
+                    : configuration.isPressed ? Palette.controlHover : Color.clear
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .scaleEffect(!reduceMotion && configuration.isPressed ? 0.94 : 1)
+            .animation(
+                reduceMotion ? nil : .spring(response: 0.20, dampingFraction: 0.82),
+                value: configuration.isPressed
+            )
+    }
+}
+
 private struct SetupIconButtonStyle: ButtonStyle {
     var filled = false
     var active = false
@@ -4262,19 +4283,6 @@ private struct WindowDragRegion: NSViewRepresentable {
     }
 }
 
-private struct BottomDragHandle: View {
-    var body: some View {
-        Capsule()
-            .fill(Palette.controlIcon.opacity(0.34))
-            .frame(width: 72, height: 4)
-            .frame(width: 132, height: 16)
-            .contentShape(Rectangle())
-            .overlay(WindowDragRegion())
-            .help("Drag to move the Talk bar")
-            .accessibilityLabel("Drag the Talk bar")
-    }
-}
-
 private struct DeviceAvatar: View {
     let emoji: String
     let colorHex: String
@@ -4397,13 +4405,25 @@ private struct WalkieTalkieTargetIcon: View {
         .accessibilityValue(accessibilityValue(selected: selected, incoming: incoming, linePeer: linePeer))
     }
 
+    @ViewBuilder
     private var avatar: some View {
-        DeviceAvatar(
-            emoji: icon,
-            colorHex: colorHex,
-            profileImageData: profileImageData,
-            size: 30
-        )
+        if id == nil {
+            ZStack {
+                Circle().fill(model.roomAccentColor.opacity(0.16))
+                Image(systemName: "person.2.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(model.roomAccentColor)
+            }
+            .frame(width: 30, height: 30)
+            .overlay(Circle().stroke(model.roomAccentColor.opacity(0.34), lineWidth: 1))
+        } else {
+            DeviceAvatar(
+                emoji: icon,
+                colorHex: colorHex,
+                profileImageData: profileImageData,
+                size: 30
+            )
+        }
     }
 
     private var isPushToTalkSelected: Bool {
@@ -4415,7 +4435,7 @@ private struct WalkieTalkieTargetIcon: View {
 
     private var lineColor: Color {
         switch model.openLineState {
-        case .connected: Color.purple
+        case .connected: model.roomAccentColor
         case .inviting, .invited: Color.orange
         case .idle: Color.clear
         }
@@ -4444,14 +4464,11 @@ private struct WalkieTalkieBar: View {
     var body: some View {
         Group {
             if showsCloseButton {
-                VStack(spacing: 2) {
-                    controls.glass(cornerRadius: 22)
-                    BottomDragHandle()
-                }
-                .padding(.horizontal, FloatingMetrics.windowInset)
-                .padding(.top, FloatingMetrics.windowInset)
+                controls
+                    .glass(cornerRadius: 18)
+                    .padding(FloatingMetrics.windowInset)
             } else {
-                controls.background(Palette.opaqueSurface)
+                controls
             }
         }
         .onAppear(perform: model.refreshVoiceInputs)
@@ -4460,29 +4477,109 @@ private struct WalkieTalkieBar: View {
     }
 
     private var controls: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 7) {
+            voiceState
+            targetDock
+            actionDock
+        }
+        .padding(.horizontal, 8)
+        .frame(
+            minWidth: showsCloseButton ? FloatingMetrics.walkieBarMinWidth : FloatingMetrics.width,
+            maxWidth: showsCloseButton ? .infinity : FloatingMetrics.width,
+            minHeight: FloatingMetrics.walkieBarHeight,
+            maxHeight: FloatingMetrics.walkieBarHeight
+        )
+        .background { WalkieBarBackground(colors: model.roomAtmosphereColors) }
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Palette.glassHighlight.opacity(0.72))
+                .frame(height: 1)
+        }
+    }
 
-                walkieTarget(id: nil, name: "Everyone", icon: "👥", colorHex: "3F86E8")
+    private var voiceState: some View {
+        HStack(spacing: 6) {
+            ZStack {
+                Circle().fill(model.roomAccentColor.opacity(0.14))
+                Image(systemName: "waveform")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(model.roomAccentColor)
+            }
+            .frame(width: 27, height: 27)
+            .overlay(alignment: .bottomTrailing) {
+                Circle()
+                    .fill(voiceStateColor)
+                    .frame(width: 7, height: 7)
+                    .overlay(Circle().stroke(Palette.opaqueSurface, lineWidth: 1.5))
+            }
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(remoteParticipants) { participant in
-                        let appearance = DeviceAppearance.generated(from: participant.id)
-                        walkieTarget(
-                            id: participant.id,
-                            name: participant.name,
-                            icon: participant.icon ?? appearance.icon,
-                            colorHex: participant.colorHex ?? appearance.colorHex,
-                            profileImageData: participant.profileImageData
-                        )
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Talk")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Palette.ink)
+                Text(voiceStateLabel)
+                    .font(.system(size: 8, weight: .medium, design: .rounded))
+                    .foregroundStyle(Palette.secondary)
+                    .lineLimit(1)
+            }
+        }
+        .frame(width: 78, height: 40, alignment: .leading)
+        .contentShape(Rectangle())
+        .overlay {
+            if showsCloseButton {
+                WindowDragRegion().accessibilityHidden(true)
+            }
+        }
+        .help(showsCloseButton ? "Drag to move the Talk bar" : "Talk · \(voiceStateLabel)")
+        .accessibilityElement(children: .combine)
+    }
+
+    private var targetDock: some View {
+        HStack(spacing: 4) {
+            walkieTarget(id: nil, name: "Everyone", icon: "", colorHex: "3F86E8")
+
+            if remoteParticipants.isEmpty {
+                Text("Waiting for people")
+                    .font(.system(size: 9, weight: .medium, design: .rounded))
+                    .foregroundStyle(Palette.secondary)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Rectangle()
+                    .fill(Palette.strokeStrong.opacity(0.58))
+                    .frame(width: 1, height: 20)
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 4) {
+                        ForEach(remoteParticipants) { participant in
+                            let appearance = DeviceAppearance.generated(from: participant.id)
+                            walkieTarget(
+                                id: participant.id,
+                                name: participant.name,
+                                icon: participant.icon ?? appearance.icon,
+                                colorHex: participant.colorHex ?? appearance.colorHex,
+                                profileImageData: participant.profileImageData
+                            )
+                        }
                     }
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
+                .scrollClipDisabled()
+                .frame(maxWidth: .infinity)
             }
-            .scrollClipDisabled()
-            .frame(maxWidth: .infinity)
+        }
+        .padding(.horizontal, 4)
+        .frame(maxWidth: .infinity)
+        .frame(height: 40)
+        .background(Palette.messageSurface.opacity(0.76))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Palette.glassHighlight.opacity(0.62), lineWidth: 1)
+        )
+    }
 
+    private var actionDock: some View {
+        HStack(spacing: 0) {
             openLineControls
 
             communicationButton(
@@ -4504,81 +4601,109 @@ private struct WalkieTalkieBar: View {
             }
             .keyboardShortcut("2", modifiers: .command)
 
-            Menu {
-                    Menu("Microphone input") {
-                        Button {
-                            model.selectVoiceInput(nil)
-                        } label: {
-                            if model.selectedVoiceInputUID == nil {
-                                Label(systemDefaultMicrophoneLabel, systemImage: "checkmark")
-                            } else {
-                                Text(systemDefaultMicrophoneLabel)
-                            }
-                        }
-                        Divider()
-                        ForEach(model.voiceInputDevices.filter { !$0.isSystemDefault }) { input in
-                            Button {
-                                model.selectVoiceInput(input.id)
-                            } label: {
-                                if input.id == model.selectedVoiceInputUID {
-                                    Label(input.name, systemImage: "checkmark")
-                                } else {
-                                    Text(input.name)
-                                }
-                            }
-                        }
-                        Divider()
-                        Button("Refresh microphones") { model.refreshVoiceInputs() }
-                    }
-                    Divider()
-                    Button(model.incomingCallsMuted ? "Unmute incoming voice" : "Mute incoming voice") {
-                        model.toggleIncomingCallsMute()
-                    }
-                    Button(model.incomingMediaMuted ? "Unmute incoming media" : "Mute incoming media") {
-                        model.toggleIncomingMediaMute()
-                    }
-                    Divider()
-                    Button(model.walkieBarHidden ? "Show Talk bar" : "Hide Talk bar") {
-                        model.walkieBarHidden ? model.showWalkieBar() : model.hideWalkieBar()
-                    }
-                    Button(model.floatingBarHidden ? "Show media floating bar" : "Hide media floating bar") {
-                        model.floatingBarHidden ? model.showFloatingBar() : model.hideFloatingBar()
-                    }
-                    Divider()
-                    Button("Shortcut Mapper…") {
-                        (NSApp.delegate as? WERAIAppDelegate)?.showShortcutMapper(nil)
-                    }
-                    Button("Diagnostics…") {
-                        (NSApp.delegate as? WERAIAppDelegate)?.showDiagnostics(nil)
-                    }
-            } label: {
-                Image(systemName: "slider.horizontal.3")
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(width: 30, height: 28)
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize(horizontal: true, vertical: false)
-            .help("Talk settings · \(selectedMicrophoneName)")
+            settingsMenu
 
-                if showsCloseButton {
-                    Button(action: model.hideWalkieBar) {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 10, weight: .bold))
-                            .frame(width: 24, height: 24)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Hide Talk bar")
-                    .accessibilityLabel("Hide Talk bar")
+            if showsCloseButton {
+                Button(action: model.hideWalkieBar) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .frame(width: 30, height: 30)
                 }
+                .buttonStyle(WalkieActionButtonStyle(active: false))
+                .help("Hide Talk bar")
+                .accessibilityLabel("Hide Talk bar")
+            }
         }
-        .padding(.horizontal, 10)
-        .frame(
-            minWidth: showsCloseButton ? FloatingMetrics.walkieBarMinWidth : FloatingMetrics.width,
-            maxWidth: showsCloseButton ? .infinity : FloatingMetrics.width,
-            minHeight: FloatingMetrics.walkieBarHeight,
-            maxHeight: FloatingMetrics.walkieBarHeight
+        .padding(3)
+        .frame(height: 40)
+        .background(Palette.messageSurface.opacity(0.76))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Palette.glassHighlight.opacity(0.62), lineWidth: 1)
         )
-        .background(ArtworkAtmosphere(colors: model.roomAtmosphereColors, strength: 0.72))
+    }
+
+    private var settingsMenu: some View {
+        Menu {
+            Menu("Microphone input") {
+                Button {
+                    model.selectVoiceInput(nil)
+                } label: {
+                    if model.selectedVoiceInputUID == nil {
+                        Label(systemDefaultMicrophoneLabel, systemImage: "checkmark")
+                    } else {
+                        Text(systemDefaultMicrophoneLabel)
+                    }
+                }
+                Divider()
+                ForEach(model.voiceInputDevices.filter { !$0.isSystemDefault }) { input in
+                    Button {
+                        model.selectVoiceInput(input.id)
+                    } label: {
+                        if input.id == model.selectedVoiceInputUID {
+                            Label(input.name, systemImage: "checkmark")
+                        } else {
+                            Text(input.name)
+                        }
+                    }
+                }
+                Divider()
+                Button("Refresh microphones") { model.refreshVoiceInputs() }
+            }
+            Divider()
+            Button(model.incomingCallsMuted ? "Unmute incoming voice" : "Mute incoming voice") {
+                model.toggleIncomingCallsMute()
+            }
+            Button(model.incomingMediaMuted ? "Unmute incoming media" : "Mute incoming media") {
+                model.toggleIncomingMediaMute()
+            }
+            Divider()
+            Button(model.walkieBarHidden ? "Show Talk bar" : "Hide Talk bar") {
+                model.walkieBarHidden ? model.showWalkieBar() : model.hideWalkieBar()
+            }
+            Button(model.floatingBarHidden ? "Show media floating bar" : "Hide media floating bar") {
+                model.floatingBarHidden ? model.showFloatingBar() : model.hideFloatingBar()
+            }
+            Divider()
+            Button("Shortcut Mapper…") {
+                (NSApp.delegate as? WERAIAppDelegate)?.showShortcutMapper(nil)
+            }
+            Button("Diagnostics…") {
+                (NSApp.delegate as? WERAIAppDelegate)?.showDiagnostics(nil)
+            }
+        } label: {
+            Image(systemName: "slider.horizontal.3")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Palette.controlIcon)
+                .frame(width: 30, height: 30)
+                .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize(horizontal: true, vertical: false)
+        .help("Talk settings · \(selectedMicrophoneName)")
+        .accessibilityLabel("Talk settings")
+    }
+
+    private var voiceStateLabel: String {
+        if model.walkieStarting { return "Starting" }
+        if model.walkieTalking { return "Speaking" }
+        if !model.incomingWalkieSpeakerIDs.isEmpty { return "Listening" }
+        switch model.openLineState {
+        case .invited: return "Incoming"
+        case .inviting: return "Calling"
+        case .connected: return "Open line"
+        case .idle: return "Ready"
+        }
+    }
+
+    private var voiceStateColor: Color {
+        if !model.incomingWalkieSpeakerIDs.isEmpty { return .green }
+        if model.walkieTalking || model.walkieStarting || model.openLineState.isSendingMicrophone {
+            return model.roomAccentColor
+        }
+        return Palette.muted
     }
 
     private var remoteParticipants: [RoomParticipant] {
@@ -4660,7 +4785,7 @@ private struct WalkieTalkieBar: View {
                 .font(.system(size: 12, weight: .semibold))
                 .frame(width: 30, height: 30)
         }
-        .buttonStyle(FlatToolButtonStyle(active: active))
+        .buttonStyle(WalkieActionButtonStyle(active: active))
         .overlay(alignment: .topTrailing) {
             if badge > 0 {
                 Text("\(min(badge, 99))")
@@ -4700,7 +4825,7 @@ private final class WalkieTalkieWindowController {
                 width: FloatingMetrics.walkieBarWidth(participantCount: model.participants.count)
                     + FloatingMetrics.windowInset * 2,
                 height: FloatingMetrics.windowHeight(
-                    for: FloatingMetrics.walkieBarHeight + FloatingMetrics.walkieDragHandleHeight
+                    for: FloatingMetrics.walkieBarHeight
                 )
             ),
             styleMask: [.borderless, .resizable],
@@ -4720,13 +4845,13 @@ private final class WalkieTalkieWindowController {
         panel.minSize = NSSize(
             width: FloatingMetrics.walkieBarMinWidth + FloatingMetrics.windowInset * 2,
             height: FloatingMetrics.windowHeight(
-                for: FloatingMetrics.walkieBarHeight + FloatingMetrics.walkieDragHandleHeight
+                for: FloatingMetrics.walkieBarHeight
             )
         )
         panel.maxSize = NSSize(
             width: FloatingMetrics.walkieBarMaxWidth + FloatingMetrics.windowInset * 2,
             height: FloatingMetrics.windowHeight(
-                for: FloatingMetrics.walkieBarHeight + FloatingMetrics.walkieDragHandleHeight
+                for: FloatingMetrics.walkieBarHeight
             )
         )
         let hostingView = NSHostingView(rootView: WalkieTalkieBar(model: model))
@@ -5078,6 +5203,34 @@ private struct ArtworkAtmosphere: View {
             .frame(width: geometry.size.width, height: geometry.size.height)
         }
         .clipped()
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+private struct WalkieBarBackground: View {
+    let colors: [Color]
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    var body: some View {
+        ZStack {
+            ArtworkAtmosphere(colors: colors, strength: 0.46)
+            Rectangle()
+                .fill(
+                    reduceTransparency
+                        ? AnyShapeStyle(Palette.opaqueSurface)
+                        : AnyShapeStyle(.ultraThinMaterial)
+                )
+            if !reduceTransparency {
+                Rectangle()
+                    .fill(
+                        colorScheme == .dark
+                            ? Palette.opaqueSurface.opacity(0.34)
+                            : Color.white.opacity(0.42)
+                    )
+            }
+        }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
     }
