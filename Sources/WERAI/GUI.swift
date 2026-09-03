@@ -2,6 +2,7 @@ import AppKit
 import AVFoundation
 import Combine
 import CoreGraphics
+import QuartzCore
 import SwiftUI
 import UniformTypeIdentifiers
 import WERAICore
@@ -33,6 +34,35 @@ enum GUIApplication {
 
 @MainActor
 private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
+    private enum SetupWindow {
+        static let width: CGFloat = 440
+        static let collapseDuration: TimeInterval = 0.28
+
+        @MainActor static func height(for model: WERAIViewModel) -> CGFloat {
+            switch model.phase {
+            case .idle:
+                guard model.mode == .listen else { return 260 }
+                let roomCount = model.roomChoices.count
+                let listHeight: CGFloat
+                if roomCount == 0 {
+                    listHeight = 170
+                } else {
+                    let visibleRows = min(roomCount, 4)
+                    listHeight = CGFloat(visibleRows * 58 + max(0, visibleRows - 1))
+                }
+                let privateKeyHeight: CGFloat = model.selectedRoomConfiguration?.isPrivate == true
+                    && model.selectedRoomConfiguration?.accessKey == nil ? 52 : 0
+                return 184 + listHeight + privateKeyHeight
+            case .starting:
+                return 270
+            case .failed:
+                return 330
+            case .live:
+                return 270
+            }
+        }
+    }
+
     private let model = WERAIViewModel()
     private let updater = AppUpdater()
     private var window: NSWindow?
@@ -46,24 +76,34 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
     private var videoFullScreenToggleObserver: AnyCancellable?
     private var floatingBarObserver: AnyCancellable?
     private var walkieBarObserver: AnyCancellable?
+    private var setupLayoutObserver: AnyCancellable?
     private var terminationSignalSources = [DispatchSourceSignal]()
+    private var setupWindowFrame: NSRect?
+    private var setupTransitionGeneration = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installTerminationSignalHandlers()
         installMainMenu()
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1_040, height: 720),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            contentRect: NSRect(
+                x: 0,
+                y: 0,
+                width: SetupWindow.width,
+                height: SetupWindow.height(for: model)
+            ),
+            styleMask: [.titled, .closable, .miniaturizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         window.title = ALOAppFlavor.displayName
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
-        window.backgroundColor = .windowBackgroundColor
-        window.minSize = NSSize(width: 860, height: 600)
+        window.backgroundColor = .clear
+        window.isOpaque = false
+        window.isMovableByWindowBackground = true
         window.contentView = NSHostingView(rootView: WERAIView(model: model))
         window.center()
+        setupWindowFrame = window.frame
         window.isReleasedWhenClosed = false
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -115,6 +155,17 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
                 DispatchQueue.main.async { self?.updateWalkieBar(hidden: hidden) }
             }
 
+        setupLayoutObserver = Publishers.CombineLatest4(
+            model.$mode.removeDuplicates(),
+            model.$savedRooms,
+            model.$nearbyRooms,
+            model.$selectedRoomID.removeDuplicates()
+        )
+        .dropFirst()
+        .sink { [weak self] _ in
+            DispatchQueue.main.async { self?.resizeSetupWindow(animated: true) }
+        }
+
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -154,10 +205,10 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateWindows(for phase: WERAIViewModel.Phase) {
+        guard phase == model.phase else { return }
+        setupTransitionGeneration &+= 1
         if phase == .live {
-            window?.orderOut(nil)
-            updateFloatingBar(hidden: model.floatingBarHidden)
-            updateWalkieBar(hidden: model.walkieBarHidden)
+            collapseSetupWindowIntoMenuBar(generation: setupTransitionGeneration)
         } else {
             statusMenuController?.closePopover()
             fullScreenVideoController?.close()
@@ -166,7 +217,80 @@ private final class WERAIAppDelegate: NSObject, NSApplicationDelegate {
             roomBarController = nil
             walkieTalkieBarController?.close()
             walkieTalkieBarController = nil
+            restoreSetupWindow()
+            resizeSetupWindow(animated: window?.isVisible == true)
             window?.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    private func collapseSetupWindowIntoMenuBar(generation: Int) {
+        guard let window else { return }
+        let finish = { [weak self] in
+            guard let self, generation == self.setupTransitionGeneration, self.model.phase == .live else { return }
+            window.orderOut(nil)
+            self.restoreSetupWindow()
+            self.updateFloatingBar(hidden: self.model.floatingBarHidden)
+            self.updateWalkieBar(hidden: self.model.walkieBarHidden)
+        }
+        guard window.isVisible,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+              let statusFrame = statusMenuController?.statusItemFrameOnScreen
+        else {
+            finish()
+            return
+        }
+
+        setupWindowFrame = window.frame
+        let targetSize = NSSize(width: 28, height: 22)
+        let targetFrame = NSRect(
+            x: statusFrame.midX - targetSize.width / 2,
+            y: statusFrame.midY - targetSize.height / 2,
+            width: targetSize.width,
+            height: targetSize.height
+        )
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = SetupWindow.collapseDuration
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.32, 0.0, 0.2, 1.0)
+            window.animator().alphaValue = 0.08
+            window.animator().setFrame(targetFrame, display: true)
+        } completionHandler: {
+            finish()
+        }
+    }
+
+    private func restoreSetupWindow() {
+        guard let window else { return }
+        if let setupWindowFrame { window.setFrame(setupWindowFrame, display: false) }
+        window.alphaValue = 1
+    }
+
+    private func resizeSetupWindow(animated: Bool) {
+        guard model.phase != .live, let window else { return }
+        let contentRect = NSRect(
+            x: 0,
+            y: 0,
+            width: SetupWindow.width,
+            height: SetupWindow.height(for: model)
+        )
+        var targetFrame = window.frameRect(forContentRect: contentRect)
+        targetFrame.origin.x = window.frame.midX - targetFrame.width / 2
+        targetFrame.origin.y = window.frame.maxY - targetFrame.height
+        guard abs(window.frame.height - targetFrame.height) > 0.5 else {
+            setupWindowFrame = targetFrame
+            return
+        }
+        setupWindowFrame = targetFrame
+        guard animated,
+              window.isVisible,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        else {
+            window.setFrame(targetFrame, display: true)
+            return
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.24
+            context.timingFunction = CAMediaTimingFunction(controlPoints: 0.32, 0.0, 0.2, 1.0)
+            window.animator().setFrame(targetFrame, display: true)
         }
     }
 
@@ -373,6 +497,11 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
     func closePopover() {
         guard popover.isShown else { return }
         popover.performClose(nil)
+    }
+
+    var statusItemFrameOnScreen: NSRect? {
+        guard let button = statusItem.button, let window = button.window else { return nil }
+        return window.convertToScreen(button.convert(button.bounds, to: nil))
     }
 
     func popoverDidClose(_ notification: Notification) {
@@ -2117,7 +2246,8 @@ private struct WERAIView: View {
 
     var body: some View {
         ZStack {
-            AmbientBackground(isLive: model.phase == .live)
+            Palette.canvas
+                .ignoresSafeArea()
             switch model.phase {
             case .idle: idleView
             case .starting: progressView
@@ -2126,75 +2256,47 @@ private struct WERAIView: View {
             }
             if model.permissionNotice { permissionOverlay }
         }
-        .frame(minWidth: 860, minHeight: 600)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .tint(Palette.controlAccent)
-        .ignoresSafeArea()
     }
 
     private var idleView: some View {
-        HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 14) {
-                Text("Listen together.")
-                    .font(.system(size: 38, weight: .semibold, design: .rounded))
-                    .tracking(-1.2)
-                    .foregroundStyle(Palette.ink)
-                Text("One room for synchronized sound, conversation, and an optional shared screen.")
-                    .font(.system(size: 14, weight: .regular, design: .rounded))
-                    .foregroundStyle(Palette.secondary)
-                    .lineSpacing(3)
-                    .frame(maxWidth: 360, alignment: .leading)
-                Text("ALO \(versionLabel) · LOCAL · PEER-TO-PEER · FREE")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .tracking(0.9)
-                    .foregroundStyle(Palette.muted)
-                    .padding(.top, 8)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-
-            setupConsole
-                .frame(width: 510)
-        }
-        .padding(.horizontal, 72)
-        .padding(.top, 34)
+        setupConsole
+            .padding(.top, 34)
+            .padding(.horizontal, 20)
+            .padding(.bottom, 18)
     }
 
     private var setupConsole: some View {
-        VStack(spacing: 14) {
+        VStack(spacing: 16) {
             HStack {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(model.mode == .share ? "Create a room" : "Your rooms")
-                        .font(.system(size: 18, weight: .semibold, design: .rounded))
-                        .foregroundStyle(Palette.ink)
-                    Text(model.mode == .share ? "Create the group first. Anyone can broadcast afterward." : "Nearby and previously joined rooms")
-                        .font(.system(size: 11, design: .rounded))
-                        .foregroundStyle(Palette.secondary)
-                }
+                Text(model.mode == .share ? "New room" : "Rooms")
+                    .font(.system(size: 24, weight: .black, design: .rounded))
+                    .tracking(-0.7)
+                    .foregroundStyle(Palette.ink)
+                Text(versionLabel)
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Palette.muted)
                 Spacer()
-                Button(action: model.editDeviceIdentity) {
-                    HStack(spacing: 7) {
-                        DeviceAvatar(
-                            emoji: model.currentDeviceIcon,
-                            colorHex: model.currentDeviceColorHex,
-                            profileImageData: model.currentDeviceProfileImageData,
-                            size: 26
-                        )
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(model.currentUserName)
-                                .font(.system(size: 10, weight: .semibold))
-                                .lineLimit(1)
-                            Text("This Mac")
-                                .font(.system(size: 8))
-                                .foregroundStyle(Palette.secondary)
-                        }
+                if model.mode == .listen {
+                    Button(action: model.refreshRooms) {
+                        Image(systemName: "arrow.clockwise")
                     }
-                    .padding(.leading, 5)
-                    .padding(.trailing, 16)
-                    .frame(height: 36)
-                    .background(Palette.messageSurface)
-                    .clipShape(Capsule())
+                    .buttonStyle(SetupIconButtonStyle())
+                    .help("Refresh nearby rooms")
+                    .accessibilityLabel("Refresh nearby rooms")
                 }
-                .buttonStyle(PressScaleButtonStyle())
-                .help("Change this Mac's room name, emoji, color, or photo")
+                Button(action: model.editDeviceIdentity) {
+                    DeviceAvatar(
+                        emoji: model.currentDeviceIcon,
+                        colorHex: model.currentDeviceColorHex,
+                        profileImageData: model.currentDeviceProfileImageData,
+                        size: 28
+                    )
+                }
+                .buttonStyle(SetupIconButtonStyle())
+                .help("Edit \(model.currentUserName)")
+                .accessibilityLabel("Edit this Mac's room identity")
             }
 
             if model.mode == .share {
@@ -2203,8 +2305,7 @@ private struct WERAIView: View {
                 roomList
             }
         }
-        .padding(18)
-        .glass(cornerRadius: 24)
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     private var createRoomPanel: some View {
@@ -2228,47 +2329,64 @@ private struct WERAIView: View {
                 Button {
                     model.createPrivateRoom.toggle()
                 } label: {
-                    Label(
-                        model.createPrivateRoom ? "Private" : "Public",
-                        systemImage: model.createPrivateRoom ? "lock.fill" : "person.3.fill"
-                    )
+                    Image(systemName: model.createPrivateRoom ? "lock.fill" : "person.3.fill")
                 }
-                .buttonStyle(ToolButtonStyle(active: model.createPrivateRoom))
+                .buttonStyle(SetupIconButtonStyle(active: model.createPrivateRoom))
+                .help(model.createPrivateRoom ? "Private room" : "Public room")
+                .accessibilityLabel(model.createPrivateRoom ? "Make room public" : "Make room private")
                 Spacer()
-                Button("Back") {
+                Button {
                     withAnimation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.86)) {
                         model.mode = .listen
                     }
+                } label: {
+                    Image(systemName: "chevron.left")
                 }
-                .buttonStyle(PillButtonStyle(filled: false))
-                Button("Create room", action: model.startSharing)
-                    .buttonStyle(PillButtonStyle(filled: true))
-                    .disabled(!model.canStartSharing)
+                .buttonStyle(SetupIconButtonStyle())
+                .help("Back to rooms")
+                .accessibilityLabel("Back to rooms")
+                Button(action: model.startSharing) {
+                    Image(systemName: "arrow.right")
+                }
+                .buttonStyle(SetupIconButtonStyle(filled: true))
+                .disabled(!model.canStartSharing)
+                .help("Create and open room")
+                .accessibilityLabel("Create and open room")
             }
         }
     }
 
     private var roomList: some View {
         VStack(spacing: 10) {
-            ScrollView {
-                LazyVStack(spacing: 8) {
+            ScrollView(.vertical, showsIndicators: false) {
+                LazyVStack(spacing: 0) {
                     if model.roomChoices.isEmpty {
                         VStack(spacing: 8) {
                             Image(systemName: "dot.radiowaves.left.and.right")
-                                .font(.system(size: 22))
+                                .font(.system(size: 22, weight: .medium))
                                 .foregroundStyle(Palette.accent)
-                            Text("Looking for rooms on your network…")
-                                .font(.system(size: 12, design: .rounded))
-                                .foregroundStyle(Palette.secondary)
                         }
-                        .frame(maxWidth: .infinity, minHeight: 150)
+                        .frame(maxWidth: .infinity, minHeight: 170)
+                        .help("Looking for rooms on your network")
+                        .accessibilityLabel("Looking for rooms on your network")
                     } else {
-                        ForEach(model.roomChoices) { room in roomCard(room) }
+                        ForEach(model.roomChoices) { room in
+                            roomCard(room)
+                            if room.id != model.roomChoices.last?.id {
+                                Divider()
+                                    .padding(.leading, 58)
+                            }
+                        }
                     }
                 }
-                .padding(2)
             }
             .frame(maxHeight: 270)
+            .background(Palette.messageSurface)
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .stroke(Palette.strokeStrong, lineWidth: 1)
+            )
 
             if model.selectedRoomConfiguration?.isPrivate == true,
                model.selectedRoomConfiguration?.accessKey == nil {
@@ -2280,20 +2398,25 @@ private struct WERAIView: View {
                     .background(Palette.composer)
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
-            HStack {
-                Text("Rooms stay saved on this Mac")
-                    .font(.system(size: 10, design: .rounded))
-                    .foregroundStyle(Palette.muted)
-                Spacer()
-                Button("Create room") {
+            HStack(spacing: 8) {
+                Button {
                     withAnimation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.86)) {
                         model.mode = .share
                     }
+                } label: {
+                    Image(systemName: "plus")
                 }
-                .buttonStyle(PillButtonStyle(filled: false))
-                Button("Open room", action: model.joinSelectedRoom)
-                    .buttonStyle(PillButtonStyle(filled: true))
-                    .disabled(!model.canJoin)
+                .buttonStyle(SetupIconButtonStyle())
+                .help("Create room")
+                .accessibilityLabel("Create room")
+                Spacer()
+                Button(action: model.joinSelectedRoom) {
+                    Image(systemName: "arrow.right")
+                }
+                .buttonStyle(SetupIconButtonStyle(filled: true))
+                .disabled(!model.canJoin)
+                .help("Open selected room")
+                .accessibilityLabel("Open selected room")
             }
         }
     }
@@ -2302,7 +2425,7 @@ private struct WERAIView: View {
         let nearby = model.nearbyRooms.first(where: { $0.id == room.id })
         let saved = model.savedRooms.contains(where: { $0.id == room.id })
         let selected = model.selectedRoomID == room.id
-        return HStack(spacing: 12) {
+        return HStack(spacing: 8) {
             Button {
                 model.selectedRoomID = room.id
                 model.privateRoomKey = ""
@@ -2311,12 +2434,12 @@ private struct WERAIView: View {
                     Image(systemName: room.isPrivate ? "lock.fill" : "person.3.fill")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(selected ? Palette.selectedControlText : Palette.accent)
-                        .frame(width: 34, height: 34)
+                        .frame(width: 36, height: 36)
                         .background(selected ? Palette.controlAccent : Palette.accentSoft)
-                        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                     VStack(alignment: .leading, spacing: 3) {
                         Text(room.name)
-                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .font(.system(size: 13, weight: .bold, design: .rounded))
                             .foregroundStyle(Palette.ink)
                         Text(nearby.map { "Nearby · \($0.peerCount) \($0.peerCount == 1 ? "person" : "people")" } ?? "Saved on this Mac")
                             .font(.system(size: 10, design: .rounded))
@@ -2336,19 +2459,16 @@ private struct WERAIView: View {
                     Image(systemName: "trash")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(Palette.secondary)
+                        .frame(width: 30, height: 34)
                 }
                 .buttonStyle(FlatToolButtonStyle(active: false))
                 .help("Forget this room on this Mac")
+                .accessibilityLabel("Forget \(room.name)")
             }
         }
         .padding(.horizontal, 12)
         .frame(height: 58)
-        .background(selected ? Palette.accentSoft.opacity(0.7) : Palette.composer)
-        .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 15, style: .continuous)
-                .stroke(selected ? Palette.controlAccent.opacity(0.5) : Palette.strokeStrong, lineWidth: 1)
-        )
+        .background(selected ? Palette.accentSoft.opacity(0.7) : Color.clear)
     }
 
     private var progressView: some View {
@@ -2390,14 +2510,22 @@ private struct WERAIView: View {
                         .lineSpacing(3)
                 }
                 HStack(spacing: 9) {
-                    Button("Open Recording Settings", action: model.openPrivacySettings)
-                        .buttonStyle(PillButtonStyle(filled: true))
-                    Button("Restart ALO", action: model.restartApplication)
-                        .buttonStyle(PillButtonStyle(filled: false))
+                    Button(action: model.openPrivacySettings) {
+                        Image(systemName: "gearshape")
+                    }
+                    .buttonStyle(SetupIconButtonStyle(filled: true))
+                    .help("Open Recording Settings")
+                    .accessibilityLabel("Open Recording Settings")
+                    Button(action: model.restartApplication) {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .buttonStyle(SetupIconButtonStyle())
+                    .help("Restart ALO")
+                    .accessibilityLabel("Restart ALO")
                 }
             }
             .padding(24)
-            .frame(width: 420)
+            .frame(width: 392)
             .glass(cornerRadius: 26)
         }
         .transition(.opacity)
@@ -2415,18 +2543,27 @@ private struct WERAIView: View {
                 Text(model.errorMessage ?? "Something interrupted ALO.")
                     .font(.system(size: 12, design: .rounded))
                     .foregroundStyle(Palette.secondary)
-                    .frame(maxWidth: 410, alignment: .leading)
+                    .frame(maxWidth: 336, alignment: .leading)
             }
             HStack(spacing: 9) {
-                Button("Try again", action: model.tryAgain)
-                    .buttonStyle(PillButtonStyle(filled: true))
+                Button(action: model.tryAgain) {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(SetupIconButtonStyle(filled: true))
+                .help("Try again")
+                .accessibilityLabel("Try again")
                 if model.errorIsPermissionRelated {
-                    Button("Recording Settings", action: model.openPrivacySettings)
-                        .buttonStyle(PillButtonStyle(filled: false))
+                    Button(action: model.openPrivacySettings) {
+                        Image(systemName: "gearshape")
+                    }
+                    .buttonStyle(SetupIconButtonStyle())
+                    .help("Open Recording Settings")
+                    .accessibilityLabel("Open Recording Settings")
                 }
             }
         }
         .padding(28)
+        .frame(width: 392, alignment: .leading)
         .glass(cornerRadius: 26)
     }
 }
@@ -3344,6 +3481,29 @@ private struct FlatToolButtonStyle: ButtonStyle {
             .scaleEffect(!reduceMotion && configuration.isPressed ? 0.985 : 1)
             .animation(reduceMotion ? nil : .snappy(duration: 0.22, extraBounce: 0.08), value: configuration.isPressed)
             .animation(reduceMotion ? nil : .snappy(duration: 0.26, extraBounce: 0.04), value: active)
+    }
+}
+
+private struct SetupIconButtonStyle: ButtonStyle {
+    var filled = false
+    var active = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 13, weight: .bold))
+            .foregroundStyle(filled || active ? Palette.selectedControlText : Palette.controlIcon)
+            .frame(width: 38, height: 38)
+            .background(filled || active ? Palette.controlAccent : Palette.messageSurface)
+            .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .stroke(filled || active ? Color.clear : Palette.stroke, lineWidth: 1)
+            )
+            .scaleEffect(!reduceMotion && configuration.isPressed ? 0.94 : 1)
+            .opacity(isEnabled ? (configuration.isPressed ? 0.82 : 1) : 0.34)
+            .animation(reduceMotion ? nil : .spring(response: 0.2, dampingFraction: 0.82), value: configuration.isPressed)
     }
 }
 
