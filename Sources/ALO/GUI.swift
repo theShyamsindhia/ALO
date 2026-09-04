@@ -1045,10 +1045,6 @@ struct RoomMessage: Identifiable, Equatable {
     let sentNanos: UInt64
 }
 
-private enum ChatScrollTarget: Hashable {
-    case bottom
-}
-
 private enum FloatingMetrics {
     static let width: CGFloat = 560
     static let barHeight: CGFloat = 58
@@ -1465,6 +1461,7 @@ final class ALOViewModel: ObservableObject {
     private var localNowPlayingMonitor: NowPlayingMonitor?
     private var deviceIdentityEditor: DeviceIdentityEditorController?
     private var incomingMessagePreviewTask: Task<Void, Never>?
+    private var chatViewportsAtLatest = Set<UUID>()
     private var openLineInvitationTimeoutTask: Task<Void, Never>?
     private var screenRecordingRequestAttempted = false
     private var activeRoom: String?
@@ -2490,7 +2487,6 @@ final class ALOViewModel: ObservableObject {
         dismissIncomingMessagePreview()
         showFloatingBar()
         floatingSection = .chat
-        unreadMessageCount = 0
     }
 
     func showPeopleInFloatingBar() {
@@ -2501,9 +2497,7 @@ final class ALOViewModel: ObservableObject {
 
     func setMenuBarPopoverVisible(_ visible: Bool) {
         menuBarPopoverVisible = visible
-        if visible, floatingSection == .chat {
-            unreadMessageCount = 0
-        } else if !visible, floatingBarHidden {
+        if !visible, floatingBarHidden {
             floatingSection = .collapsed
         }
     }
@@ -2514,8 +2508,8 @@ final class ALOViewModel: ObservableObject {
 
     func sendMessage() {
         let text = draftMessage.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
-        meshSession?.sendChat(text)
+        guard !text.isEmpty, phase == .live, let meshSession else { return }
+        meshSession.sendChat(text)
         draftMessage = ""
     }
 
@@ -2594,13 +2588,17 @@ final class ALOViewModel: ObservableObject {
             floatingSection = .collapsed
         } else {
             floatingSection = .chat
-            unreadMessageCount = 0
         }
     }
 
-    func markChatPresented() {
-        unreadMessageCount = 0
-        firstUnreadMessageID = nil
+    func setChatViewportAtLatest(_ id: UUID, _ atLatest: Bool) {
+        if atLatest {
+            chatViewportsAtLatest.insert(id)
+            if unreadMessageCount != 0 { unreadMessageCount = 0 }
+            if firstUnreadMessageID != nil { firstUnreadMessageID = nil }
+        } else {
+            chatViewportsAtLatest.remove(id)
+        }
     }
 
     func toggleFloatingVideo() {
@@ -2844,7 +2842,8 @@ final class ALOViewModel: ObservableObject {
                 ))
                 let chatIsVisible = self.floatingSection == .chat
                     && (!self.floatingBarHidden || self.menuBarPopoverVisible)
-                if senderID != self.currentParticipantID, !chatIsVisible {
+                let chatIsAtLatest = chatIsVisible && !self.chatViewportsAtLatest.isEmpty
+                if senderID != self.currentParticipantID, !chatIsAtLatest {
                     if self.firstUnreadMessageID == nil {
                         self.firstUnreadMessageID = self.messages[self.messages.count - 1].id
                     }
@@ -2941,6 +2940,7 @@ final class ALOViewModel: ObservableObject {
         globalShortcutTalkTargets.removeAll()
         participants = []
         messages = []
+        chatViewportsAtLatest.removeAll()
         unreadMessageCount = 0
         firstUnreadMessageID = nil
         dismissIncomingMessagePreview()
@@ -3620,17 +3620,6 @@ private struct FloatingRoomView: View {
         model.roomAccentColor
     }
 
-    private var messageTransition: AnyTransition {
-        reduceMotion
-            ? .opacity
-            : .asymmetric(
-                insertion: .move(edge: .bottom)
-                    .combined(with: .scale(scale: 0.96, anchor: .bottom))
-                    .combined(with: .opacity),
-                removal: .opacity
-            )
-    }
-
     private var hasExpandedContent: Bool {
         model.permissionNotice
             || model.floatingSection != .collapsed
@@ -4141,66 +4130,45 @@ private struct FloatingRoomView: View {
         VStack(spacing: 0) {
             chatHeader
             Divider().opacity(0.42)
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 6) {
-                        if model.messages.isEmpty {
-                            VStack(spacing: 7) {
-                                Image(systemName: "bubble.left.and.bubble.right")
-                                    .font(.system(size: 18, weight: .medium))
-                                    .foregroundStyle(Palette.controlIcon)
-                                Text("Start the conversation")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(Palette.ink)
-                                Text("Everyone in the room will see it.")
-                                    .font(.system(size: 10, weight: .medium))
-                                    .foregroundStyle(Palette.secondary)
-                            }
-                            .frame(maxWidth: .infinity, minHeight: 170, alignment: .center)
-                        }
-                        ForEach(Array(model.messages.enumerated()), id: \.element.id) { index, message in
-                            let showsSender = index == 0
-                                || model.messages[index - 1].sender != message.sender
-                            floatingMessage(message, showsSender: showsSender)
-                                .id(message.id)
-                                .transition(messageTransition)
-                        }
-                        Color.clear
-                            .frame(height: 1)
-                            .id(ChatScrollTarget.bottom)
+            ChatTranscript(
+                messages: model.messages,
+                currentParticipantID: model.currentParticipantID,
+                firstUnreadMessageID: model.firstUnreadMessageID,
+                unreadCount: model.unreadMessageCount,
+                isPresented: chatIsPresented,
+                accent: roomAccent,
+                onLatestVisibilityChanged: model.setChatViewportAtLatest
+            ) { message, showsSender in
+                floatingMessage(message, showsSender: showsSender)
+            }
+            .overlay {
+                if model.messages.isEmpty {
+                    VStack(spacing: 7) {
+                        Image(systemName: "bubble.left.and.bubble.right")
+                            .font(.system(size: 18, weight: .medium))
+                            .foregroundStyle(Palette.controlIcon)
+                        Text("Start the conversation")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(Palette.ink)
+                        Text("Everyone in the room will see it.")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(Palette.secondary)
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                }
-                .scrollIndicators(.hidden)
-                .onAppear {
-                    let firstUnread = model.firstUnreadMessageID
-                    DispatchQueue.main.async {
-                        if let firstUnread {
-                            proxy.scrollTo(firstUnread, anchor: .top)
-                        } else {
-                            proxy.scrollTo(ChatScrollTarget.bottom, anchor: .bottom)
-                        }
-                        model.markChatPresented()
-                    }
-                }
-                .onChange(of: model.messages.last?.id) {
-                    guard model.messages.last != nil else { return }
-                    DispatchQueue.main.async {
-                        withAnimation(reduceMotion ? nil : .snappy(duration: 0.24, extraBounce: 0.04)) {
-                            proxy.scrollTo(ChatScrollTarget.bottom, anchor: .bottom)
-                        }
-                    }
+                    .allowsHitTesting(false)
                 }
             }
             Divider().opacity(0.42)
             messageComposer
+                .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .animation(
-            reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.8),
-            value: model.messages.count
-        )
+    }
+
+    private var chatIsPresented: Bool {
+        model.phase == .live && model.floatingSection == .chat && !model.permissionNotice
+            && (presentation == .menuBar
+                ? model.menuBarPopoverVisible
+                : !model.floatingBarHidden && !model.videoFullscreen)
     }
 
     private var chatHeader: some View {
@@ -4251,9 +4219,9 @@ private struct FloatingRoomView: View {
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(Palette.ink)
                 .focused($composerFocused)
-                .onSubmit(model.sendMessage)
+                .onSubmit(sendChatMessage)
 
-            Button(action: model.sendMessage) {
+            Button(action: sendChatMessage) {
                 Image(systemName: "arrow.up")
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(Palette.selectedControlText)
@@ -4262,7 +4230,7 @@ private struct FloatingRoomView: View {
                     .clipShape(Circle())
             }
             .buttonStyle(PressScaleButtonStyle())
-            .disabled(!hasDraft)
+            .disabled(!hasDraft || model.phase != .live)
             .opacity(hasDraft ? 1 : 0.26)
             .scaleEffect(!reduceMotion && hasDraft ? 1 : 0.9)
             .help("Send message")
@@ -4282,13 +4250,23 @@ private struct FloatingRoomView: View {
         .padding(10)
         .onTapGesture { composerFocused = true }
         .onAppear {
-            NSApp.activate(ignoringOtherApps: true)
-            DispatchQueue.main.async { composerFocused = true }
+            if chatIsPresented {
+                NSApp.activate(ignoringOtherApps: true)
+                DispatchQueue.main.async { composerFocused = true }
+            }
+        }
+        .onChange(of: chatIsPresented) { _, visible in
+            if visible { composerFocused = true }
         }
         .animation(
             reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.72),
             value: hasDraft
         )
+    }
+
+    private func sendChatMessage() {
+        model.sendMessage()
+        composerFocused = true
     }
 
     private func floatingMessage(_ message: RoomMessage, showsSender: Bool) -> some View {
@@ -4312,6 +4290,7 @@ private struct FloatingRoomView: View {
 
                 Text(message.text)
                     .font(.system(size: 12))
+                    .fixedSize(horizontal: false, vertical: true)
                     .foregroundStyle(own ? Palette.selectedControlText : Palette.ink)
                     .padding(.horizontal, 11)
                     .padding(.vertical, 8)
@@ -5050,35 +5029,24 @@ private struct WalkieTalkieBar: View {
     }
 
     private var voiceState: some View {
-        HStack(spacing: 6) {
-            ZStack {
-                Circle().fill(model.roomAccentColor.opacity(0.14))
-                Image(systemName: "waveform")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(model.roomAccentColor)
-            }
-            .frame(width: 27, height: 27)
-            .overlay(alignment: .bottomTrailing) {
-                Circle()
-                    .fill(voiceStateColor)
-                    .frame(width: 7, height: 7)
-                    .overlay(Circle().stroke(Palette.opaqueSurface, lineWidth: 1.5))
-            }
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Talk")
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Palette.ink)
-                Text(voiceStateLabel)
-                    .font(.system(size: 8, weight: .medium, design: .rounded))
-                    .foregroundStyle(Palette.secondary)
-                    .lineLimit(1)
-            }
+        ZStack {
+            Circle().fill(model.roomAccentColor.opacity(0.14))
+            Image(systemName: "waveform")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(model.roomAccentColor)
         }
-        .frame(width: 78, height: 40, alignment: .leading)
+        .frame(width: 27, height: 27)
+        .overlay(alignment: .bottomTrailing) {
+            Circle()
+                .fill(voiceStateColor)
+                .frame(width: 7, height: 7)
+                .overlay(Circle().stroke(Palette.opaqueSurface, lineWidth: 1.5))
+        }
+        .frame(width: 32, height: 40)
         .contentShape(Rectangle())
         .help("Talk · \(voiceStateLabel)")
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Talk · \(voiceStateLabel)")
     }
 
     private var targetDock: some View {
