@@ -58,6 +58,23 @@ final class RoomStore {
         try persist(rooms)
     }
 
+    @discardableResult
+    func rename(roomID: String, to name: String) throws -> Bool {
+        var rooms = load()
+        guard let index = rooms.firstIndex(where: { $0.id == roomID }) else { return false }
+        let room = rooms[index]
+        rooms[index] = RoomConfiguration(
+            id: room.id,
+            name: name,
+            creatorPeerID: room.creatorPeerID,
+            isPrivate: room.isPrivate,
+            accessKey: room.accessKey,
+            joinedAt: room.joinedAt
+        )
+        try persist(rooms)
+        return true
+    }
+
     func forget(roomID: String) throws {
         try persist(load().filter { $0.id != roomID })
         try? FileManager.default.removeItem(at: eventsURL(roomID: roomID))

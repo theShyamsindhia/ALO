@@ -1627,6 +1627,31 @@ final class WERAIViewModel: ObservableObject {
         }
     }
 
+    @discardableResult
+    func renameRoom(roomID: String, to proposedName: String) -> Bool {
+        let name = String(proposedName.trimmingCharacters(in: .whitespacesAndNewlines).prefix(40))
+        guard phase == .idle, !name.isEmpty else { return false }
+        do {
+            guard try roomStore.rename(roomID: roomID, to: name) else { return false }
+            savedRooms = roomStore.load()
+            statusText = "Renamed space to \(name)"
+            return true
+        } catch {
+            errorMessage = "Could not rename the space: \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    func copyPrivateInviteKey(roomID: String) {
+        guard let room = savedRooms.first(where: { $0.id == roomID }),
+              room.isPrivate,
+              let key = room.accessKey
+        else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(key, forType: .string)
+        statusText = "Private space invite key copied"
+    }
+
     func copyPrivateInviteKey() {
         guard let key = activePrivateInviteKey else { return }
         NSPasteboard.general.clearContents()
@@ -2989,6 +3014,9 @@ private struct WERAIView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var roomNameFocused: Bool
     @FocusState private var privateKeyFocused: Bool
+    @FocusState private var roomRenameFocused: Bool
+    @State private var editingRoomID: String?
+    @State private var editedRoomName = ""
 
     var body: some View {
         ZStack {
@@ -3257,45 +3285,137 @@ private struct WERAIView: View {
     private func roomCard(_ room: RoomConfiguration) -> some View {
         let nearby = model.nearbyRooms.first(where: { $0.id == room.id })
         let saved = model.savedRooms.contains(where: { $0.id == room.id })
-        return Button {
-            model.selectedRoomID = room.id
-            model.privateRoomKey = ""
-            if !room.isPrivate || room.accessKey != nil {
-                model.joinSelectedRoom()
+        return HStack(spacing: 8) {
+            roomCardIcon(room)
+
+            if editingRoomID == room.id {
+                TextField("Space name", text: $editedRoomName)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(SetupPalette.ink)
+                    .focused($roomRenameFocused)
+                    .onChange(of: editedRoomName) { _, newValue in
+                        if newValue.count > 40 { editedRoomName = String(newValue.prefix(40)) }
+                    }
+                    .onSubmit { commitRoomRename(room) }
+                    .onExitCommand(perform: cancelRoomRename)
+
+                Button(action: cancelRoomRename) {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(SetupRoomActionButtonStyle())
+                .help("Cancel rename")
+                .accessibilityLabel("Cancel rename")
+
+                Button { commitRoomRename(room) } label: {
+                    Image(systemName: "checkmark")
+                }
+                .buttonStyle(SetupRoomActionButtonStyle(filled: true))
+                .disabled(normalizedEditedRoomName.isEmpty)
+                .help("Save space name")
+                .accessibilityLabel("Save space name")
+            } else {
+                Button {
+                    model.selectedRoomID = room.id
+                    model.privateRoomKey = ""
+                    if !room.isPrivate || room.accessKey != nil {
+                        model.joinSelectedRoom()
+                    }
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(room.name)
+                            .font(.system(size: 12, weight: .black, design: .rounded))
+                            .foregroundStyle(SetupPalette.ink)
+                        Text(nearby.map { "Nearby · \($0.peerCount) \($0.peerCount == 1 ? "person" : "people")" } ?? "Saved on this Mac")
+                            .font(.system(size: 9, weight: .medium, design: .rounded))
+                            .foregroundStyle(nearby == nil ? SetupPalette.secondary : SetupPalette.live)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(room.isPrivate && room.accessKey == nil ? "Enter the invite key for \(room.name)" : "Open \(room.name)")
+                .accessibilityLabel("Open \(room.name)")
+
+                if saved {
+                    roomOptionsMenu(room)
+                }
+            }
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, 6)
+        .frame(maxWidth: .infinity)
+        .frame(height: 48)
+        .background(Color.black.opacity(editingRoomID == room.id ? 0.08 : 0.055))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .animation(reduceMotion ? nil : .snappy(duration: 0.2), value: editingRoomID)
+    }
+
+    private func roomCardIcon(_ room: RoomConfiguration) -> some View {
+        Image(systemName: room.isPrivate ? "lock.fill" : "person.3.fill")
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(SetupPalette.live)
+            .frame(width: 30, height: 30)
+            .background(Color.white.opacity(0.52))
+            .clipShape(Circle())
+    }
+
+    private func roomOptionsMenu(_ room: RoomConfiguration) -> some View {
+        Menu {
+            Button {
+                beginRoomRename(room)
+            } label: {
+                Label("Rename Space", systemImage: "pencil")
+            }
+            if room.isPrivate, room.accessKey != nil {
+                Button {
+                    model.copyPrivateInviteKey(roomID: room.id)
+                } label: {
+                    Label("Copy Invite Key", systemImage: "key")
+                }
+            }
+            Divider()
+            Button(role: .destructive) {
+                model.forgetRoom(roomID: room.id)
+            } label: {
+                Label("Forget Space", systemImage: "trash")
             }
         } label: {
-            HStack(spacing: 10) {
-                Image(systemName: room.isPrivate ? "lock.fill" : "person.3.fill")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(SetupPalette.live)
-                    .frame(width: 30, height: 30)
-                    .background(Color.white.opacity(0.52))
-                    .clipShape(Circle())
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(room.name)
-                        .font(.system(size: 12, weight: .black, design: .rounded))
-                        .foregroundStyle(SetupPalette.ink)
-                    Text(nearby.map { "Nearby · \($0.peerCount) \($0.peerCount == 1 ? "person" : "people")" } ?? "Saved on this Mac")
-                        .font(.system(size: 9, weight: .medium, design: .rounded))
-                        .foregroundStyle(nearby == nil ? SetupPalette.secondary : SetupPalette.live)
-                }
-                Spacer()
-            }
-            .padding(.horizontal, 10)
-            .frame(maxWidth: .infinity)
-            .frame(height: 48)
-            .contentShape(Rectangle())
+            Image(systemName: "ellipsis")
         }
-        .buttonStyle(SetupRoomButtonStyle())
-        .help(room.isPrivate && room.accessKey == nil ? "Enter the invite key for \(room.name)" : "Open \(room.name)")
-        .accessibilityLabel("Open \(room.name)")
-        .contextMenu {
-            if saved {
-                Button("Forget Space", role: .destructive) {
-                    model.forgetRoom(roomID: room.id)
-                }
-            }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .frame(width: 28, height: 28)
+        .background(Color.black.opacity(0.055))
+        .clipShape(Circle())
+        .help("Space options")
+        .accessibilityLabel("Options for \(room.name)")
+    }
+
+    private var normalizedEditedRoomName: String {
+        String(editedRoomName.trimmingCharacters(in: .whitespacesAndNewlines).prefix(40))
+    }
+
+    private func beginRoomRename(_ room: RoomConfiguration) {
+        editedRoomName = room.name
+        withAnimation(reduceMotion ? nil : .snappy(duration: 0.2)) {
+            editingRoomID = room.id
         }
+        DispatchQueue.main.async { roomRenameFocused = true }
+    }
+
+    private func cancelRoomRename() {
+        roomRenameFocused = false
+        withAnimation(reduceMotion ? nil : .snappy(duration: 0.2)) {
+            editingRoomID = nil
+        }
+        editedRoomName = ""
+    }
+
+    private func commitRoomRename(_ room: RoomConfiguration) {
+        guard model.renameRoom(roomID: room.id, to: normalizedEditedRoomName) else { return }
+        cancelRoomRename()
     }
 
     private var progressView: some View {
@@ -4463,15 +4583,24 @@ private struct SetupIconButtonStyle: ButtonStyle {
     }
 }
 
-private struct SetupRoomButtonStyle: ButtonStyle {
+private struct SetupRoomActionButtonStyle: ButtonStyle {
+    var filled = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.isEnabled) private var isEnabled
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .background(Color.black.opacity(configuration.isPressed ? 0.10 : 0.055))
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .scaleEffect(!reduceMotion && configuration.isPressed ? 0.985 : 1)
-            .animation(reduceMotion ? nil : .snappy(duration: 0.20), value: configuration.isPressed)
+            .font(.system(size: 9, weight: .bold))
+            .foregroundStyle(filled ? Color.white : SetupPalette.secondary)
+            .frame(width: 24, height: 24)
+            .background(filled ? SetupPalette.live : Color.black.opacity(0.055))
+            .clipShape(Circle())
+            .scaleEffect(!reduceMotion && configuration.isPressed ? 0.92 : 1)
+            .opacity(isEnabled ? (configuration.isPressed ? 0.8 : 1) : 0.34)
+            .animation(
+                reduceMotion ? nil : .snappy(duration: 0.18),
+                value: configuration.isPressed
+            )
     }
 }
 
