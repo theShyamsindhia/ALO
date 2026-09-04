@@ -122,14 +122,14 @@ struct LoopbackRoomScaleTests {
     @Test("Listener re-anchors after sustained post-spike drift")
     func listenerReanchorsAfterSustainedPostSpikeDrift() {
         var recovery = PlaybackDriftRecovery()
-        let delayed = SynchronizedPlayer.sustainedDriftThresholdNanos + 30_000_000
+        let delayed = SynchronizedPlayer.hardResyncThresholdNanos + 30_000_000
 
-        let firstDelayedCheck = recovery.shouldResynchronize(latenessNanos: delayed)
-        let secondDelayedCheck = recovery.shouldResynchronize(latenessNanos: delayed)
-        let thirdDelayedCheck = recovery.shouldResynchronize(latenessNanos: delayed)
-        #expect(!firstDelayedCheck)
-        #expect(!secondDelayedCheck)
-        #expect(thirdDelayedCheck)
+        for _ in 0..<(PlaybackDriftRecovery.minimumSampleCount - 1) {
+            let shouldResynchronize = recovery.shouldResynchronize(latenessNanos: delayed)
+            #expect(!shouldResynchronize)
+        }
+        let sustainedSevereDrift = recovery.shouldResynchronize(latenessNanos: delayed)
+        #expect(sustainedSevereDrift)
 
         // A single delayed observation after recovery must not cause a resync loop.
         let postRecoveryDelay = recovery.shouldResynchronize(latenessNanos: delayed)
@@ -205,19 +205,29 @@ struct LoopbackRoomScaleTests {
         peer.setRoomPlayback(playing: false)
         #expect(commandReceived.wait(timeout: .now() + 2) == .success)
         #expect(requestedCommands.values == [.pause])
-        #expect(waitUntil(timeout: 2) { peer.playbackStates.contains(false) })
-        #expect(waitUntil(timeout: 2) { observer.roomPlaybackStates.contains(false) })
-        #expect(waitUntil(timeout: 2) {
-            peer.resyncCommandCount == 1 && observer.resyncCommandCount == 1
-        })
+        // An accepted command is not proof that the source obeyed it. Keep
+        // forwarding capture until Now Playing confirms the pause, otherwise
+        // one ignored media-key request can latch the room silent forever.
+        Thread.sleep(forTimeInterval: 0.1)
+        #expect(!peer.playbackStates.contains(false))
 
         let samples = [Int16](
             repeating: 0,
             count: Int(AudioPacket.framesPerPacket) * Int(AudioPacket.channelCount)
         )
         host.acceptAudio(samples: samples, captureTimeNanos: MonotonicClock.nowNanos())
+        #expect(waitUntil(timeout: 2) { peer.packetCount == 1 })
+
+        host.setNowPlaying(NowPlayingMedia(title: "Test source", isPlaying: false))
+        #expect(waitUntil(timeout: 2) { peer.playbackStates.contains(false) })
+        #expect(waitUntil(timeout: 2) { observer.roomPlaybackStates.contains(false) })
+        #expect(waitUntil(timeout: 2) {
+            peer.resyncCommandCount == 1 && observer.resyncCommandCount == 1
+        })
+
+        host.acceptAudio(samples: samples, captureTimeNanos: MonotonicClock.nowNanos())
         Thread.sleep(forTimeInterval: 0.1)
-        #expect(peer.packetCount == 0)
+        #expect(peer.packetCount == 1)
 
         peer.setRoomPlayback(playing: true)
         #expect(commandReceived.wait(timeout: .now() + 2) == .success)
@@ -230,7 +240,7 @@ struct LoopbackRoomScaleTests {
         // A delayed or missing Now Playing update must not leave the host's
         // packet path latched in Pause after macOS accepts the Play request.
         host.acceptAudio(samples: samples, captureTimeNanos: MonotonicClock.nowNanos())
-        #expect(waitUntil(timeout: 2) { peer.packetCount == 1 })
+        #expect(waitUntil(timeout: 2) { peer.packetCount == 2 })
 
         // Later source confirmation reconciles metadata without a second reset.
         host.setNowPlaying(NowPlayingMedia(title: "Test source", isPlaying: true))

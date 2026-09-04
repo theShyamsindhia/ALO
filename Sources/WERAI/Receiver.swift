@@ -185,6 +185,7 @@ final class Receiver {
         queue.sync {
             let now = MonotonicClock.nowNanos()
             let report = player.syncReport()
+            let outputFormat = player.outputHardwareFormatForDiagnostics
             return ReceiverTimingDiagnostics(
                 roundTripMilliseconds: clock.bestRoundTripNanos.map { Double($0) / 1_000_000 },
                 clockOffsetMilliseconds: clock.offsetNanos(at: now).map { Double($0) / 1_000_000 },
@@ -192,9 +193,16 @@ final class Receiver {
                 recommendedBufferMilliseconds: Double(
                     jitter.recommendedPlayoutDelayNanos(
                         roundTripNanos: clock.bestRoundTripNanos,
-                        outputLatencyNanos: player.outputLatencyForTimingNanos
+                        outputLatencyNanos: player.outputLatencyForTimingNanos,
+                        renderSchedulingHeadroomNanos: player.renderSchedulingHeadroomForTimingNanos
                     )
                 ) / 1_000_000,
+                outputLatencyMilliseconds: Double(player.outputLatencyForTimingNanos) / 1_000_000,
+                renderHeadroomMilliseconds: Double(
+                    player.renderSchedulingHeadroomForTimingNanos
+                ) / 1_000_000,
+                outputSampleRate: outputFormat?.sampleRate,
+                outputChannelCount: outputFormat?.channelCount,
                 latenessMilliseconds: Double(report.latenessNanos) / 1_000_000,
                 latePacketCount: report.latePacketCount,
                 resyncCount: report.resyncCount
@@ -242,13 +250,6 @@ final class Receiver {
                 volume: self.participantVolume,
                 muted: self.participantMuted || muted
             )
-        }
-    }
-
-    /// Dims this Mac's synchronized media without changing room state or timing.
-    func setVoiceDuckingActive(_ active: Bool) {
-        queue.async { [weak self] in
-            self?.player.setVoiceDucking(active: active)
         }
     }
 
@@ -494,11 +495,13 @@ final class Receiver {
             type: "sync_report",
             playoutDelayNanos: jitter.recommendedPlayoutDelayNanos(
                 roundTripNanos: clock.bestRoundTripNanos,
-                outputLatencyNanos: player.outputLatencyForTimingNanos
+                outputLatencyNanos: player.outputLatencyForTimingNanos,
+                renderSchedulingHeadroomNanos: player.renderSchedulingHeadroomForTimingNanos
             ),
             outputLatencyPlayoutFloorNanos: RoomTiming.outputLatencyFloor(
                 player.outputLatencyForTimingNanos,
-                roundTripNanos: clock.bestRoundTripNanos
+                roundTripNanos: clock.bestRoundTripNanos,
+                renderSchedulingHeadroomNanos: player.renderSchedulingHeadroomForTimingNanos
             )
         ))
         send(ControlMessage(

@@ -59,6 +59,10 @@ struct DiagnosticsTests {
                     clockOffsetMilliseconds: -2.1,
                     jitterMilliseconds: 3.2,
                     recommendedBufferMilliseconds: 250,
+                    outputLatencyMilliseconds: 12,
+                    renderHeadroomMilliseconds: 25,
+                    outputSampleRate: 48_000,
+                    outputChannelCount: 2,
                     latenessMilliseconds: 0,
                     latePacketCount: 1,
                     resyncCount: 0
@@ -71,6 +75,8 @@ struct DiagnosticsTests {
         #expect(result.outcome == .passed)
         #expect(result.detail.contains("RTT 12 ms"))
         #expect(result.detail.contains("buffer 250 ms"))
+        #expect(result.detail.contains("output 12 ms + 25 ms render"))
+        #expect(result.detail.contains("48000 Hz/2 ch"))
         #expect(result.detail.contains("2 remote peers"))
     }
 

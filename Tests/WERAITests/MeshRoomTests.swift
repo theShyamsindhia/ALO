@@ -7,7 +7,13 @@ import WERAICore
 struct MeshRoomTests {
     @Test("Room discovery and media allow nearby peer-to-peer paths")
     func nearbyPeerToPeerNetworking() {
-        #expect(LocalNetworkParameters.tcp().includePeerToPeer)
+        let tcp = LocalNetworkParameters.tcp()
+        #expect(tcp.includePeerToPeer)
+        let tcpOptions = tcp.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options
+        #expect(tcpOptions?.enableKeepalive == true)
+        #expect(tcpOptions?.keepaliveIdle == 5)
+        #expect(tcpOptions?.keepaliveInterval == 2)
+        #expect(tcpOptions?.keepaliveCount == 3)
         #expect(LocalNetworkParameters.udp().includePeerToPeer)
     }
 
@@ -285,6 +291,337 @@ struct MeshRoomTests {
         #expect(a.broadcasterID == "a")
         #expect(b.broadcasterID == "a")
         #expect(c.broadcasterID == "a")
+    }
+
+    @Test("Duplicate peer links do not create a reconnect storm")
+    func duplicatePeerLinksStayBounded() throws {
+        #expect(!MeshControlPlane.shouldReconnectAfterRemoval(
+            initiated: true,
+            localID: "a",
+            remoteID: "b",
+            canonicalPeerExists: true
+        ))
+        #expect(MeshControlPlane.shouldReconnectAfterRemoval(
+            initiated: true,
+            localID: "a",
+            remoteID: "b",
+            canonicalPeerExists: false
+        ))
+
+        let room = RoomConfiguration(name: "Duplicate link test", creatorPeerID: "a")
+        let a = MeshProbe()
+        let b = MeshProbe()
+        let ready = PortProbe()
+        let attempts = CountProbe()
+        let nodeA = MeshControlPlane(
+            room: room,
+            nodeID: "a",
+            displayName: "A",
+            replicaHandler: { a.update(replica: $0) },
+            participantsHandler: { a.update(participants: $0) },
+            connectionAttemptHandler: { attempts.increment() }
+        )
+        let nodeB = makeNode(room: room, id: "b", probe: b, ports: ready)
+        try nodeA.start(advertise: false)
+        try nodeB.start(advertise: false)
+        defer { nodeA.stop(); nodeB.stop() }
+        guard let port = ready.wait() else {
+            Issue.record("Mesh listener did not start")
+            return
+        }
+        let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: port)
+        nodeA.connectForTesting(to: endpoint)
+        #expect(waitUntil { a.participantCount == 2 && b.participantCount == 2 })
+        nodeA.connectForTesting(to: endpoint)
+
+        Thread.sleep(forTimeInterval: 1.2)
+        #expect(attempts.count == 2)
+    }
+
+    @Test("A large room history crosses the mesh in bounded sync envelopes")
+    func largeInitialSyncIsChunked() throws {
+        let room = RoomConfiguration(name: "Large sync test", creatorPeerID: "a")
+        let artwork = Data(repeating: 0xA5, count: 20_000)
+        let events = (1...16).map { counter in
+            MeshRoomEvent(
+                id: "playback-\(counter)",
+                roomID: room.id,
+                version: MeshVersion(
+                    counter: UInt64(counter),
+                    nodeID: "a",
+                    wallTimeMillis: UInt64(counter)
+                ),
+                kind: .playback,
+                nowPlaying: NowPlayingMedia(
+                    title: "Track \(counter)",
+                    artworkData: artwork,
+                    isPlaying: true
+                )
+            )
+        }
+        let unsafeEnvelope = try MeshEnvelope(type: "sync", events: events).encodedLine()
+        #expect(unsafeEnvelope.count > MeshEnvelopeDecoder.maximumLineBytes)
+        let chunks = MeshControlPlane.synchronizationEnvelopes(
+            events: events,
+            versionVector: ["a": 16]
+        )
+        #expect(chunks.count > 2)
+        #expect(try chunks.allSatisfy {
+            try $0.encodedLine().count <= MeshEnvelopeDecoder.maximumLineBytes
+        })
+        #expect(chunks.compactMap(\.events).flatMap { $0 }.count == events.count)
+        #expect(chunks.last?.versionVector == ["a": 16])
+
+        let a = MeshProbe()
+        let b = MeshProbe()
+        let ready = PortProbe()
+        let nodeA = MeshControlPlane(
+            room: room,
+            nodeID: "a",
+            displayName: "A",
+            initialEvents: events,
+            replicaHandler: { a.update(replica: $0) },
+            participantsHandler: { a.update(participants: $0) }
+        )
+        let nodeB = makeNode(room: room, id: "b", probe: b, ports: ready)
+        try nodeA.start(advertise: false)
+        try nodeB.start(advertise: false)
+        defer { nodeA.stop(); nodeB.stop() }
+        guard let port = ready.wait() else {
+            Issue.record("Mesh listener did not start")
+            return
+        }
+        nodeA.connectForTesting(to: .hostPort(host: "127.0.0.1", port: port))
+
+        #expect(waitUntil(timeout: 4) { b.eventCount == events.count })
+    }
+
+    @Test("A relaunched peer recovers the room's active broadcaster")
+    func compactedReplicaRecoversLiveBroadcaster() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("werai-live-state-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let room = RoomConfiguration(name: "Relaunch sync test", creatorPeerID: "a")
+        let claim = MeshRoomEvent(
+            id: "active-claim",
+            roomID: room.id,
+            version: MeshVersion(counter: 1, nodeID: "b", wallTimeMillis: 1),
+            kind: .broadcaster,
+            broadcasterID: "b",
+            broadcasterEpoch: 1,
+            mediaServiceName: "active-media",
+            isBroadcasting: true
+        )
+        let playback = MeshRoomEvent(
+            id: "active-playback",
+            roomID: room.id,
+            version: MeshVersion(counter: 2, nodeID: "b", wallTimeMillis: 2),
+            kind: .playback,
+            nowPlaying: NowPlayingMedia(title: "Still playing", isPlaying: true)
+        )
+        let store = RoomStore(fileURL: directory.appendingPathComponent("rooms.json"))
+        store.saveEvents([claim, playback], roomID: room.id)
+        let compacted = store.loadEvents(roomID: room.id)
+        #expect(MeshRoomReplica(events: compacted).broadcaster == nil)
+        #expect(MeshRoomReplica(events: compacted).versionVector == ["b": 2])
+
+        let a = MeshProbe()
+        let relaunched = MeshProbe()
+        let ready = PortProbe()
+        let nodeA = MeshControlPlane(
+            room: room,
+            nodeID: "a",
+            displayName: "A",
+            initialEvents: [claim, playback],
+            replicaHandler: { a.update(replica: $0) },
+            participantsHandler: { a.update(participants: $0) }
+        )
+        let nodeC = MeshControlPlane(
+            room: room,
+            nodeID: "c",
+            displayName: "C",
+            initialEvents: compacted,
+            listenerReadyHandler: { ready.set($0) },
+            replicaHandler: { relaunched.update(replica: $0) },
+            participantsHandler: { relaunched.update(participants: $0) }
+        )
+        try nodeA.start(advertise: false)
+        try nodeC.start(advertise: false)
+        defer { nodeA.stop(); nodeC.stop() }
+        guard let port = ready.wait() else {
+            Issue.record("Mesh listener did not start")
+            return
+        }
+        nodeA.connectForTesting(to: .hostPort(host: "127.0.0.1", port: port))
+
+        #expect(waitUntil { relaunched.broadcasterID == "b" })
+    }
+
+    @Test("Artwork accepted by the producer survives mesh validation")
+    func producerSizedArtworkCrossesMesh() throws {
+        let room = RoomConfiguration(name: "Artwork boundary test", creatorPeerID: "a")
+        let artwork = Data(repeating: 0xA5, count: 180_000)
+        let event = MeshRoomEvent(
+            id: "large-artwork",
+            roomID: room.id,
+            version: MeshVersion(counter: 1, nodeID: "a", wallTimeMillis: 1),
+            kind: .playback,
+            nowPlaying: NowPlayingMedia(
+                title: "Detailed artwork",
+                artworkData: artwork,
+                isPlaying: true
+            )
+        )
+        let encoded = try MeshEnvelope(type: "sync", events: [event]).encodedLine()
+        #expect(encoded.count <= MeshEnvelopeDecoder.maximumLineBytes)
+
+        let a = MeshProbe()
+        let b = MeshProbe()
+        let ready = PortProbe()
+        let nodeA = MeshControlPlane(
+            room: room,
+            nodeID: "a",
+            displayName: "A",
+            initialEvents: [event],
+            replicaHandler: { a.update(replica: $0) },
+            participantsHandler: { a.update(participants: $0) }
+        )
+        let nodeB = makeNode(room: room, id: "b", probe: b, ports: ready)
+        try nodeA.start(advertise: false)
+        try nodeB.start(advertise: false)
+        defer { nodeA.stop(); nodeB.stop() }
+        guard let port = ready.wait() else {
+            Issue.record("Mesh listener did not start")
+            return
+        }
+        nodeA.connectForTesting(to: .hostPort(host: "127.0.0.1", port: port))
+
+        #expect(waitUntil { b.artworkByteCount == artwork.count })
+    }
+
+    @Test("Chunked sync never exposes a broadcaster whose stop is still in flight")
+    func chunkedSyncAppliesBroadcasterLifecycleAtomically() throws {
+        let room = RoomConfiguration(name: "Atomic sync test", creatorPeerID: "a")
+        let claim = MeshRoomEvent(
+            id: "old-claim",
+            roomID: room.id,
+            version: MeshVersion(counter: 1, nodeID: "b", wallTimeMillis: 1),
+            kind: .broadcaster,
+            broadcasterID: "b",
+            broadcasterEpoch: 1,
+            mediaServiceName: "dead-media",
+            isBroadcasting: true
+        )
+        let artwork = Data(repeating: 0xA5, count: 20_000)
+        let playback = (2...17).map { counter in
+            MeshRoomEvent(
+                id: "playback-\(counter)",
+                roomID: room.id,
+                version: MeshVersion(
+                    counter: UInt64(counter),
+                    nodeID: "b",
+                    wallTimeMillis: UInt64(counter)
+                ),
+                kind: .playback,
+                nowPlaying: NowPlayingMedia(
+                    title: "Track \(counter)",
+                    artworkData: artwork,
+                    isPlaying: false
+                )
+            )
+        }
+        let stop = MeshRoomEvent(
+            id: "old-stop",
+            roomID: room.id,
+            version: MeshVersion(counter: 18, nodeID: "b", wallTimeMillis: 18),
+            kind: .broadcaster,
+            broadcasterID: "b",
+            broadcasterEpoch: 1,
+            isBroadcasting: false
+        )
+        let chunks = MeshControlPlane.synchronizationEnvelopes(
+            events: [claim] + playback + [stop],
+            versionVector: ["b": 18]
+        )
+        #expect(chunks.count > 2)
+
+        var replica = MeshRoomReplica()
+        var observedBroadcasters = [String]()
+        for envelope in chunks {
+            _ = replica.merge(envelope.events ?? [])
+            if let broadcaster = replica.broadcaster?.nodeID {
+                observedBroadcasters.append(broadcaster)
+            }
+        }
+        #expect(observedBroadcasters.isEmpty)
+    }
+
+    @Test("An expected peer identity mismatch does not reconnect forever")
+    func expectedPeerIdentityMismatchStopsRetrying() throws {
+        let room = RoomConfiguration(name: "Stale discovery test", creatorPeerID: "a")
+        let a = MeshProbe()
+        let b = MeshProbe()
+        let ready = PortProbe()
+        let attempts = CountProbe()
+        let nodeA = MeshControlPlane(
+            room: room,
+            nodeID: "a",
+            displayName: "A",
+            replicaHandler: { a.update(replica: $0) },
+            participantsHandler: { a.update(participants: $0) },
+            connectionAttemptHandler: { attempts.increment() }
+        )
+        let nodeB = makeNode(room: room, id: "b", probe: b, ports: ready)
+        try nodeA.start(advertise: false)
+        try nodeB.start(advertise: false)
+        defer { nodeA.stop(); nodeB.stop() }
+        guard let port = ready.wait() else {
+            Issue.record("Mesh listener did not start")
+            return
+        }
+        nodeA.connectForTesting(
+            to: .hostPort(host: "127.0.0.1", port: port),
+            expectedNodeID: "c"
+        )
+
+        Thread.sleep(forTimeInterval: 0.7)
+        #expect(attempts.count == 1)
+        #expect(a.participantCount == 1)
+    }
+
+    @Test("Identity mismatch is rejected before canonical direction validation")
+    func inverseExpectedPeerIdentityMismatchStopsRetrying() throws {
+        let room = RoomConfiguration(name: "Inverse stale discovery test", creatorPeerID: "b")
+        let local = MeshProbe()
+        let actual = MeshProbe()
+        let ready = PortProbe()
+        let attempts = CountProbe()
+        let localNode = MeshControlPlane(
+            room: room,
+            nodeID: "b",
+            displayName: "B",
+            replicaHandler: { local.update(replica: $0) },
+            participantsHandler: { local.update(participants: $0) },
+            connectionAttemptHandler: { attempts.increment() }
+        )
+        let actualNode = makeNode(room: room, id: "a", probe: actual, ports: ready)
+        try localNode.start(advertise: false)
+        try actualNode.start(advertise: false)
+        defer { localNode.stop(); actualNode.stop() }
+        guard let port = ready.wait() else {
+            Issue.record("Mesh listener did not start")
+            return
+        }
+        localNode.connectForTesting(
+            to: .hostPort(host: "127.0.0.1", port: port),
+            expectedNodeID: "c"
+        )
+
+        Thread.sleep(forTimeInterval: 0.7)
+        #expect(attempts.count == 1)
+        #expect(local.participantCount == 1)
     }
 
     @Test("A restarted peer reseeds heartbeat sequence and can broadcast after rejoining")
@@ -1113,6 +1450,13 @@ private final class PortProbe: @unchecked Sendable {
     }
 }
 
+private final class CountProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    var count: Int { lock.withLock { value } }
+    func increment() { lock.withLock { value += 1 } }
+}
+
 private final class MeshProbe: @unchecked Sendable {
     private let lock = NSLock()
     private var replica = MeshRoomReplica()
@@ -1121,6 +1465,8 @@ private final class MeshProbe: @unchecked Sendable {
     var participantCount: Int { lock.withLock { participants.count } }
     var minimumObservedParticipantCount: Int? { lock.withLock { participantCountHistory.min() } }
     var chatCount: Int { lock.withLock { replica.chatEvents.count } }
+    var eventCount: Int { lock.withLock { replica.events.count } }
+    var artworkByteCount: Int? { lock.withLock { replica.nowPlaying.artworkData?.count } }
     var chatTexts: [String?] { lock.withLock { replica.chatEvents.map(\.text) } }
     var chatSenderIDs: [String?] { lock.withLock { replica.chatEvents.map(\.senderID) } }
     var broadcasterID: String? { lock.withLock { replica.broadcaster?.nodeID } }

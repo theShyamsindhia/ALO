@@ -701,7 +701,6 @@ final class MeshSession {
         active: Bool,
         level: Double
     ) {
-        let wasDucking = !activeIncomingVoiceSessions.isEmpty
         let senderWasActive = activeIncomingVoiceSessions.values.contains(senderID)
         let previousLevel = incomingVoiceLevel(for: senderID)
         if active {
@@ -716,21 +715,12 @@ final class MeshSession {
         if senderWasActive != senderIsActive || abs(previousLevel - currentLevel) >= 0.001 {
             walkieTalkieStateHandler(senderID, senderName, senderIsActive, currentLevel)
         }
-        if wasDucking != !activeIncomingVoiceSessions.isEmpty {
-            applyIncomingVoiceDucking()
-        }
     }
 
     private func incomingVoiceLevel(for senderID: String) -> Double {
         activeIncomingVoiceSessions.compactMap { sessionID, activeSenderID in
             activeSenderID == senderID ? incomingVoiceSessionLevels[sessionID] : nil
         }.max() ?? 0
-    }
-
-    private func applyIncomingVoiceDucking() {
-        let active = !activeIncomingVoiceSessions.isEmpty
-        hostSession?.setVoiceDuckingActive(active)
-        receiver?.setVoiceDuckingActive(active)
     }
 
     func setVideoEnabled(_ enabled: Bool) async throws {
@@ -920,7 +910,6 @@ final class MeshSession {
                         muted: routing.publishedParticipantMediaMuted
                     )
                     host.setLocalPlaybackMuted(routing.incomingMediaMuted)
-                    applyIncomingVoiceDucking()
                 } else {
                     statusHandler("Connecting to the room broadcaster")
                     let receiver = try Receiver(
@@ -962,7 +951,6 @@ final class MeshSession {
                         muted: routing.publishedParticipantMediaMuted
                     )
                     receiver.setLocalPlaybackMuted(routing.incomingMediaMuted)
-                    applyIncomingVoiceDucking()
                     guard generation == transitionGeneration,
                           replica.broadcaster == broadcaster else {
                         receiver.stop()

@@ -7,41 +7,9 @@ import WERAICore
 struct MediaOutputGain {
     static func effectiveGain(
         participantVolume: Double,
-        muted: Bool,
-        duckingGain: Double = 1
+        muted: Bool
     ) -> Double {
-        muted ? 0 : min(max(participantVolume, 0), 1) * min(max(duckingGain, 0), 1)
-    }
-}
-
-struct MediaDuckingEnvelope {
-    static let duckedGain = 0.32
-    static let attackDurationSeconds = 0.12
-    static let releaseDurationSeconds = 0.50
-
-    private(set) var gain = 1.0
-    private(set) var isActive = false
-
-    mutating func setActive(_ active: Bool) {
-        isActive = active
-    }
-
-    @discardableResult
-    mutating func advance(seconds: Double) -> Bool {
-        guard seconds > 0 else { return false }
-        let target = isActive ? Self.duckedGain : 1
-        guard gain != target else { return false }
-        let duration = isActive
-            ? Self.attackDurationSeconds
-            : Self.releaseDurationSeconds
-        let step = (1 - Self.duckedGain) * seconds / duration
-        let previous = gain
-        if step + 1e-12 >= abs(target - gain) {
-            gain = target
-        } else {
-            gain += target < gain ? -step : step
-        }
-        return gain != previous
+        muted ? 0 : min(max(participantVolume, 0), 1)
     }
 }
 
@@ -57,6 +25,30 @@ struct AudioOutputHardwareFormat: Equatable {
             return abs(old.sampleRate - new.sampleRate) >= 1
                 || old.channelCount != new.channelCount
         }
+    }
+}
+
+struct AudioOutputRenderBudget {
+    static let safetyMarginNanos: UInt64 = 10_000_000
+    static let maximumHeadroomNanos: UInt64 = 200_000_000
+
+    static func schedulingHeadroomNanos(
+        bufferFrames: UInt32?,
+        safetyOffsetFrames: UInt32?,
+        sampleRate: Double
+    ) -> UInt64 {
+        guard sampleRate > 0 else { return RoomTiming.renderSchedulingHeadroomNanos }
+        let hardwareFrames = UInt64(bufferFrames ?? 0) &+ UInt64(safetyOffsetFrames ?? 0)
+        let hardwareLeadNanos = UInt64(
+            Double(hardwareFrames) * 1_000_000_000 / sampleRate
+        )
+        return min(
+            maximumHeadroomNanos,
+            max(
+                RoomTiming.renderSchedulingHeadroomNanos,
+                hardwareLeadNanos &+ safetyMarginNanos
+            )
+        )
     }
 }
 
@@ -83,7 +75,6 @@ struct AudioConfigurationRecoveryGate {
 final class SynchronizedPlayer {
     static let targetLatencyNanos = RoomTiming.defaultPlayoutDelayNanos
     static let hardResyncThresholdNanos: UInt64 = 100_000_000
-    static let sustainedDriftThresholdNanos: UInt64 = 20_000_000
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
     private let varispeed = AVAudioUnitVarispeed()
@@ -96,6 +87,8 @@ final class SynchronizedPlayer {
     private var anchorCaptureNanos: UInt64?
     private var hasStarted = false
     private var outputLatencyNanos: UInt64 = 0
+    private var renderSchedulingHeadroomNanos = RoomTiming.renderSchedulingHeadroomNanos
+    private var lastOutputStateRefreshNanos: UInt64 = 0
     private var activeOutputDeviceID: AudioDeviceID?
     private var activeOutputHardwareFormat: AudioOutputHardwareFormat?
     private var targetLatencyNanos = RoomTiming.defaultPlayoutDelayNanos
@@ -113,14 +106,16 @@ final class SynchronizedPlayer {
     private var recoveryRetryNotBeforeNanos: UInt64 = 0
     private var participantVolume: Double = 1
     private var participantMuted = false
-    private var duckingEnvelope = MediaDuckingEnvelope()
-    private var lastDuckingUpdateNanos = MonotonicClock.nowNanos()
     private var playbackIsActive = false
     private var roomPlaybackIsPlaying = true
     private var resyncCutoverCaptureNanos: UInt64?
     private(set) var configurationChangeCount: UInt64 = 0
 
     var outputLatencyForTimingNanos: UInt64 { outputLatencyNanos }
+    var renderSchedulingHeadroomForTimingNanos: UInt64 { renderSchedulingHeadroomNanos }
+    var outputHardwareFormatForDiagnostics: AudioOutputHardwareFormat? {
+        activeOutputHardwareFormat
+    }
 
     var clockOffsetNanos: Int64?
 
@@ -180,12 +175,12 @@ final class SynchronizedPlayer {
 
     func maintainSync() {
         let now = MonotonicClock.nowNanos()
-        updateDucking(nowNanos: now)
         guard roomPlaybackIsPlaying else {
             setPlaybackActive(false)
             return
         }
         applyPendingAudioEngineConfigurationChange()
+        refreshOutputTimingIfNeeded(nowNanos: now)
         drain()
         updatePlaybackActivity(nowNanos: now)
         guard hasStarted else {
@@ -227,13 +222,6 @@ final class SynchronizedPlayer {
         let absoluteErrorNanos = UInt64(
             abs(errorFrames) * 1_000_000_000 / Double(AudioPacket.sampleRate)
         )
-        let hardResyncFrames = Double(AudioPacket.sampleRate)
-            * Double(Self.hardResyncThresholdNanos) / 1_000_000_000
-        if abs(errorFrames) > hardResyncFrames {
-            latestLatenessNanos = absoluteErrorNanos
-            hardResynchronize()
-            return
-        }
         if driftRecovery.shouldResynchronize(latenessNanos: absoluteErrorNanos) {
             latestLatenessNanos = absoluteErrorNanos
             hardResynchronize()
@@ -241,7 +229,7 @@ final class SynchronizedPlayer {
         }
         let desiredCorrection = abs(errorFrames) < 24
             ? 0
-            : max(-0.002, min(0.002, errorFrames / Double(AudioPacket.sampleRate) * 0.02))
+            : max(-0.01, min(0.01, errorFrames / Double(AudioPacket.sampleRate) * 0.25))
         smoothedCorrection += (desiredCorrection - smoothedCorrection) * 0.12
         if abs(smoothedCorrection) < 0.000_005 {
             smoothedCorrection = 0
@@ -280,7 +268,7 @@ final class SynchronizedPlayer {
                 continue
             }
 
-            if !hasStarted, desiredRenderNanos <= now + 25_000_000 {
+            if !hasStarted, desiredRenderNanos <= now + renderSchedulingHeadroomNanos {
                 latestLatenessNanos = now > desiredRenderNanos ? now - desiredRenderNanos : 0
                 latePacketCount &+= 1
                 expectedSequence = sequence &+ 1
@@ -333,12 +321,6 @@ final class SynchronizedPlayer {
         applyOutputGain()
     }
 
-    func setVoiceDucking(active: Bool) {
-        let now = MonotonicClock.nowNanos()
-        updateDucking(nowNanos: now)
-        duckingEnvelope.setActive(active)
-    }
-
     func setRoomPlayback(playing: Bool) {
         guard roomPlaybackIsPlaying != playing else { return }
         roomPlaybackIsPlaying = playing
@@ -362,21 +344,9 @@ final class SynchronizedPlayer {
     private func applyOutputGain() {
         player.volume = Float(MediaOutputGain.effectiveGain(
             participantVolume: participantVolume,
-            muted: participantMuted,
-            duckingGain: duckingEnvelope.gain
+            muted: participantMuted
         ))
         updatePlaybackActivity(nowNanos: MonotonicClock.nowNanos())
-    }
-
-    private func updateDucking(nowNanos: UInt64) {
-        let elapsedNanos = nowNanos >= lastDuckingUpdateNanos
-            ? nowNanos - lastDuckingUpdateNanos
-            : 0
-        lastDuckingUpdateNanos = nowNanos
-        guard duckingEnvelope.advance(seconds: Double(elapsedNanos) / 1_000_000_000) else {
-            return
-        }
-        applyOutputGain()
     }
 
     private func updatePlaybackActivity(nowNanos: UInt64) {
@@ -465,7 +435,8 @@ final class SynchronizedPlayer {
             to: currentHardwareFormat
         )
         // Core Audio also broadcasts configuration changes for unrelated private
-        // taps. Ignore those only when this engine's device and latency are intact.
+        // taps. Rebuild only when this engine stopped or its route/format changed;
+        // latency-only updates are folded into the live timeline below.
         if Self.shouldRecoverAfterConfigurationChange(
             engineIsRunning: engine.isRunning,
             deviceChanged: deviceChanged,
@@ -473,21 +444,43 @@ final class SynchronizedPlayer {
             outputFormatChanged: outputFormatChanged
         ) {
             handleAudioEngineConfigurationChange()
+        } else {
+            if Self.shouldAcceptOutputLatencyMeasurement(
+                engineIsRunning: engine.isRunning,
+                previousLatencyNanos: outputLatencyNanos,
+                measuredLatencyNanos: currentLatencyNanos
+            ) {
+                outputLatencyNanos = currentLatencyNanos
+            }
+            renderSchedulingHeadroomNanos = measuredRenderSchedulingHeadroomNanos(
+                deviceID: currentDeviceID,
+                hardwareFormat: currentHardwareFormat
+            )
+            activeOutputDeviceID = currentDeviceID
+            activeOutputHardwareFormat = currentHardwareFormat
         }
     }
 
     static func shouldRecoverAfterConfigurationChange(
         engineIsRunning: Bool,
         deviceChanged: Bool,
-        latencyChanged: Bool,
+        latencyChanged _: Bool,
         outputFormatChanged: Bool = false
     ) -> Bool {
-        !engineIsRunning || deviceChanged || latencyChanged || outputFormatChanged
+        !engineIsRunning || deviceChanged || outputFormatChanged
     }
 
     static func latencyChanged(from old: UInt64, to new: UInt64) -> Bool {
         let difference = old > new ? old - new : new - old
         return difference > 1_000_000
+    }
+
+    static func shouldAcceptOutputLatencyMeasurement(
+        engineIsRunning: Bool,
+        previousLatencyNanos: UInt64,
+        measuredLatencyNanos: UInt64
+    ) -> Bool {
+        engineIsRunning && (measuredLatencyNanos > 0 || previousLatencyNanos == 0)
     }
 
     private func recoverAudioEngine() {
@@ -524,6 +517,93 @@ final class SynchronizedPlayer {
         outputLatencyNanos = measuredOutputLatencyNanos()
         activeOutputDeviceID = currentOutputDeviceID()
         activeOutputHardwareFormat = currentOutputHardwareFormat()
+        renderSchedulingHeadroomNanos = measuredRenderSchedulingHeadroomNanos(
+            deviceID: activeOutputDeviceID,
+            hardwareFormat: activeOutputHardwareFormat
+        )
+        lastOutputStateRefreshNanos = MonotonicClock.nowNanos()
+    }
+
+    private func refreshOutputTimingIfNeeded(nowNanos: UInt64) {
+        guard nowNanos >= lastOutputStateRefreshNanos,
+              nowNanos - lastOutputStateRefreshNanos >= 2_000_000_000,
+              engine.isRunning
+        else { return }
+        lastOutputStateRefreshNanos = nowNanos
+        let measuredLatencyNanos = measuredOutputLatencyNanos()
+        guard Self.shouldAcceptOutputLatencyMeasurement(
+            engineIsRunning: engine.isRunning,
+            previousLatencyNanos: outputLatencyNanos,
+            measuredLatencyNanos: measuredLatencyNanos
+        ) else { return }
+        outputLatencyNanos = measuredLatencyNanos
+        renderSchedulingHeadroomNanos = measuredRenderSchedulingHeadroomNanos(
+            deviceID: currentOutputDeviceID(),
+            hardwareFormat: currentOutputHardwareFormat()
+        )
+    }
+
+    private func measuredRenderSchedulingHeadroomNanos(
+        deviceID: AudioDeviceID?,
+        hardwareFormat: AudioOutputHardwareFormat?
+    ) -> UInt64 {
+        guard let deviceID else { return RoomTiming.renderSchedulingHeadroomNanos }
+        return AudioOutputRenderBudget.schedulingHeadroomNanos(
+            bufferFrames: Self.audioDeviceUInt32Property(
+                deviceID: deviceID,
+                selector: kAudioDevicePropertyBufferFrameSize
+            ),
+            safetyOffsetFrames: Self.audioDeviceUInt32Property(
+                deviceID: deviceID,
+                selector: kAudioDevicePropertySafetyOffset
+            ),
+            sampleRate: Self.audioDeviceNominalSampleRate(deviceID)
+                ?? hardwareFormat?.sampleRate
+                ?? Double(AudioPacket.sampleRate)
+        )
+    }
+
+    private static func audioDeviceNominalSampleRate(_ deviceID: AudioDeviceID) -> Double? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectHasProperty(deviceID, &address) else { return nil }
+        var value: Float64 = 0
+        var size = UInt32(MemoryLayout<Float64>.size)
+        let status = AudioObjectGetPropertyData(
+            deviceID,
+            &address,
+            0,
+            nil,
+            &size,
+            &value
+        )
+        return status == noErr && value > 0 ? value : nil
+    }
+
+    private static func audioDeviceUInt32Property(
+        deviceID: AudioDeviceID,
+        selector: AudioObjectPropertySelector
+    ) -> UInt32? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: selector,
+            mScope: kAudioDevicePropertyScopeOutput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectHasProperty(deviceID, &address) else { return nil }
+        var value: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        let status = AudioObjectGetPropertyData(
+            deviceID,
+            &address,
+            0,
+            nil,
+            &size,
+            &value
+        )
+        return status == noErr ? value : nil
     }
 
     private func currentOutputHardwareFormat() -> AudioOutputHardwareFormat? {
@@ -645,8 +725,11 @@ final class SynchronizedPlayer {
               next.sequence > sequence
         else { return }
 
-        let nextRenderNanos = addSigned(next.captureTimeNanos, -offset)
+        let nextAudibleNanos = addSigned(next.captureTimeNanos, -offset)
             &+ targetLatencyNanos
+        let nextRenderNanos = nextAudibleNanos > outputLatencyNanos
+            ? nextAudibleNanos - outputLatencyNanos
+            : nextAudibleNanos
         guard nextRenderNanos <= MonotonicClock.nowNanos() + 50_000_000 else { return }
 
         let silence = [Int16](
@@ -685,23 +768,26 @@ final class SynchronizedPlayer {
 }
 
 struct PlaybackDriftRecovery {
-    static let requiredConsecutiveChecks = 3
+    static let minimumSampleCount = 9
+    static let maximumSampleCount = 21
 
-    private var consecutiveLateChecks = 0
+    private var samples = [UInt64]()
 
     mutating func shouldResynchronize(latenessNanos: UInt64) -> Bool {
-        guard latenessNanos >= SynchronizedPlayer.sustainedDriftThresholdNanos else {
-            reset()
-            return false
+        samples.append(latenessNanos)
+        if samples.count > Self.maximumSampleCount {
+            samples.removeFirst(samples.count - Self.maximumSampleCount)
         }
-        consecutiveLateChecks += 1
-        guard consecutiveLateChecks >= Self.requiredConsecutiveChecks else { return false }
+        guard samples.count >= Self.minimumSampleCount else { return false }
+        let sorted = samples.sorted()
+        let median = sorted[sorted.count / 2]
+        guard median >= SynchronizedPlayer.hardResyncThresholdNanos else { return false }
         reset()
         return true
     }
 
     mutating func reset() {
-        consecutiveLateChecks = 0
+        samples.removeAll(keepingCapacity: true)
     }
 }
 

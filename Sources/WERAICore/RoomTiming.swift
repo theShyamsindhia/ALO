@@ -12,7 +12,8 @@ public enum RoomTiming {
 
     public static func outputLatencyFloor(
         _ outputLatencyNanos: UInt64,
-        roundTripNanos: UInt64? = nil
+        roundTripNanos: UInt64? = nil,
+        renderSchedulingHeadroomNanos: UInt64 = renderSchedulingHeadroomNanos
     ) -> UInt64 {
         let required = 120_000_000
             &+ (roundTripNanos ?? 0) / 2
@@ -60,7 +61,8 @@ public final class NetworkJitterEstimator {
 
     public func recommendedPlayoutDelayNanos(
         roundTripNanos: UInt64?,
-        outputLatencyNanos: UInt64 = 0
+        outputLatencyNanos: UInt64 = 0,
+        renderSchedulingHeadroomNanos: UInt64 = RoomTiming.renderSchedulingHeadroomNanos
     ) -> UInt64 {
         let halfRoundTrip = (roundTripNanos ?? 0) / 2
         let jitterBudget = transitSamples.count >= 40
@@ -73,7 +75,7 @@ public final class NetworkJitterEstimator {
             &+ halfRoundTrip
             &+ jitterBudget
             &+ min(outputLatencyNanos, RoomTiming.maximumPlayoutDelayNanos)
-            &+ RoomTiming.renderSchedulingHeadroomNanos
+            &+ renderSchedulingHeadroomNanos
         let clamped = RoomTiming.clampedPlayoutDelay(audibleBudget)
         let step = RoomTiming.timingStepNanos
         return ((clamped + step - 1) / step) * step

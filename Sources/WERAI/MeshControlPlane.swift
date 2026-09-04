@@ -133,6 +133,7 @@ final class MeshControlPlane: @unchecked Sendable {
         var realtimeVoiceQueue = RealtimeVoiceSendQueue()
         var realtimeVoiceSendInFlight = false
         var legacyVoiceDownsamplers = [String: LegacyVoiceDownsampler]()
+        var remoteVersionVector: [String: UInt64]?
         let localNonce = UUID().uuidString
         var authenticated = false
 
@@ -158,6 +159,7 @@ final class MeshControlPlane: @unchecked Sendable {
     private let openLineHandler: (OpenLineMessage) -> Void
     private let appVersion: String
     private let listenerReadyHandler: ((NWEndpoint.Port) -> Void)?
+    private let connectionAttemptHandler: () -> Void
     private var replica: MeshRoomReplica
     private var listener: NWListener?
     private var browser: NWBrowser?
@@ -186,6 +188,7 @@ final class MeshControlPlane: @unchecked Sendable {
     private let broadcasterLeaseNanos: UInt64 = 2_400_000_000
     private let participantLeaseNanos: UInt64 = 2_400_000_000
     private let maximumSyncEvents = 2_000
+    private static let synchronizationEnvelopeTargetBytes = 196_608
     private let maximumRememberedWalkieMessages = 8_192
     private let maximumWalkieTalkieHopCount: UInt8 = 8
     private static let fullBandVoiceVersion = AppVersion("0.13.31")!
@@ -206,7 +209,8 @@ final class MeshControlPlane: @unchecked Sendable {
         mediaCommandHandler: @escaping (RoomMediaCommand, String, UInt64) -> Bool = { _, _, _ in true },
         resyncRequestHandler: @escaping (String?, String, UInt64) -> Bool = { _, _, _ in true },
         walkieTalkieHandler: @escaping (WalkieTalkieMessage) -> Void = { _ in },
-        openLineHandler: @escaping (OpenLineMessage) -> Void = { _ in }
+        openLineHandler: @escaping (OpenLineMessage) -> Void = { _ in },
+        connectionAttemptHandler: @escaping () -> Void = {}
     ) {
         self.room = room
         self.nodeID = nodeID
@@ -227,6 +231,7 @@ final class MeshControlPlane: @unchecked Sendable {
         self.openLineHandler = openLineHandler
         self.replica = MeshRoomReplica(events: initialEvents)
         self.listenerReadyHandler = listenerReadyHandler
+        self.connectionAttemptHandler = connectionAttemptHandler
         self.replicaHandler = replicaHandler
         self.participantsHandler = participantsHandler
     }
@@ -271,8 +276,8 @@ final class MeshControlPlane: @unchecked Sendable {
         startHeartbeatTimer()
     }
 
-    func connectForTesting(to endpoint: NWEndpoint) {
-        queue.async { [weak self] in self?.connect(to: endpoint, expectedNodeID: nil) }
+    func connectForTesting(to endpoint: NWEndpoint, expectedNodeID: String? = nil) {
+        queue.async { [weak self] in self?.connect(to: endpoint, expectedNodeID: expectedNodeID) }
     }
 
     func disconnectForTesting(peerID: String) {
@@ -566,6 +571,7 @@ final class MeshControlPlane: @unchecked Sendable {
     }
 
     private func connect(to endpoint: NWEndpoint, expectedNodeID: String?) {
+        connectionAttemptHandler()
         let connection = NWConnection(to: endpoint, using: LocalNetworkParameters.tcp())
         let link = Link(connection: connection, initiated: true)
         link.nodeID = expectedNodeID
@@ -616,6 +622,7 @@ final class MeshControlPlane: @unchecked Sendable {
             deviceColorHex: deviceColorHex,
             profileImageData: profileImageData,
             appVersion: appVersion,
+            versionVector: replica.versionVector,
             authNonce: room.isPrivate ? link.localNonce : nil
         )
     }
@@ -679,12 +686,28 @@ final class MeshControlPlane: @unchecked Sendable {
                 link.connection.cancel()
                 return
             }
-            let shouldBeInitiated = nodeID < remoteID
-            guard link.initiated == shouldBeInitiated else {
+            guard link.nodeID == nil || link.nodeID == remoteID else {
+                // The discovered service no longer belongs to the advertised
+                // peer. Do not reconnect forever to the same stale endpoint.
+                link.nodeID = nil
                 link.connection.cancel()
                 return
             }
+            let shouldBeInitiated = nodeID < remoteID
+            guard link.initiated == shouldBeInitiated else {
+                if link.initiated {
+                    link.connection.cancel()
+                } else {
+                    // Give the initiator a deterministic chance to read our
+                    // identity before closing a connection in the wrong
+                    // canonical direction. This lets it invalidate a stale
+                    // Bonjour endpoint instead of retrying that endpoint.
+                    sendThenCancel(hello(for: link), to: link)
+                }
+                return
+            }
             link.nodeID = remoteID
+            link.remoteVersionVector = envelope.versionVector
             link.displayName = envelope.displayName
             let remoteAppearance = DeviceAppearance.generated(from: remoteID)
             let sanitizedAppearance = DeviceAppearance(
@@ -734,7 +757,11 @@ final class MeshControlPlane: @unchecked Sendable {
             if let vector = envelope.versionVector {
                 let missing = replica.missingEvents(comparedWith: vector)
                 if !missing.isEmpty {
-                    send(MeshEnvelope(type: "sync", events: Array(missing.prefix(maximumSyncEvents))), to: link)
+                    sendSync(
+                        events: Array(missing.prefix(maximumSyncEvents)),
+                        versionVector: nil,
+                        to: link
+                    )
                 }
             }
         case "event":
@@ -904,7 +931,9 @@ final class MeshControlPlane: @unchecked Sendable {
     private func merge(_ events: [MeshRoomEvent], excluding source: Link) {
         let valid = events.prefix(maximumSyncEvents).filter {
             $0.roomID == room.id && ($0.text?.utf8.count ?? 0) <= 8_192 &&
-                (try? JSONEncoder().encode($0).count).map { $0 <= 32_768 } == true
+                (try? MeshEnvelope(type: "event", event: $0).encodedLine().count).map {
+                    $0 <= MeshEnvelopeDecoder.maximumLineBytes
+                } == true
         }
         let inserted = replica.merge(valid)
         guard !inserted.isEmpty else { return }
@@ -1135,12 +1164,28 @@ final class MeshControlPlane: @unchecked Sendable {
     private func remove(_ link: Link) {
         guard links.removeValue(forKey: ObjectIdentifier(link.connection)) != nil else { return }
         let disconnectedID = link.nodeID
-        if let id = link.nodeID, peers[id] === link {
+        let wasCanonical = disconnectedID.map { peers[$0] === link } ?? false
+        if let id = disconnectedID, wasCanonical {
             peers.removeValue(forKey: id)
         }
-        if link.initiated, let disconnectedID, nodeID < disconnectedID {
+        let canonicalPeerExists = disconnectedID.map { peers[$0] != nil } ?? false
+        if Self.shouldReconnectAfterRemoval(
+            initiated: link.initiated,
+            localID: nodeID,
+            remoteID: disconnectedID,
+            canonicalPeerExists: canonicalPeerExists
+        ), let disconnectedID {
             scheduleReconnect(to: link.connection.endpoint, peerID: disconnectedID)
         }
+    }
+
+    static func shouldReconnectAfterRemoval(
+        initiated: Bool,
+        localID: String,
+        remoteID: String?,
+        canonicalPeerExists: Bool
+    ) -> Bool {
+        initiated && !canonicalPeerExists && remoteID.map { localID < $0 } == true
     }
 
     private func scheduleReconnect(to endpoint: NWEndpoint, peerID: String) {
@@ -1348,7 +1393,12 @@ final class MeshControlPlane: @unchecked Sendable {
 
     private func completeAuthentication(_ link: Link, remoteID: String) {
         guard !link.authenticated else { return }
-        if let existing = peers[remoteID], existing !== link { existing.connection.cancel() }
+        if let existing = peers[remoteID], existing !== link {
+            // A fresh authenticated link may be replacing an AWDL socket that
+            // died only on the initiator's side. Adopt it so a half-open
+            // canonical connection cannot reject every recovery attempt.
+            existing.connection.cancel()
+        }
         link.authenticated = true
         peers[remoteID] = link
         reconnectAttempts[remoteID] = 0
@@ -1357,11 +1407,116 @@ final class MeshControlPlane: @unchecked Sendable {
         cacheParticipant(from: link, id: remoteID)
         if let version = link.appVersion { peerVersionHandler(version) }
         publishParticipants()
-        send(MeshEnvelope(
-            type: "sync",
-            events: Array(replica.events.suffix(maximumSyncEvents)),
-            versionVector: replica.versionVector
-        ), to: link)
+        let missing = link.remoteVersionVector.map(replica.missingEvents(comparedWith:))
+            ?? Array(replica.events.suffix(maximumSyncEvents))
+        var eventsByID = Dictionary(uniqueKeysWithValues: missing.map { ($0.id, $0) })
+        // Persisted replicas intentionally omit transient broadcaster claims,
+        // so their version vector can be ahead of an event they do not hold.
+        // Always include broadcaster lifecycle events to restore the live room
+        // after a peer relaunches and to retain stop events against resurrection.
+        for event in replica.events where event.kind == .broadcaster {
+            eventsByID[event.id] = event
+        }
+        let events = MeshRoomReplica(events: Array(eventsByID.values)).events
+        sendSync(
+            events: events,
+            versionVector: replica.versionVector,
+            to: link
+        )
+    }
+
+    /// A room can retain many artwork-bearing playback events. Sending them as
+    /// one JSON line exceeds `MeshEnvelopeDecoder.maximumLineBytes`, so the peer
+    /// cancels before merging anything and reconnects into the same snapshot.
+    /// Keep batches comfortably below that hard framing limit and send the
+    /// version vector only after all event batches have arrived.
+    static func synchronizationEnvelopes(
+        events: [MeshRoomEvent],
+        versionVector: [String: UInt64]?
+    ) -> [MeshEnvelope] {
+        let encoder = JSONEncoder()
+        var envelopes = [MeshEnvelope]()
+        var batch = [MeshRoomEvent]()
+        var estimatedBytes = 64
+
+        func envelopeFits(_ envelope: MeshEnvelope) -> Bool {
+            (try? envelope.encodedLine().count).map {
+                $0 <= MeshEnvelopeDecoder.maximumLineBytes
+            } == true
+        }
+
+        func appendBatch(_ events: [MeshRoomEvent], to envelopes: inout [MeshEnvelope]) {
+            guard !events.isEmpty else { return }
+            let envelope = MeshEnvelope(type: "sync", events: events)
+            if envelopeFits(envelope) { envelopes.append(envelope) }
+        }
+
+        // Apply lifecycle stops before claims, and the winning claim before
+        // older claims. That keeps every intermediate batch semantically safe:
+        // a stopped broadcaster never appears live while its stop is still in
+        // flight, and a lower-priority claim cannot briefly replace the winner.
+        let orderedEvents = events.sorted(by: synchronizationEventPrecedes)
+        for event in orderedEvents {
+            guard let encodedEvent = try? encoder.encode(event) else { continue }
+            let eventBytes = encodedEvent.count
+            if !batch.isEmpty,
+               estimatedBytes + eventBytes + 1 > synchronizationEnvelopeTargetBytes {
+                appendBatch(batch, to: &envelopes)
+                batch.removeAll(keepingCapacity: true)
+                estimatedBytes = 64
+            }
+            let single = MeshEnvelope(type: "sync", events: [event])
+            guard envelopeFits(single) else { continue }
+            batch.append(event)
+            estimatedBytes += eventBytes + 1
+        }
+        appendBatch(batch, to: &envelopes)
+
+        if let versionVector {
+            let completion = MeshEnvelope(type: "sync", events: [], versionVector: versionVector)
+            if envelopeFits(completion) { envelopes.append(completion) }
+        }
+        return envelopes
+    }
+
+    private static func synchronizationEventPrecedes(
+        _ lhs: MeshRoomEvent,
+        _ rhs: MeshRoomEvent
+    ) -> Bool {
+        let lhsIsBroadcaster = lhs.kind == .broadcaster
+        let rhsIsBroadcaster = rhs.kind == .broadcaster
+        if lhsIsBroadcaster != rhsIsBroadcaster { return lhsIsBroadcaster }
+        guard lhsIsBroadcaster else {
+            return lhs.version == rhs.version ? lhs.id < rhs.id : lhs.version < rhs.version
+        }
+
+        let lhsIsClaim = lhs.isBroadcasting == true
+        let rhsIsClaim = rhs.isBroadcasting == true
+        if lhsIsClaim != rhsIsClaim { return !lhsIsClaim }
+        guard lhsIsClaim else {
+            return lhs.version == rhs.version ? lhs.id < rhs.id : lhs.version < rhs.version
+        }
+
+        let lhsEpoch = lhs.broadcasterEpoch ?? 0
+        let rhsEpoch = rhs.broadcasterEpoch ?? 0
+        if lhsEpoch != rhsEpoch { return lhsEpoch > rhsEpoch }
+        let lhsNode = lhs.broadcasterID ?? ""
+        let rhsNode = rhs.broadcasterID ?? ""
+        if lhsNode != rhsNode { return lhsNode > rhsNode }
+        return lhs.version == rhs.version ? lhs.id > rhs.id : lhs.version > rhs.version
+    }
+
+    private func sendSync(
+        events: [MeshRoomEvent],
+        versionVector: [String: UInt64]?,
+        to link: Link
+    ) {
+        for envelope in Self.synchronizationEnvelopes(
+            events: events,
+            versionVector: versionVector
+        ) {
+            send(envelope, to: link)
+        }
     }
 
     private func cacheParticipant(from link: Link, id: String) {
@@ -1382,6 +1537,22 @@ final class MeshControlPlane: @unchecked Sendable {
 
     private func send(_ envelope: MeshEnvelope, to link: Link) {
         send(envelope, to: [link])
+    }
+
+    private func sendThenCancel(_ envelope: MeshEnvelope, to link: Link) {
+        guard let data = try? envelope.encodedLine() else {
+            link.connection.cancel()
+            return
+        }
+        link.connection.send(content: data, completion: .contentProcessed { [weak self, weak link] _ in
+            guard let self, let link else { return }
+            self.queue.async {
+                guard self.links[ObjectIdentifier(link.connection)] === link,
+                      !link.authenticated
+                else { return }
+                link.connection.cancel()
+            }
+        })
     }
 
     private func send(_ envelope: MeshEnvelope, to links: [Link]) {

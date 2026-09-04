@@ -57,6 +57,8 @@ final class HostServer {
     private var videoEnabled = false
     private var nowPlaying = NowPlayingMedia()
     private var roomPlaybackIsPlaying = true
+    private var requestedPlaybackState: Bool?
+    private var requestedPlaybackStateSetNanos: UInt64?
     private var lastAudioCaptureNanos: UInt64?
     private var mediaQueue = [RoomQueueItem]()
     private var groupPlayoutDelayNanos = RoomTiming.defaultPlayoutDelayNanos
@@ -218,6 +220,10 @@ final class HostServer {
             let sourcePlaybackChanged = media.isPlaying.map {
                 $0 != self.roomPlaybackIsPlaying
             } ?? false
+            if media.isPlaying != nil {
+                self.requestedPlaybackState = nil
+                self.requestedPlaybackStateSetNanos = nil
+            }
             if let sourceIsPlaying = media.isPlaying, sourcePlaybackChanged {
                 // The broadcaster's real macOS media session is the sole source
                 // of truth. ALO and listener controls only request a change; the
@@ -495,20 +501,38 @@ final class HostServer {
     }
 
     private func applyRoomMediaCommand(_ command: RoomMediaCommand) -> Bool {
+        let now = MonotonicClock.nowNanos()
+        if !Self.playbackIntentIsCurrent(
+            setAtNanos: requestedPlaybackStateSetNanos,
+            nowNanos: now
+        ) {
+            requestedPlaybackState = nil
+            requestedPlaybackStateSetNanos = nil
+        }
         let requestedState = RoomRemoteCommandCenter.playbackState(
             after: command,
-            current: roomPlaybackIsPlaying
+            current: requestedPlaybackState ?? roomPlaybackIsPlaying
         )
         let sourceCommand = requestedState.map { $0 ? RoomMediaCommand.play : .pause }
             ?? command
         guard playbackRequestHandler?(sourceCommand) == true else { return false }
+        if let requestedState {
+            requestedPlaybackState = requestedState
+            requestedPlaybackStateSetNanos = now
+        }
         guard let requestedState, requestedState != roomPlaybackIsPlaying else { return true }
 
+        // An accepted Pause request is not proof that the source obeyed it.
+        // Keep forwarding capture until Now Playing confirms the pause so an
+        // app that ignores media keys cannot latch the room silent forever.
+        // Play is safe to apply optimistically: if the source stays paused no
+        // capture arrives, while doing so releases a stale confirmed Pause.
+        guard requestedState else { return true }
+
         // MediaRemote reports command acceptance synchronously, while browser
-        // and third-party Now Playing metadata can lag or never publish the
-        // matching state. Apply the accepted intent now so a stale Pause cannot
-        // keep dropping resumed capture. A later source update can still correct
-        // the room if the player reports a different state.
+        // and third-party Now Playing metadata can lag. Apply an accepted Play
+        // intent now so a stale confirmed Pause cannot keep dropping resumed
+        // capture. A later source update can still correct the room.
         roomPlaybackIsPlaying = requestedState
         packetizer.discardPendingSamples()
         nowPlaying = NowPlayingMedia(
@@ -523,6 +547,14 @@ final class HostServer {
         broadcast(ControlMessage(type: "room_playback", isPlaying: requestedState))
         _ = sendCoordinatedResync(targetID: nil)
         return true
+    }
+
+    static func playbackIntentIsCurrent(
+        setAtNanos: UInt64?,
+        nowNanos: UInt64
+    ) -> Bool {
+        guard let setAtNanos, nowNanos >= setAtNanos else { return false }
+        return nowNanos - setAtNanos < 2_000_000_000
     }
 
     private func sendCoordinatedResync(

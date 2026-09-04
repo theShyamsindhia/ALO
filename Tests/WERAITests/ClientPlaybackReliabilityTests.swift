@@ -81,35 +81,14 @@ struct ClientPlaybackReliabilityTests {
         ) == ["talk-peer"])
     }
 
-    @Test("Voice ducking preserves participant volume and mute")
-    func voiceDuckingPreservesLevelControls() {
+    @Test("Voice activity does not lower synchronized media")
+    func voiceActivityPreservesMediaLevel() {
         #expect(MediaOutputGain.effectiveGain(
-            participantVolume: 0.5, muted: false, duckingGain: 0.32
-        ) == 0.16)
+            participantVolume: 0.5, muted: false
+        ) == 0.5)
         #expect(MediaOutputGain.effectiveGain(
-            participantVolume: 0.5, muted: true, duckingGain: 0.32
+            participantVolume: 0.5, muted: true
         ) == 0)
-    }
-
-    @Test("Voice ducking attacks quickly and releases gently")
-    func voiceDuckingEnvelope() {
-        var envelope = MediaDuckingEnvelope()
-        envelope.setActive(true)
-        let attacked = envelope.advance(seconds: MediaDuckingEnvelope.attackDurationSeconds)
-        #expect(attacked)
-        #expect(envelope.gain == MediaDuckingEnvelope.duckedGain)
-        envelope.setActive(false)
-        let releasing = envelope.advance(
-            seconds: MediaDuckingEnvelope.releaseDurationSeconds / 2
-        )
-        #expect(releasing)
-        #expect(envelope.gain > MediaDuckingEnvelope.duckedGain)
-        #expect(envelope.gain < 1)
-        let released = envelope.advance(
-            seconds: MediaDuckingEnvelope.releaseDurationSeconds / 2
-        )
-        #expect(released)
-        #expect(envelope.gain == 1)
     }
     @Test @MainActor func videoControlStartsAudioAndVideoWhenNoBroadcasterVideoExists() {
         #expect(WERAIViewModel.videoControlIntent(
@@ -193,6 +172,14 @@ struct ClientPlaybackReliabilityTests {
             metadataIsPlaying: false,
             streamIsActive: false
         ) == false)
+        #expect(HostServer.playbackIntentIsCurrent(
+            setAtNanos: 1_000_000_000,
+            nowNanos: 2_500_000_000
+        ))
+        #expect(!HostServer.playbackIntentIsCurrent(
+            setAtNanos: 1_000_000_000,
+            nowNanos: 3_000_000_000
+        ))
     }
 
     @Test func unrelatedAudioConfigurationChangesDoNotRestartAHealthyEngine() {
@@ -205,11 +192,59 @@ struct ClientPlaybackReliabilityTests {
         #expect(SynchronizedPlayer.shouldRecoverAfterConfigurationChange(
             engineIsRunning: true, deviceChanged: true, latencyChanged: false
         ))
-        #expect(SynchronizedPlayer.shouldRecoverAfterConfigurationChange(
+        #expect(!SynchronizedPlayer.shouldRecoverAfterConfigurationChange(
             engineIsRunning: true, deviceChanged: false, latencyChanged: true
         ))
         #expect(!SynchronizedPlayer.latencyChanged(from: 10_000_000, to: 10_500_000))
         #expect(SynchronizedPlayer.latencyChanged(from: 10_000_000, to: 12_000_000))
+        #expect(!SynchronizedPlayer.shouldAcceptOutputLatencyMeasurement(
+            engineIsRunning: false,
+            previousLatencyNanos: 220_000_000,
+            measuredLatencyNanos: 220_000_000
+        ))
+        #expect(!SynchronizedPlayer.shouldAcceptOutputLatencyMeasurement(
+            engineIsRunning: true,
+            previousLatencyNanos: 220_000_000,
+            measuredLatencyNanos: 0
+        ))
+        #expect(SynchronizedPlayer.shouldAcceptOutputLatencyMeasurement(
+            engineIsRunning: true,
+            previousLatencyNanos: 220_000_000,
+            measuredLatencyNanos: 240_000_000
+        ))
+    }
+
+    @Test("Moderate Bluetooth clock jitter never cuts playback")
+    func moderateOutputJitterUsesContinuousCorrection() {
+        var recovery = PlaybackDriftRecovery()
+        let jitterPattern: [UInt64] = [
+            24_000_000, 27_000_000, 21_000_000, 31_000_000, 23_000_000,
+        ]
+        for index in 0..<21 {
+            let lateness = jitterPattern[index % jitterPattern.count]
+            let shouldResynchronize = recovery.shouldResynchronize(latenessNanos: lateness)
+            #expect(!shouldResynchronize)
+        }
+    }
+
+    @Test("Bluetooth IO lead expands render scheduling headroom")
+    func bluetoothRenderHeadroom() {
+        #expect(AudioOutputRenderBudget.schedulingHeadroomNanos(
+            bufferFrames: 128,
+            safetyOffsetFrames: 32,
+            sampleRate: 48_000
+        ) == RoomTiming.renderSchedulingHeadroomNanos)
+        let bluetoothHeadroom = AudioOutputRenderBudget.schedulingHeadroomNanos(
+            bufferFrames: 512,
+            safetyOffsetFrames: 4_096,
+            sampleRate: 48_000
+        )
+        #expect(bluetoothHeadroom > 100_000_000)
+        #expect(RoomTiming.outputLatencyFloor(
+            220_000_000,
+            roundTripNanos: 4_000_000,
+            renderSchedulingHeadroomNanos: bluetoothHeadroom
+        ) == 450_000_000)
     }
 
     @Test("An AirPods format switch rebuilds a still-running output engine")

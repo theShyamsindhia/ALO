@@ -73,6 +73,10 @@ struct ReceiverTimingDiagnostics: Sendable, Equatable {
     let clockOffsetMilliseconds: Double?
     let jitterMilliseconds: Double
     let recommendedBufferMilliseconds: Double
+    let outputLatencyMilliseconds: Double
+    let renderHeadroomMilliseconds: Double
+    let outputSampleRate: Double?
+    let outputChannelCount: UInt32?
     let latenessMilliseconds: Double
     let latePacketCount: UInt64
     let resyncCount: UInt64
@@ -125,6 +129,13 @@ struct DiagnosticRoomContext: Sendable, Equatable {
             }
             parts.append("buffer \(Self.milliseconds(receiver.recommendedBufferMilliseconds))")
             parts.append("jitter \(Self.milliseconds(receiver.jitterMilliseconds))")
+            parts.append(
+                "output \(Self.milliseconds(receiver.outputLatencyMilliseconds)) + \(Self.milliseconds(receiver.renderHeadroomMilliseconds)) render"
+            )
+            if let sampleRate = receiver.outputSampleRate,
+               let channels = receiver.outputChannelCount {
+                parts.append("\(Int(sampleRate.rounded())) Hz/\(channels) ch")
+            }
             parts.append("lateness \(Self.milliseconds(receiver.latenessMilliseconds))")
             parts.append("late \(receiver.latePacketCount), resyncs \(receiver.resyncCount)")
         }

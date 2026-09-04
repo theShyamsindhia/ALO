@@ -235,10 +235,6 @@ final class HostSession {
         localReceiver?.setLocalPlaybackMuted(muted)
     }
 
-    func setVoiceDuckingActive(_ active: Bool) {
-        localReceiver?.setVoiceDuckingActive(active)
-    }
-
     @discardableResult
     func sendRoomMediaCommand(_ command: RoomMediaCommand) -> Bool {
         host?.sendRoomMediaCommand(command) ?? false

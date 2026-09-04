@@ -17,10 +17,8 @@ queue state are stored locally.
 ## Requirements
 
 - macOS 14.2 or newer
-- Built-in, wired, or USB audio output
+- Built-in, wired, USB, or Bluetooth audio output
 - All Macs on the same Wi-Fi/LAN, with client isolation disabled
-
-Bluetooth output is not recommended because its latency can change while playing.
 
 ## Run the Mac app
 
@@ -173,8 +171,8 @@ yet end-to-end encrypted, so use both room types only on a trusted local network
 - The room establishes one shared playout target before audio begins. Once streaming starts,
   that timeline is locked, so a joining Mac adopts the room's timing instead of interrupting
   everyone already listening.
-- Output-device latency is measured per Mac. Remaining error is corrected 20 times per
-  second with a smoothed varispeed adjustment capped at 0.2%.
+- Output-device latency and render headroom are measured per Mac. Remaining error is
+  corrected 20 times per second with a smoothed varispeed adjustment capped at 1%.
 - Each receiver watches the audio render clock while packets are still arriving. If a
   CPU spike stops that clock for 250 ms, or pushes playback more than 100 ms ahead or
   behind the room timeline, it flushes stale scheduled audio and re-anchors itself.
@@ -190,7 +188,8 @@ yet end-to-end encrypted, so use both room types only on a trusted local network
 - Spotify artwork is resolved once per track through Spotify’s public HTTPS artwork
   endpoint; no Spotify account token is used. Other players use macOS Now Playing data
   when the system makes it available.
-- Bluetooth output is less predictable than built-in, wired, or USB speakers. This is
+- Bluetooth format and latency transitions are detected and the output graph is rebuilt
+  without discarding the voice jitter cushion. Bluetooth adds device latency, so ALO is
   not intended for live musical performance.
 
 ## Verify
