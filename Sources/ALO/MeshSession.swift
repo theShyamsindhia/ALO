@@ -190,6 +190,7 @@ final class MeshSession {
         queueHandler: @escaping ([RoomQueueItem]) -> Void,
         videoHandler: @escaping (CGImage) -> Void,
         peerVersionHandler: @escaping (String) -> Void = { _ in },
+        roomIconHandler: @escaping (RoomIcon) -> Void = { _ in },
         errorHandler: @escaping (Error) -> Void = { _ in },
         walkieTalkieStateHandler: @escaping (String, String, Bool, Double) -> Void = { _, _, _, _ in },
         walkieTalkieTransmissionEndedHandler: @escaping (Error) -> Void = { _ in },
@@ -251,6 +252,9 @@ final class MeshSession {
             },
             participantsHandler: { participants in
                 DispatchQueue.main.async { relay.participants(participants) }
+            },
+            roomIconHandler: { icon in
+                DispatchQueue.main.async { roomIconHandler(icon) }
             },
             peerVersionHandler: { version in
                 DispatchQueue.main.async { peerVersionHandler(version) }

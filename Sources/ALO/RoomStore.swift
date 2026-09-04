@@ -9,6 +9,7 @@ final class RoomStore {
         let creatorPeerID: String
         let isPrivate: Bool
         let joinedAt: Date
+        let icon: RoomIcon?
     }
 
     private let fileURL: URL
@@ -46,7 +47,8 @@ final class RoomStore {
                 creatorPeerID: record.creatorPeerID,
                 isPrivate: record.isPrivate,
                 accessKey: key,
-                joinedAt: record.joinedAt
+                joinedAt: record.joinedAt,
+                icon: record.icon
             )
         }.sorted { $0.joinedAt > $1.joinedAt }
     }
@@ -72,7 +74,8 @@ final class RoomStore {
             creatorPeerID: room.creatorPeerID,
             isPrivate: room.isPrivate,
             accessKey: room.accessKey,
-            joinedAt: room.joinedAt
+            joinedAt: room.joinedAt,
+            icon: room.icon
         )
         try persist(rooms)
         return true
@@ -86,6 +89,16 @@ final class RoomStore {
             try? FileManager.default.removeItem(at: roomStateURL(roomID: roomID))
         }
         secrets.remove(roomID: roomID)
+    }
+
+    @discardableResult
+    func mergeIcon(_ icon: RoomIcon, roomID: String) throws -> Bool {
+        var rooms = load()
+        guard let index = rooms.firstIndex(where: { $0.id == roomID }),
+              icon.supersedes(rooms[index].icon) else { return false }
+        rooms[index].icon = icon
+        try persist(rooms)
+        return true
     }
 
     func loadEvents(roomID: String) -> [MeshRoomEvent] {
@@ -139,7 +152,8 @@ final class RoomStore {
                 name: $0.name,
                 creatorPeerID: $0.creatorPeerID,
                 isPrivate: $0.isPrivate,
-                joinedAt: $0.joinedAt
+                joinedAt: $0.joinedAt,
+                icon: $0.icon
             )
         }
         let data = try JSONEncoder().encode(records)

@@ -161,6 +161,9 @@ final class MeshControlPlane: @unchecked Sendable {
 
     let room: RoomConfiguration
     let nodeID: String
+    private var roomIcon: RoomIcon?
+    private let roomIconHandler: (RoomIcon) -> Void
+    private var advertisedRecord = [String: String]()
     private var displayName: String
     private var deviceIcon: String
     private var deviceColorHex: String
@@ -235,6 +238,7 @@ final class MeshControlPlane: @unchecked Sendable {
         listenerReadyHandler: ((NWEndpoint.Port) -> Void)? = nil,
         replicaHandler: @escaping (MeshRoomReplica) -> Void,
         participantsHandler: @escaping ([RoomParticipant]) -> Void,
+        roomIconHandler: @escaping (RoomIcon) -> Void = { _ in },
         peerVersionHandler: @escaping (String) -> Void = { _ in },
         mediaCommandHandler: @escaping (RoomMediaCommand, String, UInt64) -> Bool = { _, _, _ in true },
         resyncRequestHandler: @escaping (String?, String, UInt64) -> Bool = { _, _, _ in true },
@@ -249,6 +253,8 @@ final class MeshControlPlane: @unchecked Sendable {
     ) {
         self.room = room
         self.nodeID = nodeID
+        self.roomIcon = room.icon
+        self.roomIconHandler = roomIconHandler
         self.displayName = displayName
         let generatedAppearance = DeviceAppearance.generated(from: nodeID)
         let appearance = DeviceAppearance(
@@ -287,22 +293,11 @@ final class MeshControlPlane: @unchecked Sendable {
 
     func start(advertise: Bool = true) throws {
         isStopped = false
+        advertisedRecord = [:]
         let listener = try NWListener(using: LocalNetworkParameters.tcp(), on: .any)
+        self.listener = listener
         if advertise {
-            var txtRecord = [
-                "roomID": room.id,
-                "roomName": String(room.name.prefix(40)),
-                "nodeID": nodeID,
-                "private": room.isPrivate ? "1" : "0",
-                "version": "1",
-                "appVersion": appVersion,
-            ]
-            if let accessProof { txtRecord["accessProof"] = accessProof }
-            listener.service = NWListener.Service(
-                name: "\(room.id.prefix(8))-\(nodeID.prefix(8))",
-                type: MeshRoomBrowser.serviceType,
-                txtRecord: NWTXTRecord(txtRecord)
-            )
+            refreshAdvertisement()
         }
         listener.newConnectionHandler = { [weak self] in self?.accept($0) }
         listener.stateUpdateHandler = { [weak self] state in
@@ -328,6 +323,31 @@ final class MeshControlPlane: @unchecked Sendable {
 
     func connectForTesting(to endpoint: NWEndpoint, expectedNodeID: String? = nil) {
         queue.async { [weak self] in self?.connect(to: endpoint, expectedNodeID: expectedNodeID) }
+    }
+
+    func updateRoomIcon(_ icon: RoomIcon) {
+        queue.async { [weak self] in self?.mergeRoomIcon(icon) }
+    }
+
+    private func mergeRoomIcon(_ icon: RoomIcon) {
+        guard icon.supersedes(roomIcon) else { return }
+        roomIcon = icon
+        roomIconHandler(icon)
+        broadcast(MeshEnvelope(type: "room_icon", roomIcon: icon))
+    }
+
+    private func refreshAdvertisement() {
+        let record = RoomDiscovery.record(
+            room: room, nodeID: nodeID, displayName: displayName,
+            appVersion: appVersion, accessProof: accessProof, icon: roomIcon,
+            media: replica.broadcaster?.nodeID == nodeID ? replica.nowPlaying : nil
+        )
+        guard record != advertisedRecord else { return }
+        advertisedRecord = record
+        listener?.service = NWListener.Service(
+            name: "\(room.id.prefix(8))-\(nodeID.prefix(8))",
+            type: MeshRoomBrowser.serviceType, txtRecord: NWTXTRecord(record)
+        )
     }
 
     func disconnectForTesting(peerID: String) {
@@ -871,6 +891,8 @@ final class MeshControlPlane: @unchecked Sendable {
 
         guard link.authenticated, let remoteID = link.nodeID, peers[remoteID] === link else { return }
         switch envelope.type {
+        case "room_icon":
+            if let icon = envelope.roomIcon { mergeRoomIcon(icon) }
         case "sync":
             merge(Array((envelope.events ?? []).prefix(maximumSyncEvents)), excluding: link)
             if let vector = envelope.versionVector {
@@ -1388,6 +1410,7 @@ final class MeshControlPlane: @unchecked Sendable {
             broadcast(MeshEnvelope(type: "heartbeat", nodeID: nodeID, heartbeatSequence: heartbeatSequence, heartbeatGeneration: heartbeatGeneration))
             retireExpiredBroadcasterIfNeeded(nowNanos: now)
             expireDisconnectedParticipantsIfNeeded(nowNanos: now)
+            if !advertisedRecord.isEmpty { refreshAdvertisement() }
         }
         heartbeatTimer = timer
         timer.resume()
@@ -1530,6 +1553,7 @@ final class MeshControlPlane: @unchecked Sendable {
         }
         link.authenticated = true
         peers[remoteID] = link
+        if let roomIcon { send(MeshEnvelope(type: "room_icon", roomIcon: roomIcon), to: link) }
         if roomStateSyncDisabled, link.roomStateSyncVersion == 1 {
             disableRoomStateSync(
                 for: link,

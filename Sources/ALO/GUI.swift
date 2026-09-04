@@ -495,7 +495,12 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
         window.standardWindowButton(.closeButton)?.isHidden = true
         window.standardWindowButton(.miniaturizeButton)?.isHidden = true
         window.standardWindowButton(.zoomButton)?.isHidden = true
-        window.contentView = NSHostingView(rootView: ALOView(model: model))
+        window.contentView = NSHostingView(rootView: ALOView(
+            model: model,
+            checkForUpdates: ALOAppFlavor.isDevelopment ? nil : { [weak self] in
+                self?.updater.checkForUpdates(userInitiated: true)
+            }
+        ))
         window.center()
         setupWindowFrame = window.frame
         window.isReleasedWhenClosed = false
@@ -1399,6 +1404,8 @@ final class ALOViewModel: ObservableObject {
     @Published var nearbyRooms = [NearbyRoom]()
     @Published var savedRooms = [RoomConfiguration]()
     @Published var selectedRoomID: String?
+    @Published var roomsRefreshing = false
+    @Published var roomsRefreshError: String?
     @Published var createPrivateRoom = false
     @Published var privateRoomKey = ""
     @Published var statusText = "Ready"
@@ -1518,20 +1525,29 @@ final class ALOViewModel: ObservableObject {
         })
             ? savedVoiceInput
             : nil
-        selectedRoomID = lastJoinedRoomStore.roomToRestore(from: savedRooms)?.id
-            ?? savedRooms.first?.id
+        selectedRoomID = nil
         roomBrowser = MeshRoomBrowser(
             updateHandler: { [weak self] rooms in
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.nearbyRooms = rooms
-                    if self.selectedRoomID == nil || !self.roomChoices.contains(where: { $0.id == self.selectedRoomID }) {
-                        self.selectedRoomID = rooms.first?.id ?? self.savedRooms.first?.id
+                    if let selected = self.selectedRoomID, !self.roomChoices.contains(where: { $0.id == selected }) {
+                        self.selectedRoomID = nil
                     }
                 }
             },
             errorHandler: { [weak self] message in
-                DispatchQueue.main.async { self?.statusText = "Local network unavailable: \(message)" }
+                DispatchQueue.main.async {
+                    self?.roomsRefreshing = false
+                    self?.roomsRefreshError = message
+                    self?.statusText = "Local network unavailable: \(message)"
+                }
+            },
+            readyHandler: { [weak self] in
+                DispatchQueue.main.async {
+                    self?.roomsRefreshing = false
+                    self?.roomsRefreshError = nil
+                }
             }
         )
         if discoverRooms { roomBrowser.start() }
@@ -1657,7 +1673,8 @@ final class ALOViewModel: ObservableObject {
                 name: room.name,
                 creatorPeerID: room.creatorPeerID,
                 isPrivate: true,
-                accessKey: key
+                accessKey: key,
+                icon: room.icon
             )
             try? roomStore.save(unlocked)
             savedRooms = roomStore.load()
@@ -1671,7 +1688,7 @@ final class ALOViewModel: ObservableObject {
             try roomStore.forget(roomID: roomID)
             savedRooms = roomStore.load()
             if selectedRoomID == roomID {
-                selectedRoomID = nearbyRooms.first?.id ?? savedRooms.first?.id
+                selectedRoomID = nil
             }
         } catch {
             errorMessage = "Could not forget the room: \(error.localizedDescription)"
@@ -1701,6 +1718,21 @@ final class ALOViewModel: ObservableObject {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(key, forType: .string)
         statusText = "Private space invite key copied"
+    }
+
+    func setRoomIcon(roomID: String, symbol: String) {
+        guard phase == .idle, let room = savedRooms.first(where: { $0.id == roomID }),
+              RoomIcon.choices.contains(where: { $0.symbol == symbol }) else { return }
+        let nearbyIcon = nearbyRooms.first(where: { $0.id == roomID })?.icon
+        let counter = max(room.icon?.version.counter ?? 0, nearbyIcon?.version.counter ?? 0)
+        guard counter < UInt64.max - 1 else { return }
+        let icon = RoomIcon(symbol: symbol, version: MeshVersion(counter: counter + 1, nodeID: nodeID))
+        do {
+            try roomStore.mergeIcon(icon, roomID: roomID)
+            savedRooms = roomStore.load()
+        } catch {
+            errorMessage = "Could not save the space icon: \(error.localizedDescription)"
+        }
     }
 
     func copyPrivateInviteKey() {
@@ -1741,6 +1773,16 @@ final class ALOViewModel: ObservableObject {
             queueHandler: queueCallback,
             videoHandler: videoCallback,
             peerVersionHandler: { [weak self] version in self?.peerVersionHandler(version) },
+            roomIconHandler: { [weak self] icon in
+                guard let self else { return }
+                do {
+                    try self.roomStore.mergeIcon(icon, roomID: room.id)
+                    self.savedRooms = self.roomStore.load()
+                    if self.activeRoomConfiguration?.id == room.id { self.activeRoomConfiguration?.icon = icon }
+                } catch {
+                    self.errorMessage = "Could not save the shared space icon: \(error.localizedDescription)"
+                }
+            },
             errorHandler: { [weak self] error in
                 guard let self else { return }
                 let permissionRelated = self.isPermissionError(error)
@@ -2670,6 +2712,11 @@ final class ALOViewModel: ObservableObject {
     }
 
     func refreshRooms() {
+        guard phase == .idle, !roomsRefreshing else { return }
+        savedRooms = roomStore.load()
+        nearbyRooms = []
+        roomsRefreshing = true
+        roomsRefreshError = nil
         statusText = "Looking for rooms"
         roomBrowser.restart()
     }
@@ -3085,12 +3132,14 @@ final class ALOViewModel: ObservableObject {
 
 struct ALOView: View {
     @ObservedObject var model: ALOViewModel
+    var checkForUpdates: (() -> Void)? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var roomNameFocused: Bool
     @FocusState private var privateKeyFocused: Bool
     @FocusState private var roomRenameFocused: Bool
     @State private var editingRoomID: String?
     @State private var editedRoomName = ""
+    @State private var focusedRoomID: String?
 
     var body: some View {
         ZStack {
@@ -3177,10 +3226,24 @@ struct ALOView: View {
     private var setupFooter: some View {
         VStack(spacing: 0) {
             Divider()
-            Text("ALO")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            HStack(spacing: 6) {
+                if let error = model.roomsRefreshError {
+                    Image(systemName: "wifi.exclamationmark")
+                        .help(error)
+                        .accessibilityLabel("Nearby discovery unavailable: \(error)")
+                }
+                Button(action: { checkForUpdates?() }) {
+                    Label("ALO \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—")",
+                          systemImage: "arrow.down.circle")
+                }
+                .buttonStyle(.borderless)
+                .disabled(checkForUpdates == nil)
+                .help("Check for updates")
+                .accessibilityLabel("Check for ALO updates")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(height: 37)
     }
@@ -3236,14 +3299,31 @@ struct ALOView: View {
                 Text("Spaces")
                     .font(.headline)
                 Spacer()
+                Button(action: model.refreshRooms) {
+                    ZStack {
+                        if model.roomsRefreshing {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                    }
+                    .frame(width: 20, height: 20)
+                }
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.circle)
+                .disabled(model.roomsRefreshing)
+                .help(model.roomsRefreshing ? "Looking for nearby spaces…" : "Sync saved and nearby spaces")
+                .accessibilityLabel("Sync spaces")
                 Button {
                     withAnimation(reduceMotion ? nil : .smooth(duration: 0.28)) {
                         model.mode = .share
                     }
                 } label: {
                     Image(systemName: "plus")
+                        .frame(width: 20, height: 20)
                 }
                 .buttonStyle(.bordered)
+                .buttonBorderShape(.circle)
                 .help("Create a space")
                 .accessibilityLabel("Create a space")
             }
@@ -3251,7 +3331,7 @@ struct ALOView: View {
             .frame(height: 45)
 
             ScrollViewReader { proxy in
-                List(selection: $model.selectedRoomID) {
+                List(selection: $focusedRoomID) {
                     if model.roomChoices.isEmpty {
                         VStack(alignment: .leading, spacing: 3) {
                             Text("Looking nearby")
@@ -3273,14 +3353,18 @@ struct ALOView: View {
                 }
                 .listStyle(.inset)
                 .scrollContentBackground(.hidden)
+                .onChange(of: focusedRoomID) { _, selected in
+                    if let selected { model.selectedRoomID = selected }
+                }
                 .onChange(of: model.selectedRoomID, initial: true) { previous, selected in
                     if previous != selected { model.privateRoomKey = "" }
-                    if let selected {
+                    if let selected, model.selectedRoomConfiguration?.isPrivate == true {
                         DispatchQueue.main.async { proxy.scrollTo(selected, anchor: .center) }
                     }
                 }
                 .onKeyPress(.return) {
-                    guard editingRoomID == nil, let room = model.selectedRoomConfiguration else { return .ignored }
+                    guard editingRoomID == nil, focusedRoomID != nil,
+                          let room = model.selectedRoomConfiguration else { return .ignored }
                     if room.isPrivate && room.accessKey == nil {
                         privateKeyFocused = true
                     } else {
@@ -3306,6 +3390,7 @@ struct ALOView: View {
             }
         }
         .frame(width: 286, height: 199)
+        .onAppear { focusedRoomID = nil }
     }
 
     private var setupRoomListHeight: CGFloat {
@@ -3357,10 +3442,11 @@ struct ALOView: View {
                         Text(room.name)
                             .font(.body)
                             .lineLimit(1)
-                        Text(nearby.map { "Nearby · \($0.peerCount) \($0.peerCount == 1 ? "person" : "people")" } ?? "Saved on this Mac")
+                        Text(nearby?.detail ?? (room.isPrivate ? "Private · Saved on this Mac" : "Saved on this Mac"))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
+                            .help(nearby?.activityHelp ?? "Saved on this Mac. Join to open the space.")
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
@@ -3381,7 +3467,9 @@ struct ALOView: View {
     }
 
     private func roomCardIcon(_ room: RoomConfiguration) -> some View {
-        Image(systemName: room.isPrivate ? "lock.fill" : "person.3.fill")
+        let nearbyIcon = model.nearbyRooms.first(where: { $0.id == room.id })?.icon
+        let icon = nearbyIcon?.supersedes(room.icon) == true ? nearbyIcon : room.icon
+        return Image(systemName: icon?.symbol ?? (room.isPrivate ? "lock.fill" : "person.3.fill"))
             .font(.body)
             .foregroundStyle(.secondary)
             .frame(width: 24, height: 24)
@@ -3393,6 +3481,16 @@ struct ALOView: View {
                 beginRoomRename(room)
             } label: {
                 Label("Rename Space", systemImage: "pencil")
+            }
+            Menu {
+                Text("Shared when you join the space")
+                ForEach(RoomIcon.choices, id: \.symbol) { choice in
+                    Button { model.setRoomIcon(roomID: room.id, symbol: choice.symbol) } label: {
+                        Label(choice.name, systemImage: choice.symbol)
+                    }
+                }
+            } label: {
+                Label("Shared Icon", systemImage: "square.grid.2x2")
             }
             if room.isPrivate, room.accessKey != nil {
                 Button {

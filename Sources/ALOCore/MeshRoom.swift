@@ -7,6 +7,7 @@ public struct RoomConfiguration: Codable, Sendable, Equatable, Hashable, Identif
     public let isPrivate: Bool
     public let accessKey: String?
     public let joinedAt: Date
+    public var icon: RoomIcon?
 
     public init(
         id: String = UUID().uuidString,
@@ -14,7 +15,8 @@ public struct RoomConfiguration: Codable, Sendable, Equatable, Hashable, Identif
         creatorPeerID: String = "",
         isPrivate: Bool = false,
         accessKey: String? = nil,
-        joinedAt: Date = Date()
+        joinedAt: Date = Date(),
+        icon: RoomIcon? = nil
     ) {
         self.id = id
         self.name = name
@@ -22,6 +24,7 @@ public struct RoomConfiguration: Codable, Sendable, Equatable, Hashable, Identif
         self.isPrivate = isPrivate
         self.accessKey = isPrivate ? accessKey : nil
         self.joinedAt = joinedAt
+        self.icon = icon?.isValid == true ? icon : nil
     }
 }
 
@@ -242,6 +245,7 @@ public struct MeshRoomReplica: Sendable, Equatable {
 
 public struct MeshEnvelope: Codable, Sendable {
     public let type: String
+    public let roomIcon: RoomIcon?
     public let room: RoomConfiguration?
     public let nodeID: String?
     public let displayName: String?
@@ -277,6 +281,7 @@ public struct MeshEnvelope: Codable, Sendable {
 
     public init(
         type: String,
+        roomIcon: RoomIcon? = nil,
         room: RoomConfiguration? = nil,
         nodeID: String? = nil,
         displayName: String? = nil,
@@ -309,6 +314,7 @@ public struct MeshEnvelope: Codable, Sendable {
         openLine: OpenLineMessage? = nil
     ) {
         self.type = type
+        self.roomIcon = roomIcon
         self.room = room
         self.nodeID = nodeID
         self.displayName = displayName

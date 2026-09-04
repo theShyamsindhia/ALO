@@ -12,7 +12,7 @@ extension NativePresentationTests {
     @Suite(.serialized) @MainActor
     struct SpacesPresentationTests {
         @Test("Native Spaces fits populated, empty, private and creation states in both appearances",
-              arguments: [false, true], ["rooms", "empty", "private", "create"])
+              arguments: [false, true], ["rooms", "empty", "private", "create", "nearby"])
         func nativePresentation(dark: Bool, state: String) async throws {
             _ = NSApplication.shared
             let model = ALOViewModel(discoverRooms: false)
@@ -24,17 +24,24 @@ extension NativePresentationTests {
                 RoomConfiguration(id: "movies", name: "Movies"),
                 RoomConfiguration(id: "private", name: "Private space", isPrivate: true)
             ]
-            model.selectedRoomID = state == "private" ? "private" : nil
+            model.selectedRoomID = state == "private" ? "private" : "music"
             model.mode = state == "create" ? .share : .listen
             model.roomName = ""
             let initialRooms = model.savedRooms
+            if state == "nearby" {
+                model.nearbyRooms = [NearbyRoom(id: "music", name: "Listening room", isPrivate: false,
+                    peerCount: 3, accessProof: nil, memberNames: ["Raj", "Shyam", "Bishal"],
+                    trackTitle: "A song with a very long name", isPlaying: true,
+                    icon: RoomIcon(symbol: "headphones", version: MeshVersion(counter: 1, nodeID: "a")))]
+            }
             let window = NSWindow(
                 contentRect: NSRect(x: -2000, y: 0, width: 306, height: 426),
                 styleMask: .borderless, backing: .buffered, defer: false
             )
             window.isReleasedWhenClosed = false
             window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
-            let hosting = NSHostingView(rootView: ALOView(model: model)
+            var updateRequested = false
+            let hosting = NSHostingView(rootView: ALOView(model: model, checkForUpdates: { updateRequested = true })
                 .environment(\.colorScheme, dark ? .dark : .light))
             window.contentView = hosting
             defer { window.close() }
@@ -50,10 +57,10 @@ extension NativePresentationTests {
                 let scrollView = try #require(views.compactMap { $0 as? NSScrollView }.first)
                 #expect(scrollView.frame.height > 80)
                 #expect(scrollView.frame.height < 170)
+                let table = try #require(views.compactMap { $0 as? NSTableView }.first)
+                #expect(table.selectedRow == -1, "Remembered rooms must not appear selected")
                 if state == "private" {
-                    let table = try #require(views.compactMap { $0 as? NSTableView }.first)
-                    try #require(table.selectedRow >= 0)
-                    #expect(table.visibleRect.contains(table.rect(ofRow: table.selectedRow)))
+                    #expect(table.visibleRect.contains(table.rect(ofRow: table.numberOfRows - 1)))
                 }
             }
             // Presenting any state must never join, rename or forget a room.
@@ -61,6 +68,7 @@ extension NativePresentationTests {
             #expect(model.savedRooms == initialRooms)
             #expect(model.privateRoomKey.isEmpty)
             #expect(!model.canStartSharing)
+            #expect(!updateRequested)
 
             let bitmap = try #require(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
             hosting.cacheDisplay(in: hosting.bounds, to: bitmap)

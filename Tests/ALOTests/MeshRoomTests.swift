@@ -1410,6 +1410,45 @@ struct MeshRoomTests {
         #expect(!persisted.contains { $0.id == "removed-add" })
     }
 
+    @Test("Shared icons converge across peers and late joins without changing room history", arguments: [false, true])
+    func sharedRoomIcons(isPrivate: Bool) throws {
+        let first = RoomIcon(symbol: "headphones", version: MeshVersion(counter: 1, nodeID: "a"))
+        let newer = RoomIcon(symbol: "film.fill", version: MeshVersion(counter: 2, nodeID: "b"))
+        var room = RoomConfiguration(name: "Icon test", isPrivate: isPrivate,
+            accessKey: isPrivate ? "secret" : nil, icon: first)
+        let a = RoomIconProbe()
+        let b = RoomIconProbe()
+        let c = RoomIconProbe()
+        let readyB = PortProbe()
+        let readyC = PortProbe()
+        let history = MeshProbe()
+        let nodeA = MeshControlPlane(room: room, nodeID: "a", displayName: "A",
+            replicaHandler: { history.update(replica: $0) }, participantsHandler: { _ in },
+            roomIconHandler: { a.set($0) })
+        room.icon = newer
+        let nodeB = MeshControlPlane(room: room, nodeID: "b", displayName: "B",
+            listenerReadyHandler: { readyB.set($0) }, replicaHandler: { _ in },
+            participantsHandler: { _ in }, roomIconHandler: { b.set($0) })
+        room.icon = nil
+        let nodeC = MeshControlPlane(room: room, nodeID: "c", displayName: "C",
+            listenerReadyHandler: { readyC.set($0) }, replicaHandler: { _ in },
+            participantsHandler: { _ in }, roomIconHandler: { c.set($0) })
+        try nodeA.start(advertise: false)
+        try nodeB.start(advertise: false)
+        try nodeC.start(advertise: false)
+        defer { nodeA.stop(); nodeB.stop(); nodeC.stop() }
+        let portB = try #require(readyB.wait())
+        let portC = try #require(readyC.wait())
+        nodeA.connectForTesting(to: .hostPort(host: "127.0.0.1", port: portB))
+        #expect(waitUntil { a.icon == newer })
+        nodeB.connectForTesting(to: .hostPort(host: "127.0.0.1", port: portC))
+        #expect(waitUntil { c.icon == newer })
+        let latest = RoomIcon(symbol: "leaf.fill", version: MeshVersion(counter: 3, nodeID: "a"))
+        nodeA.updateRoomIcon(latest)
+        #expect(waitUntil { a.icon == latest && b.icon == latest && c.icon == latest })
+        #expect(history.eventCount == 0, "Icon changes must not become chat/playback events")
+    }
+
     private func makeNode(room: RoomConfiguration, id: String, probe: MeshProbe, ports: PortProbe) -> MeshControlPlane {
         MeshControlPlane(
             room: room,
@@ -1448,6 +1487,13 @@ private final class PortProbe: @unchecked Sendable {
         _ = semaphore.wait(timeout: .now() + 3)
         return lock.withLock { value }
     }
+}
+
+private final class RoomIconProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: RoomIcon?
+    var icon: RoomIcon? { lock.withLock { value } }
+    func set(_ icon: RoomIcon) { lock.withLock { value = icon } }
 }
 
 private final class CountProbe: @unchecked Sendable {
