@@ -512,6 +512,7 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
             NSApp.activate(ignoringOtherApps: true)
         }
         if !ALOAppFlavor.isDevelopment {
+            updater.updateAvailabilityHandler = { [weak model] version in model?.availableUpdateVersion = version }
             updater.updateAvailableHandler = { [weak self] version in self?.presentUpdate(version: version) }
             updater.messageHandler = { [weak self] message in self?.presentUpdateMessage(message) }
             model.peerVersionHandler = { [weak updater] version in updater?.observePeerVersion(version) }
@@ -1406,6 +1407,7 @@ final class ALOViewModel: ObservableObject {
     @Published var selectedRoomID: String?
     @Published var roomsRefreshing = false
     @Published var roomsRefreshError: String?
+    @Published var availableUpdateVersion: String?
     @Published var createPrivateRoom = false
     @Published var privateRoomKey = ""
     @Published var statusText = "Ready"
@@ -3233,13 +3235,23 @@ struct ALOView: View {
                         .accessibilityLabel("Nearby discovery unavailable: \(error)")
                 }
                 Button(action: { checkForUpdates?() }) {
-                    Label("ALO \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—")",
-                          systemImage: "arrow.down.circle")
+                    HStack(spacing: 6) {
+                        Label("ALO \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—")",
+                              systemImage: "arrow.down.circle")
+                        if model.availableUpdateVersion != nil {
+                            Circle()
+                                .fill(.tint)
+                                .frame(width: 5, height: 5)
+                                .accessibilityHidden(true)
+                            Text("Update available")
+                                .foregroundStyle(.tint)
+                        }
+                    }
                 }
                 .buttonStyle(.borderless)
                 .disabled(checkForUpdates == nil)
-                .help("Check for updates")
-                .accessibilityLabel("Check for ALO updates")
+                .help(model.availableUpdateVersion.map { "ALO \($0) is available" } ?? "Check for updates")
+                .accessibilityLabel(model.availableUpdateVersion.map { "Update available: ALO \($0)" } ?? "Check for ALO updates")
             }
             .font(.caption)
             .foregroundStyle(.secondary)

@@ -12,7 +12,7 @@ extension NativePresentationTests {
     @Suite(.serialized) @MainActor
     struct SpacesPresentationTests {
         @Test("Native Spaces fits populated, empty, private and creation states in both appearances",
-              arguments: [false, true], ["rooms", "empty", "private", "create", "nearby"])
+              arguments: [false, true], ["rooms", "empty", "private", "create", "nearby", "update"])
         func nativePresentation(dark: Bool, state: String) async throws {
             _ = NSApplication.shared
             let model = ALOViewModel(discoverRooms: false)
@@ -27,6 +27,7 @@ extension NativePresentationTests {
             model.selectedRoomID = state == "private" ? "private" : "music"
             model.mode = state == "create" ? .share : .listen
             model.roomName = ""
+            model.availableUpdateVersion = state == "update" ? "999.0.1" : nil
             let initialRooms = model.savedRooms
             if state == "nearby" {
                 model.nearbyRooms = [NearbyRoom(id: "music", name: "Listening room", isPrivate: false,

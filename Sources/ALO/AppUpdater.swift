@@ -67,8 +67,13 @@ final class AppUpdater {
     private static let checkInterval: TimeInterval = 6 * 60 * 60
 
     var updateAvailableHandler: ((String) -> Void)?
+    var updateAvailabilityHandler: ((String?) -> Void)?
     var messageHandler: ((String) -> Void)?
-    private(set) var availableRelease: Release?
+    private(set) var availableRelease: Release? {
+        didSet {
+            updateAvailabilityHandler?(availableRelease.flatMap { AppVersion($0.tagName)?.description })
+        }
+    }
     private var checkTimer: Timer?
     private var checkTask: Task<Void, Never>?
     private var lastPresentedVersion: String?
@@ -100,20 +105,26 @@ final class AppUpdater {
             do {
                 let release = try await Self.fetchLatestRelease()
                 guard !Task.isCancelled else { return }
-                guard let version = AppVersion(release.tagName), version > currentVersion else {
-                    availableRelease = nil
-                    if userInitiated { messageHandler?("ALO \(currentVersion) is up to date.") }
-                    return
-                }
-                availableRelease = release
-                if userInitiated || lastPresentedVersion != version.description {
-                    lastPresentedVersion = version.description
-                    updateAvailableHandler?(version.description)
-                }
+                handleFetchedRelease(release, userInitiated: userInitiated)
             } catch is CancellationError {
             } catch {
                 if userInitiated { messageHandler?("Could not check for updates: \(error.localizedDescription)") }
             }
+        }
+    }
+
+    func handleFetchedRelease(_ release: Release, userInitiated: Bool) {
+        guard let version = AppVersion(release.tagName), version > currentVersion else {
+            availableRelease = nil
+            if userInitiated { messageHandler?("ALO \(currentVersion) is up to date.") }
+            return
+        }
+        // Availability remains visible even when the once-per-version alert
+        // has already been dismissed with Later.
+        availableRelease = release
+        if userInitiated || lastPresentedVersion != version.description {
+            lastPresentedVersion = version.description
+            updateAvailableHandler?(version.description)
         }
     }
 
