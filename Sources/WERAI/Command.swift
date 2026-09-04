@@ -163,6 +163,7 @@ enum WERAICommand {
             deviceColorHex: appearance.colorHex,
             profileImageData: profileImageData,
             initialEvents: store.loadEvents(roomID: room.id),
+            initialRoomStateDocument: store.loadRoomStateDocument(roomID: room.id),
             statusHandler: report,
             identityHandler: { id, name in report("identity \(name) \(id)") },
             participantsHandler: { report("participants \($0.count)") },
@@ -178,7 +179,8 @@ enum WERAICommand {
                 broadcastFailure = error
                 report("error \(error.localizedDescription)")
             },
-            replicaPersistenceHandler: { store.saveEvents($0.events, roomID: room.id) }
+            replicaPersistenceHandler: { store.saveEvents($0.events, roomID: room.id) },
+            roomStatePersistenceHandler: { store.saveRoomStateDocument($0, roomID: room.id) }
         )
         try session.start(broadcastInitially: broadcastInitially)
         report("room-open \(room.name) \(room.id)")

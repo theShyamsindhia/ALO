@@ -180,6 +180,7 @@ final class MeshSession {
         profileImageData: Data? = nil,
         audioOutput: RoomAudioOutputEngine = RoomAudioOutputEngine(),
         initialEvents: [MeshRoomEvent] = [],
+        initialRoomStateDocument: Data? = nil,
         statusHandler: @escaping (String) -> Void,
         identityHandler: @escaping (String, String) -> Void,
         participantsHandler: @escaping ([RoomParticipant]) -> Void,
@@ -194,7 +195,8 @@ final class MeshSession {
         walkieTalkieTransmissionEndedHandler: @escaping (Error) -> Void = { _ in },
         incomingOpenLineInvitationHandler: @escaping (OpenLineInvitation) -> Void = { _ in },
         openLineStateHandler: @escaping (OpenLineState) -> Void = { _ in },
-        replicaPersistenceHandler: @escaping (MeshRoomReplica) -> Void = { _ in }
+        replicaPersistenceHandler: @escaping (MeshRoomReplica) -> Void = { _ in },
+        roomStatePersistenceHandler: @escaping (Data) -> Void = { _ in }
     ) {
         let relay = CallbackRelay()
         let mediaRelay = MediaActionRelay()
@@ -243,6 +245,7 @@ final class MeshSession {
             deviceColorHex: appearance.colorHex,
             profileImageData: self.profileImageData,
             initialEvents: initialEvents,
+            initialRoomStateDocument: initialRoomStateDocument,
             replicaHandler: { replica in
                 DispatchQueue.main.async { relay.replica(replica) }
             },
@@ -263,7 +266,8 @@ final class MeshSession {
             },
             openLineHandler: { message in
                 DispatchQueue.main.async { relay.openLine(message) }
-            }
+            },
+            roomStatePersistenceHandler: roomStatePersistenceHandler
         )
         relay.replica = { [weak self] in self?.apply($0) }
         relay.participants = participantsHandler
@@ -764,7 +768,9 @@ final class MeshSession {
         await activeTransition?.value
         await hostSession?.stop()
         hostSession = nil
-        control.stop()
+        await withCheckedContinuation { continuation in
+            control.stop { continuation.resume() }
+        }
     }
 
     func stopImmediately() {

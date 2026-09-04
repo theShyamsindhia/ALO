@@ -252,6 +252,11 @@ public struct MeshEnvelope: Codable, Sendable {
     public let events: [MeshRoomEvent]?
     public let event: MeshRoomEvent?
     public let versionVector: [String: UInt64]?
+    public let roomStateSyncVersion: UInt8?
+    public let roomStateSyncID: String?
+    public let roomStateSyncChunkIndex: UInt16?
+    public let roomStateSyncChunkCount: UInt16?
+    public let roomStateSyncMessage: Data?
     public let accessProof: String?
     public let heartbeatSequence: UInt64?
     public let heartbeatGeneration: String?
@@ -282,6 +287,11 @@ public struct MeshEnvelope: Codable, Sendable {
         events: [MeshRoomEvent]? = nil,
         event: MeshRoomEvent? = nil,
         versionVector: [String: UInt64]? = nil,
+        roomStateSyncVersion: UInt8? = nil,
+        roomStateSyncID: String? = nil,
+        roomStateSyncChunkIndex: UInt16? = nil,
+        roomStateSyncChunkCount: UInt16? = nil,
+        roomStateSyncMessage: Data? = nil,
         accessProof: String? = nil,
         heartbeatSequence: UInt64? = nil,
         heartbeatGeneration: String? = nil,
@@ -309,6 +319,11 @@ public struct MeshEnvelope: Codable, Sendable {
         self.events = events
         self.event = event
         self.versionVector = versionVector
+        self.roomStateSyncVersion = roomStateSyncVersion
+        self.roomStateSyncID = roomStateSyncID
+        self.roomStateSyncChunkIndex = roomStateSyncChunkIndex
+        self.roomStateSyncChunkCount = roomStateSyncChunkCount
+        self.roomStateSyncMessage = roomStateSyncMessage
         self.accessProof = accessProof
         self.heartbeatSequence = heartbeatSequence
         self.heartbeatGeneration = heartbeatGeneration

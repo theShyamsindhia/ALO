@@ -1724,6 +1724,7 @@ final class WERAIViewModel: ObservableObject {
             profileImageData: currentDeviceProfileImageData,
             audioOutput: audioOutput,
             initialEvents: roomStore.loadEvents(roomID: room.id),
+            initialRoomStateDocument: roomStore.loadRoomStateDocument(roomID: room.id),
             statusHandler: { [weak self] status in
                 DispatchQueue.main.async {
                     guard let self else { return }
@@ -1812,6 +1813,9 @@ final class WERAIViewModel: ObservableObject {
             },
             replicaPersistenceHandler: { [weak self] replica in
                 self?.roomStore.saveEvents(replica.events, roomID: room.id)
+            },
+            roomStatePersistenceHandler: { [weak self] document in
+                self?.roomStore.saveRoomStateDocument(document, roomID: room.id)
             }
         )
         activeRoom = room.name

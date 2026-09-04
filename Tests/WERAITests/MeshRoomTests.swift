@@ -1333,7 +1333,7 @@ struct MeshRoomTests {
         #expect(forward.chatEvents.compactMap(\.text) == ["second", "first"])
     }
 
-    @Test("Room event persistence retains durable state and recent bounded chat")
+    @Test("Room event persistence retains durable state and bounded chat")
     func roomEventPersistence() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("werai-mesh-tests-\(UUID().uuidString)", isDirectory: true)
@@ -1402,7 +1402,7 @@ struct MeshRoomTests {
         let persisted = store.loadEvents(roomID: roomID)
         let restored = MeshRoomReplica(events: persisted)
         #expect(restored.chatEvents.count == 500)
-        #expect(!restored.chatEvents.contains { $0.text == "expired" })
+        #expect(restored.chatEvents.contains { $0.text == "expired" })
         #expect(restored.queue.map(\.id) == ["saved"])
         #expect(restored.broadcaster == nil)
         #expect(persisted.filter { $0.kind == .playback }.map(\.id) == ["playback-new"])

@@ -10,8 +10,19 @@ let package = Package(
     products: [
         .executable(name: "alo", targets: ["WERAI"])
     ],
+    dependencies: [
+        .package(
+            url: "https://github.com/automerge/automerge-swift.git",
+            exact: "0.7.2"
+        )
+    ],
     targets: [
-        .target(name: "WERAICore"),
+        .target(
+            name: "WERAICore",
+            dependencies: [
+                .product(name: "Automerge", package: "automerge-swift")
+            ]
+        ),
         .target(name: "WERAISharedAudioClient"),
         .executableTarget(
             name: "WERAI",

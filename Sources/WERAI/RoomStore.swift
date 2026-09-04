@@ -13,6 +13,8 @@ final class RoomStore {
 
     private let fileURL: URL
     private let secrets = RoomSecretStore()
+    private let roomStateIOQueue = DispatchQueue(label: "in.werai.room-state.persistence", qos: .utility)
+    private var forgottenRoomIDs = Set<String>()
 
     init(fileURL: URL? = nil) {
         if let fileURL {
@@ -50,6 +52,7 @@ final class RoomStore {
     }
 
     func save(_ room: RoomConfiguration) throws {
+        roomStateIOQueue.async { [self] in forgottenRoomIDs.remove(room.id) }
         var rooms = load().filter { $0.id != room.id }
         rooms.insert(room, at: 0)
         if room.isPrivate, let key = room.accessKey {
@@ -78,6 +81,10 @@ final class RoomStore {
     func forget(roomID: String) throws {
         try persist(load().filter { $0.id != roomID })
         try? FileManager.default.removeItem(at: eventsURL(roomID: roomID))
+        roomStateIOQueue.async { [self] in
+            forgottenRoomIDs.insert(roomID)
+            try? FileManager.default.removeItem(at: roomStateURL(roomID: roomID))
+        }
         secrets.remove(roomID: roomID)
     }
 
@@ -87,11 +94,7 @@ final class RoomStore {
     }
 
     func saveEvents(_ events: [MeshRoomEvent], roomID: String) {
-        let now = UInt64(Date().timeIntervalSince1970 * 1_000)
-        let cutoff = now - min(now, 7 * 86_400_000)
-        let chats = events.filter {
-            $0.kind == .chat && min($0.version.wallTimeMillis, now) >= cutoff
-        }.suffix(500)
+        let chats = events.filter { $0.kind == .chat }.suffix(500)
         let latestPlayback = events.filter { $0.kind == .playback }.max { $0.version < $1.version }
         let latestVideo = events.filter { $0.kind == .video }.max { $0.version < $1.version }
         var queueAdds = [String: MeshRoomEvent]()
@@ -115,6 +118,20 @@ final class RoomStore {
         try? data.write(to: eventsURL(roomID: roomID), options: .atomic)
     }
 
+    func loadRoomStateDocument(roomID: String) -> Data? {
+        roomStateIOQueue.sync {
+            try? Data(contentsOf: roomStateURL(roomID: roomID))
+        }
+    }
+
+    func saveRoomStateDocument(_ document: Data, roomID: String) {
+        guard !document.isEmpty else { return }
+        roomStateIOQueue.async { [self] in
+            guard !forgottenRoomIDs.contains(roomID) else { return }
+            try? document.write(to: roomStateURL(roomID: roomID), options: .atomic)
+        }
+    }
+
     private func persist(_ rooms: [RoomConfiguration]) throws {
         let records = rooms.map {
             StoredRoom(
@@ -131,6 +148,10 @@ final class RoomStore {
 
     private func eventsURL(roomID: String) -> URL {
         fileURL.deletingLastPathComponent().appendingPathComponent("room-\(roomID).events.json")
+    }
+
+    private func roomStateURL(roomID: String) -> URL {
+        fileURL.deletingLastPathComponent().appendingPathComponent("room-\(roomID).state.automerge")
     }
 }
 

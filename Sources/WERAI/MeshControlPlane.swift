@@ -130,16 +130,32 @@ final class MeshControlPlane: @unchecked Sendable {
         var deviceColorHex: String?
         var profileImageData: Data?
         var appVersion: String?
+        var roomStateSyncVersion: UInt8?
         var realtimeVoiceQueue = RealtimeVoiceSendQueue()
         var realtimeVoiceSendInFlight = false
         var legacyVoiceDownsamplers = [String: LegacyVoiceDownsampler]()
         var remoteVersionVector: [String: UInt64]?
+        let roomStateSyncSession: RoomStateSyncSession
+        var roomStateSyncID: String?
+        var roomStateSyncChunkCount: UInt16 = 0
+        var roomStateSyncNextChunk: UInt16 = 0
+        var roomStateSyncBuffer = Data()
+        var roomStateSyncSendQueue = [Data]()
+        var roomStateSyncSendInFlight = false
+        var roomStateSyncReceiveInFlight = false
+        var roomStateSyncReceiveQueue = [Data]()
+        var roomStateSyncReceiveQueuedBytes = 0
         let localNonce = UUID().uuidString
         var authenticated = false
 
-        init(connection: NWConnection, initiated: Bool) {
+        init(
+            connection: NWConnection,
+            initiated: Bool,
+            roomStateSyncSession: RoomStateSyncSession
+        ) {
             self.connection = connection
             self.initiated = initiated
+            self.roomStateSyncSession = roomStateSyncSession
         }
     }
 
@@ -150,6 +166,7 @@ final class MeshControlPlane: @unchecked Sendable {
     private var deviceColorHex: String
     private var profileImageData: Data?
     private let queue = DispatchQueue(label: "in.werai.mesh.control", qos: .userInteractive)
+    private let roomStateWorkerQueue = DispatchQueue(label: "in.werai.mesh.room-state", qos: .utility)
     private let replicaHandler: (MeshRoomReplica) -> Void
     private let participantsHandler: ([RoomParticipant]) -> Void
     private let peerVersionHandler: (String) -> Void
@@ -161,6 +178,13 @@ final class MeshControlPlane: @unchecked Sendable {
     private let listenerReadyHandler: ((NWEndpoint.Port) -> Void)?
     private let connectionAttemptHandler: () -> Void
     private var replica: MeshRoomReplica
+    private let roomStateSync: any RoomStateSync
+    private let roomStatePersistenceHandler: (Data) -> Void
+    private let roomStateReceiveCompletedHandler: ([MeshRoomEvent]) -> Void
+    private let roomStateDowngradeHandler: (String?) -> Void
+    private let disableRoomStateSyncDuringAuthenticationForTesting: Bool
+    private var roomStatePersistenceWorkItem: DispatchWorkItem?
+    private var roomStateSyncDisabled = false
     private var listener: NWListener?
     private var browser: NWBrowser?
     private var links = [ObjectIdentifier: Link]()
@@ -189,9 +213,14 @@ final class MeshControlPlane: @unchecked Sendable {
     private let participantLeaseNanos: UInt64 = 2_400_000_000
     private let maximumSyncEvents = 2_000
     private static let synchronizationEnvelopeTargetBytes = 196_608
+    static let roomStateSyncChunkBytes = 96 * 1_024
+    static let maximumRoomStateSyncBytes = 5 * 1_024 * 1_024
+    static let maximumRoomStateSyncChunks: UInt16 = 96
     private let maximumRememberedWalkieMessages = 8_192
     private let maximumWalkieTalkieHopCount: UInt8 = 8
     private static let fullBandVoiceVersion = AppVersion("0.13.31")!
+    private static let maximumPendingRoomStateSyncMessages = 32
+    private static let maximumPendingRoomStateSyncBytes = 16 * 1_024 * 1_024
 
     init(
         room: RoomConfiguration,
@@ -202,6 +231,7 @@ final class MeshControlPlane: @unchecked Sendable {
         profileImageData: Data? = nil,
         appVersion: String = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0",
         initialEvents: [MeshRoomEvent] = [],
+        initialRoomStateDocument: Data? = nil,
         listenerReadyHandler: ((NWEndpoint.Port) -> Void)? = nil,
         replicaHandler: @escaping (MeshRoomReplica) -> Void,
         participantsHandler: @escaping ([RoomParticipant]) -> Void,
@@ -210,6 +240,11 @@ final class MeshControlPlane: @unchecked Sendable {
         resyncRequestHandler: @escaping (String?, String, UInt64) -> Bool = { _, _, _ in true },
         walkieTalkieHandler: @escaping (WalkieTalkieMessage) -> Void = { _ in },
         openLineHandler: @escaping (OpenLineMessage) -> Void = { _ in },
+        roomStatePersistenceHandler: @escaping (Data) -> Void = { _ in },
+        roomStateSyncOverride: (any RoomStateSync)? = nil,
+        roomStateReceiveCompletedHandler: @escaping ([MeshRoomEvent]) -> Void = { _ in },
+        roomStateDowngradeHandler: @escaping (String?) -> Void = { _ in },
+        disableRoomStateSyncDuringAuthenticationForTesting: Bool = false,
         connectionAttemptHandler: @escaping () -> Void = {}
     ) {
         self.room = room
@@ -229,7 +264,21 @@ final class MeshControlPlane: @unchecked Sendable {
         self.resyncRequestHandler = resyncRequestHandler
         self.walkieTalkieHandler = walkieTalkieHandler
         self.openLineHandler = openLineHandler
-        self.replica = MeshRoomReplica(events: initialEvents)
+        let durableState: any RoomStateSync = roomStateSyncOverride
+            ?? AutomergeRoomStateSync.recovering(
+                roomID: room.id,
+                savedDocument: initialRoomStateDocument,
+                legacyEvents: initialEvents
+            )
+        self.roomStateSync = durableState
+        self.roomStateSyncDisabled = false
+        let durableEvents = (try? durableState.snapshot().events) ?? []
+        self.replica = MeshRoomReplica(events: initialEvents + durableEvents)
+        self.roomStatePersistenceHandler = roomStatePersistenceHandler
+        self.roomStateReceiveCompletedHandler = roomStateReceiveCompletedHandler
+        self.roomStateDowngradeHandler = roomStateDowngradeHandler
+        self.disableRoomStateSyncDuringAuthenticationForTesting =
+            disableRoomStateSyncDuringAuthenticationForTesting
         self.listenerReadyHandler = listenerReadyHandler
         self.connectionAttemptHandler = connectionAttemptHandler
         self.replicaHandler = replicaHandler
@@ -273,6 +322,7 @@ final class MeshControlPlane: @unchecked Sendable {
         }
         publishParticipants()
         replicaHandler(replica)
+        scheduleRoomStatePersistence(delay: .milliseconds(0))
         startHeartbeatTimer()
     }
 
@@ -284,13 +334,58 @@ final class MeshControlPlane: @unchecked Sendable {
         queue.async { [weak self] in self?.peers[peerID]?.connection.cancel() }
     }
 
-    func stop() {
+    func dropPeerForTesting(peerID: String) {
+        queue.async { [weak self] in
+            guard let self, let link = peers[peerID] else { return }
+            remove(link)
+            link.connection.cancel()
+        }
+    }
+
+    func sendMalformedRoomStateSyncForTesting(peerID: String) {
+        queue.async { [weak self] in
+            guard let self, let link = peers[peerID] else { return }
+            send(MeshEnvelope(type: "room_state_sync"), to: link)
+        }
+    }
+
+    func sendRoomStateSyncMessagesForTesting(_ messages: [Data], peerID: String) {
+        queue.async { [weak self] in
+            guard let self, let link = peers[peerID] else { return }
+            for (index, message) in messages.enumerated() {
+                for envelope in Self.roomStateSyncEnvelopes(
+                    message: message,
+                    messageID: "test-\(index)-\(UUID().uuidString)"
+                ) {
+                    send(envelope, to: link)
+                }
+            }
+        }
+    }
+
+    func sendRoomStateSyncEnvelopesForTesting(_ envelopes: [MeshEnvelope], peerID: String) {
+        queue.async { [weak self] in
+            guard let self, let link = peers[peerID] else { return }
+            for envelope in envelopes { send(envelope, to: link) }
+        }
+    }
+
+    func stop(completion: @escaping @Sendable () -> Void = {}) {
         queue.async { [self] in
             isStopped = true
             browser?.cancel()
             listener?.cancel()
             heartbeatTimer?.cancel()
             reconnectWorkItems.values.forEach { $0.cancel() }
+            roomStatePersistenceWorkItem?.cancel()
+            roomStatePersistenceWorkItem = nil
+            let durableState = roomStateSync
+            let persist = roomStatePersistenceHandler
+            roomStateWorkerQueue.async {
+                _ = try? durableState.compactIfNeeded()
+                persist(durableState.save())
+                completion()
+            }
             links.values.forEach { $0.connection.cancel() }
             browser = nil
             listener = nil
@@ -322,7 +417,7 @@ final class MeshControlPlane: @unchecked Sendable {
 
     func updateIdentity(name: String, icon: String, colorHex: String) {
         queue.async { [weak self] in
-            guard let self else { return }
+            guard let self, !isStopped else { return }
             updateIdentityOnQueue(
                 name: name,
                 icon: icon,
@@ -532,7 +627,7 @@ final class MeshControlPlane: @unchecked Sendable {
         videoEnabled: Bool? = nil
     ) {
         queue.async { [weak self] in
-            guard let self else { return }
+            guard let self, !isStopped else { return }
             let event = MeshRoomEvent(
                 roomID: room.id,
                 version: replica.nextVersion(nodeID: nodeID),
@@ -551,6 +646,7 @@ final class MeshControlPlane: @unchecked Sendable {
                 videoEnabled: videoEnabled
             )
             _ = replica.merge([event])
+            ingestDurableRoomState([event], excluding: nil)
             replicaHandler(replica)
             broadcast(MeshEnvelope(type: "event", event: event))
         }
@@ -573,13 +669,21 @@ final class MeshControlPlane: @unchecked Sendable {
     private func connect(to endpoint: NWEndpoint, expectedNodeID: String?) {
         connectionAttemptHandler()
         let connection = NWConnection(to: endpoint, using: LocalNetworkParameters.tcp())
-        let link = Link(connection: connection, initiated: true)
+        let link = Link(
+            connection: connection,
+            initiated: true,
+            roomStateSyncSession: roomStateSync.makeSession()
+        )
         link.nodeID = expectedNodeID
         register(link)
     }
 
     private func accept(_ connection: NWConnection) {
-        register(Link(connection: connection, initiated: false))
+        register(Link(
+            connection: connection,
+            initiated: false,
+            roomStateSyncSession: roomStateSync.makeSession()
+        ))
     }
 
     private func register(_ link: Link) {
@@ -604,7 +708,7 @@ final class MeshControlPlane: @unchecked Sendable {
         }
     }
 
-    private func hello(for link: Link) -> MeshEnvelope {
+    private func hello(for link: Link, advertiseRoomStateSync: Bool = true) -> MeshEnvelope {
         let publicRoom = RoomConfiguration(
             id: room.id,
             name: room.name,
@@ -623,6 +727,7 @@ final class MeshControlPlane: @unchecked Sendable {
             profileImageData: profileImageData,
             appVersion: appVersion,
             versionVector: replica.versionVector,
+            roomStateSyncVersion: advertiseRoomStateSync && !roomStateSyncDisabled ? 1 : nil,
             authNonce: room.isPrivate ? link.localNonce : nil
         )
     }
@@ -718,6 +823,20 @@ final class MeshControlPlane: @unchecked Sendable {
             link.deviceColorHex = sanitizedAppearance.colorHex
             link.profileImageData = DeviceAppearance.sanitizedProfileImageData(envelope.profileImageData)
             link.appVersion = envelope.appVersion
+            let previousRoomStateSyncVersion = link.roomStateSyncVersion
+            let nextRoomStateSyncVersion: UInt8? = envelope.roomStateSyncVersion == 1 ? 1 : nil
+            if previousRoomStateSyncVersion == 1, nextRoomStateSyncVersion == nil {
+                disableRoomStateSync(
+                    for: link,
+                    reason: "the peer switched to legacy durable sync",
+                    notifyPeer: false
+                )
+            } else {
+                link.roomStateSyncVersion = nextRoomStateSyncVersion
+            }
+            if disableRoomStateSyncDuringAuthenticationForTesting {
+                roomStateSyncDisabled = true
+            }
             if room.isPrivate {
                 guard let nonce = envelope.authNonce, nonce.count <= 128,
                       let key = room.accessKey else { link.connection.cancel(); return }
@@ -766,6 +885,9 @@ final class MeshControlPlane: @unchecked Sendable {
             }
         case "event":
             if let event = envelope.event { merge([event], excluding: link) }
+        case "room_state_sync":
+            guard !roomStateSyncDisabled, link.roomStateSyncVersion == 1 else { return }
+            receiveRoomStateSync(envelope, from: link)
         case "heartbeat":
             if let originID = envelope.nodeID, let sequence = envelope.heartbeatSequence,
                let generation = envelope.heartbeatGeneration {
@@ -929,20 +1051,27 @@ final class MeshControlPlane: @unchecked Sendable {
     }
 
     private func merge(_ events: [MeshRoomEvent], excluding source: Link) {
-        let valid = events.prefix(maximumSyncEvents).filter {
-            $0.roomID == room.id && ($0.text?.utf8.count ?? 0) <= 8_192 &&
-                (try? MeshEnvelope(type: "event", event: $0).encodedLine().count).map {
-                    $0 <= MeshEnvelopeDecoder.maximumLineBytes
-                } == true
-        }
+        let valid = validRoomEvents(Array(events.prefix(maximumSyncEvents)))
         let inserted = replica.merge(valid)
         guard !inserted.isEmpty else { return }
+        if source.roomStateSyncVersion == nil {
+            ingestDurableRoomState(inserted, excluding: source)
+        }
         if let broadcaster = replica.broadcaster, broadcaster.nodeID != nodeID,
            lastSeenNanos[broadcaster.nodeID] == nil {
             lastSeenNanos[broadcaster.nodeID] = MonotonicClock.nowNanos()
         }
         replicaHandler(replica)
         for event in inserted { broadcast(MeshEnvelope(type: "event", event: event), excluding: source) }
+    }
+
+    private func validRoomEvents(_ events: [MeshRoomEvent]) -> [MeshRoomEvent] {
+        events.filter {
+            $0.roomID == room.id && ($0.text?.utf8.count ?? 0) <= 8_192 &&
+                (try? MeshEnvelope(type: "event", event: $0).encodedLine().count).map {
+                    $0 <= MeshEnvelopeDecoder.maximumLineBytes
+                } == true
+        }
     }
 
     private func isValidWalkieTalkie(_ message: WalkieTalkieMessage) -> Bool {
@@ -1401,6 +1530,12 @@ final class MeshControlPlane: @unchecked Sendable {
         }
         link.authenticated = true
         peers[remoteID] = link
+        if roomStateSyncDisabled, link.roomStateSyncVersion == 1 {
+            disableRoomStateSync(
+                for: link,
+                reason: "local durable sync had already switched to legacy"
+            )
+        }
         reconnectAttempts[remoteID] = 0
         reconnectWorkItems.removeValue(forKey: remoteID)?.cancel()
         lastSeenNanos[remoteID] = MonotonicClock.nowNanos()
@@ -1423,6 +1558,7 @@ final class MeshControlPlane: @unchecked Sendable {
             versionVector: replica.versionVector,
             to: link
         )
+        if link.roomStateSyncVersion == 1 { sendRoomStateSync(to: link) }
     }
 
     /// A room can retain many artwork-bearing playback events. Sending them as
@@ -1517,6 +1653,287 @@ final class MeshControlPlane: @unchecked Sendable {
         ) {
             send(envelope, to: link)
         }
+    }
+
+    static func roomStateSyncEnvelopes(
+        message: Data,
+        messageID: String = UUID().uuidString
+    ) -> [MeshEnvelope] {
+        guard !message.isEmpty,
+              message.count <= maximumRoomStateSyncBytes,
+              !messageID.isEmpty,
+              messageID.utf8.count <= 128
+        else { return [] }
+        let count = (message.count + roomStateSyncChunkBytes - 1) / roomStateSyncChunkBytes
+        guard count <= Int(maximumRoomStateSyncChunks) else { return [] }
+        return (0..<count).map { index in
+            let start = index * roomStateSyncChunkBytes
+            let end = min(start + roomStateSyncChunkBytes, message.count)
+            return MeshEnvelope(
+                type: "room_state_sync",
+                roomStateSyncID: messageID,
+                roomStateSyncChunkIndex: UInt16(index),
+                roomStateSyncChunkCount: UInt16(count),
+                roomStateSyncMessage: message.subdata(in: start..<end)
+            )
+        }
+    }
+
+    private func sendRoomStateSync(to link: Link) {
+        guard !roomStateSyncDisabled, link.roomStateSyncVersion == 1 else { return }
+        roomStateWorkerQueue.async { [weak self, weak link] in
+            guard let self, let link,
+                  let message = roomStateSync.generateSyncMessage(for: link.roomStateSyncSession)
+            else { return }
+            let encoded = Self.roomStateSyncEnvelopes(message: message).compactMap {
+                try? $0.encodedLine()
+            }
+            queue.async { [weak self, weak link] in
+                guard let self, let link,
+                      links[ObjectIdentifier(link.connection)] === link,
+                      link.roomStateSyncVersion == 1
+                else { return }
+                guard !encoded.isEmpty else {
+                    disableRoomStateSync(for: link, reason: "sync message exceeded the wire budget")
+                    return
+                }
+                link.roomStateSyncSendQueue.append(contentsOf: encoded)
+                drainRoomStateSync(to: link)
+            }
+        }
+    }
+
+    private func ingestDurableRoomState(_ events: [MeshRoomEvent], excluding source: Link?) {
+        let durable = events.filter {
+            $0.kind == .chat || $0.kind == .queueAdd || $0.kind == .queueRemove
+        }
+        guard !roomStateSyncDisabled, !durable.isEmpty else { return }
+        roomStateWorkerQueue.async { [weak self] in
+            guard let self else { return }
+            do {
+                let inserted = try roomStateSync.ingest(durable)
+                guard !inserted.isEmpty else { return }
+                let shouldFallback = roomStateSync.requiresLifecycleCompaction()
+                queue.async { [weak self] in
+                    guard let self, !isStopped, !roomStateSyncDisabled else { return }
+                    scheduleRoomStatePersistence()
+                    if shouldFallback {
+                        handleRoomStateSyncFailure(RoomStateSyncError.documentTooLarge, from: nil)
+                        return
+                    }
+                    for link in peers.values where link !== source && link.roomStateSyncVersion == 1 {
+                        sendRoomStateSync(to: link)
+                    }
+                }
+            } catch {
+                queue.async { [weak self] in
+                    guard let self, !isStopped else { return }
+                    handleRoomStateSyncFailure(error, from: nil)
+                }
+            }
+        }
+    }
+
+    private func receiveRoomStateSync(_ envelope: MeshEnvelope, from link: Link) {
+        guard let messageID = envelope.roomStateSyncID,
+              !messageID.isEmpty,
+              messageID.utf8.count <= 128,
+              let index = envelope.roomStateSyncChunkIndex,
+              let count = envelope.roomStateSyncChunkCount,
+              count > 0,
+              count <= Self.maximumRoomStateSyncChunks,
+              index < count,
+              let chunk = envelope.roomStateSyncMessage,
+              !chunk.isEmpty,
+              chunk.count <= Self.roomStateSyncChunkBytes
+        else {
+            disableRoomStateSync(for: link, reason: "peer sent malformed durable-sync framing")
+            return
+        }
+
+        if index == 0 {
+            link.roomStateSyncID = messageID
+            link.roomStateSyncChunkCount = count
+            link.roomStateSyncNextChunk = 0
+            link.roomStateSyncBuffer.removeAll(keepingCapacity: true)
+        }
+        guard link.roomStateSyncID == messageID,
+              link.roomStateSyncChunkCount == count,
+              link.roomStateSyncNextChunk == index,
+              link.roomStateSyncBuffer.count + chunk.count <= Self.maximumRoomStateSyncBytes
+        else {
+            resetRoomStateSyncAssembly(link)
+            disableRoomStateSync(for: link, reason: "peer exceeded durable-sync assembly bounds")
+            return
+        }
+        link.roomStateSyncBuffer.append(chunk)
+        link.roomStateSyncNextChunk &+= 1
+        guard link.roomStateSyncNextChunk == count else { return }
+
+        let message = link.roomStateSyncBuffer
+        resetRoomStateSyncAssembly(link)
+        enqueueRoomStateSyncMessage(message, from: link)
+    }
+
+    private func enqueueRoomStateSyncMessage(_ message: Data, from link: Link) {
+        guard !link.roomStateSyncReceiveInFlight else {
+            guard link.roomStateSyncReceiveQueue.count
+                    < Self.maximumPendingRoomStateSyncMessages,
+                  link.roomStateSyncReceiveQueuedBytes + message.count
+                    <= Self.maximumPendingRoomStateSyncBytes else {
+                disableRoomStateSync(for: link, reason: "peer exceeded durable-sync work backlog")
+                return
+            }
+            link.roomStateSyncReceiveQueue.append(message)
+            link.roomStateSyncReceiveQueuedBytes += message.count
+            return
+        }
+        link.roomStateSyncReceiveInFlight = true
+        processRoomStateSyncMessage(message, from: link)
+    }
+
+    private func processRoomStateSyncMessage(_ message: Data, from link: Link) {
+        roomStateWorkerQueue.async { [weak self, weak link] in
+            guard let self, let link else { return }
+            do {
+                let inserted = try roomStateSync.receiveSyncMessage(
+                    message,
+                    from: link.roomStateSyncSession
+                )
+                let shouldFallback = roomStateSync.requiresLifecycleCompaction()
+                roomStateReceiveCompletedHandler(inserted)
+                queue.async { [weak self] in
+                    guard let self, !isStopped else { return }
+                    let linkIsLive = links[ObjectIdentifier(link.connection)] === link
+                        && link.authenticated
+                    if !inserted.isEmpty {
+                        let merged = replica.merge(validRoomEvents(inserted))
+                        if !merged.isEmpty {
+                            replicaHandler(replica)
+                            // Legacy peers still converge during the rolling upgrade.
+                            for event in merged {
+                                broadcast(MeshEnvelope(type: "event", event: event), excluding: link)
+                            }
+                        }
+                        scheduleRoomStatePersistence()
+                        for peer in peers.values
+                            where peer !== link && peer.roomStateSyncVersion == 1 {
+                            sendRoomStateSync(to: peer)
+                        }
+                    }
+                    if shouldFallback {
+                        handleRoomStateSyncFailure(RoomStateSyncError.documentTooLarge, from: nil)
+                    }
+                    if linkIsLive { sendRoomStateSync(to: link) }
+                    finishRoomStateSyncReceive(from: link)
+                }
+            } catch {
+                queue.async { [weak self] in
+                    guard let self, !isStopped else { return }
+                    handleRoomStateSyncFailure(error, from: link)
+                    finishRoomStateSyncReceive(from: link)
+                }
+            }
+        }
+    }
+
+    private func finishRoomStateSyncReceive(from link: Link) {
+        link.roomStateSyncReceiveInFlight = false
+        guard !roomStateSyncDisabled,
+              link.roomStateSyncVersion == 1,
+              links[ObjectIdentifier(link.connection)] === link,
+              !link.roomStateSyncReceiveQueue.isEmpty
+        else {
+            link.roomStateSyncReceiveQueue.removeAll(keepingCapacity: false)
+            return
+        }
+        let next = link.roomStateSyncReceiveQueue.removeFirst()
+        link.roomStateSyncReceiveQueuedBytes -= next.count
+        link.roomStateSyncReceiveInFlight = true
+        processRoomStateSyncMessage(next, from: link)
+    }
+
+    private func drainRoomStateSync(to link: Link) {
+        guard !link.roomStateSyncSendInFlight,
+              !link.roomStateSyncSendQueue.isEmpty,
+              links[ObjectIdentifier(link.connection)] === link
+        else { return }
+        let data = link.roomStateSyncSendQueue.removeFirst()
+        link.roomStateSyncSendInFlight = true
+        link.connection.send(content: data, completion: .contentProcessed { [weak self, weak link] error in
+            guard let self, let link else { return }
+            self.queue.async {
+                link.roomStateSyncSendInFlight = false
+                guard error == nil else {
+                    link.connection.cancel()
+                    return
+                }
+                self.drainRoomStateSync(to: link)
+            }
+        })
+    }
+
+    private func scheduleRoomStatePersistence(delay: DispatchTimeInterval = .milliseconds(250)) {
+        guard !isStopped else { return }
+        roomStatePersistenceWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !isStopped else { return }
+            roomStatePersistenceWorkItem = nil
+            roomStateWorkerQueue.async { [weak self] in
+                guard let self else { return }
+                let document = roomStateSync.save()
+                queue.async { [weak self] in
+                    guard let self, !isStopped else { return }
+                    roomStatePersistenceHandler(document)
+                }
+            }
+        }
+        roomStatePersistenceWorkItem = work
+        queue.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func resetRoomStateSyncAssembly(_ link: Link) {
+        link.roomStateSyncID = nil
+        link.roomStateSyncChunkCount = 0
+        link.roomStateSyncNextChunk = 0
+        link.roomStateSyncBuffer.removeAll(keepingCapacity: false)
+    }
+
+    private func handleRoomStateSyncFailure(_ error: Error, from link: Link?) {
+        if let link {
+            disableRoomStateSync(
+                for: link,
+                reason: "peer state could not be merged (\(type(of: error)))"
+            )
+        } else {
+            roomStateSyncDisabled = true
+            for peer in peers.values {
+                disableRoomStateSync(
+                    for: peer,
+                    reason: "local state could not be updated (\(type(of: error)))"
+                )
+            }
+        }
+    }
+
+    private func disableRoomStateSync(for link: Link, reason: String, notifyPeer: Bool = true) {
+        let transitionedFromAutomerge = link.roomStateSyncVersion == 1
+        let shouldNotify = notifyPeer && link.authenticated && transitionedFromAutomerge
+        link.roomStateSyncVersion = nil
+        link.roomStateSyncSendQueue.removeAll(keepingCapacity: false)
+        link.roomStateSyncReceiveQueue.removeAll(keepingCapacity: false)
+        link.roomStateSyncReceiveQueuedBytes = 0
+        resetRoomStateSyncAssembly(link)
+        if shouldNotify {
+            // A repeated hello is accepted before or after authentication, so
+            // this downgrade cannot be lost in the handshake race.
+            send(hello(for: link, advertiseRoomStateSync: false), to: link)
+        }
+        if transitionedFromAutomerge, !roomStateSyncDisabled {
+            ingestDurableRoomState(replica.events, excluding: nil)
+        }
+        roomStateDowngradeHandler(link.nodeID)
+        fputs("Durable room sync disabled for this link: \(reason). Legacy sync remains active.\n", stderr)
     }
 
     private func cacheParticipant(from link: Link, id: String) {
