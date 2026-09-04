@@ -98,6 +98,91 @@ private enum ALOStatusIcon {
     }
 }
 
+private enum ALOMenuBarPill {
+    static let statusItemWidth: CGFloat = 54
+    private static let imageSize = NSSize(width: 50, height: 20)
+
+    static func image(
+        active: Bool,
+        transmitting: Bool,
+        receiving: Bool,
+        voiceLevel: Double,
+        unreadCount: Int
+    ) -> NSImage {
+        let level = min(1, max(0, voiceLevel))
+        let image = NSImage(size: imageSize, flipped: false) { _ in
+            let pillRect = NSRect(x: 1, y: 1, width: 48, height: 18)
+            let pill = NSBezierPath(roundedRect: pillRect, xRadius: 9, yRadius: 9)
+            NSColor(calibratedWhite: 0.09, alpha: 0.96).setFill()
+            pill.fill()
+            NSColor.white.withAlphaComponent(0.16).setStroke()
+            pill.lineWidth = 0.75
+            pill.stroke()
+
+            if let icon = tintedStatusIcon(active: active) {
+                let iconRect = NSRect(x: 7, y: 4, width: 12, height: 12)
+                icon.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1)
+            }
+
+            if transmitting || receiving {
+                drawWaveform(level: transmitting ? max(0.58, level) : level)
+            } else {
+                let dotRect = NSRect(x: 34, y: 8, width: 4, height: 4)
+                let dotColor = active
+                    ? NSColor(red: 0.35, green: 0.68, blue: 0.96, alpha: 0.86)
+                    : NSColor.white.withAlphaComponent(0.32)
+                dotColor.setFill()
+                NSBezierPath(ovalIn: dotRect).fill()
+            }
+
+            if unreadCount > 0 {
+                let badgeRect = NSRect(x: 41, y: 13, width: 6, height: 6)
+                NSColor(calibratedWhite: 0.09, alpha: 1).setStroke()
+                NSColor.systemRed.setFill()
+                let badge = NSBezierPath(ovalIn: badgeRect)
+                badge.fill()
+                badge.lineWidth = 1
+                badge.stroke()
+            }
+            return true
+        }
+        image.isTemplate = false
+        image.accessibilityDescription = ALOAppFlavor.displayName
+        return image
+    }
+
+    private static func tintedStatusIcon(active: Bool) -> NSImage? {
+        guard let source = ALOAppFlavor.statusImage(active: active) else { return nil }
+        let image = NSImage(size: source.size, flipped: false) { rect in
+            guard let context = NSGraphicsContext.current?.cgContext else { return false }
+            source.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+            context.setBlendMode(.sourceAtop)
+            context.setFillColor(NSColor.white.withAlphaComponent(active ? 0.96 : 0.7).cgColor)
+            context.fill(rect)
+            return true
+        }
+        image.isTemplate = false
+        return image
+    }
+
+    private static func drawWaveform(level: Double) {
+        let profiles = [0.54, 1.0, 0.72]
+        let visibleLevel = max(0.18, level)
+        let color = NSColor(red: 0.35, green: 0.68, blue: 0.96, alpha: 0.96)
+        color.setFill()
+        for (index, profile) in profiles.enumerated() {
+            let height = 3 + 7 * visibleLevel * profile
+            let rect = NSRect(
+                x: 29 + CGFloat(index) * 4,
+                y: 10 - height / 2,
+                width: 2,
+                height: height
+            )
+            NSBezierPath(roundedRect: rect, xRadius: 1, yRadius: 1).fill()
+        }
+    }
+}
+
 @MainActor
 enum GUIApplication {
     private static var appDelegate: WERAIAppDelegate?
@@ -545,30 +630,27 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
     private let openMainWindow: () -> Void
     private let statusItem: NSStatusItem
     private let popover = NSPopover()
-    private let badgeView = StatusUnreadBadgeView()
     private var observers = Set<AnyCancellable>()
+    private var isLive = false
+    private var isTransmittingVoice = false
+    private var isReceivingVoice = false
+    private var voiceLevel = 0.0
+    private var unreadCount = 0
 
     init(model: WERAIViewModel, openMainWindow: @escaping () -> Void) {
         self.model = model
         self.openMainWindow = openMainWindow
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        statusItem = NSStatusBar.system.statusItem(withLength: ALOMenuBarPill.statusItemWidth)
         super.init()
-        statusItem.button?.image = ALOAppFlavor.statusImage(active: true)
-        statusItem.button?.image?.isTemplate = true
         statusItem.button?.toolTip = ALOAppFlavor.displayName
         if let button = statusItem.button {
+            button.imagePosition = .imageOnly
+            button.imageScaling = .scaleProportionallyDown
             button.target = self
             button.action = #selector(togglePopover)
             button.sendAction(on: [.leftMouseUp])
-            badgeView.translatesAutoresizingMaskIntoConstraints = false
-            button.addSubview(badgeView)
-            NSLayoutConstraint.activate([
-                badgeView.widthAnchor.constraint(equalToConstant: 8),
-                badgeView.heightAnchor.constraint(equalToConstant: 8),
-                badgeView.trailingAnchor.constraint(equalTo: button.trailingAnchor, constant: -1),
-                badgeView.topAnchor.constraint(equalTo: button.topAnchor, constant: 1),
-            ])
         }
+        refreshStatusPill()
 
         popover.behavior = .transient
         popover.animates = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -594,16 +676,21 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
             .removeDuplicates()
             .sink { [weak self] phase in self?.updatePhase(phase) }
             .store(in: &observers)
-        Publishers.CombineLatest4(
-            model.$walkieTalking.removeDuplicates(),
-            model.$walkieStarting.removeDuplicates(),
-            model.$openLineState.removeDuplicates(),
-            model.$incomingWalkieSpeakerIDs.removeDuplicates()
+        Publishers.CombineLatest(
+            Publishers.CombineLatest4(
+                model.$walkieTalking.removeDuplicates(),
+                model.$walkieStarting.removeDuplicates(),
+                model.$openLineState.removeDuplicates(),
+                model.$incomingWalkieSpeakerIDs.removeDuplicates()
+            ),
+            model.$incomingWalkieLevels
         )
-        .sink { [weak self] talking, starting, lineState, incoming in
+        .sink { [weak self] voiceState, levels in
+            let (talking, starting, lineState, incoming) = voiceState
             self?.updateVoiceIndicator(
                 transmitting: talking || starting || lineState.isSendingMicrophone,
-                receiving: !incoming.isEmpty
+                receiving: !incoming.isEmpty,
+                level: levels.values.max() ?? 0
             )
         }
         .store(in: &observers)
@@ -685,43 +772,40 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
     }
 
     private func updateBadge(count: Int) {
-        badgeView.isHidden = count == 0
-        let detail = count == 0
-            ? ALOAppFlavor.displayName
-            : "\(ALOAppFlavor.displayName) · \(count) unread message\(count == 1 ? "" : "s")"
-        statusItem.button?.toolTip = detail
-        statusItem.button?.setAccessibilityLabel(detail)
+        unreadCount = count
+        refreshStatusPill()
     }
 
     private func updatePhase(_ phase: WERAIViewModel.Phase) {
         if phase != .live { closePopover() }
-        statusItem.button?.image = ALOAppFlavor.statusImage(active: phase == .live)
-        statusItem.button?.image?.isTemplate = true
+        isLive = phase == .live
+        refreshStatusPill()
     }
 
-    private func updateVoiceIndicator(transmitting: Bool, receiving: Bool) {
-        statusItem.button?.contentTintColor = transmitting
-            ? .systemOrange
-            : receiving ? .systemGreen : nil
-    }
-}
-
-private final class StatusUnreadBadgeView: NSView {
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-        layer?.backgroundColor = NSColor.systemRed.cgColor
-        layer?.cornerRadius = 4
-        isHidden = true
-        setAccessibilityElement(false)
+    private func updateVoiceIndicator(transmitting: Bool, receiving: Bool, level: Double) {
+        isTransmittingVoice = transmitting
+        isReceivingVoice = receiving
+        voiceLevel = level
+        refreshStatusPill()
     }
 
-    required init?(coder: NSCoder) {
-        nil
-    }
-
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        nil
+    private func refreshStatusPill() {
+        statusItem.button?.image = ALOMenuBarPill.image(
+            active: isLive,
+            transmitting: isTransmittingVoice,
+            receiving: isReceivingVoice,
+            voiceLevel: voiceLevel,
+            unreadCount: unreadCount
+        )
+        let voiceDetail = isTransmittingVoice
+            ? " · speaking"
+            : isReceivingVoice ? " · receiving voice" : ""
+        let unreadDetail = unreadCount == 0
+            ? ""
+            : " · \(unreadCount) unread message\(unreadCount == 1 ? "" : "s")"
+        let detail = ALOAppFlavor.displayName + voiceDetail + unreadDetail
+        statusItem.button?.toolTip = detail
+        statusItem.button?.setAccessibilityLabel(detail)
     }
 }
 
