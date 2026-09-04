@@ -495,11 +495,34 @@ final class HostServer {
     }
 
     private func applyRoomMediaCommand(_ command: RoomMediaCommand) -> Bool {
-        // Do not maintain a second, synthetic room state here. macOS may accept
-        // a media command without the player changing state. NowPlayingMonitor
-        // will call setNowPlaying only when the broadcaster's source actually
-        // pauses or plays, and that confirmed state is what listeners receive.
-        playbackRequestHandler?(command) == true
+        let requestedState = RoomRemoteCommandCenter.playbackState(
+            after: command,
+            current: roomPlaybackIsPlaying
+        )
+        let sourceCommand = requestedState.map { $0 ? RoomMediaCommand.play : .pause }
+            ?? command
+        guard playbackRequestHandler?(sourceCommand) == true else { return false }
+        guard let requestedState, requestedState != roomPlaybackIsPlaying else { return true }
+
+        // MediaRemote reports command acceptance synchronously, while browser
+        // and third-party Now Playing metadata can lag or never publish the
+        // matching state. Apply the accepted intent now so a stale Pause cannot
+        // keep dropping resumed capture. A later source update can still correct
+        // the room if the player reports a different state.
+        roomPlaybackIsPlaying = requestedState
+        packetizer.discardPendingSamples()
+        nowPlaying = NowPlayingMedia(
+            title: nowPlaying.title,
+            artist: nowPlaying.artist,
+            album: nowPlaying.album,
+            artworkData: nowPlaying.artworkData,
+            sourceURL: nowPlaying.sourceURL,
+            isPlaying: requestedState
+        )
+        broadcast(ControlMessage(type: "now_playing", nowPlaying: nowPlaying))
+        broadcast(ControlMessage(type: "room_playback", isPlaying: requestedState))
+        _ = sendCoordinatedResync(targetID: nil)
+        return true
     }
 
     private func sendCoordinatedResync(

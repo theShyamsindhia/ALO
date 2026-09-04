@@ -205,24 +205,38 @@ struct LoopbackRoomScaleTests {
         peer.setRoomPlayback(playing: false)
         #expect(commandReceived.wait(timeout: .now() + 2) == .success)
         #expect(requestedCommands.values == [.pause])
-        #expect(peer.resyncCommandCount == 0)
-        host.setNowPlaying(NowPlayingMedia(title: "Test source", isPlaying: false))
         #expect(waitUntil(timeout: 2) { peer.playbackStates.contains(false) })
         #expect(waitUntil(timeout: 2) { observer.roomPlaybackStates.contains(false) })
         #expect(waitUntil(timeout: 2) {
             peer.resyncCommandCount == 1 && observer.resyncCommandCount == 1
         })
 
+        let samples = [Int16](
+            repeating: 0,
+            count: Int(AudioPacket.framesPerPacket) * Int(AudioPacket.channelCount)
+        )
+        host.acceptAudio(samples: samples, captureTimeNanos: MonotonicClock.nowNanos())
+        Thread.sleep(forTimeInterval: 0.1)
+        #expect(peer.packetCount == 0)
+
         peer.setRoomPlayback(playing: true)
         #expect(commandReceived.wait(timeout: .now() + 2) == .success)
         #expect(requestedCommands.values == [.pause, .play])
-        #expect(peer.resyncCommandCount == 1)
-        host.setNowPlaying(NowPlayingMedia(title: "Test source", isPlaying: true))
         #expect(waitUntil(timeout: 2) { observer.playbackStates.contains(true) })
         #expect(waitUntil(timeout: 2) { peer.roomPlaybackStates.contains(true) })
         #expect(waitUntil(timeout: 2) {
             peer.resyncCommandCount == 2 && observer.resyncCommandCount == 2
         })
+        // A delayed or missing Now Playing update must not leave the host's
+        // packet path latched in Pause after macOS accepts the Play request.
+        host.acceptAudio(samples: samples, captureTimeNanos: MonotonicClock.nowNanos())
+        #expect(waitUntil(timeout: 2) { peer.packetCount == 1 })
+
+        // Later source confirmation reconciles metadata without a second reset.
+        host.setNowPlaying(NowPlayingMedia(title: "Test source", isPlaying: true))
+        Thread.sleep(forTimeInterval: 0.1)
+        #expect(peer.resyncCommandCount == 2)
+        #expect(observer.resyncCommandCount == 2)
 
         peer.sendMediaCommand(.nextTrack)
         #expect(commandReceived.wait(timeout: .now() + 2) == .success)
@@ -234,6 +248,23 @@ struct LoopbackRoomScaleTests {
         #expect(waitUntil(timeout: 2) { observer.playbackStates.last == false })
         #expect(waitUntil(timeout: 2) { peer.resyncCommandCount == 3 })
         #expect(observer.resyncCommandCount == 3)
+    }
+
+    @Test("Toggle requests become explicit idempotent source commands")
+    func togglePlaybackRequestsAreNormalized() {
+        let requestedCommands = LockedMediaCommands()
+        let host = HostServer(
+            roomName: "Playback normalization test",
+            advertise: false,
+            playbackRequestHandler: { command in
+                requestedCommands.append(command)
+                return true
+            }
+        )
+
+        #expect(host.sendRoomMediaCommand(.togglePlayPause))
+        #expect(host.sendRoomMediaCommand(.togglePlayPause))
+        #expect(requestedCommands.values == [.pause, .play])
     }
 
     @Test("Manual resync aligns every selected synchronized output")

@@ -1663,9 +1663,20 @@ final class WERAIViewModel: ObservableObject {
     }
 
     func toggleRoomPlayback() {
-        if meshSession?.sendMediaCommand(.togglePlayPause) != true {
+        let command = Self.playbackCommand(
+            metadataIsPlaying: nowPlaying.isPlaying,
+            audioIsRendering: audioIsRendering
+        )
+        if meshSession?.sendMediaCommand(command) != true {
             statusText = "Wait for the broadcaster connection, then try again"
         }
+    }
+
+    nonisolated static func playbackCommand(
+        metadataIsPlaying: Bool?,
+        audioIsRendering: Bool
+    ) -> RoomMediaCommand {
+        (metadataIsPlaying ?? audioIsRendering) ? .pause : .play
     }
 
     func toggleBroadcasting() {

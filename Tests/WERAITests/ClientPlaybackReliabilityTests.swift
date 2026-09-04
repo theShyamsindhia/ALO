@@ -163,6 +163,22 @@ struct ClientPlaybackReliabilityTests {
     }
 
     @Test func remoteCommandsReducePlaybackStatePredictably() {
+        #expect(WERAIViewModel.playbackCommand(
+            metadataIsPlaying: true,
+            audioIsRendering: false
+        ) == .pause)
+        #expect(WERAIViewModel.playbackCommand(
+            metadataIsPlaying: false,
+            audioIsRendering: true
+        ) == .play)
+        #expect(WERAIViewModel.playbackCommand(
+            metadataIsPlaying: nil,
+            audioIsRendering: true
+        ) == .pause)
+        #expect(WERAIViewModel.playbackCommand(
+            metadataIsPlaying: nil,
+            audioIsRendering: false
+        ) == .play)
         #expect(RoomRemoteCommandCenter.playbackState(after: .play, current: false) == true)
         #expect(RoomRemoteCommandCenter.playbackState(after: .pause, current: true) == false)
         #expect(RoomRemoteCommandCenter.playbackState(after: .togglePlayPause, current: true) == false)
