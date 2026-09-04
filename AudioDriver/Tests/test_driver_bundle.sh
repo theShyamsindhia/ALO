@@ -33,10 +33,10 @@ xcrun clang -std=c11 -O2 \
   -DWERAI_SHARED_AUDIO_NAME=\"$client_test_name\" \
   -DWERAI_NAME=\"$client_test_name\" \
   -I "$repo_root/AudioDriver/include" \
-  -I "$repo_root/Sources/WERAISharedAudioClient/include" \
+  -I "$repo_root/Sources/ALOSharedAudioClient/include" \
   "$repo_root/AudioDriver/Tests/client_abi_test.c" \
   "$repo_root/AudioDriver/Sources/WERAISharedAudio.c" \
-  "$repo_root/Sources/WERAISharedAudioClient/WERAISharedAudioClient.c" \
+  "$repo_root/Sources/ALOSharedAudioClient/WERAISharedAudioClient.c" \
   -o "$client_test_binary"
 "$client_test_binary"
 

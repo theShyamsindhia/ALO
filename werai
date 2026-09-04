@@ -1,3 +1,4 @@
 #!/bin/zsh
 
-exec "${0:A:h}/dist/werai" "$@"
+# Compatibility launcher for existing scripts; use ./alo for new commands.
+exec "${0:A:h}/alo" "$@"

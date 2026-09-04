@@ -5,7 +5,7 @@ repo_root="${0:A:h}/.."
 driver_root="$repo_root/AudioDriver"
 bundle="$repo_root/dist/ALORoom.driver"
 binary="$bundle/Contents/MacOS/ALORoom"
-identity="${WERAI_CODESIGN_IDENTITY:--}"
+identity="${ALO_CODESIGN_IDENTITY:-${WERAI_CODESIGN_IDENTITY:--}}"
 sdk="$(xcrun --sdk macosx --show-sdk-path)"
 architectures=(arm64 x86_64)
 if [[ "${1:-}" == "--arm64-only" ]]; then
@@ -44,7 +44,8 @@ fi
 codesign_args=(--force --sign "$identity" --identifier in.werai.audio.driver)
 if [[ "$identity" != "-" ]]; then
   codesign_args+=(--options runtime --timestamp)
-  [[ -n "${WERAI_SIGNING_KEYCHAIN:-}" ]] && codesign_args+=(--keychain "$WERAI_SIGNING_KEYCHAIN")
+  signing_keychain="${ALO_SIGNING_KEYCHAIN:-${WERAI_SIGNING_KEYCHAIN:-}}"
+  [[ -n "$signing_keychain" ]] && codesign_args+=(--keychain "$signing_keychain")
 fi
 codesign "${codesign_args[@]}" "$bundle"
 codesign --verify --strict --verbose=2 "$bundle"

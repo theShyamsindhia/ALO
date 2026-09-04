@@ -3,12 +3,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "WERAI",
+    name: "ALO",
     platforms: [
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "alo", targets: ["WERAI"])
+        .executable(name: "alo", targets: ["ALO"])
     ],
     dependencies: [
         .package(
@@ -18,15 +18,15 @@ let package = Package(
     ],
     targets: [
         .target(
-            name: "WERAICore",
+            name: "ALOCore",
             dependencies: [
                 .product(name: "Automerge", package: "automerge-swift")
             ]
         ),
-        .target(name: "WERAISharedAudioClient"),
+        .target(name: "ALOSharedAudioClient"),
         .executableTarget(
-            name: "WERAI",
-            dependencies: ["WERAICore", "WERAISharedAudioClient"],
+            name: "ALO",
+            dependencies: ["ALOCore", "ALOSharedAudioClient"],
             linkerSettings: [
                 .linkedFramework("Carbon"),
                 .linkedFramework("MediaPlayer"),
@@ -39,8 +39,8 @@ let package = Package(
             ]
         ),
         .testTarget(
-            name: "WERAITests",
-            dependencies: ["WERAICore", "WERAI"]
+            name: "ALOTests",
+            dependencies: ["ALOCore", "ALO"]
         )
     ]
 )

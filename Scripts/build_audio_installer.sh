@@ -7,7 +7,7 @@ cd "${0:A:h}/.."
 driver="dist/ALORoom.driver"
 payload_root="dist/audio-installer-root"
 package="dist/Install-ALO-Audio-Device.pkg"
-installer_identity="${WERAI_INSTALLER_IDENTITY:-}"
+installer_identity="${ALO_INSTALLER_IDENTITY:-${WERAI_INSTALLER_IDENTITY:-}}"
 
 ./Scripts/build_audio_driver.sh
 
@@ -26,7 +26,8 @@ arguments=(
 )
 if [[ -n "$installer_identity" ]]; then
     arguments+=(--sign "$installer_identity")
-    [[ -n "${WERAI_SIGNING_KEYCHAIN:-}" ]] && arguments+=(--keychain "$WERAI_SIGNING_KEYCHAIN")
+    signing_keychain="${ALO_SIGNING_KEYCHAIN:-${WERAI_SIGNING_KEYCHAIN:-}}"
+    [[ -n "$signing_keychain" ]] && arguments+=(--keychain "$signing_keychain")
 fi
 
 rm -f "$package"

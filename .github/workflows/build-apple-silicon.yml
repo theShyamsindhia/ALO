@@ -29,6 +29,9 @@ jobs:
       - name: Verify Apple Silicon runner
         run: test "$(uname -m)" = "arm64"
 
+      - name: Verify room network and lifecycle scenarios
+        run: bash Scripts/test_room_scenarios.sh
+
       - name: Install Developer ID Application certificate
         id: import-application-certificate
         uses: apple-actions/import-codesign-certs@5142e029c445c10ffc7149d172e540235a065466 # v7
@@ -39,14 +42,14 @@ jobs:
 
       - name: Verify signing identity
         env:
-          WERAI_CODESIGN_IDENTITY: ${{ vars.WERAI_CODESIGN_IDENTITY }}
+          ALO_CODESIGN_IDENTITY: ${{ vars.ALO_CODESIGN_IDENTITY || vars.WERAI_CODESIGN_IDENTITY }}
         run: |
-          test -n "$WERAI_CODESIGN_IDENTITY"
-          security find-identity -v -p codesigning | grep -F "$WERAI_CODESIGN_IDENTITY"
+          test -n "$ALO_CODESIGN_IDENTITY"
+          security find-identity -v -p codesigning | grep -F "$ALO_CODESIGN_IDENTITY"
 
       - name: Build and package arm64 app
         env:
-          WERAI_CODESIGN_IDENTITY: ${{ vars.WERAI_CODESIGN_IDENTITY }}
+          ALO_CODESIGN_IDENTITY: ${{ vars.ALO_CODESIGN_IDENTITY || vars.WERAI_CODESIGN_IDENTITY }}
         run: ./Scripts/package.sh --arm64-only
 
       - name: Notarize and staple app and disk image
@@ -54,7 +57,7 @@ jobs:
           APP_STORE_CONNECT_API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}
           APP_STORE_CONNECT_KEY_ID: ${{ vars.APP_STORE_CONNECT_KEY_ID }}
           APP_STORE_CONNECT_ISSUER_ID: ${{ vars.APP_STORE_CONNECT_ISSUER_ID }}
-          WERAI_CODESIGN_IDENTITY: ${{ vars.WERAI_CODESIGN_IDENTITY }}
+          ALO_CODESIGN_IDENTITY: ${{ vars.ALO_CODESIGN_IDENTITY || vars.WERAI_CODESIGN_IDENTITY }}
         run: |
           test -n "$APP_STORE_CONNECT_API_KEY_BASE64"
           test -n "$APP_STORE_CONNECT_KEY_ID"
@@ -71,7 +74,7 @@ jobs:
             --timeout 15m
           xcrun stapler staple dist/ALO.app
           ./Scripts/create_distribution_archives.sh arm64
-          codesign --force --timestamp --sign "$WERAI_CODESIGN_IDENTITY" \
+          codesign --force --timestamp --sign "$ALO_CODESIGN_IDENTITY" \
             dist/ALO-macos-arm64.dmg
 
           xcrun notarytool submit dist/ALO-macos-arm64.dmg \

@@ -38,7 +38,7 @@ else
     bundle_identifier="in.werai.audio"
 fi
 cli_archive="dist/alo-cli-macos-$archive_suffix.zip"
-codesign_identity="${WERAI_CODESIGN_IDENTITY:--}"
+codesign_identity="${ALO_CODESIGN_IDENTITY:-${WERAI_CODESIGN_IDENTITY:--}}"
 codesign_arguments=(
     --force
     --sign "$codesign_identity"
@@ -47,13 +47,14 @@ codesign_arguments=(
 )
 if [[ "$codesign_identity" != "-" ]]; then
     codesign_arguments+=(--options runtime)
-    if [[ "${WERAI_CODESIGN_TIMESTAMP:-automatic}" == "none" ]]; then
+    if [[ "${ALO_CODESIGN_TIMESTAMP:-${WERAI_CODESIGN_TIMESTAMP:-automatic}}" == "none" ]]; then
         codesign_arguments+=(--timestamp=none)
     else
         codesign_arguments+=(--timestamp)
     fi
-    if [[ -n "${WERAI_SIGNING_KEYCHAIN:-}" ]]; then
-        codesign_arguments+=(--keychain "$WERAI_SIGNING_KEYCHAIN")
+    signing_keychain="${ALO_SIGNING_KEYCHAIN:-${WERAI_SIGNING_KEYCHAIN:-}}"
+    if [[ -n "$signing_keychain" ]]; then
+        codesign_arguments+=(--keychain "$signing_keychain")
     fi
 fi
 
@@ -66,7 +67,7 @@ run_codesign() {
     command codesign "$@" &
     local codesign_pid=$!
     (
-        sleep "${WERAI_CODESIGN_TIMEOUT_SECONDS:-120}"
+        sleep "${ALO_CODESIGN_TIMEOUT_SECONDS:-${WERAI_CODESIGN_TIMEOUT_SECONDS:-120}}"
         if kill -0 "$codesign_pid" 2>/dev/null; then
             echo "codesign timed out while accessing the signing key or Apple timestamp service" >&2
             kill -TERM "$codesign_pid" 2>/dev/null || true
@@ -134,7 +135,7 @@ if [[ "$codesign_identity" == "-" ]]; then
         run_codesign "${codesign_arguments[@]}" "$app"
     else
         run_codesign "${codesign_arguments[@]}" \
-            --requirements Resources/WERAI.requirements \
+            --requirements Resources/ALO.requirements \
             "$app"
     fi
 else

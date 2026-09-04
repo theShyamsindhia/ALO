@@ -69,6 +69,24 @@ transparency, increased contrast, and the user-selected control accent.
 
 ## Build it
 
+The Swift package and app module are `ALO`, shared Swift code is `ALOCore`, and
+the executable is `alo`. After packaging, `./alo` runs `dist/alo`; the old
+`./werai` launcher forwards to it for compatibility.
+
+### Rebrand compatibility
+
+ALO intentionally retains the `in.werai.audio` production bundle ID, separate
+`in.werai.audio.dev` development ID, existing `WERAI` / `WERAI-Dev` data folders,
+Keychain services, Bonjour service types, and legacy driver/shared-memory ABI.
+Changing those names cosmetically would lose existing permissions, saved rooms,
+or interoperability with installed versions. `ALO_*` signing settings are preferred;
+existing `WERAI_*` settings remain supported as fallbacks.
+
+The repository is currently still `theShyamsindhia/WERAI`; renaming it to `alo`
+requires repository-admin access. Keep the updater on that working repository
+until the rename succeeds. The local checkout folder may retain its old name;
+it does not affect the app's identity.
+
 Build once on each Mac with Apple's free Command Line Tools:
 
 ```sh
@@ -218,6 +236,16 @@ Run the focused single-Mac mesh tests:
 swift test --filter MeshRoomTests
 ```
 
+Run the combined live-socket scenario and repeatable partition/restart simulations:
+
+```sh
+bash Scripts/test_room_scenarios.sh 3
+```
+
+This keeps per-run logs and checks mixed media/voice/chat traffic, repeated late
+joins, disk restoration, delayed links, offline edits, and convergence after
+network partitions. See [scenario coverage and hardware-test limits](docs/room-scenario-testing.md).
+
 For automated two-Mac QA without UI automation, save or join the room once in
 the app on each Mac, then run the signed app binary on either Mac:
 
@@ -299,7 +327,8 @@ Manual workflow dispatch remains available for signing diagnostics.
 The repository must provide `DEVELOPER_ID_P12_BASE64` and
 `DEVELOPER_ID_P12_PASSWORD` as Actions secrets, plus
 `APP_STORE_CONNECT_API_KEY_BASE64` as an Actions secret. Configure
-`WERAI_CODESIGN_IDENTITY`, `APPLE_TEAM_ID`, `APP_STORE_CONNECT_KEY_ID`, and
+`ALO_CODESIGN_IDENTITY` (legacy `WERAI_CODESIGN_IDENTITY` is also accepted),
+`APPLE_TEAM_ID`, `APP_STORE_CONNECT_KEY_ID`, and
 `APP_STORE_CONNECT_ISSUER_ID` as Actions variables. Use an App Store Connect
 team key (Developer access or higher), because individual API keys cannot submit
 software to Apple's notarization service. The imported P12 must contain the
