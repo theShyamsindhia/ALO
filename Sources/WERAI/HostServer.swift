@@ -585,26 +585,28 @@ final class HostServer {
 
     private func updateGroupTiming() {
         let now = MonotonicClock.nowNanos()
-        let freshReports = clients.compactMap { identifier, client -> (ObjectIdentifier, UInt64, UInt64)? in
-            if client.id == localParticipantID { return nil }
+        let freshReports = clients.compactMap { identifier, client -> (
+            isLocal: Bool,
+            isEligible: Bool,
+            recommendation: UInt64,
+            outputLatencyFloor: UInt64
+        )? in
             guard let reportedAt = client.lastSyncReportNanos,
                   now >= reportedAt,
                   now - reportedAt <= 5_000_000_000
             else { return nil }
             return (
-                identifier,
-                client.recommendedPlayoutDelayNanos,
-                client.outputLatencyPlayoutFloorNanos
+                isLocal: client.id == localParticipantID,
+                isEligible: timingEligibleClients?.contains(identifier) ?? true,
+                recommendation: client.recommendedPlayoutDelayNanos,
+                outputLatencyFloor: client.outputLatencyPlayoutFloorNanos
             )
         }
-        let activeRecommendations: [UInt64] = freshReports.compactMap { report in
-            let (identifier, recommendation, _) = report
-            if let timingEligibleClients, !timingEligibleClients.contains(identifier) { return nil }
-            return recommendation
-        }
+        let timingInputs = Self.timingInputs(freshReports)
+        let activeRecommendations = timingInputs.recommendations
         // A late joiner's network jitter must not retime an established room,
         // but every current output still needs enough lead time for its hardware.
-        let outputLatencyFloors = freshReports.map(\.2)
+        let outputLatencyFloors = timingInputs.outputLatencyFloors
         // Once audio has established a timeline, losing the original reporters
         // must not make later joiners indirectly pull that timeline backward.
         if timingEligibleClients != nil,
@@ -663,6 +665,23 @@ final class HostServer {
             .map(RoomTiming.clampedPlayoutDelay)
             .max() ?? RoomTiming.defaultPlayoutDelayNanos
         return max(networkConsensus, hardwareFloor)
+    }
+
+    static func timingInputs(
+        _ reports: [(
+            isLocal: Bool,
+            isEligible: Bool,
+            recommendation: UInt64,
+            outputLatencyFloor: UInt64
+        )]
+    ) -> (recommendations: [UInt64], outputLatencyFloors: [UInt64]) {
+        (
+            recommendations: reports.compactMap { report in
+                guard !report.isLocal, report.isEligible else { return nil }
+                return report.recommendation
+            },
+            outputLatencyFloors: reports.map(\.outputLatencyFloor)
+        )
     }
 
     private func broadcastQueue() {

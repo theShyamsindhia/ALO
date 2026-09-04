@@ -40,6 +40,65 @@ struct RealtimeVoiceSendQueue {
     }
 }
 
+/// Stateful low-pass decimator used only for peers that predate full-band voice.
+/// Keeping the filter history per connection/session avoids a click at every
+/// 20 ms packet boundary while suppressing frequencies above the 16 kHz
+/// stream's Nyquist limit before decimation.
+struct LegacyVoiceDownsampler {
+    private static let tapCount = 31
+    private static let decimationFactor = 3
+    private static let coefficients: [Double] = {
+        let cutoff = 7_000.0 / 48_000.0
+        let midpoint = Double(tapCount - 1) / 2
+        var values = (0..<tapCount).map { index -> Double in
+            let distance = Double(index) - midpoint
+            let sinc = distance == 0
+                ? 2 * cutoff
+                : sin(2 * Double.pi * cutoff * distance) / (Double.pi * distance)
+            let window = 0.54 - 0.46 * cos(2 * Double.pi * Double(index) / Double(tapCount - 1))
+            return sinc * window
+        }
+        let total = values.reduce(0, +)
+        guard total != 0 else { return values }
+        for index in values.indices { values[index] /= total }
+        return values
+    }()
+
+    private var history = [Double](repeating: 0, count: tapCount)
+    private var writeIndex = 0
+    private var phase = 0
+
+    mutating func process(_ data: Data) -> Data? {
+        guard !data.isEmpty,
+              data.count.isMultiple(of: MemoryLayout<Int16>.size)
+        else { return nil }
+
+        var output = Data()
+        output.reserveCapacity(data.count / Self.decimationFactor)
+        data.withUnsafeBytes { bytes in
+            for offset in stride(from: 0, to: data.count, by: MemoryLayout<Int16>.size) {
+                let bits = UInt16(bytes[offset]) | (UInt16(bytes[offset + 1]) << 8)
+                history[writeIndex] = Double(Int16(bitPattern: bits))
+                writeIndex = (writeIndex + 1) % Self.tapCount
+                phase += 1
+                guard phase == Self.decimationFactor else { continue }
+                phase = 0
+
+                var filtered = 0.0
+                for tap in 0..<Self.tapCount {
+                    let historyIndex = (writeIndex - 1 - tap + Self.tapCount) % Self.tapCount
+                    filtered += history[historyIndex] * Self.coefficients[tap]
+                }
+                let sample = Int16(clamping: Int(filtered.rounded()))
+                let outputBits = UInt16(bitPattern: sample)
+                output.append(UInt8(truncatingIfNeeded: outputBits))
+                output.append(UInt8(truncatingIfNeeded: outputBits >> 8))
+            }
+        }
+        return output
+    }
+}
+
 final class MeshControlPlane: @unchecked Sendable {
     static let identityEnvelopeType = "display_name"
     private struct WalkieMessageKey: Hashable {
@@ -73,6 +132,7 @@ final class MeshControlPlane: @unchecked Sendable {
         var appVersion: String?
         var realtimeVoiceQueue = RealtimeVoiceSendQueue()
         var realtimeVoiceSendInFlight = false
+        var legacyVoiceDownsamplers = [String: LegacyVoiceDownsampler]()
         let localNonce = UUID().uuidString
         var authenticated = false
 
@@ -128,7 +188,7 @@ final class MeshControlPlane: @unchecked Sendable {
     private let maximumSyncEvents = 2_000
     private let maximumRememberedWalkieMessages = 8_192
     private let maximumWalkieTalkieHopCount: UInt8 = 8
-    private static let fullBandVoiceVersion = AppVersion("0.13.30")!
+    private static let fullBandVoiceVersion = AppVersion("0.13.31")!
 
     init(
         room: RoomConfiguration,
@@ -911,8 +971,21 @@ final class MeshControlPlane: @unchecked Sendable {
     static func legacyCompatibleWalkieTalkieMessage(
         _ message: WalkieTalkieMessage
     ) -> WalkieTalkieMessage {
+        var downsampler = LegacyVoiceDownsampler()
+        return legacyCompatibleWalkieTalkieMessage(message, downsampler: &downsampler)
+    }
+
+    static func legacyCompatibleWalkieTalkieMessage(
+        _ message: WalkieTalkieMessage,
+        downsampler: inout LegacyVoiceDownsampler
+    ) -> WalkieTalkieMessage {
         guard message.resolvedSampleRate == 48_000 else { return message }
-        let legacyPCM = message.pcm16Mono.flatMap(downsample48kPCMTo16k)
+        let legacyPCM: Data?
+        if let pcm = message.pcm16Mono {
+            legacyPCM = downsampler.process(pcm)
+        } else {
+            legacyPCM = nil
+        }
         return WalkieTalkieMessage(
             kind: message.kind,
             senderID: message.senderID,
@@ -924,27 +997,6 @@ final class MeshControlPlane: @unchecked Sendable {
             sampleRate: 16_000,
             pcm16Mono: legacyPCM
         )
-    }
-
-    private static func downsample48kPCMTo16k(_ data: Data) -> Data? {
-        let bytesPerLegacyFrame = 3 * MemoryLayout<Int16>.size
-        guard !data.isEmpty, data.count.isMultiple(of: bytesPerLegacyFrame) else { return nil }
-        var output = Data()
-        output.reserveCapacity(data.count / 3)
-        data.withUnsafeBytes { bytes in
-            for offset in stride(from: 0, to: data.count, by: bytesPerLegacyFrame) {
-                var total: Int32 = 0
-                for sampleOffset in stride(from: offset, to: offset + bytesPerLegacyFrame, by: 2) {
-                    let bits = UInt16(bytes[sampleOffset]) | (UInt16(bytes[sampleOffset + 1]) << 8)
-                    total += Int32(Int16(bitPattern: bits))
-                }
-                let sample = Int16(total / 3)
-                let bits = UInt16(bitPattern: sample)
-                output.append(UInt8(truncatingIfNeeded: bits))
-                output.append(UInt8(truncatingIfNeeded: bits >> 8))
-            }
-        }
-        return output
     }
 
     private func isValidOpenLine(_ message: OpenLineMessage) -> Bool {
@@ -1335,9 +1387,25 @@ final class MeshControlPlane: @unchecked Sendable {
     private func send(_ envelope: MeshEnvelope, to links: [Link]) {
         if envelope.type == "walkie_talkie", let message = envelope.walkieTalkie {
             for link in links {
-                let wireMessage = Self.supportsFullBandVoice(appVersion: link.appVersion)
-                    ? message
-                    : Self.legacyCompatibleWalkieTalkieMessage(message)
+                let wireMessage: WalkieTalkieMessage
+                if Self.supportsFullBandVoice(appVersion: link.appVersion) {
+                    wireMessage = message
+                } else {
+                    if message.kind == .began {
+                        link.legacyVoiceDownsamplers[message.sessionID] = LegacyVoiceDownsampler()
+                    }
+                    var downsampler = link.legacyVoiceDownsamplers[message.sessionID]
+                        ?? LegacyVoiceDownsampler()
+                    wireMessage = Self.legacyCompatibleWalkieTalkieMessage(
+                        message,
+                        downsampler: &downsampler
+                    )
+                    if message.kind == .ended {
+                        link.legacyVoiceDownsamplers.removeValue(forKey: message.sessionID)
+                    } else {
+                        link.legacyVoiceDownsamplers[message.sessionID] = downsampler
+                    }
+                }
                 let wireEnvelope = MeshEnvelope(
                     type: envelope.type,
                     nodeID: envelope.nodeID,

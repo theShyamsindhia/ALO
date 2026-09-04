@@ -211,9 +211,11 @@ struct WalkieTalkieAudioTests {
         #expect(!initialBeginNeedsReplacement)
         lifecycle.markEnding()
         #expect(lifecycle.isEnding)
+        #expect(lifecycle.shouldDropAudio)
         let revivedBeginNeedsReplacement = lifecycle.beginRequiresReplacement()
         #expect(revivedBeginNeedsReplacement)
         #expect(!lifecycle.isEnding)
+        #expect(!lifecycle.shouldDropAudio)
     }
 
     @Test("Microphone chunks are packetized into exact 20 ms frames")

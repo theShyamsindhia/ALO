@@ -156,6 +156,13 @@ struct LoopbackRoomScaleTests {
             [normal, normal, 370_000_000],
             outputLatencyFloors: [250_000_000, 250_000_000, 370_000_000]
         ) == 370_000_000)
+
+        let inputs = HostServer.timingInputs([
+            (isLocal: true, isEligible: false, recommendation: delayed, outputLatencyFloor: 370_000_000),
+            (isLocal: false, isEligible: true, recommendation: normal, outputLatencyFloor: normal),
+        ])
+        #expect(inputs.recommendations == [normal])
+        #expect(inputs.outputLatencyFloors == [370_000_000, normal])
     }
 
     @Test("Participant play and pause requests force every receiver to resynchronize")

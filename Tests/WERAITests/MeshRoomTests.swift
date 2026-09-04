@@ -806,7 +806,8 @@ struct MeshRoomTests {
     func fullBandVoiceCompatibilityAndBackpressure() throws {
         #expect(!MeshControlPlane.supportsFullBandVoice(appVersion: nil))
         #expect(!MeshControlPlane.supportsFullBandVoice(appVersion: "0.13.29"))
-        #expect(MeshControlPlane.supportsFullBandVoice(appVersion: "0.13.30"))
+        #expect(!MeshControlPlane.supportsFullBandVoice(appVersion: "0.13.30"))
+        #expect(MeshControlPlane.supportsFullBandVoice(appVersion: "0.13.31"))
 
         let fullBandPCM = Data(repeating: 0x24, count: 960 * MemoryLayout<Int16>.size)
         let fullBand = WalkieTalkieMessage(
@@ -823,6 +824,20 @@ struct MeshRoomTests {
         #expect(legacy.resolvedSampleRate == 16_000)
         #expect(legacy.pcm16Mono?.count == 320 * MemoryLayout<Int16>.size)
 
+        var speechDownsampler = LegacyVoiceDownsampler()
+        var aliasDownsampler = LegacyVoiceDownsampler()
+        let speech = legacyPCMFixture(frequency: 1_000)
+        let outOfBand = legacyPCMFixture(frequency: 12_000)
+        for _ in 0..<3 {
+            _ = speechDownsampler.process(speech)
+            _ = aliasDownsampler.process(outOfBand)
+        }
+        let pendingSpeechOutput = speechDownsampler.process(speech)
+        let pendingAliasOutput = aliasDownsampler.process(outOfBand)
+        let speechOutput = try #require(pendingSpeechOutput)
+        let aliasOutput = try #require(pendingAliasOutput)
+        #expect(pcmRMS(aliasOutput) < pcmRMS(speechOutput) * 0.12)
+
         var queue = RealtimeVoiceSendQueue(maximumPendingAudioPackets: 2)
         queue.enqueue(.init(kind: .audio, sessionID: "voice", data: Data([1])))
         queue.enqueue(.init(kind: .audio, sessionID: "voice", data: Data([2])))
@@ -830,6 +845,32 @@ struct MeshRoomTests {
         #expect(queue.pending.map(\.data) == [Data([2]), Data([3])])
         queue.enqueue(.init(kind: .ended, sessionID: "voice", data: Data([4])))
         #expect(queue.pending.map(\.data) == [Data([4])])
+    }
+
+    private func legacyPCMFixture(frequency: Double) -> Data {
+        var data = Data()
+        data.reserveCapacity(960 * MemoryLayout<Int16>.size)
+        for frame in 0..<960 {
+            let angle = 2 * Double.pi * frequency * Double(frame) / 48_000
+            let bits = UInt16(bitPattern: Int16((sin(angle) * 20_000).rounded()))
+            data.append(UInt8(truncatingIfNeeded: bits))
+            data.append(UInt8(truncatingIfNeeded: bits >> 8))
+        }
+        return data
+    }
+
+    private func pcmRMS(_ data: Data) -> Double {
+        var total = 0.0
+        let count = data.count / MemoryLayout<Int16>.size
+        data.withUnsafeBytes { bytes in
+            for index in 0..<count {
+                let offset = index * 2
+                let bits = UInt16(bytes[offset]) | (UInt16(bytes[offset + 1]) << 8)
+                let sample = Double(Int16(bitPattern: bits))
+                total += sample * sample
+            }
+        }
+        return sqrt(total / Double(max(1, count)))
     }
 
     @Test("Room controls retry until the broadcaster media session accepts them")

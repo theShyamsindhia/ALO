@@ -449,6 +449,7 @@ struct WalkieTalkiePlaybackTracker {
 
 struct VoicePlaybackSessionLifecycle {
     private(set) var isEnding = false
+    var shouldDropAudio: Bool { isEnding }
 
     mutating func markEnding() { isEnding = true }
 
@@ -718,6 +719,11 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
                   data.count <= 8_192,
                   data.count.isMultiple(of: MemoryLayout<Int16>.size)
             else { return }
+            // Reliable delivery can still be reordered across relayed mesh
+            // paths. Never let a straggler revive and replace a session whose
+            // final buffers are deliberately draining; a new `.began` is the
+            // only message allowed to start that session ID again.
+            if sessions[message.sessionID]?.lifecycle.shouldDropAudio == true { return }
             let session = beginSession(message)
             guard let session else { return }
             session.senderName = message.senderName
