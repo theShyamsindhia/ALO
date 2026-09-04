@@ -4,6 +4,41 @@ import Foundation
 import Network
 import WERAICore
 
+struct ReceiverTransportEpoch {
+    private(set) var token: UInt64 = 0
+
+    mutating func advance() {
+        token &+= 1
+    }
+
+    func accepts(_ candidate: UInt64) -> Bool {
+        candidate == token
+    }
+}
+
+struct ReceiverLevelPreference {
+    private(set) var volume = 1.0
+    private(set) var muted = false
+
+    mutating func updateLocally(volume: Double, muted: Bool) {
+        self.volume = min(max(volume, 0), 1)
+        self.muted = muted
+    }
+
+    mutating func updateFromAuthoritativeLevel(volume: Double, muted: Bool) {
+        updateLocally(volume: volume, muted: muted)
+    }
+
+    func controlMessage(participantID: String) -> ControlMessage {
+        ControlMessage(
+            type: "set_level",
+            targetID: participantID,
+            volume: volume,
+            muted: muted
+        )
+    }
+}
+
 final class Receiver {
     private final class PlaybackActivityRelay {
         var handler: (Bool) -> Void = { _ in }
@@ -50,10 +85,13 @@ final class Receiver {
     private var locallyForcedPlaybackMuted = false
     private var participantVolume = 1.0
     private var participantMuted = false
+    private var levelPreference = ReceiverLevelPreference()
+    private var transportEpoch = ReceiverTransportEpoch()
 
     init(
         requestedRoom: String?,
         roomDisplayName: String? = nil,
+        audioOutput: RoomAudioOutputEngine = RoomAudioOutputEngine(),
         outputDeviceUID: String? = nil,
         outputDeviceID: AudioDeviceID? = nil,
         participantID: String = UUID().uuidString,
@@ -85,6 +123,7 @@ final class Receiver {
         let playbackActivityRelay = PlaybackActivityRelay()
         self.playbackActivityRelay = playbackActivityRelay
         self.player = try SynchronizedPlayer(
+            audioOutput: audioOutput,
             outputDeviceUID: outputDeviceUID,
             outputDeviceID: outputDeviceID
         ) { active in
@@ -155,6 +194,7 @@ final class Receiver {
 
     func stop() {
         queue.sync {
+            transportEpoch.advance()
             pingTimer?.cancel()
             pingTimer = nil
             maintenanceTimer?.cancel()
@@ -231,12 +271,16 @@ final class Receiver {
     func setLocalLevel(volume: Double, muted: Bool) {
         queue.async { [weak self] in
             guard let self else { return }
-            self.send(ControlMessage(
-                type: "set_level",
-                targetID: self.participantID,
-                volume: volume,
-                muted: muted
-            ))
+            self.levelPreference.updateLocally(volume: volume, muted: muted)
+            self.participantVolume = self.levelPreference.volume
+            self.participantMuted = muted
+            self.player.setLevel(
+                volume: self.participantVolume,
+                muted: muted || self.locallyForcedPlaybackMuted
+            )
+            if self.hasAuthenticatedControl {
+                self.sendPreferredLevel()
+            }
         }
     }
 
@@ -318,8 +362,12 @@ final class Receiver {
 
     private func connect(to endpoint: NWEndpoint) {
         let connection = NWConnection(to: endpoint, using: LocalNetworkParameters.tcp())
-        connection.stateUpdateHandler = { [weak self] state in
+        let connectionEpoch = transportEpoch.token
+        connection.stateUpdateHandler = { [weak self, weak connection] state in
             guard let self else { return }
+            guard self.transportEpoch.accepts(connectionEpoch),
+                  let connection, self.control === connection
+            else { return }
             switch state {
             case .ready:
                 print("Connected to \(endpoint).")
@@ -328,14 +376,14 @@ final class Receiver {
             case .failed(let error):
                 fputs("Room connection failed: \(error)\n", stderr)
                 self.statusHandler?(.failed(error.localizedDescription))
-                self.handleControlDisconnect()
+                self.handleControlDisconnect(expectedEpoch: connectionEpoch)
             default:
                 break
             }
         }
         connection.start(queue: queue)
         control = connection
-        receiveControl()
+        receiveControl(from: connection, epoch: connectionEpoch)
     }
 
     private func sendJoin() {
@@ -371,9 +419,16 @@ final class Receiver {
         control?.send(content: data, completion: .contentProcessed { _ in })
     }
 
-    private func receiveControl() {
-        control?.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, isComplete, error in
+    private func sendPreferredLevel() {
+        send(levelPreference.controlMessage(participantID: participantID))
+    }
+
+    private func receiveControl(from connection: NWConnection, epoch: UInt64) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self, weak connection] data, _, isComplete, error in
             guard let self else { return }
+            guard self.transportEpoch.accepts(epoch),
+                  let connection, self.control === connection
+            else { return }
             if let data {
                 for message in self.controlDecoder.append(data) {
                     switch message.type {
@@ -398,6 +453,10 @@ final class Receiver {
                         if let id = message.participantID, let name = message.displayName {
                             self.identityHandler?(id, name)
                         }
+                        // A replacement host has no previous Client record to
+                        // inherit. Republish the device's chosen level for each
+                        // newly authenticated transport epoch.
+                        self.sendPreferredLevel()
                     case "media_state":
                         self.mediaStateHandler?(message.videoEnabled ?? false)
                     case "now_playing":
@@ -411,6 +470,10 @@ final class Receiver {
                     case "level":
                         self.participantVolume = message.volume ?? 1
                         self.participantMuted = message.muted ?? false
+                        self.levelPreference.updateFromAuthoritativeLevel(
+                            volume: self.participantVolume,
+                            muted: self.participantMuted
+                        )
                         self.player.setLevel(
                             volume: self.participantVolume,
                             muted: self.participantMuted || self.locallyForcedPlaybackMuted
@@ -431,20 +494,32 @@ final class Receiver {
                 }
             }
             if !isComplete, error == nil {
-                self.receiveControl()
+                self.receiveControl(from: connection, epoch: epoch)
             } else {
-                self.handleControlDisconnect()
+                self.handleControlDisconnect(expectedEpoch: epoch)
             }
         }
     }
 
-    private func handleControlDisconnect() {
+    private func handleControlDisconnect(expectedEpoch: UInt64) {
+        guard transportEpoch.accepts(expectedEpoch) else { return }
+        transportEpoch.advance()
         pingTimer?.cancel()
         pingTimer = nil
         control?.cancel()
         control = nil
         hasAuthenticatedControl = false
         controlDecoder = ControlLineDecoder()
+        audioConnections.forEach { $0.cancel() }
+        audioConnections.removeAll()
+        videoConnections.forEach { $0.cancel() }
+        videoConnections.removeAll()
+        clock.reset()
+        jitter.reset()
+        player.clockOffsetNanos = nil
+        player.resetStream()
+        videoDecoder.resetTiming()
+        lastSyncReportNanos = 0
         if capturesSystemMediaCommands { remoteCommandCenter.stop() }
         guard hasChosenRoom else { return }
         hasChosenRoom = false
@@ -453,6 +528,7 @@ final class Receiver {
     }
 
     private func receiveAudio(from connection: NWConnection) {
+        let connectionEpoch = transportEpoch.token
         audioConnections.append(connection)
         connection.stateUpdateHandler = { state in
             if case .failed(let error) = state {
@@ -463,18 +539,17 @@ final class Receiver {
 
         func receiveNext() {
             connection.receiveMessage { [weak self] data, _, _, error in
+                guard let self, self.transportEpoch.accepts(connectionEpoch) else { return }
                 if let data, let packet = AudioPacket(data: data) {
-                    if let self {
-                        let now = MonotonicClock.nowNanos()
-                        if let offset = self.clock.offsetNanos(at: now), self.clock.isReady {
-                            self.jitter.observe(
-                                captureTimeNanos: packet.captureTimeNanos,
-                                receivedAt: now,
-                                clockOffsetNanos: offset
-                            )
-                        }
-                        self.player.accept(packet)
+                    let now = MonotonicClock.nowNanos()
+                    if let offset = self.clock.offsetNanos(at: now), self.clock.isReady {
+                        self.jitter.observe(
+                            captureTimeNanos: packet.captureTimeNanos,
+                            receivedAt: now,
+                            clockOffsetNanos: offset
+                        )
                     }
+                    self.player.accept(packet)
                 }
                 if error == nil {
                     receiveNext()
@@ -520,6 +595,7 @@ final class Receiver {
     }
 
     private func receiveVideo(from connection: NWConnection) {
+        let connectionEpoch = transportEpoch.token
         videoConnections.append(connection)
         let decoder = VideoFrameStreamDecoder()
         connection.stateUpdateHandler = { state in
@@ -531,9 +607,10 @@ final class Receiver {
 
         func receiveNext() {
             connection.receive(minimumIncompleteLength: 1, maximumLength: 1_048_576) { [weak self] data, _, isComplete, error in
+                guard let self, self.transportEpoch.accepts(connectionEpoch) else { return }
                 if let data {
                     for frame in decoder.append(data) {
-                        self?.videoDecoder.accept(frame)
+                        self.videoDecoder.accept(frame)
                     }
                 }
                 if !isComplete, error == nil {

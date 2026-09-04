@@ -30,6 +30,19 @@ struct ClientPlaybackReliabilityTests {
         #expect(!routing.publishedParticipantMediaMuted)
     }
 
+    @Test("An authoritative mixer echo becomes the receiver's reconnect preference")
+    func authoritativeLevelSurvivesReceiverReconnect() {
+        var preference = ReceiverLevelPreference()
+
+        preference.updateFromAuthoritativeLevel(volume: 0.27, muted: true)
+        let message = preference.controlMessage(participantID: "local-device")
+
+        #expect(message.type == "set_level")
+        #expect(message.targetID == "local-device")
+        #expect(message.volume == 0.27)
+        #expect(message.muted == true)
+    }
+
     @Test("Talk selection is additive and Everyone is a present-device snapshot") @MainActor
     func talkTargetSelection() {
         let initial: Set<String> = ["mac-a", "mac-b"]
@@ -228,6 +241,12 @@ struct ClientPlaybackReliabilityTests {
         #expect(!SynchronizedPlayer.shouldRecoverAfterConfigurationChange(
             engineIsRunning: true, deviceChanged: false, latencyChanged: true
         ))
+        #expect(SynchronizedPlayer.shouldRecoverAfterConfigurationChange(
+            engineIsRunning: true,
+            deviceChanged: false,
+            latencyChanged: false,
+            engineRestarted: true
+        ))
         #expect(!SynchronizedPlayer.latencyChanged(from: 10_000_000, to: 10_500_000))
         #expect(SynchronizedPlayer.latencyChanged(from: 10_000_000, to: 12_000_000))
         #expect(!SynchronizedPlayer.shouldAcceptOutputLatencyMeasurement(
@@ -245,6 +264,95 @@ struct ClientPlaybackReliabilityTests {
             previousLatencyNanos: 220_000_000,
             measuredLatencyNanos: 240_000_000
         ))
+    }
+
+    @Test("A rejoined receiver rejects stale and duplicate media packets")
+    func staleMediaPacketsCannotPolluteTheNextResync() {
+        #expect(!SynchronizedPlayer.shouldAdmitPacket(
+            sequence: 99,
+            expectedSequence: 100,
+            isAlreadyPending: false
+        ))
+        #expect(!SynchronizedPlayer.shouldAdmitPacket(
+            sequence: 101,
+            expectedSequence: 100,
+            isAlreadyPending: true
+        ))
+        #expect(SynchronizedPlayer.shouldAdmitPacket(
+            sequence: 100,
+            expectedSequence: 100,
+            isAlreadyPending: false
+        ))
+        #expect(SynchronizedPlayer.shouldAdmitPacket(
+            sequence: 0,
+            expectedSequence: UInt32.max,
+            isAlreadyPending: false
+        ))
+        #expect(!SynchronizedPlayer.shouldAdmitPacket(
+            sequence: UInt32.max,
+            expectedSequence: 0,
+            isAlreadyPending: false
+        ))
+    }
+
+    @Test("A receiver accepts a restarted broadcaster's reset sequence")
+    func broadcasterRestartResetsReceiverStreamIdentity() throws {
+        let player = try SynchronizedPlayer()
+        defer { player.stop() }
+        let samples = [Int16](
+            repeating: 0,
+            count: Int(AudioPacket.framesPerPacket) * Int(AudioPacket.channelCount)
+        )
+
+        player.accept(AudioPacket(
+            sequence: 90_000,
+            frameIndex: 0,
+            captureTimeNanos: MonotonicClock.nowNanos(),
+            samples: samples
+        ))
+        #expect(player.expectedSequenceForTesting == 90_000)
+
+        player.resetStream()
+        #expect(player.expectedSequenceForTesting == nil)
+
+        player.accept(AudioPacket(
+            sequence: 0,
+            frameIndex: 0,
+            captureTimeNanos: MonotonicClock.nowNanos(),
+            samples: samples
+        ))
+        #expect(player.expectedSequenceForTesting == 0)
+    }
+
+    @Test("A stopped receiver ignores a delivery already queued by its old transport")
+    func stoppedPlayerRejectsLateTransportPacket() throws {
+        let player = try SynchronizedPlayer()
+        player.clockOffsetNanos = 0
+        player.stop()
+
+        player.accept(AudioPacket(
+            sequence: 1,
+            frameIndex: 0,
+            captureTimeNanos: MonotonicClock.nowNanos(),
+            samples: [Int16](
+                repeating: 0,
+                count: Int(AudioPacket.framesPerPacket) * Int(AudioPacket.channelCount)
+            )
+        ))
+
+        #expect(player.expectedSequenceForTesting == nil)
+        #expect(player.clockOffsetNanos == nil)
+    }
+
+    @Test("A cancelled transport cannot deliver into the next receiver epoch")
+    func staleTransportCallbackIsRejectedAfterReconnect() {
+        var epoch = ReceiverTransportEpoch()
+        let oldConnectionEpoch = epoch.token
+
+        epoch.advance()
+
+        #expect(!epoch.accepts(oldConnectionEpoch))
+        #expect(epoch.accepts(epoch.token))
     }
 
     @Test("Moderate Bluetooth clock jitter never cuts playback")

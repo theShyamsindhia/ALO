@@ -210,6 +210,12 @@ final class VideoDecoder {
     private var targetLatencyNanos = RoomTiming.defaultPlayoutDelayNanos
     private let resyncGate = VideoPresentationResyncGate()
 
+    var clockOffsetNanosForTesting: Int64? {
+        timingLock.lock()
+        defer { timingLock.unlock() }
+        return clockOffsetNanos
+    }
+
     init(imageHandler: @escaping ImageHandler) {
         self.imageHandler = imageHandler
     }
@@ -244,6 +250,17 @@ final class VideoDecoder {
             }
             hasDecodedFrame = false
         }
+    }
+
+    /// Invalidates both scheduled frames and the host-specific clock model.
+    /// A replacement broadcaster may use a completely different monotonic
+    /// epoch, so video must wait for the reconnect's fresh pong samples just
+    /// like synchronized audio does.
+    func resetTiming() {
+        timingLock.lock()
+        clockOffsetNanos = nil
+        timingLock.unlock()
+        forceResync()
     }
 
     func stop() {

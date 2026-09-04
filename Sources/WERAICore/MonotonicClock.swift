@@ -43,6 +43,20 @@ public final class ClockSynchronizer {
 
     public init() {}
 
+    /// Discards all timing learned from the current host. A reconnect may be
+    /// served by a different Mac whose monotonic clock has a different epoch.
+    public func reset() {
+        sentAt.removeAll()
+        samples.removeAll()
+        nextID = 0
+        modelReferenceNanos = nil
+        modelOffsetNanos = nil
+        modelDriftNanosPerSecond = 0
+        offsetNanos = nil
+        driftPartsPerMillion = 0
+        bestRoundTripNanos = nil
+    }
+
     public func makePing(at clientNanos: UInt64) -> ControlMessage {
         let id = nextID
         nextID &+= 1

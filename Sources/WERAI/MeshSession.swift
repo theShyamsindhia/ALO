@@ -36,6 +36,7 @@ final class MeshSession {
     private let openLineStateHandler: (OpenLineState) -> Void
     private let walkieTalkieMicrophone = WalkieTalkieMicrophone()
     private let walkieTalkiePlayer: WalkieTalkiePlayer
+    private let audioOutput: RoomAudioOutputEngine
     private final class WalkieTransmissionState: @unchecked Sendable {
         struct Active {
             let id: String
@@ -177,6 +178,7 @@ final class MeshSession {
         deviceIcon: String? = nil,
         deviceColorHex: String? = nil,
         profileImageData: Data? = nil,
+        audioOutput: RoomAudioOutputEngine = RoomAudioOutputEngine(),
         initialEvents: [MeshRoomEvent] = [],
         statusHandler: @escaping (String) -> Void,
         identityHandler: @escaping (String, String) -> Void,
@@ -223,12 +225,14 @@ final class MeshSession {
         self.openLineStateHandler = openLineStateHandler
         self.openLineSessionState = OpenLineSessionState(localID: nodeID)
         let walkieTalkiePlayer = WalkieTalkiePlayer(
+            audioOutput: audioOutput,
             stateHandler: { sessionID, senderID, senderName, active, level in
                 DispatchQueue.main.async {
                     relay.walkieTalkie(sessionID, senderID, senderName, active, level)
                 }
             }
         )
+        self.audioOutput = audioOutput
         self.walkieTalkiePlayer = walkieTalkiePlayer
         self.replicaPersistenceHandler = replicaPersistenceHandler
         self.control = MeshControlPlane(
@@ -836,6 +840,7 @@ final class MeshSession {
                     try await host.start(
                         roomName: broadcaster.mediaServiceName,
                         participantID: nodeID,
+                        audioOutput: audioOutput,
                         statusHandler: statusHandler,
                         receiverCountHandler: { _ in },
                         initialVideoEnabled: initialVideoEnabled,
@@ -915,6 +920,7 @@ final class MeshSession {
                     let receiver = try Receiver(
                         requestedRoom: broadcaster.mediaServiceName,
                         roomDisplayName: room.name,
+                        audioOutput: audioOutput,
                         participantID: nodeID,
                         roomMediaCommandHandler: { [weak self] command in
                             let send = {

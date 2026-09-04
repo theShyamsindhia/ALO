@@ -1065,12 +1065,13 @@ private enum FloatingMetrics {
     static let videoHeight: CGFloat = 476
     static let permissionHeight: CGFloat = 244
     static let walkieBarHeight: CGFloat = 56
-    static let walkieBarHandleHeight: CGFloat = 11
+    static let walkieBarHandleGap: CGFloat = 6
+    static let walkieBarHandleTargetHeight: CGFloat = 24
     static let walkieBarMinWidth: CGFloat = 300
     static let walkieBarMaxWidth: CGFloat = 720
 
     static var walkieFloatingHeight: CGFloat {
-        walkieBarHeight + walkieBarHandleHeight
+        walkieBarHeight + walkieBarHandleGap + walkieBarHandleTargetHeight
     }
 
     static func walkieBarWidth(participantCount: Int) -> CGFloat {
@@ -1461,6 +1462,7 @@ final class WERAIViewModel: ObservableObject {
     private let roomStore = RoomStore()
     private let lastJoinedRoomStore = LastJoinedRoomStore()
     private let nodeID: String
+    private let audioOutput = RoomAudioOutputEngine()
     private var localNowPlayingMonitor: NowPlayingMonitor?
     private var deviceIdentityEditor: DeviceIdentityEditorController?
     private var incomingMessagePreviewTask: Task<Void, Never>?
@@ -1721,6 +1723,7 @@ final class WERAIViewModel: ObservableObject {
             deviceIcon: currentDeviceIcon,
             deviceColorHex: currentDeviceColorHex,
             profileImageData: currentDeviceProfileImageData,
+            audioOutput: audioOutput,
             initialEvents: roomStore.loadEvents(roomID: room.id),
             statusHandler: { [weak self] status in
                 DispatchQueue.main.async {
@@ -4997,14 +5000,14 @@ private struct WalkieTalkieBar: View {
     var body: some View {
         Group {
             if showsCloseButton {
-                VStack(spacing: 0) {
+                VStack(spacing: FloatingMetrics.walkieBarHandleGap) {
                     controls
                         .glass(cornerRadius: 18)
 
                     Capsule()
                         .fill(Palette.controlIcon.opacity(0.64))
                         .frame(width: 74, height: 5)
-                        .frame(height: FloatingMetrics.walkieBarHandleHeight)
+                        .frame(height: FloatingMetrics.walkieBarHandleTargetHeight)
                         .contentShape(Rectangle())
                         .overlay { WindowDragRegion().accessibilityHidden(true) }
                         .help("Drag to move the Talk bar")

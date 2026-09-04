@@ -75,7 +75,9 @@ struct AudioConfigurationRecoveryGate {
 final class SynchronizedPlayer {
     static let targetLatencyNanos = RoomTiming.defaultPlayoutDelayNanos
     static let hardResyncThresholdNanos: UInt64 = 100_000_000
-    private let engine = AVAudioEngine()
+    private let audioOutput: RoomAudioOutputEngine
+    private var engine: AVAudioEngine { audioOutput.engine }
+    var outputEngineIdentityForTesting: ObjectIdentifier { audioOutput.identity }
     private let player = AVAudioPlayerNode()
     private let varispeed = AVAudioUnitVarispeed()
     private let format: AVAudioFormat
@@ -110,7 +112,11 @@ final class SynchronizedPlayer {
     private var roomPlaybackIsPlaying = true
     private var resyncCutoverCaptureNanos: UInt64?
     private(set) var configurationChangeCount: UInt64 = 0
+    private var nodesAreAttached = false
+    private var outputLeaseHeld = false
+    private var observedOutputStartGeneration: UInt64 = 0
 
+    var expectedSequenceForTesting: UInt32? { expectedSequence }
     var outputLatencyForTimingNanos: UInt64 { outputLatencyNanos }
     var renderSchedulingHeadroomForTimingNanos: UInt64 { renderSchedulingHeadroomNanos }
     var outputHardwareFormatForDiagnostics: AudioOutputHardwareFormat? {
@@ -120,10 +126,12 @@ final class SynchronizedPlayer {
     var clockOffsetNanos: Int64?
 
     init(
+        audioOutput: RoomAudioOutputEngine = RoomAudioOutputEngine(),
         outputDeviceUID: String? = nil,
         outputDeviceID: AudioDeviceID? = nil,
         playbackActivityChanged: ((Bool) -> Void)? = nil
     ) throws {
+        self.audioOutput = audioOutput
         self.playbackActivityChanged = playbackActivityChanged
         self.outputDeviceUID = outputDeviceUID
         self.explicitOutputDeviceID = outputDeviceID
@@ -137,13 +145,22 @@ final class SynchronizedPlayer {
         }
         self.format = format
 
-        engine.attach(player)
-        engine.attach(varispeed)
-        engine.connect(player, to: varispeed, format: format)
-        engine.connect(varispeed, to: engine.mainMixerNode, format: format)
-        try applyRequestedOutputDevice()
-        engine.prepare()
-        try engine.start()
+        do {
+            try audioOutput.withGraph { engine in
+                engine.attach(player)
+                engine.attach(varispeed)
+                engine.connect(player, to: varispeed, format: format)
+                engine.connect(varispeed, to: engine.mainMixerNode, format: format)
+                nodesAreAttached = true
+                try applyRequestedOutputDevice()
+            }
+            audioOutput.retainClient()
+            outputLeaseHeld = true
+            try audioOutput.ensureRunning()
+        } catch {
+            detachOutputNodes()
+            throw error
+        }
         refreshOutputState()
         configurationObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange,
@@ -156,10 +173,17 @@ final class SynchronizedPlayer {
 
     deinit {
         if let configurationObserver { NotificationCenter.default.removeObserver(configurationObserver) }
+        detachOutputNodes()
     }
 
     func accept(_ packet: AudioPacket) {
+        guard nodesAreAttached else { return }
         guard roomPlaybackIsPlaying else { return }
+        guard Self.shouldAdmitPacket(
+            sequence: packet.sequence,
+            expectedSequence: expectedSequence,
+            isAlreadyPending: pending[packet.sequence] != nil
+        ) else { return }
         if let cutover = resyncCutoverCaptureNanos {
             guard packet.captureTimeNanos >= cutover else { return }
             resyncCutoverCaptureNanos = nil
@@ -174,6 +198,7 @@ final class SynchronizedPlayer {
     }
 
     func maintainSync() {
+        guard nodesAreAttached else { return }
         let now = MonotonicClock.nowNanos()
         guard roomPlaybackIsPlaying else {
             setPlaybackActive(false)
@@ -296,7 +321,6 @@ final class SynchronizedPlayer {
 
     func stop() {
         player.stop()
-        engine.stop()
         pending.removeAll()
         expectedSequence = nil
         hasStarted = false
@@ -305,10 +329,12 @@ final class SynchronizedPlayer {
         latestLatenessNanos = 0
         lastPacketReceivedNanos = nil
         resyncCutoverCaptureNanos = nil
+        clockOffsetNanos = nil
         setPlaybackActive(false)
         playbackWatchdog.reset()
         driftRecovery.reset()
         applyOutputGain()
+        detachOutputNodes()
     }
 
     func setTargetLatencyNanos(_ nanos: UInt64) {
@@ -398,6 +424,27 @@ final class SynchronizedPlayer {
         setPlaybackActive(false)
     }
 
+    /// Starts a new transport epoch without tearing down the shared hardware
+    /// graph. Host processes restart their packet sequence at zero, so keeping
+    /// sequence, timeline, or watchdog state across a control reconnect would
+    /// make every packet from the new stream look stale.
+    func resetStream() {
+        player.stop()
+        pending.removeAll()
+        expectedSequence = nil
+        anchorFrameIndex = nil
+        anchorCaptureNanos = nil
+        hasStarted = false
+        smoothedCorrection = 0
+        varispeed.rate = 1
+        latestLatenessNanos = 0
+        lastPacketReceivedNanos = nil
+        resyncCutoverCaptureNanos = nil
+        playbackWatchdog.reset()
+        driftRecovery.reset()
+        setPlaybackActive(false)
+    }
+
     func handleAudioEngineConfigurationChange() {
         configurationChangeCount &+= 1
         recoverAudioEngine()
@@ -434,19 +481,22 @@ final class SynchronizedPlayer {
             from: activeOutputHardwareFormat,
             to: currentHardwareFormat
         )
+        let engineRestarted = observedOutputStartGeneration != 0
+            && observedOutputStartGeneration != audioOutput.startGeneration
         // Core Audio also broadcasts configuration changes for unrelated private
         // taps. Rebuild only when this engine stopped or its route/format changed;
         // latency-only updates are folded into the live timeline below.
         if Self.shouldRecoverAfterConfigurationChange(
-            engineIsRunning: engine.isRunning,
+            engineIsRunning: audioOutput.isRunning,
             deviceChanged: deviceChanged,
             latencyChanged: latencyChanged,
-            outputFormatChanged: outputFormatChanged
+            outputFormatChanged: outputFormatChanged,
+            engineRestarted: engineRestarted
         ) {
             handleAudioEngineConfigurationChange()
         } else {
             if Self.shouldAcceptOutputLatencyMeasurement(
-                engineIsRunning: engine.isRunning,
+                engineIsRunning: audioOutput.isRunning,
                 previousLatencyNanos: outputLatencyNanos,
                 measuredLatencyNanos: currentLatencyNanos
             ) {
@@ -465,9 +515,10 @@ final class SynchronizedPlayer {
         engineIsRunning: Bool,
         deviceChanged: Bool,
         latencyChanged _: Bool,
-        outputFormatChanged: Bool = false
+        outputFormatChanged: Bool = false,
+        engineRestarted: Bool = false
     ) -> Bool {
-        !engineIsRunning || deviceChanged || outputFormatChanged
+        !engineIsRunning || deviceChanged || outputFormatChanged || engineRestarted
     }
 
     static func latencyChanged(from old: UInt64, to new: UInt64) -> Bool {
@@ -492,13 +543,18 @@ final class SynchronizedPlayer {
             configurationLock.withLock { configurationGate.endRecovery() }
         }
 
+        guard nodesAreAttached else { return }
         player.stop()
-        engine.stop()
         hardResynchronize()
         do {
-            try applyRequestedOutputDevice()
-            engine.prepare()
-            try engine.start()
+            try audioOutput.withGraph { engine in
+                engine.disconnectNodeOutput(player)
+                engine.disconnectNodeOutput(varispeed)
+                engine.connect(player, to: varispeed, format: format)
+                engine.connect(varispeed, to: engine.mainMixerNode, format: format)
+                try applyRequestedOutputDevice()
+            }
+            try audioOutput.ensureRunning()
             refreshOutputState()
             applyOutputGain()
             recoveryRetryNotBeforeNanos = 0
@@ -514,6 +570,7 @@ final class SynchronizedPlayer {
     }
 
     private func refreshOutputState() {
+        observedOutputStartGeneration = audioOutput.startGeneration
         outputLatencyNanos = measuredOutputLatencyNanos()
         activeOutputDeviceID = currentOutputDeviceID()
         activeOutputHardwareFormat = currentOutputHardwareFormat()
@@ -527,12 +584,12 @@ final class SynchronizedPlayer {
     private func refreshOutputTimingIfNeeded(nowNanos: UInt64) {
         guard nowNanos >= lastOutputStateRefreshNanos,
               nowNanos - lastOutputStateRefreshNanos >= 2_000_000_000,
-              engine.isRunning
+              audioOutput.isRunning
         else { return }
         lastOutputStateRefreshNanos = nowNanos
         let measuredLatencyNanos = measuredOutputLatencyNanos()
         guard Self.shouldAcceptOutputLatencyMeasurement(
-            engineIsRunning: engine.isRunning,
+            engineIsRunning: audioOutput.isRunning,
             previousLatencyNanos: outputLatencyNanos,
             measuredLatencyNanos: measuredLatencyNanos
         ) else { return }
@@ -666,12 +723,42 @@ final class SynchronizedPlayer {
         }
     }
 
+    private func detachOutputNodes() {
+        audioOutput.withGraph { engine in
+            guard nodesAreAttached else { return }
+            player.stop()
+            engine.disconnectNodeOutput(player)
+            engine.disconnectNodeOutput(varispeed)
+            engine.detach(player)
+            engine.detach(varispeed)
+            nodesAreAttached = false
+        }
+        if outputLeaseHeld {
+            outputLeaseHeld = false
+            audioOutput.releaseClient()
+        }
+    }
+
     static func selectedOutputDeviceID(
         explicitID: AudioDeviceID?,
         uid: String?,
         resolver: (String) -> AudioDeviceID?
     ) -> AudioDeviceID? {
         explicitID ?? uid.flatMap(resolver)
+    }
+
+    /// UDP can deliver a final packet from a stale transport after a device has
+    /// rejoined. Once a sequence has been consumed it must never be allowed
+    /// back into `pending`, or the next hard resync can jump to that old packet.
+    static func shouldAdmitPacket(
+        sequence: UInt32,
+        expectedSequence: UInt32?,
+        isAlreadyPending: Bool
+    ) -> Bool {
+        guard !isAlreadyPending else { return false }
+        guard let expectedSequence else { return true }
+        guard sequence != expectedSequence else { return true }
+        return Int32(bitPattern: sequence &- expectedSequence) > 0
     }
 
     private static func audioDeviceID(forUID uid: String) -> AudioDeviceID? {

@@ -2,6 +2,18 @@ import Testing
 @testable import WERAI
 
 struct VideoResyncTests {
+    @Test("A transport reconnect clears the previous host's video clock")
+    func transportReconnectRequiresAFreshVideoClock() {
+        let decoder = VideoDecoder { _ in }
+        decoder.updateClockOffsetNanos(9_000_000_000)
+        #expect(decoder.clockOffsetNanosForTesting == 9_000_000_000)
+
+        decoder.resetTiming()
+
+        #expect(decoder.clockOffsetNanosForTesting == nil)
+        decoder.stop()
+    }
+
     @Test("A video resync drops frames before the shared audio cutover")
     func dropsFramesBeforeCutover() {
         let gate = VideoPresentationResyncGate()

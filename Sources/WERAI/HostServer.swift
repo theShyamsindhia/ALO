@@ -329,7 +329,9 @@ final class HostServer {
             else { return }
 
             let proposedName = message.displayName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Mac"
-            client.id = message.participantID ?? UUID().uuidString
+            let participantID = message.participantID ?? UUID().uuidString
+            replaceStaleClient(for: participantID, with: client)
+            client.id = participantID
             client.name = uniqueName(for: proposedName, client: client)
             client.audio?.cancel()
             client.audioSendsInFlight = 0
@@ -367,6 +369,7 @@ final class HostServer {
             ).encodedLine() {
                 send(data, over: client.control)
             }
+            sendLevel(to: client)
             broadcastPresence()
             if let data = try? ControlMessage(type: "media_state", videoEnabled: videoEnabled).encodedLine() {
                 send(data, over: client.control)
@@ -489,6 +492,33 @@ final class HostServer {
         default:
             break
         }
+    }
+
+    /// A device keeps the same participant ID across room joins. Network
+    /// cancellation is asynchronous, so a fast rejoin can reach the host before
+    /// the old control path reports that it closed. Keeping both clients would
+    /// fan every media packet out twice and, when UDP reuses the local port,
+    /// deliver a duplicate stream to the replacement receiver.
+    private func replaceStaleClient(for participantID: String, with replacement: Client) {
+        let replacementIdentifier = ObjectIdentifier(replacement.control)
+        guard let staleEntry = clients.first(where: { identifier, candidate in
+            identifier != replacementIdentifier && candidate.id == participantID
+        }) else { return }
+
+        let (staleIdentifier, stale) = staleEntry
+        clients.removeValue(forKey: staleIdentifier)
+
+        replacement.volume = stale.volume
+        replacement.isMuted = stale.isMuted
+        replacement.recommendedPlayoutDelayNanos = stale.recommendedPlayoutDelayNanos
+        replacement.outputLatencyPlayoutFloorNanos = stale.outputLatencyPlayoutFloorNanos
+
+        if timingEligibleClients?.remove(staleIdentifier) != nil {
+            timingEligibleClients?.insert(replacementIdentifier)
+        }
+        stale.audio?.cancel()
+        stale.video?.cancel()
+        stale.control.cancel()
     }
 
     private func coordinatedResyncMessage(
@@ -762,17 +792,21 @@ final class HostServer {
     private func applyLevel(to client: Client, volume: Double, muted: Bool) {
         client.volume = min(max(volume, 0), 1)
         client.isMuted = muted
+        sendLevel(to: client)
+        broadcastPresence()
+    }
+
+    private func sendLevel(to client: Client) {
         guard let id = client.id else { return }
         let message = ControlMessage(
             type: "level",
             targetID: id,
             volume: client.volume,
-            muted: muted
+            muted: client.isMuted
         )
         if let data = try? message.encodedLine() {
             send(data, over: client.control)
         }
-        broadcastPresence()
     }
 
     private func broadcast(_ message: ControlMessage) {

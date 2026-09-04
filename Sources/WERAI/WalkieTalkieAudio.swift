@@ -31,6 +31,10 @@ struct VoiceInputDevice: Identifiable, Equatable {
 }
 
 enum VoiceInputCatalog {
+    static func isUsableInputFormat(sampleRate: Double, channelCount: UInt32) -> Bool {
+        sampleRate > 0 && channelCount > 0
+    }
+
     static func availableDevices() -> [VoiceInputDevice] {
         let defaultID = defaultInputDeviceID()
         let devices: [VoiceInputDevice] = allDeviceIDs().compactMap { deviceID in
@@ -233,6 +237,53 @@ enum VoiceInputCatalog {
     }
 }
 
+/// Converts whichever hardware format the selected microphone actually
+/// delivers into the stable full-band wire format. The source format is taken
+/// from each tap buffer instead of a value read while Core Audio may still be
+/// switching devices.
+final class VoicePCMConverter: @unchecked Sendable {
+    private let outputFormat: AVAudioFormat
+    private var inputFormat: AVAudioFormat?
+    private var converter: AVAudioConverter?
+
+    init(outputFormat: AVAudioFormat) {
+        self.outputFormat = outputFormat
+    }
+
+    func convert(_ buffer: AVAudioPCMBuffer) -> Data? {
+        if inputFormat != buffer.format {
+            inputFormat = buffer.format
+            converter = AVAudioConverter(from: buffer.format, to: outputFormat)
+        }
+        guard let converter else { return nil }
+
+        let ratio = outputFormat.sampleRate / buffer.format.sampleRate
+        let capacity = AVAudioFrameCount(ceil(Double(buffer.frameLength) * ratio)) + 8
+        guard let converted = AVAudioPCMBuffer(
+            pcmFormat: outputFormat,
+            frameCapacity: capacity
+        ) else { return nil }
+        var supplied = false
+        var conversionError: NSError?
+        let status = converter.convert(to: converted, error: &conversionError) { _, inputStatus in
+            guard !supplied else {
+                inputStatus.pointee = .noDataNow
+                return nil
+            }
+            supplied = true
+            inputStatus.pointee = .haveData
+            return buffer
+        }
+        guard status != .error, converted.frameLength > 0,
+              let samples = converted.int16ChannelData?[0]
+        else { return nil }
+        return Data(
+            bytes: samples,
+            count: Int(converted.frameLength) * MemoryLayout<Int16>.size
+        )
+    }
+}
+
 final class WalkieTalkieMicrophone: @unchecked Sendable {
     static let sampleRate = 48_000.0
     static let packetFrames = 960
@@ -305,39 +356,27 @@ final class WalkieTalkieMicrophone: @unchecked Sendable {
         // delivering no microphone frames on some Macs.
         try VoiceInputCatalog.apply(inputDeviceUID, to: input)
         let inputFormat = input.outputFormat(forBus: 0)
-        guard inputFormat.sampleRate > 0, inputFormat.channelCount > 0,
-              let outputFormat = AVAudioFormat(
+        guard VoiceInputCatalog.isUsableInputFormat(
+            sampleRate: inputFormat.sampleRate,
+            channelCount: inputFormat.channelCount
+        ) else {
+            throw WERAIError("This Mac does not have an available microphone input.")
+        }
+        guard let outputFormat = AVAudioFormat(
                   commonFormat: .pcmFormatInt16,
                   sampleRate: Self.sampleRate,
                   channels: 1,
                   interleaved: false
-              ),
-              let converter = AVAudioConverter(from: inputFormat, to: outputFormat)
+              )
         else { throw WERAIError("This Mac does not have an available microphone input.") }
 
         let packetizer = VoicePacketizer(framesPerPacket: Self.packetFrames)
-        input.installTap(onBus: 0, bufferSize: 960, format: inputFormat) { buffer, _ in
-            let ratio = outputFormat.sampleRate / inputFormat.sampleRate
-            let capacity = AVAudioFrameCount(ceil(Double(buffer.frameLength) * ratio)) + 8
-            guard let converted = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: capacity) else { return }
-            var supplied = false
-            var conversionError: NSError?
-            let status = converter.convert(to: converted, error: &conversionError) { _, inputStatus in
-                guard !supplied else {
-                    inputStatus.pointee = .noDataNow
-                    return nil
-                }
-                supplied = true
-                inputStatus.pointee = .haveData
-                return buffer
-            }
-            guard status != .error, converted.frameLength > 0,
-                  let samples = converted.int16ChannelData?[0]
-            else { return }
-            let convertedData = Data(
-                bytes: samples,
-                count: Int(converted.frameLength) * MemoryLayout<Int16>.size
-            )
+        let converter = VoicePCMConverter(outputFormat: outputFormat)
+        // A nil tap format follows the input node's final hardware format. An
+        // explicit format captured during a Bluetooth → built-in transition can
+        // be stale and AVFAudio terminates the process on that mismatch.
+        input.installTap(onBus: 0, bufferSize: 960, format: nil) { buffer, _ in
+            guard let convertedData = converter.convert(buffer) else { return }
             for packet in packetizer.append(convertedData) {
                 handler(packet)
             }
@@ -395,6 +434,91 @@ final class WalkieTalkieMicrophone: @unchecked Sendable {
         if let engine {
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
+        }
+    }
+}
+
+struct VoicePlaybackLeveler: Sendable {
+    static let targetRMS: Float = 0.18
+    static let noiseFloorRMS: Float = 0.01
+    static let maximumGain: Float = 8
+    static let peakCeiling: Float = 0.92
+    static let gainAttack: Float = 0.10
+
+    static func downwardRampFrameCount(
+        sampleRate: Double,
+        bufferFrameCount: Int
+    ) -> Int {
+        min(
+            max(bufferFrameCount - 1, 0),
+            max(1, Int((sampleRate / 1_000).rounded()))
+        )
+    }
+
+    private(set) var gain: Float = 1
+
+    mutating func process(_ buffer: AVAudioPCMBuffer, isConcealment: Bool = false) {
+        guard let samples = buffer.floatChannelData?[0], buffer.frameLength > 0 else { return }
+        // Packet-loss concealment is synthetic silence, not a quiet microphone
+        // callback. Preserve the current speech gain so one lost packet does
+        // not make the following words fade back in over hundreds of ms.
+        guard !isConcealment else { return }
+        let count = Int(buffer.frameLength)
+        var energy: Float = 0
+        var peak: Float = 0
+        for index in 0..<count {
+            let sample = samples[index]
+            energy += sample * sample
+            peak = max(peak, abs(sample))
+        }
+        let rms = sqrt(energy / Float(count))
+        if rms < Self.noiseFloorRMS || peak == 0 {
+            let previousGain = gain
+            gain = 1
+            guard peak > 0 else { return }
+            for index in 0..<count {
+                let progress = count > 1 ? Float(index) / Float(count - 1) : 1
+                let rampedGain = previousGain + (gain - previousGain) * progress
+                samples[index] = max(
+                    -Self.peakCeiling,
+                    min(Self.peakCeiling, samples[index] * rampedGain)
+                )
+            }
+            return
+        }
+
+        let loudnessGain = max(1, Self.targetRMS / rms)
+        let peakLimitedGain = Self.peakCeiling / peak
+        let desiredGain = min(Self.maximumGain, loudnessGain, peakLimitedGain)
+        let previousGain = gain
+        // Reduce gain quickly before a loud transient. Raise it over a short
+        // speech onset so room noise is not pumped between words.
+        if desiredGain < gain {
+            gain = desiredGain
+        } else {
+            gain += (desiredGain - gain) * Self.gainAttack
+        }
+        // Limit a downward transition to the first millisecond. This avoids a
+        // buffer-boundary step while keeping the peak-limited portion short.
+        let downwardRampFrames = Self.downwardRampFrameCount(
+            sampleRate: buffer.format.sampleRate,
+            bufferFrameCount: count
+        )
+
+        for index in 0..<count {
+            let progress: Float
+            if desiredGain < previousGain {
+                progress = downwardRampFrames > 0
+                    ? min(1, Float(index) / Float(downwardRampFrames))
+                    : 1
+            } else {
+                progress = count > 1 ? Float(index) / Float(count - 1) : 1
+            }
+            let rampedGain = previousGain + (gain - previousGain) * progress
+            samples[index] = max(
+                -Self.peakCeiling,
+                min(Self.peakCeiling, samples[index] * rampedGain)
+            )
         }
     }
 }
@@ -609,6 +733,7 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
         var isActive = false
         var lifecycle = VoicePlaybackSessionLifecycle()
         var levelEnvelope = VoiceLevelEnvelope()
+        var leveler = VoicePlaybackLeveler()
         var lastPublishedLevel = 0.0
         var lastLevelPublication: UInt64 = 0
         var timeoutWorkItem: DispatchWorkItem?
@@ -633,7 +758,9 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
     }
 
     private let queue = DispatchQueue(label: "in.werai.walkie-playback", qos: .userInteractive)
-    private let engine = AVAudioEngine()
+    private let audioOutput: RoomAudioOutputEngine
+    private var engine: AVAudioEngine { audioOutput.engine }
+    var outputEngineIdentityForTesting: ObjectIdentifier { audioOutput.identity }
     static let playbackFormat = AVAudioFormat(
         standardFormatWithSampleRate: WalkieTalkieMicrophone.sampleRate,
         channels: 1
@@ -643,6 +770,8 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
     private var tracker = WalkieTalkiePlaybackTracker()
     private var configurationObserver: NSObjectProtocol?
     private var configurationRecoveryWorkItem: DispatchWorkItem?
+    private var configurationRecoveryPending = false
+    private var deferredRecoveryMessages = [WalkieTalkieMessage]()
     private var muted = false
 
     static func makePlaybackBuffer(
@@ -678,8 +807,10 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
     }
 
     init(
+        audioOutput: RoomAudioOutputEngine = RoomAudioOutputEngine(),
         stateHandler: @escaping @Sendable (String, String, String, Bool, Double) -> Void = { _, _, _, _, _ in }
     ) {
+        self.audioOutput = audioOutput
         self.stateHandler = stateHandler
         configurationObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange,
@@ -710,6 +841,20 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
     }
 
     private func acceptOnQueue(_ message: WalkieTalkieMessage) {
+        if configurationRecoveryPending {
+            // AVAudioPlayerNode clears scheduled buffers when its engine's route
+            // changes. Hold the small wireless settle window instead of
+            // restarting on an intermediate format or silently dropping speech.
+            deferredRecoveryMessages.append(message)
+            if deferredRecoveryMessages.count > 32 {
+                if let audioIndex = deferredRecoveryMessages.firstIndex(where: { $0.kind == .audio }) {
+                    deferredRecoveryMessages.remove(at: audioIndex)
+                } else {
+                    deferredRecoveryMessages.removeFirst()
+                }
+            }
+            return
+        }
         switch message.kind {
         case .began:
             _ = beginSession(message)
@@ -757,11 +902,17 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
             standardFormatWithSampleRate: sampleRate,
             channels: 1
         ) else { return nil }
-        engine.attach(player)
-        engine.connect(player, to: engine.mainMixerNode, format: format)
+        audioOutput.withGraph { engine in
+            engine.attach(player)
+            engine.connect(player, to: engine.mainMixerNode, format: format)
+        }
+        audioOutput.retainClient()
         guard ensureEngineRunning() else {
-            engine.disconnectNodeOutput(player)
-            engine.detach(player)
+            audioOutput.withGraph { engine in
+                engine.disconnectNodeOutput(player)
+                engine.detach(player)
+            }
+            audioOutput.releaseClient()
             return nil
         }
         let session = Session(
@@ -780,17 +931,24 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
     private func schedule(_ output: [VoiceJitterBuffer.Output], for session: Session) {
         for item in output {
             let data: Data
+            let isConcealment: Bool
             switch item {
             case .audio(let audio):
                 data = audio
+                isConcealment = false
             case .silence(let frames):
                 data = Data(count: frames * MemoryLayout<Int16>.size)
+                isConcealment = true
             }
-            schedule(data, for: session)
+            schedule(data, for: session, isConcealment: isConcealment)
         }
     }
 
-    private func schedule(_ data: Data, for session: Session) {
+    private func schedule(
+        _ data: Data,
+        for session: Session,
+        isConcealment: Bool = false
+    ) {
         guard ensureEngineRunning() else {
             stopSession(session.id)
             return
@@ -799,6 +957,7 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
             fromPCM16Mono: data,
             sampleRate: session.sampleRate
         ) else { return }
+        session.leveler.process(buffer, isConcealment: isConcealment)
         let frames = buffer.frameLength
         let maximumBufferedFrames = AVAudioFramePosition(session.sampleRate * 0.20)
 
@@ -828,7 +987,7 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
                 }
             }
         }
-        if !session.player.isPlaying, engine.isRunning { session.player.play() }
+        if !session.player.isPlaying, audioOutput.isRunning { session.player.play() }
         let level = session.levelEnvelope.update(target: VoiceLevelMeter.normalizedLevel(fromPCM16Mono: data))
         if session.isActive {
             publishLevelIfNeeded(for: session, level: level)
@@ -838,34 +997,60 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
     }
 
     private func ensureEngineRunning() -> Bool {
-        if engine.isRunning { return true }
-        engine.prepare()
         do {
-            try engine.start()
-            return engine.isRunning
+            try audioOutput.ensureRunning()
+            return audioOutput.isRunning
         } catch {
             return false
         }
     }
 
     private func recoverAfterConfigurationChange() {
-        engine.stop()
-        for session in sessions.values {
-            session.player.stop()
-            session.scheduledFrames = 0
-            session.jitter.resetForRouteChange()
-            setSessionActive(session, false)
+        let deferred = deferredRecoveryMessages
+        deferredRecoveryMessages.removeAll(keepingCapacity: true)
+        if sessions.isEmpty {
+            // A configuration notification is not an output client. Starting
+            // an empty AVAudioEngine can both hold a Bluetooth route forever
+            // and raise an AVFAudio exception because it has no graph nodes.
+            // Replay any speech that arrived during the settle window; its
+            // session will attach a node, retain the output, and start it.
+            configurationRecoveryPending = false
+            for message in deferred { acceptOnQueue(message) }
+            return
+        }
+        audioOutput.withGraph { engine in
+            for session in sessions.values {
+                guard let format = AVAudioFormat(
+                    standardFormatWithSampleRate: session.sampleRate,
+                    channels: 1
+                ) else { continue }
+                engine.disconnectNodeOutput(session.player)
+                engine.connect(session.player, to: engine.mainMixerNode, format: format)
+            }
         }
         guard ensureEngineRunning() else {
+            configurationRecoveryPending = false
+            deferredRecoveryMessages.removeAll()
             stopAllOnQueue()
             return
         }
         for session in sessions.values where !session.player.isPlaying {
             session.player.play()
         }
+        configurationRecoveryPending = false
+        for message in deferred { acceptOnQueue(message) }
     }
 
     private func scheduleConfigurationRecovery() {
+        if !configurationRecoveryPending {
+            configurationRecoveryPending = true
+            for session in sessions.values {
+                session.player.stop()
+                session.scheduledFrames = 0
+                session.jitter.resetForRouteChange()
+                setSessionActive(session, false)
+            }
+        }
         configurationRecoveryWorkItem?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
@@ -873,7 +1058,9 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
             recoverAfterConfigurationChange()
         }
         configurationRecoveryWorkItem = work
-        queue.asyncAfter(deadline: .now() + .milliseconds(120), execute: work)
+        // Wireless routes can publish several intermediate formats while they
+        // settle. Coalesce that burst and reconnect once to the final format.
+        queue.asyncAfter(deadline: .now() + .milliseconds(300), execute: work)
     }
 
     private func armTimeout(for session: Session) {
@@ -947,18 +1134,21 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
         }
         session.timeoutWorkItem?.cancel()
         session.player.stop()
-        engine.disconnectNodeOutput(session.player)
-        engine.detach(session.player)
+        audioOutput.withGraph { engine in
+            engine.disconnectNodeOutput(session.player)
+            engine.detach(session.player)
+        }
+        audioOutput.releaseClient()
         tracker.end(id)
         setSessionActive(session, false)
-        if sessions.isEmpty { engine.pause() }
     }
 
     private func stopAllOnQueue() {
         configurationRecoveryWorkItem?.cancel()
         configurationRecoveryWorkItem = nil
+        configurationRecoveryPending = false
+        deferredRecoveryMessages.removeAll()
         for id in Array(sessions.keys) { stopSession(id) }
-        engine.stop()
     }
 
     deinit {
@@ -966,11 +1156,18 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
         if let observer = configurationObserver {
             NotificationCenter.default.removeObserver(observer)
         }
-        for session in sessions.values {
-            session.timeoutWorkItem?.cancel()
-            session.inactivityWorkItem?.cancel()
-            session.player.stop()
+        let remainingSessions = Array(sessions.values)
+        audioOutput.withGraph { engine in
+            for session in remainingSessions {
+                session.timeoutWorkItem?.cancel()
+                session.inactivityWorkItem?.cancel()
+                session.player.stop()
+                engine.disconnectNodeOutput(session.player)
+                engine.detach(session.player)
+            }
         }
-        engine.stop()
+        for _ in remainingSessions {
+            audioOutput.releaseClient()
+        }
     }
 }

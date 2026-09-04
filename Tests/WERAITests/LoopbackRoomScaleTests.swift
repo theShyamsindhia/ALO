@@ -6,6 +6,127 @@ import Testing
 
 @Suite("Single-Mac room integration", .serialized)
 struct LoopbackRoomScaleTests {
+    @Test("A receiver republishes its local mixer level after the host restarts")
+    func receiverRestoresLocalLevelAfterHostRestart() throws {
+        let roomName = "Host restart level test \(UUID().uuidString)"
+        let firstReady = DispatchSemaphore(value: 0)
+        let firstHost = HostServer(
+            roomName: roomName,
+            listenerReadyHandler: { _ in firstReady.signal() }
+        )
+        try firstHost.start()
+        guard firstReady.wait(timeout: .now() + 3) == .success else {
+            firstHost.stop()
+            throw LoopbackTestError.hostDidNotStart
+        }
+
+        let participantID = "persistent-level-device"
+        let observations = ReceiverRestartObservations(participantID: participantID)
+        let receiver = try Receiver(
+            requestedRoom: roomName,
+            audioOutput: RoomAudioOutputEngine(idleStopDelay: .milliseconds(10)),
+            participantID: participantID,
+            capturesSystemMediaCommands: false,
+            statusHandler: { observations.record(status: $0) },
+            participantsHandler: { observations.record(participants: $0) }
+        )
+        try receiver.start()
+        defer { receiver.stop() }
+        guard waitUntil(timeout: 5, condition: { observations.connectedCount >= 1 }) else {
+            firstHost.stop()
+            throw LoopbackTestError.peerDidNotJoin
+        }
+
+        receiver.setLocalLevel(volume: 0.27, muted: true)
+        #expect(waitUntil(timeout: 2) { observations.latestLevel == .init(volume: 0.27, muted: true) })
+
+        firstHost.stop()
+        #expect(waitUntil(timeout: 3) { observations.isSearching })
+        observations.clearParticipants()
+        Thread.sleep(forTimeInterval: 0.3)
+
+        let secondReady = DispatchSemaphore(value: 0)
+        let secondHost = HostServer(
+            roomName: roomName,
+            listenerReadyHandler: { _ in secondReady.signal() }
+        )
+        try secondHost.start()
+        defer { secondHost.stop() }
+        guard secondReady.wait(timeout: .now() + 3) == .success,
+              waitUntil(timeout: 8, condition: { observations.connectedCount >= 2 })
+        else { throw LoopbackTestError.peerDidNotJoin }
+
+        #expect(waitUntil(timeout: 2) {
+            observations.latestLevel == .init(volume: 0.27, muted: true)
+        })
+    }
+
+    @Test("Rejoining with the same device identity replaces the stale receiver")
+    func rejoiningDeviceReplacesStaleTransport() throws {
+        let hostReady = DispatchSemaphore(value: 0)
+        let state = PortState()
+        let host = HostServer(
+            roomName: "Rejoin replacement test \(UUID().uuidString)",
+            advertise: false,
+            listenerReadyHandler: { port in
+                state.set(port)
+                hostReady.signal()
+            }
+        )
+        try host.start()
+        defer { host.stop() }
+        guard hostReady.wait(timeout: .now() + 3) == .success,
+              let hostPort = state.port
+        else { throw LoopbackTestError.hostDidNotStart }
+
+        let original = HeadlessLoopbackPeer(index: 901, participantID: "rejoining-device")
+        let replacement = HeadlessLoopbackPeer(index: 902, participantID: "rejoining-device")
+        try original.start(hostPort: hostPort)
+        defer {
+            original.stop()
+            replacement.stop()
+        }
+        guard original.waitUntilJoined(timeout: 3) else {
+            throw LoopbackTestError.peerDidNotJoin
+        }
+        original.setLevel(volume: 0.27, muted: true)
+        #expect(waitUntil(timeout: 2) {
+            original.levels.contains { level in
+                abs(level.volume - 0.27) < 0.001 && level.muted
+            }
+        })
+        original.requestResync(participantID: "rejoining-device")
+        #expect(waitUntil(timeout: 2) { original.resyncCommandCount >= 1 })
+
+        try replacement.start(hostPort: hostPort)
+        guard replacement.waitUntilJoined(timeout: 3) else {
+            throw LoopbackTestError.peerDidNotJoin
+        }
+
+        #expect(waitUntil(timeout: 2) {
+            host.diagnosticsSnapshot().listenerCount == 1
+        })
+        #expect(waitUntil(timeout: 2) {
+            replacement.levels.contains { level in
+                abs(level.volume - 0.27) < 0.001 && level.muted
+            }
+        })
+        let replacementResyncBaseline = replacement.resyncCommandCount
+        replacement.requestResync(participantID: "rejoining-device")
+        #expect(waitUntil(timeout: 0.7) {
+            replacement.resyncCommandCount > replacementResyncBaseline
+        })
+
+        let samples = [Int16](
+            repeating: 1_024,
+            count: Int(AudioPacket.framesPerPacket) * Int(AudioPacket.channelCount)
+        )
+        host.acceptAudio(samples: samples, captureTimeNanos: MonotonicClock.nowNanos())
+        #expect(waitUntil(timeout: 2) { replacement.packetCount == 1 })
+        Thread.sleep(forTimeInterval: 0.1)
+        #expect(original.packetCount == 0)
+    }
+
     @Test("Bounded fan-out prevents live room latency growth")
     func boundedFanoutPreventsRoomScaleDelay() throws {
         let boundedPolicy = HostServer.AudioBackpressurePolicy.boundedLatest(maxInFlight: 8)
@@ -912,6 +1033,7 @@ struct LoopbackRoomScaleTests {
 private final class HeadlessLoopbackPeer {
     private let queue: DispatchQueue
     private let index: Int
+    private let participantID: String
     private let joined = DispatchSemaphore(value: 0)
     private let pongReceived = DispatchSemaphore(value: 0)
     private let clock = ClockSynchronizer()
@@ -927,9 +1049,11 @@ private final class HeadlessLoopbackPeer {
     private var receivedPlaybackStates = [Bool]()
     private var receivedRoomPlaybackStates = [Bool]()
     private var receivedPlayoutDelays = [UInt64]()
+    private var receivedLevels = [(volume: Double, muted: Bool)]()
 
-    init(index: Int) {
+    init(index: Int, participantID: String? = nil) {
         self.index = index
+        self.participantID = participantID ?? "loopback-peer-\(index)"
         self.queue = DispatchQueue(label: "in.werai.tests.loopback-peer.\(index)")
     }
 
@@ -940,6 +1064,7 @@ private final class HeadlessLoopbackPeer {
     var playbackStates: [Bool] { queue.sync { receivedPlaybackStates } }
     var roomPlaybackStates: [Bool] { queue.sync { receivedRoomPlaybackStates } }
     var playoutDelays: [UInt64] { queue.sync { receivedPlayoutDelays } }
+    var levels: [(volume: Double, muted: Bool)] { queue.sync { receivedLevels } }
 
     func start(hostPort: NWEndpoint.Port) throws {
         let udp = try NWListener(using: .udp, on: .any)
@@ -966,7 +1091,7 @@ private final class HeadlessLoopbackPeer {
                 udpPort: udpPort.rawValue,
                 videoPort: videoPort.rawValue,
                 displayName: "Loopback peer \(self.index)",
-                participantID: "loopback-peer-\(self.index)"
+                participantID: self.participantID
             )
             self.send(join)
         }
@@ -999,7 +1124,7 @@ private final class HeadlessLoopbackPeer {
             guard let self else { return }
             self.send(ControlMessage(
                 type: "sync_status",
-                participantID: "loopback-peer-\(self.index)",
+                participantID: self.participantID,
                 syncReport: PlaybackSyncReport(
                     measuredAtNanos: MonotonicClock.nowNanos(),
                     latenessNanos: latenessNanos,
@@ -1026,6 +1151,18 @@ private final class HeadlessLoopbackPeer {
     func requestResync(participantID: String?) {
         queue.async { [weak self] in
             self?.send(ControlMessage(type: "resync_request", targetID: participantID))
+        }
+    }
+
+    func setLevel(volume: Double, muted: Bool) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.send(ControlMessage(
+                type: "set_level",
+                targetID: self.participantID,
+                volume: volume,
+                muted: muted
+            ))
         }
     }
 
@@ -1100,6 +1237,10 @@ private final class HeadlessLoopbackPeer {
                     } else if message.type == "room_playback",
                               let isPlaying = message.isPlaying {
                         self.receivedRoomPlaybackStates.append(isPlaying)
+                    } else if message.type == "level",
+                              let volume = message.volume,
+                              let muted = message.muted {
+                        self.receivedLevels.append((volume, muted))
                     }
                 }
             }
@@ -1158,6 +1299,67 @@ private final class LockedMediaCommands: @unchecked Sendable {
     func append(_ value: RoomMediaCommand) {
         lock.lock()
         storedValues.append(value)
+        lock.unlock()
+    }
+}
+
+private final class ReceiverRestartObservations: @unchecked Sendable {
+    struct Level: Equatable {
+        let volume: Double
+        let muted: Bool
+    }
+
+    private let participantID: String
+    private let lock = NSLock()
+    private var storedConnectedCount = 0
+    private var storedIsSearching = false
+    private var storedLatestLevel: Level?
+
+    init(participantID: String) {
+        self.participantID = participantID
+    }
+
+    var connectedCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedConnectedCount
+    }
+
+    var isSearching: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedIsSearching
+    }
+
+    var latestLevel: Level? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedLatestLevel
+    }
+
+    func record(status: ReceiverStatus) {
+        lock.lock()
+        if status == .connected {
+            storedConnectedCount += 1
+            storedIsSearching = false
+        } else if status == .searching {
+            storedIsSearching = true
+        }
+        lock.unlock()
+    }
+
+    func record(participants: [RoomParticipant]) {
+        let participant = participants.first { $0.id == participantID }
+        lock.lock()
+        storedLatestLevel = participant.map {
+            Level(volume: $0.volume, muted: $0.isMuted)
+        }
+        lock.unlock()
+    }
+
+    func clearParticipants() {
+        lock.lock()
+        storedLatestLevel = nil
         lock.unlock()
     }
 }

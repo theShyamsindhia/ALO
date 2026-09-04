@@ -31,6 +31,10 @@ public final class NetworkJitterEstimator {
 
     public init() {}
 
+    public func reset() {
+        transitSamples.removeAll(keepingCapacity: true)
+    }
+
     public func observe(
         captureTimeNanos: UInt64,
         receivedAt clientNanos: UInt64,

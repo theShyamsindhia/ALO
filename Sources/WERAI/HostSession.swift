@@ -60,6 +60,7 @@ final class HostSession {
     func start(
         roomName: String,
         participantID: String = UUID().uuidString,
+        audioOutput: RoomAudioOutputEngine = RoomAudioOutputEngine(),
         statusHandler: @escaping (String) -> Void,
         receiverCountHandler: @escaping (Int) -> Void,
         initialVideoEnabled: Bool,
@@ -114,6 +115,7 @@ final class HostSession {
             statusHandler("Broadcasting this Mac · waiting for audio")
             let localReceiver = try Receiver(
                 requestedRoom: roomName,
+                audioOutput: audioOutput,
                 participantID: participantID,
                 capturesSystemMediaCommands: false,
                 statusHandler: { status in
