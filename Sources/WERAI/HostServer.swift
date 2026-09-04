@@ -28,6 +28,7 @@ final class HostServer {
         var volume: Double = 1
         var isMuted = false
         var recommendedPlayoutDelayNanos = RoomTiming.defaultPlayoutDelayNanos
+        var outputLatencyPlayoutFloorNanos = RoomTiming.defaultPlayoutDelayNanos
         var lastSyncReportNanos: UInt64?
         var audioSendsInFlight = 0
         var pendingAudio: Data?
@@ -394,6 +395,9 @@ final class HostServer {
         case "sync_report":
             guard client.id != nil, let recommendation = message.playoutDelayNanos else { return }
             client.recommendedPlayoutDelayNanos = RoomTiming.clampedPlayoutDelay(recommendation)
+            client.outputLatencyPlayoutFloorNanos = RoomTiming.clampedPlayoutDelay(
+                message.outputLatencyPlayoutFloorNanos ?? RoomTiming.defaultPlayoutDelayNanos
+            )
             client.lastSyncReportNanos = MonotonicClock.nowNanos()
             updateGroupTiming()
 
@@ -581,19 +585,35 @@ final class HostServer {
 
     private func updateGroupTiming() {
         let now = MonotonicClock.nowNanos()
-        let activeRecommendations = clients.compactMap { identifier, client -> UInt64? in
-            if let timingEligibleClients, !timingEligibleClients.contains(identifier) { return nil }
+        let freshReports = clients.compactMap { identifier, client -> (ObjectIdentifier, UInt64, UInt64)? in
             if client.id == localParticipantID { return nil }
             guard let reportedAt = client.lastSyncReportNanos,
                   now >= reportedAt,
                   now - reportedAt <= 5_000_000_000
             else { return nil }
-            return client.recommendedPlayoutDelayNanos
+            return (
+                identifier,
+                client.recommendedPlayoutDelayNanos,
+                client.outputLatencyPlayoutFloorNanos
+            )
         }
+        let activeRecommendations: [UInt64] = freshReports.compactMap { report in
+            let (identifier, recommendation, _) = report
+            if let timingEligibleClients, !timingEligibleClients.contains(identifier) { return nil }
+            return recommendation
+        }
+        // A late joiner's network jitter must not retime an established room,
+        // but every current output still needs enough lead time for its hardware.
+        let outputLatencyFloors = freshReports.map(\.2)
         // Once audio has established a timeline, losing the original reporters
         // must not make later joiners indirectly pull that timeline backward.
-        if timingEligibleClients != nil, activeRecommendations.isEmpty { return }
-        let desired = Self.consensusPlayoutDelay(activeRecommendations)
+        if timingEligibleClients != nil,
+           activeRecommendations.isEmpty,
+           outputLatencyFloors.isEmpty { return }
+        let desired = Self.consensusPlayoutDelay(
+            activeRecommendations,
+            outputLatencyFloors: outputLatencyFloors
+        )
 
         let next: UInt64
         if desired > groupPlayoutDelayNanos {
@@ -628,10 +648,21 @@ final class HostServer {
     /// A single CPU-starved listener must not add latency to every healthy Mac.
     /// The lower median requires a majority to agree before the shared buffer grows,
     /// while a one-listener room can still adapt to that listener's network.
-    static func consensusPlayoutDelay(_ recommendations: [UInt64]) -> UInt64 {
-        guard !recommendations.isEmpty else { return RoomTiming.defaultPlayoutDelayNanos }
-        let sorted = recommendations.map(RoomTiming.clampedPlayoutDelay).sorted()
-        return sorted[(sorted.count - 1) / 2]
+    static func consensusPlayoutDelay(
+        _ recommendations: [UInt64],
+        outputLatencyFloors: [UInt64] = []
+    ) -> UInt64 {
+        let networkConsensus: UInt64
+        if recommendations.isEmpty {
+            networkConsensus = RoomTiming.defaultPlayoutDelayNanos
+        } else {
+            let sorted = recommendations.map(RoomTiming.clampedPlayoutDelay).sorted()
+            networkConsensus = sorted[(sorted.count - 1) / 2]
+        }
+        let hardwareFloor = outputLatencyFloors
+            .map(RoomTiming.clampedPlayoutDelay)
+            .max() ?? RoomTiming.defaultPlayoutDelayNanos
+        return max(networkConsensus, hardwareFloor)
     }
 
     private func broadcastQueue() {

@@ -86,6 +86,7 @@ final class MeshSession {
                     targetIDs: current.targetIDs,
                     sessionID: current.id,
                     sequence: current.sequence,
+                    sampleRate: UInt32(WalkieTalkieMicrophone.sampleRate),
                     pcm16Mono: data
                 )
             }
@@ -440,7 +441,8 @@ final class MeshSession {
                 senderName: senderName,
                 targetID: nil,
                 targetIDs: targetIDs,
-                sessionID: sessionID
+                sessionID: sessionID,
+                sampleRate: UInt32(WalkieTalkieMicrophone.sampleRate)
             ))
             return sessionID
         } catch {
@@ -515,7 +517,8 @@ final class MeshSession {
                 targetID: nil,
                 targetIDs: update.removed,
                 sessionID: update.active.id,
-                sequence: update.active.sequence
+                sequence: update.active.sequence,
+                sampleRate: UInt32(WalkieTalkieMicrophone.sampleRate)
             ))
         }
         if !update.added.isEmpty {
@@ -526,7 +529,8 @@ final class MeshSession {
                 targetID: nil,
                 targetIDs: update.added,
                 sessionID: update.active.id,
-                sequence: update.active.sequence
+                sequence: update.active.sequence,
+                sampleRate: UInt32(WalkieTalkieMicrophone.sampleRate)
             ))
         }
     }
@@ -621,7 +625,8 @@ final class MeshSession {
             targetID: nil,
             targetIDs: active.targetIDs,
             sessionID: active.id,
-            sequence: active.sequence
+            sequence: active.sequence,
+            sampleRate: UInt32(WalkieTalkieMicrophone.sampleRate)
         ))
     }
     @discardableResult

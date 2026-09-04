@@ -1287,7 +1287,7 @@ final class WERAIViewModel: ObservableObject {
         voiceInputDevices = VoiceInputCatalog.availableDevices()
         let savedVoiceInput = defaults.string(forKey: Self.voiceInputUIDKey)
         selectedVoiceInputUID = voiceInputDevices.contains(where: {
-            $0.id == savedVoiceInput && !$0.isSystemDefault
+            $0.id == savedVoiceInput
         })
             ? savedVoiceInput
             : nil
@@ -4784,14 +4784,14 @@ private struct WalkieTalkieBar: View {
                     }
                 }
                 Divider()
-                ForEach(model.voiceInputDevices.filter { !$0.isSystemDefault }) { input in
+                ForEach(model.voiceInputDevices) { input in
                     Button {
                         model.selectVoiceInput(input.id)
                     } label: {
                         if input.id == model.selectedVoiceInputUID {
-                            Label(input.name, systemImage: "checkmark")
+                            Label(input.menuName, systemImage: "checkmark")
                         } else {
-                            Text(input.name)
+                            Text(input.menuName)
                         }
                     }
                 }
@@ -4859,16 +4859,16 @@ private struct WalkieTalkieBar: View {
 
     private var selectedMicrophoneName: String {
         guard let selectedVoiceInputUID = model.selectedVoiceInputUID else {
-            let defaultName = VoiceInputCatalog.systemDefaultName()
-            return defaultName.map { "System Default · \($0)" } ?? "System Default"
+            let automaticName = VoiceInputCatalog.automaticInputName()
+            return automaticName.map { "Automatic · \($0)" } ?? "Automatic"
         }
-        return model.voiceInputDevices.first(where: { $0.id == selectedVoiceInputUID })?.name
+        return model.voiceInputDevices.first(where: { $0.id == selectedVoiceInputUID })?.menuName
             ?? "System microphone"
     }
 
     private var systemDefaultMicrophoneLabel: String {
-        VoiceInputCatalog.systemDefaultName().map { "System Default — \($0)" }
-            ?? "System Default Microphone"
+        VoiceInputCatalog.automaticInputName().map { "Automatic — \($0)" }
+            ?? "Automatic Microphone"
     }
 
     @ViewBuilder

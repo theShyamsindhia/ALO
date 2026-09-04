@@ -196,6 +196,34 @@ struct ClientPlaybackReliabilityTests {
         #expect(SynchronizedPlayer.latencyChanged(from: 10_000_000, to: 12_000_000))
     }
 
+    @Test("An AirPods format switch rebuilds a still-running output engine")
+    func airPodsFormatChangeRestartsOutputEngine() {
+        let highQuality = AudioOutputHardwareFormat(sampleRate: 48_000, channelCount: 2)
+        let handsFree = AudioOutputHardwareFormat(sampleRate: 24_000, channelCount: 1)
+        #expect(AudioOutputHardwareFormat.changed(from: highQuality, to: handsFree))
+        #expect(SynchronizedPlayer.shouldRecoverAfterConfigurationChange(
+            engineIsRunning: true,
+            deviceChanged: false,
+            latencyChanged: false,
+            outputFormatChanged: true
+        ))
+    }
+
+    @Test("A final Bluetooth route notification survives an in-flight recovery")
+    func routeChangeDuringRecoveryRemainsPending() {
+        var gate = AudioConfigurationRecoveryGate()
+        gate.markChanged()
+        let initialPending = gate.takePendingChange()
+        let beganRecovery = gate.beginRecovery()
+        #expect(initialPending)
+        #expect(beganRecovery)
+        gate.markChanged()
+        gate.endRecovery()
+        let finalPending = gate.takePendingChange()
+        #expect(finalPending)
+        #expect(!gate.changePending)
+    }
+
     @Test @MainActor func unrelatedStatusTextDoesNotClearRenderingState() {
         #expect(WERAIViewModel.renderingState(for: "This Mac is playing in sync") == true)
         #expect(WERAIViewModel.renderingState(for: "Connecting to the room broadcaster") == false)

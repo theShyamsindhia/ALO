@@ -3,6 +3,43 @@ import Foundation
 import Network
 import WERAICore
 
+struct RealtimeVoiceSendQueue {
+    struct Item {
+        let kind: WalkieTalkieKind
+        let sessionID: String
+        let data: Data
+    }
+
+    let maximumPendingAudioPackets: Int
+    private(set) var pending = [Item]()
+
+    init(maximumPendingAudioPackets: Int = 8) {
+        self.maximumPendingAudioPackets = max(1, maximumPendingAudioPackets)
+    }
+
+    mutating func enqueue(_ item: Item) {
+        switch item.kind {
+        case .began:
+            pending.removeAll { $0.sessionID == item.sessionID }
+        case .audio:
+            while pending.lazy.filter({ $0.kind == .audio }).count >= maximumPendingAudioPackets,
+                  let stale = pending.firstIndex(where: { $0.kind == .audio }) {
+                pending.remove(at: stale)
+            }
+        case .ended:
+            // Speech that is still waiting for the socket is already stale by
+            // the time Talk ends. Deliver the end marker promptly instead.
+            pending.removeAll { $0.sessionID == item.sessionID }
+        }
+        pending.append(item)
+    }
+
+    mutating func popFirst() -> Item? {
+        guard !pending.isEmpty else { return nil }
+        return pending.removeFirst()
+    }
+}
+
 final class MeshControlPlane: @unchecked Sendable {
     static let identityEnvelopeType = "display_name"
     private struct WalkieMessageKey: Hashable {
@@ -34,6 +71,8 @@ final class MeshControlPlane: @unchecked Sendable {
         var deviceColorHex: String?
         var profileImageData: Data?
         var appVersion: String?
+        var realtimeVoiceQueue = RealtimeVoiceSendQueue()
+        var realtimeVoiceSendInFlight = false
         let localNonce = UUID().uuidString
         var authenticated = false
 
@@ -70,6 +109,8 @@ final class MeshControlPlane: @unchecked Sendable {
     private var latestHeartbeatSequence = [String: UInt64]()
     private var latestHeartbeatGeneration = [String: String]()
     private var lastSeenNanos = [String: UInt64]()
+    private var remoteParticipants = [String: RoomParticipant]()
+    private var lastPublishedParticipants = [RoomParticipant]()
     private var reconnectAttempts = [String: Int]()
     private var reconnectWorkItems = [String: DispatchWorkItem]()
     private var seenRoomActionIDs = Set<String>()
@@ -83,9 +124,11 @@ final class MeshControlPlane: @unchecked Sendable {
     private var isStopped = true
     private let heartbeatIntervalNanos: UInt64 = 400_000_000
     private let broadcasterLeaseNanos: UInt64 = 2_400_000_000
+    private let participantLeaseNanos: UInt64 = 2_400_000_000
     private let maximumSyncEvents = 2_000
     private let maximumRememberedWalkieMessages = 8_192
     private let maximumWalkieTalkieHopCount: UInt8 = 8
+    private static let fullBandVoiceVersion = AppVersion("0.13.30")!
 
     init(
         room: RoomConfiguration,
@@ -189,6 +232,8 @@ final class MeshControlPlane: @unchecked Sendable {
             heartbeatTimer = nil
             links.removeAll()
             peers.removeAll()
+            remoteParticipants.removeAll()
+            lastPublishedParticipants.removeAll()
             reconnectWorkItems.removeAll()
             reconnectAttempts.removeAll()
             pendingRoomActions.removeAll()
@@ -733,6 +778,7 @@ final class MeshControlPlane: @unchecked Sendable {
             link.deviceIcon = appearance.icon
             link.deviceColorHex = appearance.colorHex
             link.profileImageData = DeviceAppearance.sanitizedProfileImageData(envelope.profileImageData)
+            cacheParticipant(from: link, id: remoteID)
             publishParticipants()
         case "walkie_talkie":
             let hopCount = envelope.walkieTalkieHopCount ?? 0
@@ -828,6 +874,7 @@ final class MeshControlPlane: @unchecked Sendable {
                 guard targetIDs == [targetID] else { return false }
             }
         }
+        guard (8_000...96_000).contains(message.resolvedSampleRate) else { return false }
         guard message.kind == .audio else { return message.pcm16Mono == nil }
         guard let data = message.pcm16Mono else { return false }
         return !data.isEmpty && data.count <= 8_192 && data.count.isMultiple(of: MemoryLayout<Int16>.size)
@@ -850,9 +897,54 @@ final class MeshControlPlane: @unchecked Sendable {
                 targetIDs: [recipientID],
                 sessionID: message.sessionID,
                 sequence: message.sequence,
+                sampleRate: message.sampleRate,
                 pcm16Mono: message.pcm16Mono
             )
         }
+    }
+
+    static func supportsFullBandVoice(appVersion: String?) -> Bool {
+        guard let appVersion, let parsed = AppVersion(appVersion) else { return false }
+        return parsed >= fullBandVoiceVersion
+    }
+
+    static func legacyCompatibleWalkieTalkieMessage(
+        _ message: WalkieTalkieMessage
+    ) -> WalkieTalkieMessage {
+        guard message.resolvedSampleRate == 48_000 else { return message }
+        let legacyPCM = message.pcm16Mono.flatMap(downsample48kPCMTo16k)
+        return WalkieTalkieMessage(
+            kind: message.kind,
+            senderID: message.senderID,
+            senderName: message.senderName,
+            targetID: message.targetID,
+            targetIDs: message.recipientIDs,
+            sessionID: message.sessionID,
+            sequence: message.sequence,
+            sampleRate: 16_000,
+            pcm16Mono: legacyPCM
+        )
+    }
+
+    private static func downsample48kPCMTo16k(_ data: Data) -> Data? {
+        let bytesPerLegacyFrame = 3 * MemoryLayout<Int16>.size
+        guard !data.isEmpty, data.count.isMultiple(of: bytesPerLegacyFrame) else { return nil }
+        var output = Data()
+        output.reserveCapacity(data.count / 3)
+        data.withUnsafeBytes { bytes in
+            for offset in stride(from: 0, to: data.count, by: bytesPerLegacyFrame) {
+                var total: Int32 = 0
+                for sampleOffset in stride(from: offset, to: offset + bytesPerLegacyFrame, by: 2) {
+                    let bits = UInt16(bytes[sampleOffset]) | (UInt16(bytes[sampleOffset + 1]) << 8)
+                    total += Int32(Int16(bitPattern: bits))
+                }
+                let sample = Int16(total / 3)
+                let bits = UInt16(bitPattern: sample)
+                output.append(UInt8(truncatingIfNeeded: bits))
+                output.append(UInt8(truncatingIfNeeded: bits >> 8))
+            }
+        }
+        return output
     }
 
     private func isValidOpenLine(_ message: OpenLineMessage) -> Bool {
@@ -968,6 +1060,7 @@ final class MeshControlPlane: @unchecked Sendable {
     }
 
     private func publishParticipants() {
+        let now = MonotonicClock.nowNanos()
         let local = RoomParticipant(
             id: nodeID,
             name: displayName,
@@ -975,19 +1068,16 @@ final class MeshControlPlane: @unchecked Sendable {
             colorHex: deviceColorHex,
             profileImageData: profileImageData
         )
-        let remote = peers.compactMap { id, link in
-            link.displayName.map {
-                let appearance = DeviceAppearance.generated(from: id)
-                return RoomParticipant(
-                    id: id,
-                    name: $0,
-                    icon: link.deviceIcon ?? appearance.icon,
-                    colorHex: link.deviceColorHex ?? appearance.colorHex,
-                    profileImageData: link.profileImageData
-                )
-            }
+        let remote: [RoomParticipant] = remoteParticipants.compactMap { id, participant in
+            guard peers[id] != nil || lastSeenNanos[id].map({ seen in
+                now < seen || now - seen < participantLeaseNanos
+            }) == true else { return nil }
+            return participant
         }
-        participantsHandler(([local] + remote).sorted { $0.name < $1.name })
+        let participants = ([local] + remote).sorted { $0.name < $1.name }
+        guard participants != lastPublishedParticipants else { return }
+        lastPublishedParticipants = participants
+        participantsHandler(participants)
     }
 
     private func remove(_ link: Link) {
@@ -996,7 +1086,6 @@ final class MeshControlPlane: @unchecked Sendable {
         if let id = link.nodeID, peers[id] === link {
             peers.removeValue(forKey: id)
         }
-        publishParticipants()
         if link.initiated, let disconnectedID, nodeID < disconnectedID {
             scheduleReconnect(to: link.connection.endpoint, peerID: disconnectedID)
         }
@@ -1072,6 +1161,7 @@ final class MeshControlPlane: @unchecked Sendable {
             lastSeenNanos[nodeID] = now
             broadcast(MeshEnvelope(type: "heartbeat", nodeID: nodeID, heartbeatSequence: heartbeatSequence, heartbeatGeneration: heartbeatGeneration))
             retireExpiredBroadcasterIfNeeded(nowNanos: now)
+            expireDisconnectedParticipantsIfNeeded(nowNanos: now)
         }
         heartbeatTimer = timer
         timer.resume()
@@ -1091,6 +1181,17 @@ final class MeshControlPlane: @unchecked Sendable {
             MeshEnvelope(type: "heartbeat", nodeID: originID, heartbeatSequence: sequence, heartbeatGeneration: generation),
             excluding: source
         )
+    }
+
+    private func expireDisconnectedParticipantsIfNeeded(nowNanos: UInt64) {
+        let expired = remoteParticipants.keys.filter { id in
+            if peers[id] != nil { return false }
+            guard let lastSeen = lastSeenNanos[id] else { return true }
+            return nowNanos >= lastSeen && nowNanos - lastSeen >= participantLeaseNanos
+        }
+        guard !expired.isEmpty else { return }
+        for id in expired { remoteParticipants.removeValue(forKey: id) }
+        publishParticipants()
     }
 
     private func rememberRoomAction(_ requestID: String) -> Bool {
@@ -1201,6 +1302,7 @@ final class MeshControlPlane: @unchecked Sendable {
         reconnectAttempts[remoteID] = 0
         reconnectWorkItems.removeValue(forKey: remoteID)?.cancel()
         lastSeenNanos[remoteID] = MonotonicClock.nowNanos()
+        cacheParticipant(from: link, id: remoteID)
         if let version = link.appVersion { peerVersionHandler(version) }
         publishParticipants()
         send(MeshEnvelope(
@@ -1208,6 +1310,18 @@ final class MeshControlPlane: @unchecked Sendable {
             events: Array(replica.events.suffix(maximumSyncEvents)),
             versionVector: replica.versionVector
         ), to: link)
+    }
+
+    private func cacheParticipant(from link: Link, id: String) {
+        guard let name = link.displayName else { return }
+        let appearance = DeviceAppearance.generated(from: id)
+        remoteParticipants[id] = RoomParticipant(
+            id: id,
+            name: name,
+            icon: link.deviceIcon ?? appearance.icon,
+            colorHex: link.deviceColorHex ?? appearance.colorHex,
+            profileImageData: link.profileImageData
+        )
     }
 
     private func broadcast(_ envelope: MeshEnvelope, excluding source: Link? = nil) {
@@ -1219,8 +1333,52 @@ final class MeshControlPlane: @unchecked Sendable {
     }
 
     private func send(_ envelope: MeshEnvelope, to links: [Link]) {
+        if envelope.type == "walkie_talkie", let message = envelope.walkieTalkie {
+            for link in links {
+                let wireMessage = Self.supportsFullBandVoice(appVersion: link.appVersion)
+                    ? message
+                    : Self.legacyCompatibleWalkieTalkieMessage(message)
+                let wireEnvelope = MeshEnvelope(
+                    type: envelope.type,
+                    nodeID: envelope.nodeID,
+                    walkieTalkieHopCount: envelope.walkieTalkieHopCount,
+                    walkieTalkieRelayTargetIDs: envelope.walkieTalkieRelayTargetIDs,
+                    walkieTalkie: wireMessage
+                )
+                guard let data = try? wireEnvelope.encodedLine() else { continue }
+                enqueueRealtimeVoice(
+                    .init(kind: wireMessage.kind, sessionID: wireMessage.sessionID, data: data),
+                    to: link
+                )
+            }
+            return
+        }
         guard let data = try? envelope.encodedLine() else { return }
         for link in links { send(data, to: link) }
+    }
+
+    private func enqueueRealtimeVoice(_ item: RealtimeVoiceSendQueue.Item, to link: Link) {
+        link.realtimeVoiceQueue.enqueue(item)
+        drainRealtimeVoice(to: link)
+    }
+
+    private func drainRealtimeVoice(to link: Link) {
+        guard !link.realtimeVoiceSendInFlight,
+              let item = link.realtimeVoiceQueue.popFirst()
+        else { return }
+        link.realtimeVoiceSendInFlight = true
+        link.connection.send(content: item.data, completion: .contentProcessed { [weak self, weak link] error in
+            guard let self, let link else { return }
+            self.queue.async {
+                guard self.links[ObjectIdentifier(link.connection)] === link else { return }
+                link.realtimeVoiceSendInFlight = false
+                if error != nil {
+                    link.connection.cancel()
+                } else {
+                    self.drainRealtimeVoice(to: link)
+                }
+            }
+        })
     }
 
     private func send(_ data: Data, to link: Link) {

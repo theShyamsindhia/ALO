@@ -152,6 +152,10 @@ struct LoopbackRoomScaleTests {
         #expect(HostServer.consensusPlayoutDelay([normal, delayed]) == normal)
         #expect(HostServer.consensusPlayoutDelay([normal, normal, delayed]) == normal)
         #expect(HostServer.consensusPlayoutDelay([normal, delayed, delayed]) == delayed)
+        #expect(HostServer.consensusPlayoutDelay(
+            [normal, normal, 370_000_000],
+            outputLatencyFloors: [250_000_000, 250_000_000, 370_000_000]
+        ) == 370_000_000)
     }
 
     @Test("Participant play and pause requests force every receiver to resynchronize")

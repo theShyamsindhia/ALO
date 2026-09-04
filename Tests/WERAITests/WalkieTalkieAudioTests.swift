@@ -4,6 +4,13 @@ import Testing
 import WERAICore
 
 struct WalkieTalkieAudioTests {
+    @Test("Talk and Open Line preserve full-band 48 kHz voice")
+    func fullBandVoiceFormat() {
+        #expect(WalkieTalkieMicrophone.sampleRate == 48_000)
+        #expect(WalkieTalkieMicrophone.packetFrames == 960)
+        #expect(WalkieTalkiePlayer.playbackFormat.sampleRate == 48_000)
+    }
+
     @Test("Walkie-talkie playback uses an AVAudioEngine-compatible format")
     func playerConstructionUsesSupportedFormat() {
         let player = WalkieTalkiePlayer()
@@ -72,6 +79,48 @@ struct WalkieTalkieAudioTests {
         if let systemDefault = devices.first(where: \.isSystemDefault) {
             #expect(VoiceInputCatalog.usesSystemDefault(systemDefault.id))
         }
+    }
+
+    @Test("Automatic input avoids the Bluetooth headset microphone")
+    func automaticInputPrefersBuiltInMicrophoneForBluetoothOutputQuality() {
+        let devices = [
+            VoiceInputDevice(
+                id: "airpods",
+                name: "AirPods Microphone",
+                isSystemDefault: true,
+                isBluetooth: true
+            ),
+            VoiceInputDevice(
+                id: "mac-mic",
+                name: "MacBook Pro Microphone",
+                isSystemDefault: false,
+                isBuiltIn: true
+            ),
+        ]
+
+        #expect(VoiceInputCatalog.automaticInputUID(in: devices) == "mac-mic")
+        #expect(VoiceInputCatalog.automaticInputUID(in: [
+            VoiceInputDevice(
+                id: "mac-mic",
+                name: "MacBook Pro Microphone",
+                isSystemDefault: true,
+                isBuiltIn: true
+            ),
+        ]) == nil)
+
+        #expect(VoiceInputCatalog.automaticInputUID(in: [
+            VoiceInputDevice(
+                id: "airpods",
+                name: "AirPods Microphone",
+                isSystemDefault: true,
+                isBluetooth: true
+            ),
+            VoiceInputDevice(
+                id: "usb-mic",
+                name: "USB Microphone",
+                isSystemDefault: false
+            ),
+        ]) == "usb-mic")
     }
 
     @Test("Concurrent talkers receive independent Float32 playback buffers")
@@ -170,16 +219,17 @@ struct WalkieTalkieAudioTests {
     @Test("Microphone chunks are packetized into exact 20 ms frames")
     func exactVoicePacketization() throws {
         let packetizer = VoicePacketizer()
-        let source = Data((0..<1_280).map { UInt8($0 % 251) })
+        let source = Data((0..<(packetizer.bytesPerPacket * 2)).map { UInt8($0 % 251) })
+        let firstBoundary = packetizer.bytesPerPacket + 150
 
         #expect(packetizer.append(source.prefix(117)).isEmpty)
-        let first = packetizer.append(source[117..<790])
-        let second = packetizer.append(source[790...])
+        let first = packetizer.append(source[117..<firstBoundary])
+        let second = packetizer.append(source[firstBoundary...])
 
         #expect(first.count == 1)
         #expect(second.count == 1)
-        #expect(first[0].count == 640)
-        #expect(second[0].count == 640)
+        #expect(first[0].count == packetizer.bytesPerPacket)
+        #expect(second[0].count == packetizer.bytesPerPacket)
         #expect(first[0] + second[0] == source)
         #expect(packetizer.pendingByteCount == 0)
     }
@@ -210,11 +260,29 @@ struct WalkieTalkieAudioTests {
         #expect(jitter.insert(sequence: 1, data: packet) == [.audio(packet)])
         #expect(jitter.insert(sequence: 3, data: packet).isEmpty)
         #expect(jitter.insert(sequence: 4, data: packet) == [
-            .silence(frames: 320), .audio(packet), .audio(packet),
+            .silence(frames: WalkieTalkieMicrophone.packetFrames),
+            .audio(packet),
+            .audio(packet),
         ])
         #expect(jitter.concealedPacketCount == 1)
         #expect(jitter.insert(sequence: 2, data: packet).isEmpty)
         #expect(jitter.lateDropCount == 1)
+    }
+
+    @Test("A route change rebuilds the voice startup cushion")
+    func routeChangeReprimesVoiceJitterBuffer() {
+        let packet = Data([0, 0])
+        var jitter = VoiceJitterBuffer(startupPacketCount: 4)
+        #expect(jitter.insert(sequence: 1, data: packet).isEmpty)
+        #expect(jitter.insert(sequence: 2, data: packet).isEmpty)
+        #expect(jitter.insert(sequence: 3, data: packet).isEmpty)
+        #expect(jitter.insert(sequence: 4, data: packet).count == 4)
+
+        jitter.resetForRouteChange()
+        #expect(jitter.insert(sequence: 5, data: packet).isEmpty)
+        #expect(jitter.insert(sequence: 6, data: packet).isEmpty)
+        #expect(jitter.insert(sequence: 7, data: packet).isEmpty)
+        #expect(jitter.insert(sequence: 8, data: packet).count == 4)
     }
 
     @Test("Voice jitter buffer bounds a session that never becomes contiguous")

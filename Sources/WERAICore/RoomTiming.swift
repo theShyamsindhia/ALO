@@ -4,9 +4,22 @@ public enum RoomTiming {
     public static let defaultPlayoutDelayNanos: UInt64 = 250_000_000
     public static let maximumPlayoutDelayNanos: UInt64 = 600_000_000
     public static let timingStepNanos: UInt64 = 5_000_000
+    public static let renderSchedulingHeadroomNanos: UInt64 = 25_000_000
 
     public static func clampedPlayoutDelay(_ nanos: UInt64) -> UInt64 {
         min(max(nanos, defaultPlayoutDelayNanos), maximumPlayoutDelayNanos)
+    }
+
+    public static func outputLatencyFloor(
+        _ outputLatencyNanos: UInt64,
+        roundTripNanos: UInt64? = nil
+    ) -> UInt64 {
+        let required = 120_000_000
+            &+ (roundTripNanos ?? 0) / 2
+            &+ min(outputLatencyNanos, maximumPlayoutDelayNanos)
+            &+ renderSchedulingHeadroomNanos
+        let clamped = clampedPlayoutDelay(required)
+        return ((clamped + timingStepNanos - 1) / timingStepNanos) * timingStepNanos
     }
 }
 
@@ -45,16 +58,23 @@ public final class NetworkJitterEstimator {
         return high > low ? high - low : 0
     }
 
-    public func recommendedPlayoutDelayNanos(roundTripNanos: UInt64?) -> UInt64 {
-        guard transitSamples.count >= 40 else {
-            return RoomTiming.defaultPlayoutDelayNanos
-        }
-
+    public func recommendedPlayoutDelayNanos(
+        roundTripNanos: UInt64?,
+        outputLatencyNanos: UInt64 = 0
+    ) -> UInt64 {
         let halfRoundTrip = (roundTripNanos ?? 0) / 2
-        let networkBudget = 120_000_000
+        let jitterBudget = transitSamples.count >= 40
+            ? min(jitterNanos, 100_000_000) &* 4
+            : 0
+        // `targetLatencyNanos` describes when audio should be audible. The
+        // renderer must start earlier by the hardware presentation latency;
+        // Bluetooth output can consume most of the old fixed 250 ms budget.
+        let audibleBudget = 120_000_000
             &+ halfRoundTrip
-            &+ min(jitterNanos, 100_000_000) &* 4
-        let clamped = RoomTiming.clampedPlayoutDelay(networkBudget)
+            &+ jitterBudget
+            &+ min(outputLatencyNanos, RoomTiming.maximumPlayoutDelayNanos)
+            &+ RoomTiming.renderSchedulingHeadroomNanos
+        let clamped = RoomTiming.clampedPlayoutDelay(audibleBudget)
         let step = RoomTiming.timingStepNanos
         return ((clamped + step - 1) / step) * step
     }

@@ -8,6 +8,26 @@ struct VoiceInputDevice: Identifiable, Equatable {
     let id: String
     let name: String
     let isSystemDefault: Bool
+    let isBluetooth: Bool
+    let isBuiltIn: Bool
+
+    init(
+        id: String,
+        name: String,
+        isSystemDefault: Bool,
+        isBluetooth: Bool = false,
+        isBuiltIn: Bool = false
+    ) {
+        self.id = id
+        self.name = name
+        self.isSystemDefault = isSystemDefault
+        self.isBluetooth = isBluetooth
+        self.isBuiltIn = isBuiltIn
+    }
+
+    var menuName: String {
+        isBluetooth ? "\(name) · reduces Bluetooth playback quality" : name
+    }
 }
 
 enum VoiceInputCatalog {
@@ -22,13 +42,38 @@ enum VoiceInputCatalog {
                   uid != VirtualAudioDevice.uid,
                   let name = name(for: deviceID)
             else { return nil }
-            return VoiceInputDevice(id: uid, name: name, isSystemDefault: deviceID == defaultID)
+            let transport = transportType(for: deviceID)
+            return VoiceInputDevice(
+                id: uid,
+                name: name,
+                isSystemDefault: deviceID == defaultID,
+                isBluetooth: transport == kAudioDeviceTransportTypeBluetooth
+                    || transport == kAudioDeviceTransportTypeBluetoothLE,
+                isBuiltIn: transport == kAudioDeviceTransportTypeBuiltIn
+            )
         }
         return sorted(devices)
     }
 
     static func systemDefaultName() -> String? {
         defaultInputDeviceID().flatMap(name(for:))
+    }
+
+    static func automaticInputName() -> String? {
+        let devices = availableDevices()
+        if let uid = automaticInputUID(in: devices) {
+            return devices.first(where: { $0.id == uid })?.name
+        }
+        return devices.first(where: \.isSystemDefault)?.name
+    }
+
+    /// Capturing a Bluetooth headset microphone switches its playback route to
+    /// the low-bandwidth two-way profile. Automatic mode keeps wireless output
+    /// in its full-quality profile by preferring a non-Bluetooth microphone.
+    static func automaticInputUID(in devices: [VoiceInputDevice]) -> String? {
+        guard devices.first(where: \.isSystemDefault)?.isBluetooth == true else { return nil }
+        return devices.first(where: \.isBuiltIn)?.id
+            ?? devices.first(where: { !$0.isBluetooth })?.id
     }
 
     static func sorted(_ devices: [VoiceInputDevice]) -> [VoiceInputDevice] {
@@ -41,8 +86,9 @@ enum VoiceInputCatalog {
     }
 
     static func apply(_ uid: String?, to inputNode: AVAudioInputNode) throws {
-        guard let uid else { return }
-        guard var deviceID = VirtualAudioDevice.deviceID(uid: uid),
+        let effectiveUID = uid ?? automaticInputUID(in: availableDevices())
+        guard let effectiveUID else { return }
+        guard var deviceID = VirtualAudioDevice.deviceID(uid: effectiveUID),
               isAlive(deviceID), hasInput(deviceID)
         else { throw WERAIError("The selected microphone is no longer available.") }
         // Let AVAudioEngine follow the system input normally. Setting the same
@@ -128,6 +174,12 @@ enum VoiceInputCatalog {
     }
 
     private static func isSupportedInputTransport(_ deviceID: AudioDeviceID) -> Bool {
+        guard let transport = transportType(for: deviceID) else { return true }
+        return transport != kAudioDeviceTransportTypeAggregate
+            && transport != kAudioDeviceTransportTypeVirtual
+    }
+
+    private static func transportType(for deviceID: AudioDeviceID) -> UInt32? {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyTransportType,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -136,10 +188,9 @@ enum VoiceInputCatalog {
         var transport = UInt32(0)
         var size = UInt32(MemoryLayout<UInt32>.size)
         guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &transport) == noErr else {
-            return true
+            return nil
         }
-        return transport != kAudioDeviceTransportTypeAggregate
-            && transport != kAudioDeviceTransportTypeVirtual
+        return transport
     }
 
     private static func isAlive(_ deviceID: AudioDeviceID) -> Bool {
@@ -183,8 +234,8 @@ enum VoiceInputCatalog {
 }
 
 final class WalkieTalkieMicrophone: @unchecked Sendable {
-    static let sampleRate = 16_000.0
-    static let packetFrames = 320
+    static let sampleRate = 48_000.0
+    static let packetFrames = 960
 
     private let queue = DispatchQueue(label: "in.werai.walkie-microphone", qos: .userInitiated)
     private var engine: AVAudioEngine?
@@ -453,6 +504,7 @@ struct VoiceJitterBuffer {
     let startupPacketCount: Int
     let maximumGapPackets: UInt64
     let maximumPendingPackets: Int
+    let concealmentFrames: Int
     private(set) var expectedSequence: UInt64?
     private(set) var isStarted = false
     private(set) var pending = [UInt64: Data]()
@@ -462,11 +514,13 @@ struct VoiceJitterBuffer {
     init(
         startupPacketCount: Int = 4,
         maximumGapPackets: UInt64 = 2,
-        maximumPendingPackets: Int = 8
+        maximumPendingPackets: Int = 8,
+        concealmentFrames: Int = WalkieTalkieMicrophone.packetFrames
     ) {
         self.startupPacketCount = max(1, startupPacketCount)
         self.maximumGapPackets = max(1, maximumGapPackets)
         self.maximumPendingPackets = max(self.startupPacketCount, maximumPendingPackets)
+        self.concealmentFrames = max(1, concealmentFrames)
     }
 
     mutating func insert(sequence: UInt64, data: Data) -> [Output] {
@@ -499,6 +553,12 @@ struct VoiceJitterBuffer {
         return drain(force: true)
     }
 
+    mutating func resetForRouteChange() {
+        expectedSequence = nil
+        isStarted = false
+        pending.removeAll(keepingCapacity: true)
+    }
+
     private func contiguousPacketCount() -> Int {
         guard var sequence = expectedSequence else { return 0 }
         var count = 0
@@ -520,7 +580,7 @@ struct VoiceJitterBuffer {
             guard let next = pending.keys.min(), next > expected else { break }
             let gap = next - expected
             if gap <= maximumGapPackets, force || pending.count >= 2 {
-                output.append(.silence(frames: WalkieTalkieMicrophone.packetFrames))
+                output.append(.silence(frames: concealmentFrames))
                 concealedPacketCount += 1
                 expectedSequence = expected &+ 1
                 continue
@@ -541,9 +601,10 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
         let id: String
         let senderID: String
         var senderName: String
+        let sampleRate: Double
         let player: AVAudioPlayerNode
         var scheduledFrames: AVAudioFramePosition = 0
-        var jitter = VoiceJitterBuffer()
+        var jitter: VoiceJitterBuffer
         var isActive = false
         var lifecycle = VoicePlaybackSessionLifecycle()
         var levelEnvelope = VoiceLevelEnvelope()
@@ -552,11 +613,21 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
         var timeoutWorkItem: DispatchWorkItem?
         var inactivityWorkItem: DispatchWorkItem?
 
-        init(id: String, senderID: String, senderName: String, player: AVAudioPlayerNode) {
+        init(
+            id: String,
+            senderID: String,
+            senderName: String,
+            sampleRate: Double,
+            player: AVAudioPlayerNode
+        ) {
             self.id = id
             self.senderID = senderID
             self.senderName = senderName
+            self.sampleRate = sampleRate
             self.player = player
+            jitter = VoiceJitterBuffer(
+                concealmentFrames: Int((sampleRate * 0.020).rounded())
+            )
         }
     }
 
@@ -566,18 +637,25 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
         standardFormatWithSampleRate: WalkieTalkieMicrophone.sampleRate,
         channels: 1
     )!
-    private let format = playbackFormat
     private let stateHandler: @Sendable (String, String, String, Bool, Double) -> Void
     private var sessions = [String: Session]()
     private var tracker = WalkieTalkiePlaybackTracker()
     private var configurationObserver: NSObjectProtocol?
+    private var configurationRecoveryWorkItem: DispatchWorkItem?
     private var muted = false
-    private let maximumBufferedFrames = AVAudioFramePosition(WalkieTalkieMicrophone.sampleRate * 0.20)
 
-    static func makePlaybackBuffer(fromPCM16Mono data: Data) -> AVAudioPCMBuffer? {
+    static func makePlaybackBuffer(
+        fromPCM16Mono data: Data,
+        sampleRate: Double = WalkieTalkieMicrophone.sampleRate
+    ) -> AVAudioPCMBuffer? {
         guard !data.isEmpty,
               data.count <= 8_192,
-              data.count.isMultiple(of: MemoryLayout<Int16>.size)
+              data.count.isMultiple(of: MemoryLayout<Int16>.size),
+              (8_000...96_000).contains(sampleRate),
+              let playbackFormat = AVAudioFormat(
+                  standardFormatWithSampleRate: sampleRate,
+                  channels: 1
+              )
         else { return nil }
 
         let frameCount = AVAudioFrameCount(data.count / MemoryLayout<Int16>.size)
@@ -607,7 +685,7 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
             object: engine,
             queue: nil
         ) { [weak self] _ in
-            self?.queue.async { self?.recoverAfterConfigurationChange() }
+            self?.queue.async { self?.scheduleConfigurationRecovery() }
         }
     }
 
@@ -640,7 +718,7 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
                   data.count <= 8_192,
                   data.count.isMultiple(of: MemoryLayout<Int16>.size)
             else { return }
-            let session = sessions[message.sessionID] ?? beginSession(message)
+            let session = beginSession(message)
             guard let session else { return }
             session.senderName = message.senderName
             let output = session.jitter.insert(sequence: message.sequence, data: data)
@@ -653,8 +731,10 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
 
     @discardableResult
     private func beginSession(_ message: WalkieTalkieMessage) -> Session? {
+        let sampleRate = Double(message.resolvedSampleRate)
         if let existing = sessions[message.sessionID] {
-            if existing.lifecycle.beginRequiresReplacement() {
+            if abs(existing.sampleRate - sampleRate) >= 1
+                || existing.lifecycle.beginRequiresReplacement() {
                 // A target can be removed and re-added quickly while the final
                 // buffers from its `.ended` message are still rendering. Replace
                 // the old object so its callbacks cannot mutate the revived
@@ -667,6 +747,10 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
             }
         }
         let player = AVAudioPlayerNode()
+        guard let format = AVAudioFormat(
+            standardFormatWithSampleRate: sampleRate,
+            channels: 1
+        ) else { return nil }
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: format)
         guard ensureEngineRunning() else {
@@ -678,6 +762,7 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
             id: message.sessionID,
             senderID: message.senderID,
             senderName: message.senderName,
+            sampleRate: sampleRate,
             player: player
         )
         sessions[message.sessionID] = session
@@ -704,8 +789,12 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
             stopSession(session.id)
             return
         }
-        guard let buffer = Self.makePlaybackBuffer(fromPCM16Mono: data) else { return }
+        guard let buffer = Self.makePlaybackBuffer(
+            fromPCM16Mono: data,
+            sampleRate: session.sampleRate
+        ) else { return }
         let frames = buffer.frameLength
+        let maximumBufferedFrames = AVAudioFramePosition(session.sampleRate * 0.20)
 
         if WalkieTalkiePlaybackTracker.shouldDropIncomingBuffer(
             scheduledFrames: session.scheduledFrames,
@@ -758,6 +847,7 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
         for session in sessions.values {
             session.player.stop()
             session.scheduledFrames = 0
+            session.jitter.resetForRouteChange()
             setSessionActive(session, false)
         }
         guard ensureEngineRunning() else {
@@ -767,6 +857,17 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
         for session in sessions.values where !session.player.isPlaying {
             session.player.play()
         }
+    }
+
+    private func scheduleConfigurationRecovery() {
+        configurationRecoveryWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            configurationRecoveryWorkItem = nil
+            recoverAfterConfigurationChange()
+        }
+        configurationRecoveryWorkItem = work
+        queue.asyncAfter(deadline: .now() + .milliseconds(120), execute: work)
     }
 
     private func armTimeout(for session: Session) {
@@ -848,11 +949,14 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
     }
 
     private func stopAllOnQueue() {
+        configurationRecoveryWorkItem?.cancel()
+        configurationRecoveryWorkItem = nil
         for id in Array(sessions.keys) { stopSession(id) }
         engine.stop()
     }
 
     deinit {
+        configurationRecoveryWorkItem?.cancel()
         if let observer = configurationObserver {
             NotificationCenter.default.removeObserver(observer)
         }

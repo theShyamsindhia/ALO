@@ -272,9 +272,13 @@ struct MeshRoomTests {
 
         nodeA.publishBroadcaster(active: true, mediaServiceName: "media-a")
         #expect(waitUntil { a.broadcasterID == "a" && b.broadcasterID == "a" && c.broadcasterID == "a" })
+        a.resetParticipantCountHistory()
+        b.resetParticipantCountHistory()
         nodeA.disconnectForTesting(peerID: "b")
-        #expect(waitUntil { a.participantCount == 2 && b.participantCount == 2 })
         #expect(waitUntil { a.participantCount == 3 && b.participantCount == 3 && c.participantCount == 3 })
+        Thread.sleep(forTimeInterval: 0.8)
+        #expect(a.minimumObservedParticipantCount == 3)
+        #expect(b.minimumObservedParticipantCount == 3)
 
         // Wait longer than the broadcaster lease. A's heartbeat still reaches B via C.
         Thread.sleep(forTimeInterval: 2.8)
@@ -798,6 +802,36 @@ struct MeshRoomTests {
         #expect(MeshControlPlane.legacySafeWalkieTalkieMessages(broadcast) == [broadcast])
     }
 
+    @Test("Full-band voice downgrades safely for older peers")
+    func fullBandVoiceCompatibilityAndBackpressure() throws {
+        #expect(!MeshControlPlane.supportsFullBandVoice(appVersion: nil))
+        #expect(!MeshControlPlane.supportsFullBandVoice(appVersion: "0.13.29"))
+        #expect(MeshControlPlane.supportsFullBandVoice(appVersion: "0.13.30"))
+
+        let fullBandPCM = Data(repeating: 0x24, count: 960 * MemoryLayout<Int16>.size)
+        let fullBand = WalkieTalkieMessage(
+            kind: .audio,
+            senderID: "a",
+            senderName: "A",
+            targetID: "b",
+            sessionID: "full-band",
+            sequence: 4,
+            sampleRate: 48_000,
+            pcm16Mono: fullBandPCM
+        )
+        let legacy = MeshControlPlane.legacyCompatibleWalkieTalkieMessage(fullBand)
+        #expect(legacy.resolvedSampleRate == 16_000)
+        #expect(legacy.pcm16Mono?.count == 320 * MemoryLayout<Int16>.size)
+
+        var queue = RealtimeVoiceSendQueue(maximumPendingAudioPackets: 2)
+        queue.enqueue(.init(kind: .audio, sessionID: "voice", data: Data([1])))
+        queue.enqueue(.init(kind: .audio, sessionID: "voice", data: Data([2])))
+        queue.enqueue(.init(kind: .audio, sessionID: "voice", data: Data([3])))
+        #expect(queue.pending.map(\.data) == [Data([2]), Data([3])])
+        queue.enqueue(.init(kind: .ended, sessionID: "voice", data: Data([4])))
+        #expect(queue.pending.map(\.data) == [Data([4])])
+    }
+
     @Test("Room controls retry until the broadcaster media session accepts them")
     func roomActionAcknowledgementFollowsMediaAcceptance() throws {
         let room = RoomConfiguration(name: "Control retry test", creatorPeerID: "a")
@@ -1042,7 +1076,9 @@ private final class MeshProbe: @unchecked Sendable {
     private let lock = NSLock()
     private var replica = MeshRoomReplica()
     private var participants = [RoomParticipant]()
+    private var participantCountHistory = [Int]()
     var participantCount: Int { lock.withLock { participants.count } }
+    var minimumObservedParticipantCount: Int? { lock.withLock { participantCountHistory.min() } }
     var chatCount: Int { lock.withLock { replica.chatEvents.count } }
     var chatTexts: [String?] { lock.withLock { replica.chatEvents.map(\.text) } }
     var chatSenderIDs: [String?] { lock.withLock { replica.chatEvents.map(\.senderID) } }
@@ -1052,7 +1088,15 @@ private final class MeshProbe: @unchecked Sendable {
         lock.withLock { participants.first(where: { $0.id == id }) }
     }
     func update(replica: MeshRoomReplica) { lock.withLock { self.replica = replica } }
-    func update(participants: [RoomParticipant]) { lock.withLock { self.participants = participants } }
+    func update(participants: [RoomParticipant]) {
+        lock.withLock {
+            self.participants = participants
+            participantCountHistory.append(participants.count)
+        }
+    }
+    func resetParticipantCountHistory() {
+        lock.withLock { participantCountHistory = [participants.count] }
+    }
 }
 
 private final class BlockingCommandProbe: @unchecked Sendable {

@@ -190,7 +190,10 @@ final class Receiver {
                 clockOffsetMilliseconds: clock.offsetNanos(at: now).map { Double($0) / 1_000_000 },
                 jitterMilliseconds: Double(jitter.jitterNanos) / 1_000_000,
                 recommendedBufferMilliseconds: Double(
-                    jitter.recommendedPlayoutDelayNanos(roundTripNanos: clock.bestRoundTripNanos)
+                    jitter.recommendedPlayoutDelayNanos(
+                        roundTripNanos: clock.bestRoundTripNanos,
+                        outputLatencyNanos: player.outputLatencyForTimingNanos
+                    )
                 ) / 1_000_000,
                 latenessMilliseconds: Double(report.latenessNanos) / 1_000_000,
                 latePacketCount: report.latePacketCount,
@@ -490,6 +493,11 @@ final class Receiver {
         send(ControlMessage(
             type: "sync_report",
             playoutDelayNanos: jitter.recommendedPlayoutDelayNanos(
+                roundTripNanos: clock.bestRoundTripNanos,
+                outputLatencyNanos: player.outputLatencyForTimingNanos
+            ),
+            outputLatencyPlayoutFloorNanos: RoomTiming.outputLatencyFloor(
+                player.outputLatencyForTimingNanos,
                 roundTripNanos: clock.bestRoundTripNanos
             )
         ))

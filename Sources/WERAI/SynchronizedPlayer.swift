@@ -45,6 +45,41 @@ struct MediaDuckingEnvelope {
     }
 }
 
+struct AudioOutputHardwareFormat: Equatable {
+    let sampleRate: Double
+    let channelCount: UInt32
+
+    static func changed(from old: Self?, to new: Self?) -> Bool {
+        switch (old, new) {
+        case (.none, .none): return false
+        case (.some, .none), (.none, .some): return true
+        case (.some(let old), .some(let new)):
+            return abs(old.sampleRate - new.sampleRate) >= 1
+                || old.channelCount != new.channelCount
+        }
+    }
+}
+
+struct AudioConfigurationRecoveryGate {
+    private(set) var changePending = false
+    private(set) var isRecovering = false
+
+    mutating func markChanged() { changePending = true }
+
+    mutating func takePendingChange() -> Bool {
+        defer { changePending = false }
+        return changePending
+    }
+
+    mutating func beginRecovery() -> Bool {
+        guard !isRecovering else { return false }
+        isRecovering = true
+        return true
+    }
+
+    mutating func endRecovery() { isRecovering = false }
+}
+
 final class SynchronizedPlayer {
     static let targetLatencyNanos = RoomTiming.defaultPlayoutDelayNanos
     static let hardResyncThresholdNanos: UInt64 = 100_000_000
@@ -62,6 +97,7 @@ final class SynchronizedPlayer {
     private var hasStarted = false
     private var outputLatencyNanos: UInt64 = 0
     private var activeOutputDeviceID: AudioDeviceID?
+    private var activeOutputHardwareFormat: AudioOutputHardwareFormat?
     private var targetLatencyNanos = RoomTiming.defaultPlayoutDelayNanos
     private var smoothedCorrection = 0.0
     private let playbackActivityChanged: ((Bool) -> Void)?
@@ -73,8 +109,7 @@ final class SynchronizedPlayer {
     private var driftRecovery = PlaybackDriftRecovery()
     private var configurationObserver: NSObjectProtocol?
     private let configurationLock = NSLock()
-    private var configurationChangePending = false
-    private var isRecoveringConfiguration = false
+    private var configurationGate = AudioConfigurationRecoveryGate()
     private var recoveryRetryNotBeforeNanos: UInt64 = 0
     private var participantVolume: Double = 1
     private var participantMuted = false
@@ -84,6 +119,8 @@ final class SynchronizedPlayer {
     private var roomPlaybackIsPlaying = true
     private var resyncCutoverCaptureNanos: UInt64?
     private(set) var configurationChangeCount: UInt64 = 0
+
+    var outputLatencyForTimingNanos: UInt64 { outputLatencyNanos }
 
     var clockOffsetNanos: Int64?
 
@@ -398,35 +435,42 @@ final class SynchronizedPlayer {
 
     private func markAudioEngineConfigurationChanged() {
         configurationLock.withLock {
-            if !isRecoveringConfiguration { configurationChangePending = true }
+            // Bluetooth routes can transition through several formats. Retain a
+            // notification that arrives during recovery so the next maintenance
+            // pass reconciles the final hardware state too.
+            configurationGate.markChanged()
         }
     }
 
     private func applyPendingAudioEngineConfigurationChange() {
         let pending = configurationLock.withLock {
-            let pending = configurationChangePending
-            configurationChangePending = false
-            return pending
+            configurationGate.takePendingChange()
         }
         guard pending else { return }
         let now = MonotonicClock.nowNanos()
         guard now >= recoveryRetryNotBeforeNanos else {
-            configurationLock.withLock { configurationChangePending = true }
+            configurationLock.withLock { configurationGate.markChanged() }
             return
         }
         let currentDeviceID = currentOutputDeviceID()
         let currentLatencyNanos = measuredOutputLatencyNanos()
+        let currentHardwareFormat = currentOutputHardwareFormat()
         let deviceChanged = activeOutputDeviceID != currentDeviceID
         let latencyChanged = Self.latencyChanged(
             from: outputLatencyNanos,
             to: currentLatencyNanos
+        )
+        let outputFormatChanged = AudioOutputHardwareFormat.changed(
+            from: activeOutputHardwareFormat,
+            to: currentHardwareFormat
         )
         // Core Audio also broadcasts configuration changes for unrelated private
         // taps. Ignore those only when this engine's device and latency are intact.
         if Self.shouldRecoverAfterConfigurationChange(
             engineIsRunning: engine.isRunning,
             deviceChanged: deviceChanged,
-            latencyChanged: latencyChanged
+            latencyChanged: latencyChanged,
+            outputFormatChanged: outputFormatChanged
         ) {
             handleAudioEngineConfigurationChange()
         }
@@ -435,9 +479,10 @@ final class SynchronizedPlayer {
     static func shouldRecoverAfterConfigurationChange(
         engineIsRunning: Bool,
         deviceChanged: Bool,
-        latencyChanged: Bool
+        latencyChanged: Bool,
+        outputFormatChanged: Bool = false
     ) -> Bool {
-        !engineIsRunning || deviceChanged || latencyChanged
+        !engineIsRunning || deviceChanged || latencyChanged || outputFormatChanged
     }
 
     static func latencyChanged(from old: UInt64, to new: UInt64) -> Bool {
@@ -447,14 +492,11 @@ final class SynchronizedPlayer {
 
     private func recoverAudioEngine() {
         let shouldRecover = configurationLock.withLock {
-            guard !isRecoveringConfiguration else { return false }
-            isRecoveringConfiguration = true
-            configurationChangePending = false
-            return true
+            configurationGate.beginRecovery()
         }
         guard shouldRecover else { return }
         defer {
-            configurationLock.withLock { isRecoveringConfiguration = false }
+            configurationLock.withLock { configurationGate.endRecovery() }
         }
 
         player.stop()
@@ -470,7 +512,7 @@ final class SynchronizedPlayer {
         } catch {
             fputs("Audio output recovery failed: \(error.localizedDescription)\n", stderr)
             recoveryRetryNotBeforeNanos = MonotonicClock.nowNanos() + 500_000_000
-            configurationLock.withLock { configurationChangePending = true }
+            configurationLock.withLock { configurationGate.markChanged() }
         }
     }
 
@@ -481,6 +523,29 @@ final class SynchronizedPlayer {
     private func refreshOutputState() {
         outputLatencyNanos = measuredOutputLatencyNanos()
         activeOutputDeviceID = currentOutputDeviceID()
+        activeOutputHardwareFormat = currentOutputHardwareFormat()
+    }
+
+    private func currentOutputHardwareFormat() -> AudioOutputHardwareFormat? {
+        guard let audioUnit = engine.outputNode.audioUnit else { return nil }
+        var description = AudioStreamBasicDescription()
+        var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        let status = AudioUnitGetProperty(
+            audioUnit,
+            kAudioUnitProperty_StreamFormat,
+            kAudioUnitScope_Output,
+            0,
+            &description,
+            &size
+        )
+        guard status == noErr,
+              description.mSampleRate > 0,
+              description.mChannelsPerFrame > 0
+        else { return nil }
+        return AudioOutputHardwareFormat(
+            sampleRate: description.mSampleRate,
+            channelCount: description.mChannelsPerFrame
+        )
     }
 
     private func currentOutputDeviceID() -> AudioDeviceID? {

@@ -65,6 +65,7 @@ struct AudioPacketTests {
             targetID: "mac-b",
             sessionID: "voice-1",
             sequence: 7,
+            sampleRate: 48_000,
             pcm16Mono: Data([0x01, 0x00, 0xFF, 0x7F])
         )
         let envelope = MeshEnvelope(type: "walkie_talkie", walkieTalkie: message)
@@ -72,6 +73,15 @@ struct AudioPacketTests {
 
         #expect(decoded?.walkieTalkie == message)
         #expect(decoded?.walkieTalkie?.targetID == "mac-b")
+        #expect(decoded?.walkieTalkie?.resolvedSampleRate == 48_000)
+        #expect(WalkieTalkieMessage(
+            kind: .audio,
+            senderID: "legacy",
+            senderName: "Legacy",
+            targetID: "mac-b",
+            sessionID: "legacy-voice",
+            pcm16Mono: Data([0, 0])
+        ).resolvedSampleRate == 16_000)
     }
 
     @Test("Voice packets encode one canonical recipient snapshot")
@@ -326,6 +336,14 @@ struct AudioPacketTests {
         }
 
         #expect(stable.recommendedPlayoutDelayNanos(roundTripNanos: 4_000_000) == 250_000_000)
+        #expect(stable.recommendedPlayoutDelayNanos(
+            roundTripNanos: 4_000_000,
+            outputLatencyNanos: 220_000_000
+        ) == 370_000_000)
+        #expect(RoomTiming.outputLatencyFloor(
+            220_000_000,
+            roundTripNanos: 4_000_000
+        ) == 370_000_000)
         #expect(unstable.jitterNanos >= 45_000_000)
         #expect(unstable.recommendedPlayoutDelayNanos(roundTripNanos: 20_000_000) > 250_000_000)
         #expect(RoomTiming.clampedPlayoutDelay(1_000_000_000) == 600_000_000)
@@ -335,11 +353,13 @@ struct AudioPacketTests {
         let decoder = ControlLineDecoder()
         let report = try ControlMessage(
             type: "sync_report",
-            playoutDelayNanos: 315_000_000
+            playoutDelayNanos: 315_000_000,
+            outputLatencyPlayoutFloorNanos: 290_000_000
         ).encodedLine()
 
         let decoded = decoder.append(report).first
         #expect(decoded?.playoutDelayNanos == 315_000_000)
+        #expect(decoded?.outputLatencyPlayoutFloorNanos == 290_000_000)
     }
 
     @Test func videoFramesSurviveArbitraryStreamChunks() throws {

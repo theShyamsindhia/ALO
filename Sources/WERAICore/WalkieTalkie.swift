@@ -16,6 +16,9 @@ public struct WalkieTalkieMessage: Codable, Sendable, Equatable {
     public let targetIDs: [String]?
     public let sessionID: String
     public let sequence: UInt64
+    /// Sample rate for `pcm16Mono`. Older senders omit this and are decoded as
+    /// the original 16 kHz wire format.
+    public let sampleRate: UInt32?
     public let pcm16Mono: Data?
 
     public init(
@@ -26,6 +29,7 @@ public struct WalkieTalkieMessage: Codable, Sendable, Equatable {
         targetIDs: Set<String>? = nil,
         sessionID: String,
         sequence: UInt64 = 0,
+        sampleRate: UInt32? = nil,
         pcm16Mono: Data? = nil
     ) {
         self.kind = kind
@@ -35,8 +39,11 @@ public struct WalkieTalkieMessage: Codable, Sendable, Equatable {
         self.targetIDs = targetIDs.map { $0.sorted() }
         self.sessionID = sessionID
         self.sequence = sequence
+        self.sampleRate = sampleRate
         self.pcm16Mono = pcm16Mono
     }
+
+    public var resolvedSampleRate: UInt32 { sampleRate ?? 16_000 }
 
     /// `nil` means everyone. A non-nil set is an explicit recipient snapshot.
     public var recipientIDs: Set<String>? {
