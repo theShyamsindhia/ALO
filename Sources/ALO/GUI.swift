@@ -490,7 +490,7 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
         window.titlebarSeparatorStyle = .none
         window.backgroundColor = .clear
         window.isOpaque = false
-        window.hasShadow = false
+        window.hasShadow = true
         window.isMovableByWindowBackground = true
         window.standardWindowButton(.closeButton)?.isHidden = true
         window.standardWindowButton(.miniaturizeButton)?.isHidden = true
@@ -1476,7 +1476,7 @@ final class ALOViewModel: ObservableObject {
     private static let voiceInputUIDKey = "voiceInputUID"
     private static let deviceProfileImageKey = "meshDeviceProfileImageData"
 
-    init() {
+    init(discoverRooms: Bool = true) {
         let defaults = UserDefaults.standard
         if let stored = defaults.string(forKey: "meshNodeID") {
             nodeID = stored
@@ -1534,7 +1534,7 @@ final class ALOViewModel: ObservableObject {
                 DispatchQueue.main.async { self?.statusText = "Local network unavailable: \(message)" }
             }
         )
-        roomBrowser.start()
+        if discoverRooms { roomBrowser.start() }
     }
 
     var normalizedRoomName: String { roomName.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -3083,7 +3083,7 @@ final class ALOViewModel: ObservableObject {
     }
 }
 
-private struct ALOView: View {
+struct ALOView: View {
     @ObservedObject var model: ALOViewModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var roomNameFocused: Bool
@@ -3110,7 +3110,7 @@ private struct ALOView: View {
             if model.permissionNotice { permissionOverlay }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .tint(Palette.controlAccent)
+        .tint(.accentColor)
     }
 
     private var idleView: some View {
@@ -3132,16 +3132,13 @@ private struct ALOView: View {
                     setupFooter
                 }
                 .frame(width: 286, height: 236)
-                .background { SetupLowerSurface() }
+                .background(.regularMaterial, in: UnevenRoundedRectangle(
+                    topLeadingRadius: 22, topTrailingRadius: 22
+                ))
             }
         }
         .frame(width: 286, height: 406)
         .clipShape(RoundedRectangle(cornerRadius: 27, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 27, style: .continuous)
-                .stroke(Color.white.opacity(0.88), lineWidth: 2.5)
-        )
-        .shadow(color: Color.black.opacity(0.24), radius: 14, y: 7)
         .animation(reduceMotion ? nil : .smooth(duration: 0.32), value: model.mode)
     }
 
@@ -3163,49 +3160,29 @@ private struct ALOView: View {
             .accessibilityLabel("Edit this Mac's room identity")
 
             Button(action: model.editDeviceIdentity) {
-                HStack(spacing: 8) {
-                    Text(model.currentUserName)
-                        .font(.system(size: 11, weight: .bold, design: .rounded))
-                        .lineLimit(1)
-                    ZStack {
-                        Circle().fill(Color.white.opacity(0.38))
-                        Image(systemName: "waveform")
-                            .font(.system(size: 7, weight: .bold))
-                    }
-                    .frame(width: 22, height: 22)
-                }
-                .padding(.leading, 12)
-                .padding(.trailing, 5)
-                .frame(height: 32)
-                .background(.ultraThinMaterial)
-                .background(Color.white.opacity(0.16))
-                .clipShape(Capsule())
-                .overlay(Capsule().stroke(Color.white.opacity(0.46), lineWidth: 1))
-                .shadow(color: Color.black.opacity(0.16), radius: 8, y: 3)
+                Label(model.currentUserName, systemImage: "pencil")
+                    .font(.body)
+                    .lineLimit(1)
             }
-            .buttonStyle(PressScaleButtonStyle())
+            .buttonStyle(.bordered)
+            .foregroundStyle(.primary)
             .help("Edit \(model.currentUserName)")
             .accessibilityLabel("Edit this Mac's room identity")
 
             Spacer(minLength: 16)
         }
         .frame(height: 170)
-        .foregroundStyle(Color.white)
-        .shadow(color: Color.black.opacity(0.28), radius: 3, y: 1)
     }
 
     private var setupFooter: some View {
-        Text("ALO")
-            .font(.system(size: 12, weight: .black, design: .rounded))
-            .tracking(-0.35)
-            .foregroundStyle(SetupPalette.ink)
-            .frame(maxWidth: .infinity)
-            .frame(height: 37)
-        .overlay(alignment: .top) {
-            Rectangle()
-                .fill(SetupPalette.stroke)
-                .frame(height: 1)
+        VStack(spacing: 0) {
+            Divider()
+            Text("ALO")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .frame(height: 37)
     }
 
     private var createRoomPanel: some View {
@@ -3218,62 +3195,37 @@ private struct ALOView: View {
                 } label: {
                     Image(systemName: "chevron.left")
                 }
-                .buttonStyle(SetupPanelIconButtonStyle())
+                .buttonStyle(.bordered)
                 .help("Back to spaces")
                 .accessibilityLabel("Back to spaces")
 
-                Text("New Space")
-                    .font(.system(size: 17, weight: .black, design: .rounded))
-                    .tracking(-0.3)
+                Text("New space")
+                    .font(.headline)
                 Spacer()
             }
 
             TextField("Space name", text: $model.roomName)
-                .textFieldStyle(.plain)
-                .font(.system(size: 13, weight: .bold, design: .rounded))
-                .foregroundStyle(SetupPalette.ink)
+                .textFieldStyle(.roundedBorder)
                 .focused($roomNameFocused)
                 .onSubmit(model.startSharing)
-                .padding(.horizontal, 12)
-                .frame(height: 38)
-                .background(Color.black.opacity(0.055))
-                .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 13, style: .continuous)
-                        .stroke(roomNameFocused ? SetupPalette.live : SetupPalette.stroke, lineWidth: roomNameFocused ? 1.5 : 1)
-                )
 
-            Button {
-                model.createPrivateRoom.toggle()
-            } label: {
-                HStack {
-                    Image(systemName: model.createPrivateRoom ? "lock.fill" : "person.3.fill")
-                    Text(model.createPrivateRoom ? "PRIVATE" : "PUBLIC")
-                    Spacer()
-                    Image(systemName: model.createPrivateRoom ? "checkmark.circle.fill" : "circle")
-                }
-            }
-            .buttonStyle(SetupPanelButtonStyle(active: model.createPrivateRoom))
-            .help(model.createPrivateRoom ? "Private space" : "Public space")
-            .accessibilityLabel(model.createPrivateRoom ? "Make space public" : "Make space private")
+            Toggle("Private space", isOn: $model.createPrivateRoom)
+                .help("Require an invite key to join this space")
 
-            Button(action: model.startSharing) {
-                HStack {
-                    Text("Create Space")
-                    Spacer()
-                    Image(systemName: "arrow.right")
-                }
+            Spacer(minLength: 0)
+
+            HStack {
+                Spacer()
+                Button("Create space", action: model.startSharing)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!model.canStartSharing)
             }
-            .buttonStyle(SetupPrimaryPanelButtonStyle())
-            .disabled(!model.canStartSharing)
         }
         .padding(.horizontal, 14)
         .padding(.top, 12)
         .padding(.bottom, 10)
         .frame(width: 286, height: 199)
-        .foregroundStyle(SetupPalette.ink)
         .onAppear {
-            NSApp.activate(ignoringOtherApps: true)
             DispatchQueue.main.async { roomNameFocused = true }
         }
     }
@@ -3282,8 +3234,7 @@ private struct ALOView: View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Text("Spaces")
-                    .font(.system(size: 17, weight: .black, design: .rounded))
-                    .tracking(-0.3)
+                    .font(.headline)
                 Spacer()
                 Button {
                     withAnimation(reduceMotion ? nil : .smooth(duration: 0.28)) {
@@ -3292,63 +3243,69 @@ private struct ALOView: View {
                 } label: {
                     Image(systemName: "plus")
                 }
-                .buttonStyle(SetupPanelIconButtonStyle())
+                .buttonStyle(.bordered)
                 .help("Create a space")
                 .accessibilityLabel("Create a space")
             }
             .padding(.horizontal, 14)
             .frame(height: 45)
 
-            ScrollView(.vertical, showsIndicators: false) {
-                LazyVStack(spacing: 6) {
+            ScrollViewReader { proxy in
+                List(selection: $model.selectedRoomID) {
                     if model.roomChoices.isEmpty {
                         VStack(alignment: .leading, spacing: 3) {
                             Text("Looking nearby")
-                                .font(.system(size: 12, weight: .bold, design: .rounded))
-                                .foregroundStyle(SetupPalette.ink)
+                                .font(.body)
                             Text("Open ALO on another Mac to see its spaces.")
-                                .font(.system(size: 9, weight: .medium, design: .rounded))
-                                .foregroundStyle(SetupPalette.secondary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                         .frame(maxWidth: .infinity, minHeight: 54, alignment: .leading)
-                        .padding(.horizontal, 14)
-                        .background(Color.black.opacity(0.055))
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                         .help("Looking for rooms on your network")
                         .accessibilityLabel("Looking for rooms on your network")
                     } else {
                         ForEach(model.roomChoices) { room in
                             roomCard(room)
+                                .tag(room.id)
+                                .id(room.id)
                         }
                     }
                 }
-                .padding(.horizontal, 10)
-                .padding(.bottom, 7)
+                .listStyle(.inset)
+                .scrollContentBackground(.hidden)
+                .onChange(of: model.selectedRoomID, initial: true) { previous, selected in
+                    if previous != selected { model.privateRoomKey = "" }
+                    if let selected {
+                        DispatchQueue.main.async { proxy.scrollTo(selected, anchor: .center) }
+                    }
+                }
+                .onKeyPress(.return) {
+                    guard editingRoomID == nil, let room = model.selectedRoomConfiguration else { return .ignored }
+                    if room.isPrivate && room.accessKey == nil {
+                        privateKeyFocused = true
+                    } else {
+                        model.joinSelectedRoom()
+                    }
+                    return .handled
+                }
             }
             .frame(height: setupRoomListHeight)
 
             if model.selectedRoomConfiguration?.isPrivate == true,
                model.selectedRoomConfiguration?.accessKey == nil {
                 TextField("Private room invite key", text: $model.privateRoomKey)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12, weight: .medium, design: .monospaced))
-                    .foregroundStyle(SetupPalette.ink)
+                    .textFieldStyle(.roundedBorder)
                     .focused($privateKeyFocused)
                     .onSubmit(model.joinSelectedRoom)
-                    .padding(.horizontal, 12)
                     .frame(height: 36)
-                    .background(Color.black.opacity(0.055))
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     .padding(.horizontal, 12)
                     .padding(.bottom, 7)
                     .onAppear {
-                        NSApp.activate(ignoringOtherApps: true)
                         DispatchQueue.main.async { privateKeyFocused = true }
                     }
             }
         }
         .frame(width: 286, height: 199)
-        .foregroundStyle(SetupPalette.ink)
     }
 
     private var setupRoomListHeight: CGFloat {
@@ -3364,9 +3321,7 @@ private struct ALOView: View {
 
             if editingRoomID == room.id {
                 TextField("Space name", text: $editedRoomName)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12, weight: .bold, design: .rounded))
-                    .foregroundStyle(SetupPalette.ink)
+                    .textFieldStyle(.roundedBorder)
                     .focused($roomRenameFocused)
                     .onChange(of: editedRoomName) { _, newValue in
                         if newValue.count > 40 { editedRoomName = String(newValue.prefix(40)) }
@@ -3377,14 +3332,16 @@ private struct ALOView: View {
                 Button(action: cancelRoomRename) {
                     Image(systemName: "xmark")
                 }
-                .buttonStyle(SetupRoomActionButtonStyle())
+                .buttonStyle(.bordered)
+                .controlSize(.small)
                 .help("Cancel rename")
                 .accessibilityLabel("Cancel rename")
 
                 Button { commitRoomRename(room) } label: {
                     Image(systemName: "checkmark")
                 }
-                .buttonStyle(SetupRoomActionButtonStyle(filled: true))
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
                 .disabled(normalizedEditedRoomName.isEmpty)
                 .help("Save space name")
                 .accessibilityLabel("Save space name")
@@ -3398,16 +3355,18 @@ private struct ALOView: View {
                 } label: {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(room.name)
-                            .font(.system(size: 12, weight: .black, design: .rounded))
-                            .foregroundStyle(SetupPalette.ink)
+                            .font(.body)
+                            .lineLimit(1)
                         Text(nearby.map { "Nearby · \($0.peerCount) \($0.peerCount == 1 ? "person" : "people")" } ?? "Saved on this Mac")
-                            .font(.system(size: 9, weight: .medium, design: .rounded))
-                            .foregroundStyle(nearby == nil ? SetupPalette.secondary : SetupPalette.live)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderless)
+                .foregroundStyle(.primary)
                 .help(room.isPrivate && room.accessKey == nil ? "Enter the invite key for \(room.name)" : "Open \(room.name)")
                 .accessibilityLabel("Open \(room.name)")
 
@@ -3416,22 +3375,16 @@ private struct ALOView: View {
                 }
             }
         }
-        .padding(.leading, 10)
-        .padding(.trailing, 6)
         .frame(maxWidth: .infinity)
-        .frame(height: 48)
-        .background(Color.black.opacity(editingRoomID == room.id ? 0.08 : 0.055))
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .frame(minHeight: 36)
         .animation(reduceMotion ? nil : .snappy(duration: 0.2), value: editingRoomID)
     }
 
     private func roomCardIcon(_ room: RoomConfiguration) -> some View {
         Image(systemName: room.isPrivate ? "lock.fill" : "person.3.fill")
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundStyle(SetupPalette.live)
-            .frame(width: 30, height: 30)
-            .background(Color.white.opacity(0.52))
-            .clipShape(Circle())
+            .font(.body)
+            .foregroundStyle(.secondary)
+            .frame(width: 24, height: 24)
     }
 
     private func roomOptionsMenu(_ room: RoomConfiguration) -> some View {
@@ -3460,9 +3413,7 @@ private struct ALOView: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .frame(width: 28, height: 28)
-        .background(Color.black.opacity(0.055))
-        .clipShape(Circle())
+        .frame(width: 24, height: 24)
         .help("Space options")
         .accessibilityLabel("Options for \(room.name)")
     }
@@ -4635,80 +4586,6 @@ private struct SetupIconButtonStyle: ButtonStyle {
             .scaleEffect(!reduceMotion && configuration.isPressed ? 0.94 : 1)
             .opacity(isEnabled ? (configuration.isPressed ? 0.82 : 1) : 0.34)
             .animation(reduceMotion ? nil : .spring(response: 0.2, dampingFraction: 0.82), value: configuration.isPressed)
-    }
-}
-
-private struct SetupRoomActionButtonStyle: ButtonStyle {
-    var filled = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.isEnabled) private var isEnabled
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 9, weight: .bold))
-            .foregroundStyle(filled ? Color.white : SetupPalette.secondary)
-            .frame(width: 24, height: 24)
-            .background(filled ? SetupPalette.live : Color.black.opacity(0.055))
-            .clipShape(Circle())
-            .scaleEffect(!reduceMotion && configuration.isPressed ? 0.92 : 1)
-            .opacity(isEnabled ? (configuration.isPressed ? 0.8 : 1) : 0.34)
-            .animation(
-                reduceMotion ? nil : .snappy(duration: 0.18),
-                value: configuration.isPressed
-            )
-    }
-}
-
-private struct SetupPanelIconButtonStyle: ButtonStyle {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 10, weight: .black))
-            .foregroundStyle(SetupPalette.ink)
-            .frame(width: 28, height: 28)
-            .background(Color.black.opacity(configuration.isPressed ? 0.10 : 0.055))
-            .clipShape(Circle())
-            .scaleEffect(!reduceMotion && configuration.isPressed ? 0.92 : 1)
-            .animation(reduceMotion ? nil : .snappy(duration: 0.18), value: configuration.isPressed)
-    }
-}
-
-private struct SetupPanelButtonStyle: ButtonStyle {
-    let active: Bool
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 9, weight: .black, design: .rounded))
-            .foregroundStyle(SetupPalette.ink)
-            .padding(.horizontal, 12)
-            .frame(maxWidth: .infinity)
-            .frame(height: 38)
-            .background(active ? SetupPalette.live.opacity(0.12) : Color.black.opacity(0.055))
-            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-            .scaleEffect(!reduceMotion && configuration.isPressed ? 0.98 : 1)
-            .animation(reduceMotion ? nil : .snappy(duration: 0.18), value: configuration.isPressed)
-    }
-}
-
-private struct SetupPrimaryPanelButtonStyle: ButtonStyle {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.isEnabled) private var isEnabled
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 10, weight: .black, design: .rounded))
-            .tracking(0.3)
-            .foregroundStyle(Color.white)
-            .padding(.horizontal, 13)
-            .frame(maxWidth: .infinity)
-            .frame(height: 40)
-            .background(SetupPalette.ink)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .scaleEffect(!reduceMotion && configuration.isPressed ? 0.98 : 1)
-            .opacity(isEnabled ? 1 : 0.34)
-            .animation(reduceMotion ? nil : .snappy(duration: 0.18), value: configuration.isPressed)
     }
 }
 
@@ -6013,30 +5890,6 @@ private struct SetupBackground: View {
     }
 }
 
-private struct SetupLowerSurface: View {
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-
-    var body: some View {
-        GeometryReader { geometry in
-            ZStack {
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .fill(reduceTransparency ? AnyShapeStyle(Color.white) : AnyShapeStyle(.ultraThinMaterial))
-                if !reduceTransparency {
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .fill(Color.white.opacity(0.76))
-                }
-            }
-            .frame(width: geometry.size.width, height: geometry.size.height + 24)
-            .overlay(alignment: .top) {
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .stroke(Color.white.opacity(0.72), lineWidth: 1)
-                    .frame(width: geometry.size.width, height: geometry.size.height + 24)
-            }
-        }
-        .clipped()
-    }
-}
-
 private struct WaveformGlyph: View {
     let active: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -6245,15 +6098,6 @@ private enum Palette {
             }
         })
     }
-}
-
-private enum SetupPalette {
-    static let ink = Color(red: 0.055, green: 0.075, blue: 0.055)
-    static let secondary = Color(red: 0.23, green: 0.28, blue: 0.22)
-    static let muted = Color(red: 0.42, green: 0.46, blue: 0.40)
-    static let live = Color(red: 0.035, green: 0.28, blue: 0.16)
-    static let stroke = Color.black.opacity(0.10)
-    static let surfaceStrong = Color.white.opacity(0.95)
 }
 
 struct ArtworkPalette: Equatable {
