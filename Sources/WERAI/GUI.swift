@@ -752,8 +752,13 @@ private enum FloatingMetrics {
     static let videoHeight: CGFloat = 476
     static let permissionHeight: CGFloat = 244
     static let walkieBarHeight: CGFloat = 56
+    static let walkieBarHandleHeight: CGFloat = 11
     static let walkieBarMinWidth: CGFloat = 300
     static let walkieBarMaxWidth: CGFloat = 720
+
+    static var walkieFloatingHeight: CGFloat {
+        walkieBarHeight + walkieBarHandleHeight
+    }
 
     static func walkieBarWidth(participantCount: Int) -> CGFloat {
         min(walkieBarMaxWidth, max(walkieBarMinWidth, CGFloat(participantCount) * 40 + 252))
@@ -3297,17 +3302,19 @@ private struct FloatingRoomView: View {
                 ) { model.hideFloatingBar() }
             }
 
-            Divider().frame(height: 20)
+            if presentation == .menuBar {
+                Divider().frame(height: 20)
 
-            Button(action: model.stop) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Palette.red)
-                    .frame(width: 30, height: 32)
+                Button(action: model.stop) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Palette.red)
+                        .frame(width: 30, height: 32)
+                }
+                .buttonStyle(FlatToolButtonStyle(active: false))
+                .help("Leave room")
+                .accessibilityLabel("Leave room")
             }
-            .buttonStyle(FlatToolButtonStyle(active: false))
-            .help("Leave room")
-            .accessibilityLabel("Leave room")
         }
         .padding(.horizontal, 8)
         .frame(width: FloatingMetrics.width, height: roomBarHeight)
@@ -4512,9 +4519,20 @@ private struct WalkieTalkieBar: View {
     var body: some View {
         Group {
             if showsCloseButton {
-                controls
-                    .glass(cornerRadius: 18)
-                    .padding(FloatingMetrics.windowInset)
+                VStack(spacing: 0) {
+                    controls
+                        .glass(cornerRadius: 18)
+
+                    Capsule()
+                        .fill(Palette.controlIcon.opacity(0.64))
+                        .frame(width: 74, height: 5)
+                        .frame(height: FloatingMetrics.walkieBarHandleHeight)
+                        .contentShape(Rectangle())
+                        .overlay { WindowDragRegion().accessibilityHidden(true) }
+                        .help("Drag to move the Talk bar")
+                        .accessibilityLabel("Drag handle")
+                }
+                .padding(FloatingMetrics.windowInset)
             } else {
                 controls
             }
@@ -4526,7 +4544,9 @@ private struct WalkieTalkieBar: View {
 
     private var controls: some View {
         HStack(spacing: 7) {
-            voiceState
+            if !showsCloseButton {
+                voiceState
+            }
             targetDock
             actionDock
         }
@@ -4573,12 +4593,7 @@ private struct WalkieTalkieBar: View {
         }
         .frame(width: 78, height: 40, alignment: .leading)
         .contentShape(Rectangle())
-        .overlay {
-            if showsCloseButton {
-                WindowDragRegion().accessibilityHidden(true)
-            }
-        }
-        .help(showsCloseButton ? "Drag to move the Talk bar" : "Talk · \(voiceStateLabel)")
+        .help("Talk · \(voiceStateLabel)")
         .accessibilityElement(children: .combine)
     }
 
@@ -4873,7 +4888,7 @@ private final class WalkieTalkieWindowController {
                 width: FloatingMetrics.walkieBarWidth(participantCount: model.participants.count)
                     + FloatingMetrics.windowInset * 2,
                 height: FloatingMetrics.windowHeight(
-                    for: FloatingMetrics.walkieBarHeight
+                    for: FloatingMetrics.walkieFloatingHeight
                 )
             ),
             styleMask: [.borderless, .resizable],
@@ -4893,13 +4908,13 @@ private final class WalkieTalkieWindowController {
         panel.minSize = NSSize(
             width: FloatingMetrics.walkieBarMinWidth + FloatingMetrics.windowInset * 2,
             height: FloatingMetrics.windowHeight(
-                for: FloatingMetrics.walkieBarHeight
+                for: FloatingMetrics.walkieFloatingHeight
             )
         )
         panel.maxSize = NSSize(
             width: FloatingMetrics.walkieBarMaxWidth + FloatingMetrics.windowInset * 2,
             height: FloatingMetrics.windowHeight(
-                for: FloatingMetrics.walkieBarHeight
+                for: FloatingMetrics.walkieFloatingHeight
             )
         )
         let hostingView = NSHostingView(rootView: WalkieTalkieBar(model: model))
