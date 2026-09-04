@@ -30,7 +30,8 @@ private enum ALOMenuBarPill {
         receiving: Bool,
         unreadCount: Int,
         title: String,
-        artwork: NSImage?
+        artwork: NSImage?,
+        palette: ArtworkPalette?
     ) -> NSImage {
         let image = NSImage(size: imageSize, flipped: false) { _ in
             let pillRect = NSRect(origin: .zero, size: imageSize)
@@ -39,7 +40,7 @@ private enum ALOMenuBarPill {
             pill.fill()
 
             drawWordmark(active: active)
-            drawArtwork(artwork, in: mediaRect)
+            drawArtwork(artwork, palette: palette, in: mediaRect)
 
             if active && hovered {
                 drawHoverControls(
@@ -47,7 +48,8 @@ private enum ALOMenuBarPill {
                     isPlaying: isPlaying,
                     transmitting: transmitting,
                     receiving: receiving,
-                    unreadCount: unreadCount
+                    unreadCount: unreadCount,
+                    palette: palette
                 )
             } else {
                 drawMediaTitle(title, active: active)
@@ -77,7 +79,11 @@ private enum ALOMenuBarPill {
         )
     }
 
-    private static func drawArtwork(_ artwork: NSImage?, in rect: NSRect) {
+    private static func drawArtwork(
+        _ artwork: NSImage?,
+        palette: ArtworkPalette?,
+        in rect: NSRect
+    ) {
         let mask = NSBezierPath(roundedRect: rect, xRadius: 14.5, yRadius: 14.5)
         NSGraphicsContext.saveGraphicsState()
         mask.addClip()
@@ -100,14 +106,16 @@ private enum ALOMenuBarPill {
                 respectFlipped: false,
                 hints: [.interpolation: NSImageInterpolation.high]
             )
+        } else if let palette {
+            NSGradient(colors: palette.hexes.map(NSColor.deviceIdentity))?.draw(in: rect, angle: 0)
         } else {
-            NSGradient(colors: [
-                NSColor(calibratedRed: 0.18, green: 0.31, blue: 0.46, alpha: 1),
-                NSColor(calibratedRed: 0.55, green: 0.27, blue: 0.34, alpha: 1),
-            ])?.draw(in: rect, angle: 0)
+            NSColor(calibratedWhite: 0.18, alpha: 1).setFill()
+            rect.fill()
         }
-        NSColor.black.withAlphaComponent(0.16).setFill()
-        rect.fill(using: .sourceOver)
+        NSGradient(colors: [
+            NSColor.black.withAlphaComponent(0.48),
+            NSColor.black.withAlphaComponent(0.08),
+        ])?.draw(in: rect, angle: 0)
         NSGraphicsContext.restoreGraphicsState()
     }
 
@@ -115,10 +123,10 @@ private enum ALOMenuBarPill {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byTruncatingTail
         (title as NSString).draw(
-            in: NSRect(x: 34, y: 11, width: 70, height: 7),
+            in: NSRect(x: 34, y: 9, width: 70, height: 11),
             withAttributes: [
-                .font: NSFont.systemFont(ofSize: 5, weight: .semibold),
-                .foregroundColor: NSColor.white.withAlphaComponent(active ? 0.92 : 0.7),
+                .font: NSFont.systemFont(ofSize: 7.5, weight: .semibold),
+                .foregroundColor: NSColor.white.withAlphaComponent(active ? 1 : 0.78),
                 .paragraphStyle: paragraph,
             ]
         )
@@ -129,22 +137,38 @@ private enum ALOMenuBarPill {
         isPlaying: Bool,
         transmitting: Bool,
         receiving: Bool,
-        unreadCount: Int
+        unreadCount: Int,
+        palette: ArtworkPalette?
     ) {
+        let paletteColors = palette?.hexes.map(NSColor.deviceIdentity)
         let controls = [
-            (x: CGFloat(28), symbol: "dot.radiowaves.left.and.right", size: CGFloat(13)),
+            (
+                x: CGFloat(28),
+                symbol: broadcasting ? "dot.radiowaves.left.and.right" : "waveform.badge.mic",
+                size: CGFloat(13)
+            ),
             (x: CGFloat(57), symbol: isPlaying ? "pause.fill" : "play.fill", size: CGFloat(15)),
-            (x: CGFloat(86), symbol: "bubble.left.and.text.bubble.right.fill", size: CGFloat(11)),
+            (
+                x: CGFloat(86),
+                symbol: unreadCount > 0
+                    ? "bubble.left.and.text.bubble.right.fill"
+                    : "bubble.left.and.text.bubble.right",
+                size: CGFloat(12)
+            ),
         ]
 
         for (index, control) in controls.enumerated() {
             let rect = NSRect(x: control.x, y: 2, width: 25, height: 25)
             let highlighted = index == 0 && (broadcasting || transmitting || receiving)
-            let fill = highlighted
-                ? NSColor(red: 0.35, green: 0.68, blue: 0.96, alpha: 0.94)
-                : NSColor(calibratedWhite: 0.78, alpha: 0.9)
+            let source = paletteColors.map { $0[index] }
+                ?? NSColor(calibratedWhite: 0.78, alpha: 1)
+            let fill = controlFill(source, highlighted: highlighted)
             fill.setFill()
             NSBezierPath(roundedRect: rect, xRadius: 14.5, yRadius: 14.5).fill()
+            NSColor.white.withAlphaComponent(highlighted ? 0.42 : 0.2).setStroke()
+            let edge = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 14, yRadius: 14)
+            edge.lineWidth = highlighted ? 1 : 0.5
+            edge.stroke()
 
             let iconRect = NSRect(
                 x: rect.midX - control.size / 2,
@@ -155,7 +179,7 @@ private enum ALOMenuBarPill {
             drawSymbol(
                 control.symbol,
                 in: iconRect,
-                color: highlighted ? .white : .black,
+                color: contrastingForeground(for: fill),
                 pointSize: control.size
             )
         }
@@ -171,20 +195,54 @@ private enum ALOMenuBarPill {
         color: NSColor,
         pointSize: CGFloat
     ) {
-        guard let symbol = NSImage(
+        guard let source = NSImage(
             systemSymbolName: name,
             accessibilityDescription: nil
         )?.withSymbolConfiguration(.init(pointSize: pointSize, weight: .semibold)) else { return }
-        NSGraphicsContext.saveGraphicsState()
-        symbol.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
-        guard let context = NSGraphicsContext.current?.cgContext else {
-            NSGraphicsContext.restoreGraphicsState()
-            return
+
+        let symbol = NSImage(size: source.size, flipped: false) { bounds in
+            source.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1)
+            guard let context = NSGraphicsContext.current?.cgContext else { return false }
+            context.setBlendMode(.sourceIn)
+            context.setFillColor(color.cgColor)
+            context.fill(bounds)
+            return true
         }
-        context.setBlendMode(.sourceAtop)
-        context.setFillColor(color.cgColor)
-        context.fill(rect)
-        NSGraphicsContext.restoreGraphicsState()
+        let scale = min(rect.width / symbol.size.width, rect.height / symbol.size.height)
+        let fitted = NSRect(
+            x: rect.midX - symbol.size.width * scale / 2,
+            y: rect.midY - symbol.size.height * scale / 2,
+            width: symbol.size.width * scale,
+            height: symbol.size.height * scale
+        )
+        symbol.draw(in: fitted, from: .zero, operation: .sourceOver, fraction: 1)
+    }
+
+    private static func controlFill(_ source: NSColor, highlighted: Bool) -> NSColor {
+        let color = source.usingColorSpace(.sRGB) ?? source
+        let luminance = relativeLuminance(of: color)
+        let softened: NSColor
+        if luminance < 0.2 {
+            softened = color.blended(withFraction: highlighted ? 0.18 : 0.3, of: .white) ?? color
+        } else if luminance > 0.78 {
+            softened = color.blended(withFraction: 0.12, of: .black) ?? color
+        } else {
+            softened = color
+        }
+        return softened.withAlphaComponent(0.96)
+    }
+
+    private static func contrastingForeground(for color: NSColor) -> NSColor {
+        relativeLuminance(of: color) > 0.48
+            ? NSColor.black.withAlphaComponent(0.82)
+            : NSColor.white.withAlphaComponent(0.96)
+    }
+
+    private static func relativeLuminance(of color: NSColor) -> CGFloat {
+        let rgb = color.usingColorSpace(.sRGB) ?? color
+        return rgb.redComponent * 0.2126
+            + rgb.greenComponent * 0.7152
+            + rgb.blueComponent * 0.0722
     }
 
     private static func drawBadge(in rect: NSRect) {
@@ -694,6 +752,7 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
     private var unreadCount = 0
     private var artworkData: Data?
     private var artwork: NSImage?
+    private var artworkPalette: ArtworkPalette?
 
     init(model: WERAIViewModel, openMainWindow: @escaping () -> Void) {
         self.model = model
@@ -744,6 +803,13 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
             .store(in: &observers)
         model.$nowPlaying
             .sink { [weak self] media in self?.updateNowPlaying(media) }
+            .store(in: &observers)
+        model.$roomArtworkPalette
+            .removeDuplicates()
+            .sink { [weak self] palette in
+                self?.artworkPalette = palette
+                self?.refreshStatusPill()
+            }
             .store(in: &observers)
         model.$audioIsRendering
             .removeDuplicates()
@@ -911,8 +977,9 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
             transmitting: isTransmittingVoice,
             receiving: isReceivingVoice,
             unreadCount: unreadCount,
-            title: title.flatMap { $0.isEmpty ? nil : $0 } ?? (isLive ? model.roomTitle : "Ready"),
-            artwork: artwork
+            title: title.flatMap { $0.isEmpty ? nil : $0 } ?? (isLive ? "Nothing playing" : "Ready"),
+            artwork: artwork,
+            palette: artworkPalette
         )
         let voiceDetail = isTransmittingVoice
             ? " · speaking"
