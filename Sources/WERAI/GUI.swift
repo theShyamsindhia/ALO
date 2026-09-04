@@ -14,135 +14,46 @@ private enum ALOAppFlavor {
     }
 
     static var displayName: String { isDevelopment ? "ALO Dev" : "ALO" }
-
-    static func statusImage(active: Bool) -> NSImage? {
-        if isDevelopment {
-            return NSImage(
-                systemSymbolName: active ? "hammer.fill" : "hammer",
-                accessibilityDescription: displayName
-            )
-        }
-        return ALOStatusIcon.image(active: active)
-    }
-}
-
-private enum ALOStatusIcon {
-    /// A small, front-facing cat head drawn as a template image. SF Symbols'
-    /// `cat` is a side-on body silhouette, which is hard to identify at menu-bar
-    /// size and does not match ALO's face-forward app mark.
-    static func image(active: Bool) -> NSImage {
-        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
-            guard let context = NSGraphicsContext.current?.cgContext else { return false }
-            context.setLineCap(.round)
-            context.setLineJoin(.round)
-
-            let head = CGMutablePath()
-            head.move(to: CGPoint(x: 2.4, y: 10.8))
-            head.addLine(to: CGPoint(x: 2.4, y: 15.7))
-            head.addLine(to: CGPoint(x: 6.0, y: 13.8))
-            head.addCurve(
-                to: CGPoint(x: 12.0, y: 13.8),
-                control1: CGPoint(x: 7.7, y: 14.8),
-                control2: CGPoint(x: 10.3, y: 14.8)
-            )
-            head.addLine(to: CGPoint(x: 15.6, y: 15.7))
-            head.addLine(to: CGPoint(x: 15.6, y: 10.8))
-            head.addCurve(
-                to: CGPoint(x: 9.0, y: 2.1),
-                control1: CGPoint(x: 15.6, y: 5.2),
-                control2: CGPoint(x: 12.8, y: 2.1)
-            )
-            head.addCurve(
-                to: CGPoint(x: 2.4, y: 10.8),
-                control1: CGPoint(x: 5.2, y: 2.1),
-                control2: CGPoint(x: 2.4, y: 5.2)
-            )
-            head.closeSubpath()
-
-            context.setFillColor(NSColor.black.cgColor)
-            context.setStrokeColor(NSColor.black.cgColor)
-            if active {
-                context.addPath(head)
-                context.fillPath()
-                context.saveGState()
-                context.setBlendMode(.clear)
-                context.fillEllipse(in: CGRect(x: 5.2, y: 8.4, width: 1.8, height: 2.2))
-                context.fillEllipse(in: CGRect(x: 11.0, y: 8.4, width: 1.8, height: 2.2))
-                drawCatMuzzle(in: context)
-                context.restoreGState()
-            } else {
-                context.setLineWidth(1.45)
-                context.addPath(head)
-                context.strokePath()
-                context.fillEllipse(in: CGRect(x: 5.5, y: 8.6, width: 1.3, height: 1.7))
-                context.fillEllipse(in: CGRect(x: 11.2, y: 8.6, width: 1.3, height: 1.7))
-                context.setLineWidth(1.05)
-                drawCatMuzzle(in: context)
-            }
-            return true
-        }
-        image.isTemplate = true
-        image.accessibilityDescription = ALOAppFlavor.displayName
-        return image
-    }
-
-    private static func drawCatMuzzle(in context: CGContext) {
-        let muzzle = CGMutablePath()
-        muzzle.move(to: CGPoint(x: 7.9, y: 6.7))
-        muzzle.addLine(to: CGPoint(x: 9.0, y: 5.9))
-        muzzle.addLine(to: CGPoint(x: 10.1, y: 6.7))
-        muzzle.move(to: CGPoint(x: 9.0, y: 5.9))
-        muzzle.addLine(to: CGPoint(x: 9.0, y: 4.9))
-        context.addPath(muzzle)
-        context.strokePath()
-    }
 }
 
 private enum ALOMenuBarPill {
-    static let statusItemWidth: CGFloat = 54
-    private static let imageSize = NSSize(width: 50, height: 20)
+    static let statusItemWidth: CGFloat = 117
+    private static let imageSize = NSSize(width: 113, height: 29)
+    private static let mediaRect = NSRect(x: 28, y: 2, width: 83, height: 25)
 
     static func image(
         active: Bool,
+        hovered: Bool,
+        broadcasting: Bool,
+        isPlaying: Bool,
         transmitting: Bool,
         receiving: Bool,
-        voiceLevel: Double,
-        unreadCount: Int
+        unreadCount: Int,
+        title: String,
+        artwork: NSImage?
     ) -> NSImage {
-        let level = min(1, max(0, voiceLevel))
         let image = NSImage(size: imageSize, flipped: false) { _ in
-            let pillRect = NSRect(x: 1, y: 1, width: 48, height: 18)
-            let pill = NSBezierPath(roundedRect: pillRect, xRadius: 9, yRadius: 9)
-            NSColor(calibratedWhite: 0.09, alpha: 0.96).setFill()
+            let pillRect = NSRect(origin: .zero, size: imageSize)
+            let pill = NSBezierPath(roundedRect: pillRect, xRadius: 18, yRadius: 18)
+            NSColor.black.setFill()
             pill.fill()
-            NSColor.white.withAlphaComponent(0.16).setStroke()
-            pill.lineWidth = 0.75
-            pill.stroke()
 
-            if let icon = tintedStatusIcon(active: active) {
-                let iconRect = NSRect(x: 7, y: 4, width: 12, height: 12)
-                icon.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: 1)
-            }
+            drawWordmark(active: active)
+            drawArtwork(artwork, in: mediaRect)
 
-            if transmitting || receiving {
-                drawWaveform(level: transmitting ? max(0.58, level) : level)
+            if active && hovered {
+                drawHoverControls(
+                    broadcasting: broadcasting,
+                    isPlaying: isPlaying,
+                    transmitting: transmitting,
+                    receiving: receiving,
+                    unreadCount: unreadCount
+                )
             } else {
-                let dotRect = NSRect(x: 34, y: 8, width: 4, height: 4)
-                let dotColor = active
-                    ? NSColor(red: 0.35, green: 0.68, blue: 0.96, alpha: 0.86)
-                    : NSColor.white.withAlphaComponent(0.32)
-                dotColor.setFill()
-                NSBezierPath(ovalIn: dotRect).fill()
-            }
-
-            if unreadCount > 0 {
-                let badgeRect = NSRect(x: 41, y: 13, width: 6, height: 6)
-                NSColor(calibratedWhite: 0.09, alpha: 1).setStroke()
-                NSColor.systemRed.setFill()
-                let badge = NSBezierPath(ovalIn: badgeRect)
-                badge.fill()
-                badge.lineWidth = 1
-                badge.stroke()
+                drawMediaTitle(title, active: active)
+                if unreadCount > 0 {
+                    drawBadge(in: NSRect(x: 106, y: 21, width: 6, height: 6))
+                }
             }
             return true
         }
@@ -151,35 +62,179 @@ private enum ALOMenuBarPill {
         return image
     }
 
-    private static func tintedStatusIcon(active: Bool) -> NSImage? {
-        guard let source = ALOAppFlavor.statusImage(active: active) else { return nil }
-        let image = NSImage(size: source.size, flipped: false) { rect in
-            guard let context = NSGraphicsContext.current?.cgContext else { return false }
-            source.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
-            context.setBlendMode(.sourceAtop)
-            context.setFillColor(NSColor.white.withAlphaComponent(active ? 0.96 : 0.7).cgColor)
-            context.fill(rect)
-            return true
-        }
-        image.isTemplate = false
-        return image
+    private static func drawWordmark(active: Bool) {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        let font = NSFont(name: "Fredoka One", size: 8)
+            ?? NSFont.systemFont(ofSize: 8, weight: .heavy)
+        ("ALO" as NSString).draw(
+            in: NSRect(x: 4, y: 9, width: 21, height: 11),
+            withAttributes: [
+                .font: font,
+                .foregroundColor: NSColor.white.withAlphaComponent(active ? 1 : 0.72),
+                .paragraphStyle: paragraph,
+            ]
+        )
     }
 
-    private static func drawWaveform(level: Double) {
-        let profiles = [0.54, 1.0, 0.72]
-        let visibleLevel = max(0.18, level)
-        let color = NSColor(red: 0.35, green: 0.68, blue: 0.96, alpha: 0.96)
-        color.setFill()
-        for (index, profile) in profiles.enumerated() {
-            let height = 3 + 7 * visibleLevel * profile
-            let rect = NSRect(
-                x: 29 + CGFloat(index) * 4,
-                y: 10 - height / 2,
-                width: 2,
-                height: height
+    private static func drawArtwork(_ artwork: NSImage?, in rect: NSRect) {
+        let mask = NSBezierPath(roundedRect: rect, xRadius: 14.5, yRadius: 14.5)
+        NSGraphicsContext.saveGraphicsState()
+        mask.addClip()
+        if let artwork, artwork.size.width > 0, artwork.size.height > 0 {
+            let sourceAspect = artwork.size.width / artwork.size.height
+            let targetAspect = rect.width / rect.height
+            var sourceRect = NSRect(origin: .zero, size: artwork.size)
+            if sourceAspect > targetAspect {
+                sourceRect.size.width = artwork.size.height * targetAspect
+                sourceRect.origin.x = (artwork.size.width - sourceRect.width) / 2
+            } else {
+                sourceRect.size.height = artwork.size.width / targetAspect
+                sourceRect.origin.y = (artwork.size.height - sourceRect.height) / 2
+            }
+            artwork.draw(
+                in: rect,
+                from: sourceRect,
+                operation: .sourceOver,
+                fraction: 1,
+                respectFlipped: false,
+                hints: [.interpolation: NSImageInterpolation.high]
             )
-            NSBezierPath(roundedRect: rect, xRadius: 1, yRadius: 1).fill()
+        } else {
+            NSGradient(colors: [
+                NSColor(calibratedRed: 0.18, green: 0.31, blue: 0.46, alpha: 1),
+                NSColor(calibratedRed: 0.55, green: 0.27, blue: 0.34, alpha: 1),
+            ])?.draw(in: rect, angle: 0)
         }
+        NSColor.black.withAlphaComponent(0.16).setFill()
+        rect.fill(using: .sourceOver)
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    private static func drawMediaTitle(_ title: String, active: Bool) {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        (title as NSString).draw(
+            in: NSRect(x: 34, y: 11, width: 70, height: 7),
+            withAttributes: [
+                .font: NSFont.systemFont(ofSize: 5, weight: .semibold),
+                .foregroundColor: NSColor.white.withAlphaComponent(active ? 0.92 : 0.7),
+                .paragraphStyle: paragraph,
+            ]
+        )
+    }
+
+    private static func drawHoverControls(
+        broadcasting: Bool,
+        isPlaying: Bool,
+        transmitting: Bool,
+        receiving: Bool,
+        unreadCount: Int
+    ) {
+        let controls = [
+            (x: CGFloat(28), symbol: "dot.radiowaves.left.and.right", size: CGFloat(13)),
+            (x: CGFloat(57), symbol: isPlaying ? "pause.fill" : "play.fill", size: CGFloat(15)),
+            (x: CGFloat(86), symbol: "bubble.left.and.text.bubble.right.fill", size: CGFloat(11)),
+        ]
+
+        for (index, control) in controls.enumerated() {
+            let rect = NSRect(x: control.x, y: 2, width: 25, height: 25)
+            let highlighted = index == 0 && (broadcasting || transmitting || receiving)
+            let fill = highlighted
+                ? NSColor(red: 0.35, green: 0.68, blue: 0.96, alpha: 0.94)
+                : NSColor(calibratedWhite: 0.78, alpha: 0.9)
+            fill.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: 14.5, yRadius: 14.5).fill()
+
+            let iconRect = NSRect(
+                x: rect.midX - control.size / 2,
+                y: rect.midY - control.size / 2,
+                width: control.size,
+                height: control.size
+            )
+            drawSymbol(
+                control.symbol,
+                in: iconRect,
+                color: highlighted ? .white : .black,
+                pointSize: control.size
+            )
+        }
+
+        if unreadCount > 0 {
+            drawBadge(in: NSRect(x: 106, y: 21, width: 6, height: 6))
+        }
+    }
+
+    private static func drawSymbol(
+        _ name: String,
+        in rect: NSRect,
+        color: NSColor,
+        pointSize: CGFloat
+    ) {
+        guard let symbol = NSImage(
+            systemSymbolName: name,
+            accessibilityDescription: nil
+        )?.withSymbolConfiguration(.init(pointSize: pointSize, weight: .semibold)) else { return }
+        NSGraphicsContext.saveGraphicsState()
+        symbol.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
+        guard let context = NSGraphicsContext.current?.cgContext else {
+            NSGraphicsContext.restoreGraphicsState()
+            return
+        }
+        context.setBlendMode(.sourceAtop)
+        context.setFillColor(color.cgColor)
+        context.fill(rect)
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    private static func drawBadge(in rect: NSRect) {
+        NSColor.black.setStroke()
+        NSColor.systemRed.setFill()
+        let badge = NSBezierPath(ovalIn: rect)
+        badge.fill()
+        badge.lineWidth = 1
+        badge.stroke()
+    }
+}
+
+@MainActor
+private final class ALOStatusHoverView: NSView {
+    var onHoverChanged: (Bool) -> Void
+    private var trackingArea: NSTrackingArea?
+
+    init(frame: NSRect, onHoverChanged: @escaping (Bool) -> Void) {
+        self.onHoverChanged = onHoverChanged
+        super.init(frame: frame)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let trackingArea { removeTrackingArea(trackingArea) }
+        let area = NSTrackingArea(
+            rect: .zero,
+            options: [.inVisibleRect, .mouseEnteredAndExited, .activeAlways],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        trackingArea = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        onHoverChanged(true)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        onHoverChanged(false)
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
     }
 }
 
@@ -630,12 +685,15 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
     private let openMainWindow: () -> Void
     private let statusItem: NSStatusItem
     private let popover = NSPopover()
+    private var hoverView: ALOStatusHoverView?
     private var observers = Set<AnyCancellable>()
     private var isLive = false
+    private var isHovered = false
     private var isTransmittingVoice = false
     private var isReceivingVoice = false
-    private var voiceLevel = 0.0
     private var unreadCount = 0
+    private var artworkData: Data?
+    private var artwork: NSImage?
 
     init(model: WERAIViewModel, openMainWindow: @escaping () -> Void) {
         self.model = model
@@ -647,8 +705,16 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
             button.imagePosition = .imageOnly
             button.imageScaling = .scaleProportionallyDown
             button.target = self
-            button.action = #selector(togglePopover)
+            button.action = #selector(handleStatusItemClick(_:))
             button.sendAction(on: [.leftMouseUp])
+            button.setAccessibilityHelp("Hover for broadcast, playback, and chat controls")
+            button.wantsLayer = true
+            let hoverView = ALOStatusHoverView(frame: button.bounds) { [weak self] hovered in
+                self?.setHovered(hovered)
+            }
+            hoverView.autoresizingMask = [.width, .height]
+            button.addSubview(hoverView)
+            self.hoverView = hoverView
         }
         refreshStatusPill()
 
@@ -676,21 +742,23 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
             .removeDuplicates()
             .sink { [weak self] phase in self?.updatePhase(phase) }
             .store(in: &observers)
-        Publishers.CombineLatest(
-            Publishers.CombineLatest4(
-                model.$walkieTalking.removeDuplicates(),
-                model.$walkieStarting.removeDuplicates(),
-                model.$openLineState.removeDuplicates(),
-                model.$incomingWalkieSpeakerIDs.removeDuplicates()
-            ),
-            model.$incomingWalkieLevels
+        model.$nowPlaying
+            .sink { [weak self] media in self?.updateNowPlaying(media) }
+            .store(in: &observers)
+        model.$audioIsRendering
+            .removeDuplicates()
+            .sink { [weak self] _ in self?.refreshStatusPill() }
+            .store(in: &observers)
+        Publishers.CombineLatest4(
+            model.$walkieTalking.removeDuplicates(),
+            model.$walkieStarting.removeDuplicates(),
+            model.$openLineState.removeDuplicates(),
+            model.$incomingWalkieSpeakerIDs.removeDuplicates()
         )
-        .sink { [weak self] voiceState, levels in
-            let (talking, starting, lineState, incoming) = voiceState
+        .sink { [weak self] talking, starting, lineState, incoming in
             self?.updateVoiceIndicator(
                 transmitting: talking || starting || lineState.isSendingMicrophone,
-                receiving: !incoming.isEmpty,
-                level: levels.values.max() ?? 0
+                receiving: !incoming.isEmpty
             )
         }
         .store(in: &observers)
@@ -743,12 +811,35 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
         model.setMenuBarPopoverVisible(false)
     }
 
-    @objc private func togglePopover() {
+    @objc private func handleStatusItemClick(_ sender: NSStatusBarButton) {
         guard model.phase == .live else {
             openMainWindow()
             return
         }
-        popover.isShown ? closePopover() : showPopover()
+        guard isHovered, let event = NSApp.currentEvent else {
+            popover.isShown ? closePopover() : showPopover()
+            return
+        }
+
+        let point = sender.convert(event.locationInWindow, from: nil)
+        let imageRect = sender.cell?.imageRect(forBounds: sender.bounds) ?? sender.bounds
+        guard imageRect.contains(point) else {
+            popover.isShown ? closePopover() : showPopover()
+            return
+        }
+        let componentX = (point.x - imageRect.minX) / max(1, imageRect.width) * 113
+        switch componentX {
+        case ..<28:
+            popover.isShown ? closePopover() : showPopover()
+        case ..<57:
+            model.toggleBroadcasting()
+            DispatchQueue.main.async { [weak self] in self?.refreshStatusPill() }
+        case ..<86:
+            model.toggleRoomPlayback()
+        default:
+            if model.floatingSection != .chat { model.showChat() }
+            showPopover()
+        }
     }
 
     private var panelSize: NSSize {
@@ -782,20 +873,46 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
         refreshStatusPill()
     }
 
-    private func updateVoiceIndicator(transmitting: Bool, receiving: Bool, level: Double) {
-        isTransmittingVoice = transmitting
-        isReceivingVoice = receiving
-        voiceLevel = level
+    private func updateNowPlaying(_ media: NowPlayingMedia) {
+        if artworkData != media.artworkData {
+            artworkData = media.artworkData
+            artwork = media.artworkData.flatMap(NSImage.init(data:))
+        }
         refreshStatusPill()
     }
 
-    private func refreshStatusPill() {
-        statusItem.button?.image = ALOMenuBarPill.image(
+    private func updateVoiceIndicator(transmitting: Bool, receiving: Bool) {
+        isTransmittingVoice = transmitting
+        isReceivingVoice = receiving
+        refreshStatusPill()
+    }
+
+    private func setHovered(_ hovered: Bool) {
+        guard isHovered != hovered else { return }
+        isHovered = hovered
+        refreshStatusPill(animated: true)
+    }
+
+    private func refreshStatusPill(animated: Bool = false) {
+        guard let button = statusItem.button else { return }
+        if animated, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            let transition = CATransition()
+            transition.type = .fade
+            transition.duration = 0.12
+            transition.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            button.layer?.add(transition, forKey: "alo-status-hover")
+        }
+        let title = model.nowPlaying.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        button.image = ALOMenuBarPill.image(
             active: isLive,
+            hovered: isHovered,
+            broadcasting: model.isHost,
+            isPlaying: model.roomIsPlaying,
             transmitting: isTransmittingVoice,
             receiving: isReceivingVoice,
-            voiceLevel: voiceLevel,
-            unreadCount: unreadCount
+            unreadCount: unreadCount,
+            title: title.flatMap { $0.isEmpty ? nil : $0 } ?? (isLive ? model.roomTitle : "Ready"),
+            artwork: artwork
         )
         let voiceDetail = isTransmittingVoice
             ? " · speaking"
@@ -804,8 +921,8 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
             ? ""
             : " · \(unreadCount) unread message\(unreadCount == 1 ? "" : "s")"
         let detail = ALOAppFlavor.displayName + voiceDetail + unreadDetail
-        statusItem.button?.toolTip = detail
-        statusItem.button?.setAccessibilityLabel(detail)
+        button.toolTip = detail
+        button.setAccessibilityLabel(detail)
     }
 }
 
