@@ -16,57 +16,77 @@ private enum ALOAppFlavor {
     static var displayName: String { isDevelopment ? "ALO Dev" : "ALO" }
 }
 
-enum ALOMenuBarPill {
-    enum HoverAction: Equatable {
-        case broadcast
-        case playback
-        case chat
+enum ALOMenuBarRecord {
+    struct TrackIdentity: Equatable {
+        let title: String?
+        let artist: String?
+        let album: String?
+        let sourceURL: String?
     }
 
-    static let statusItemWidth: CGFloat = 117
-    private static let imageSize = NSSize(width: 113, height: 29)
-    private static let mediaRect = NSRect(x: 28, y: 2, width: 83, height: 25)
-    private static let controlSize: CGFloat = 25
-    private static let iconPointSize: CGFloat = 12
+    static let statusItemWidth: CGFloat = 32
+    static let recordSize = NSSize(width: 27, height: 27)
 
-    static func image(
-        active: Bool,
-        hovered: Bool,
-        broadcasting: Bool,
-        isPlaying: Bool,
-        canControlPlayback: Bool,
-        transmitting: Bool,
-        receiving: Bool,
-        unreadCount: Int,
-        title: String,
-        artwork: NSImage?,
-        palette: ArtworkPalette?
-    ) -> NSImage {
-        let image = NSImage(size: imageSize, flipped: false) { _ in
-            let pillRect = NSRect(origin: .zero, size: imageSize)
-            let pill = NSBezierPath(roundedRect: pillRect, xRadius: 18, yRadius: 18)
-            NSColor.black.setFill()
-            pill.fill()
+    static func trackIdentity(for media: NowPlayingMedia) -> TrackIdentity? {
+        func cleaned(_ value: String?) -> String? {
+            guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+                return nil
+            }
+            return value
+        }
 
-            drawPeopleIcon(active: active)
-            drawArtwork(artwork, palette: palette, in: mediaRect)
+        let identity = TrackIdentity(
+            title: cleaned(media.title),
+            artist: cleaned(media.artist),
+            album: cleaned(media.album),
+            sourceURL: cleaned(media.sourceURL)
+        )
+        guard identity.title != nil
+                || identity.artist != nil
+                || identity.album != nil
+                || identity.sourceURL != nil
+        else { return nil }
+        return identity
+    }
 
-            if active && hovered {
-                drawHoverControls(
-                    broadcasting: broadcasting,
-                    isPlaying: isPlaying,
-                    canControlPlayback: canControlPlayback,
-                    transmitting: transmitting,
-                    receiving: receiving,
-                    unreadCount: unreadCount,
-                    palette: palette
+    static func shouldFlip(from previous: TrackIdentity?, to next: TrackIdentity?) -> Bool {
+        guard let previous, let next else { return false }
+        return previous != next
+    }
+
+    static func image(active: Bool, artwork: NSImage?, palette: ArtworkPalette?) -> NSImage {
+        let image = NSImage(size: recordSize, flipped: false) { bounds in
+            let disc = NSBezierPath(ovalIn: bounds.insetBy(dx: 0.5, dy: 0.5))
+            NSGraphicsContext.saveGraphicsState()
+            disc.addClip()
+
+            if let artwork, artwork.size.width > 0, artwork.size.height > 0 {
+                artwork.draw(
+                    in: bounds,
+                    from: croppedSourceRect(for: artwork, destination: bounds),
+                    operation: .sourceOver,
+                    fraction: active ? 1 : 0.72,
+                    respectFlipped: false,
+                    hints: [.interpolation: NSImageInterpolation.high]
                 )
             } else {
-                drawMediaTitle(title, active: active)
-                if unreadCount > 0 {
-                    drawBadge(in: NSRect(x: 106, y: 21, width: 6, height: 6))
-                }
+                (palette?.hexes.first.map(NSColor.deviceIdentity)
+                    ?? NSColor(calibratedWhite: active ? 0.16 : 0.11, alpha: 1)).setFill()
+                bounds.fill()
+                drawSymbol(active ? "music.note" : "person.2.fill", in: bounds)
             }
+
+            NSColor.black.withAlphaComponent(0.13).setStroke()
+            for inset in [CGFloat(4.5), 8] {
+                let groove = NSBezierPath(ovalIn: bounds.insetBy(dx: inset, dy: inset))
+                groove.lineWidth = 0.5
+                groove.stroke()
+            }
+            NSGraphicsContext.restoreGraphicsState()
+
+            NSColor.white.withAlphaComponent(0.3).setStroke()
+            disc.lineWidth = 0.75
+            disc.stroke()
             return true
         }
         image.isTemplate = false
@@ -74,232 +94,103 @@ enum ALOMenuBarPill {
         return image
     }
 
-    private static func drawPeopleIcon(active: Bool) {
-        drawSymbol(
-            "person.2.fill",
-            in: NSRect(x: 8, y: 8.5, width: iconPointSize, height: iconPointSize),
-            color: NSColor.white.withAlphaComponent(active ? 1 : 0.72),
-            pointSize: iconPointSize
-        )
-    }
-
-    private static func drawArtwork(
-        _ artwork: NSImage?,
-        palette: ArtworkPalette?,
-        in rect: NSRect
-    ) {
-        let mask = NSBezierPath(roundedRect: rect, xRadius: 14.5, yRadius: 14.5)
-        NSGraphicsContext.saveGraphicsState()
-        mask.addClip()
-        if let artwork, artwork.size.width > 0, artwork.size.height > 0 {
-            let sourceAspect = artwork.size.width / artwork.size.height
-            let targetAspect = rect.width / rect.height
-            var sourceRect = NSRect(origin: .zero, size: artwork.size)
-            if sourceAspect > targetAspect {
-                sourceRect.size.width = artwork.size.height * targetAspect
-                sourceRect.origin.x = (artwork.size.width - sourceRect.width) / 2
-            } else {
-                sourceRect.size.height = artwork.size.width / targetAspect
-                sourceRect.origin.y = (artwork.size.height - sourceRect.height) / 2
-            }
-            artwork.draw(
-                in: rect,
-                from: sourceRect,
-                operation: .sourceOver,
-                fraction: 1,
-                respectFlipped: false,
-                hints: [.interpolation: NSImageInterpolation.high]
-            )
-        } else if let palette {
-            NSGradient(colors: palette.hexes.map(NSColor.deviceIdentity))?.draw(in: rect, angle: 0)
+    private static func croppedSourceRect(for image: NSImage, destination: NSRect) -> NSRect {
+        let sourceAspect = image.size.width / image.size.height
+        let destinationAspect = destination.width / destination.height
+        var source = NSRect(origin: .zero, size: image.size)
+        if sourceAspect > destinationAspect {
+            source.size.width = image.size.height * destinationAspect
+            source.origin.x = (image.size.width - source.width) / 2
         } else {
-            NSColor(calibratedWhite: 0.18, alpha: 1).setFill()
-            rect.fill()
+            source.size.height = image.size.width / destinationAspect
+            source.origin.y = (image.size.height - source.height) / 2
         }
-        NSGradient(colors: [
-            NSColor.black.withAlphaComponent(0.48),
-            NSColor.black.withAlphaComponent(0.08),
-        ])?.draw(in: rect, angle: 0)
-        NSGraphicsContext.restoreGraphicsState()
+        return source
     }
 
-    private static func drawMediaTitle(_ title: String, active: Bool) {
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineBreakMode = .byTruncatingTail
-        (title as NSString).draw(
-            in: NSRect(x: 34, y: 9, width: 70, height: 11),
-            withAttributes: [
-                .font: NSFont.systemFont(ofSize: 7.5, weight: .semibold),
-                .foregroundColor: NSColor.white.withAlphaComponent(active ? 1 : 0.78),
-                .paragraphStyle: paragraph,
-            ]
-        )
-    }
-
-    private static func drawHoverControls(
-        broadcasting: Bool,
-        isPlaying: Bool,
-        canControlPlayback: Bool,
-        transmitting: Bool,
-        receiving: Bool,
-        unreadCount: Int,
-        palette: ArtworkPalette?
-    ) {
-        let paletteColors = palette?.hexes.map(NSColor.deviceIdentity)
-        let controls = hoverControls(
-            broadcasting: broadcasting,
-            isPlaying: isPlaying,
-            canControlPlayback: canControlPlayback,
-            unreadCount: unreadCount
-        )
-
-        for control in controls {
-            let rect = NSRect(x: control.x, y: 2, width: controlSize, height: controlSize)
-            let highlighted = control.action == .broadcast && (broadcasting || transmitting || receiving)
-            let source = paletteColors.map { $0[control.paletteIndex] }
-                ?? NSColor(calibratedWhite: 0.78, alpha: 1)
-            let fill = controlFill(source, highlighted: highlighted)
-            fill.setFill()
-            NSBezierPath(roundedRect: rect, xRadius: 14.5, yRadius: 14.5).fill()
-            NSColor.white.withAlphaComponent(highlighted ? 0.42 : 0.2).setStroke()
-            let edge = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 14, yRadius: 14)
-            edge.lineWidth = highlighted ? 1 : 0.5
-            edge.stroke()
-
-            let iconRect = NSRect(
-                x: rect.midX - iconPointSize / 2,
-                y: rect.midY - iconPointSize / 2,
-                width: iconPointSize,
-                height: iconPointSize
-            )
-            drawSymbol(
-                control.symbol,
-                in: iconRect,
-                color: contrastingForeground(for: fill),
-                pointSize: iconPointSize
-            )
-        }
-
-        if unreadCount > 0 {
-            drawBadge(in: NSRect(x: 106, y: 21, width: 6, height: 6))
-        }
-    }
-
-    static func hoverAction(at x: CGFloat, canControlPlayback: Bool) -> HoverAction? {
-        controlPositions(canControlPlayback: canControlPlayback).first { position in
-            x >= position.x && x < position.x + controlSize
-        }?.action
-    }
-
-    private static func hoverControls(
-        broadcasting: Bool,
-        isPlaying: Bool,
-        canControlPlayback: Bool,
-        unreadCount: Int
-    ) -> [(action: HoverAction, x: CGFloat, symbol: String, paletteIndex: Int)] {
-        controlPositions(canControlPlayback: canControlPlayback).map { position in
-            let symbol: String
-            let paletteIndex: Int
-            switch position.action {
-            case .broadcast:
-                symbol = broadcasting ? "dot.radiowaves.left.and.right" : "waveform.badge.mic"
-                paletteIndex = 0
-            case .playback:
-                symbol = isPlaying ? "pause.fill" : "play.fill"
-                paletteIndex = 1
-            case .chat:
-                symbol = unreadCount > 0
-                    ? "bubble.left.and.text.bubble.right.fill"
-                    : "bubble.left.and.text.bubble.right"
-                paletteIndex = 2
-            }
-            return (position.action, position.x, symbol, paletteIndex)
-        }
-    }
-
-    private static func controlPositions(
-        canControlPlayback: Bool
-    ) -> [(action: HoverAction, x: CGFloat)] {
-        if canControlPlayback {
-            return [(.broadcast, 28), (.playback, 57), (.chat, 86)]
-        }
-        return [(.broadcast, 42), (.chat, 71)]
-    }
-
-    private static func drawSymbol(
-        _ name: String,
-        in rect: NSRect,
-        color: NSColor,
-        pointSize: CGFloat
-    ) {
+    private static func drawSymbol(_ name: String, in bounds: NSRect) {
         guard let source = NSImage(
             systemSymbolName: name,
             accessibilityDescription: nil
-        )?.withSymbolConfiguration(.init(pointSize: pointSize, weight: .semibold)) else { return }
+        )?.withSymbolConfiguration(.init(pointSize: 11, weight: .semibold)) else { return }
 
-        let symbol = NSImage(size: source.size, flipped: false) { bounds in
-            source.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1)
+        let symbol = NSImage(size: source.size, flipped: false) { symbolBounds in
+            source.draw(in: symbolBounds, from: .zero, operation: .sourceOver, fraction: 1)
             guard let context = NSGraphicsContext.current?.cgContext else { return false }
             context.setBlendMode(.sourceIn)
-            context.setFillColor(color.cgColor)
-            context.fill(bounds)
+            context.setFillColor(NSColor.white.withAlphaComponent(0.88).cgColor)
+            context.fill(symbolBounds)
             return true
         }
-        let scale = min(rect.width / symbol.size.width, rect.height / symbol.size.height)
+        let scale = min(12 / symbol.size.width, 12 / symbol.size.height)
         let fitted = NSRect(
-            x: rect.midX - symbol.size.width * scale / 2,
-            y: rect.midY - symbol.size.height * scale / 2,
+            x: bounds.midX - symbol.size.width * scale / 2,
+            y: bounds.midY - symbol.size.height * scale / 2,
             width: symbol.size.width * scale,
             height: symbol.size.height * scale
         )
-        symbol.draw(in: fitted, from: .zero, operation: .sourceOver, fraction: 1)
-    }
-
-    private static func controlFill(_ source: NSColor, highlighted: Bool) -> NSColor {
-        let color = source.usingColorSpace(.sRGB) ?? source
-        let luminance = relativeLuminance(of: color)
-        let softened: NSColor
-        if luminance < 0.2 {
-            softened = color.blended(withFraction: highlighted ? 0.18 : 0.3, of: .white) ?? color
-        } else if luminance > 0.78 {
-            softened = color.blended(withFraction: 0.12, of: .black) ?? color
-        } else {
-            softened = color
-        }
-        return softened.withAlphaComponent(0.96)
-    }
-
-    private static func contrastingForeground(for color: NSColor) -> NSColor {
-        relativeLuminance(of: color) > 0.48
-            ? NSColor.black.withAlphaComponent(0.82)
-            : NSColor.white.withAlphaComponent(0.96)
-    }
-
-    private static func relativeLuminance(of color: NSColor) -> CGFloat {
-        let rgb = color.usingColorSpace(.sRGB) ?? color
-        return rgb.redComponent * 0.2126
-            + rgb.greenComponent * 0.7152
-            + rgb.blueComponent * 0.0722
-    }
-
-    private static func drawBadge(in rect: NSRect) {
-        NSColor.black.setStroke()
-        NSColor.systemRed.setFill()
-        let badge = NSBezierPath(ovalIn: rect)
-        badge.fill()
-        badge.lineWidth = 1
-        badge.stroke()
+        symbol.draw(
+            in: fitted,
+            from: .zero,
+            operation: .sourceOver,
+            fraction: 1,
+            respectFlipped: false,
+            hints: [.interpolation: NSImageInterpolation.high]
+        )
     }
 }
 
 @MainActor
-private final class ALOStatusHoverView: NSView {
-    var onHoverChanged: (Bool) -> Void
-    private var trackingArea: NSTrackingArea?
+private final class ALOStatusRecordView: NSView {
+    private static let spinKey = "alo-record-spin"
+    private static let flipKey = "alo-record-flip"
 
-    init(frame: NSRect, onHoverChanged: @escaping (Bool) -> Void) {
-        self.onHoverChanged = onHoverChanged
-        super.init(frame: frame)
+    private let flipLayer = CALayer()
+    private let artworkLayer = CALayer()
+    private let edgeLayer = CALayer()
+    private let spindleLayer = CALayer()
+    private let badgeLayer = CALayer()
+    private var lastIdentity: ALOMenuBarRecord.TrackIdentity?
+    private weak var lastArtwork: NSImage?
+    private var lastPalette: ArtworkPalette?
+    private var lastActive = false
+    private var hasImage = false
+    private var isSpinning = false
+    private var isWaitingForFlipSwap = false
+    private var flipTargetImage: NSImage?
+    private var flipGeneration = 0
+    private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.masksToBounds = false
+
+        var perspective = CATransform3DIdentity
+        perspective.m34 = -1 / 180
+        layer?.sublayerTransform = perspective
+
+        artworkLayer.contentsGravity = .resizeAspectFill
+        artworkLayer.masksToBounds = true
+        flipLayer.addSublayer(artworkLayer)
+        layer?.addSublayer(flipLayer)
+
+        edgeLayer.borderColor = NSColor.white.withAlphaComponent(0.16).cgColor
+        edgeLayer.borderWidth = 0.5
+        layer?.addSublayer(edgeLayer)
+
+        spindleLayer.backgroundColor = NSColor(calibratedWhite: 0.08, alpha: 0.9).cgColor
+        spindleLayer.borderColor = NSColor.white.withAlphaComponent(0.7).cgColor
+        spindleLayer.borderWidth = 0.75
+        layer?.addSublayer(spindleLayer)
+
+        badgeLayer.backgroundColor = NSColor.systemRed.cgColor
+        badgeLayer.borderColor = NSColor(calibratedWhite: 0.08, alpha: 1).cgColor
+        badgeLayer.borderWidth = 1
+        badgeLayer.isHidden = true
+        layer?.addSublayer(badgeLayer)
+
+        installSpinAnimation()
     }
 
     @available(*, unavailable)
@@ -307,29 +198,182 @@ private final class ALOStatusHoverView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let trackingArea { removeTrackingArea(trackingArea) }
-        let area = NSTrackingArea(
-            rect: .zero,
-            options: [.inVisibleRect, .mouseEnteredAndExited, .activeAlways],
-            owner: self,
-            userInfo: nil
+    override func layout() {
+        super.layout()
+        let diameter = min(ALOMenuBarRecord.recordSize.width, max(0, bounds.height - 1))
+        let discFrame = NSRect(
+            x: floor((bounds.width - diameter) / 2),
+            y: floor((bounds.height - diameter) / 2),
+            width: diameter,
+            height: diameter
         )
-        addTrackingArea(area)
-        trackingArea = area
-    }
 
-    override func mouseEntered(with event: NSEvent) {
-        onHoverChanged(true)
-    }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        flipLayer.frame = discFrame
+        artworkLayer.frame = NSRect(origin: .zero, size: discFrame.size)
+        artworkLayer.cornerRadius = diameter / 2
+        edgeLayer.frame = discFrame
+        edgeLayer.cornerRadius = diameter / 2
 
-    override func mouseExited(with event: NSEvent) {
-        onHoverChanged(false)
+        let spindleSize: CGFloat = 4.5
+        spindleLayer.frame = NSRect(
+            x: discFrame.midX - spindleSize / 2,
+            y: discFrame.midY - spindleSize / 2,
+            width: spindleSize,
+            height: spindleSize
+        )
+        spindleLayer.cornerRadius = spindleSize / 2
+
+        let badgeSize: CGFloat = 7
+        badgeLayer.frame = NSRect(
+            x: discFrame.maxX - badgeSize + 1,
+            y: discFrame.maxY - badgeSize + 1,
+            width: badgeSize,
+            height: badgeSize
+        )
+        badgeLayer.cornerRadius = badgeSize / 2
+        CATransaction.commit()
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         nil
+    }
+
+    func update(
+        active: Bool,
+        playing: Bool,
+        unreadCount: Int,
+        media: NowPlayingMedia,
+        artwork: NSImage?,
+        palette: ArtworkPalette?
+    ) {
+        let identity = ALOMenuBarRecord.trackIdentity(for: media)
+        let trackChanged = active && ALOMenuBarRecord.shouldFlip(from: lastIdentity, to: identity)
+        let imageChanged = !hasImage || lastActive != active || lastArtwork !== artwork || lastPalette != palette
+        lastIdentity = identity
+        lastActive = active
+        lastArtwork = artwork
+        lastPalette = palette
+
+        if trackChanged || imageChanged {
+            let image = ALOMenuBarRecord.image(active: active, artwork: artwork, palette: palette)
+            if trackChanged && !reduceMotion {
+                flip(to: image)
+            } else if isWaitingForFlipSwap {
+                flipTargetImage = image
+            } else {
+                setImage(image, crossfade: hasImage && !reduceMotion)
+            }
+            hasImage = true
+        }
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        badgeLayer.isHidden = unreadCount == 0
+        CATransaction.commit()
+        setSpinning(active && playing && artwork != nil && !reduceMotion)
+    }
+
+    func setReduceMotion(_ enabled: Bool) {
+        guard reduceMotion != enabled else { return }
+        reduceMotion = enabled
+        if enabled {
+            flipGeneration &+= 1
+            isWaitingForFlipSwap = false
+            flipTargetImage = nil
+            hasImage = false
+            flipLayer.removeAnimation(forKey: Self.flipKey)
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            flipLayer.transform = CATransform3DIdentity
+            CATransaction.commit()
+            setSpinning(false)
+        }
+    }
+
+    private func setImage(_ image: NSImage, crossfade: Bool) {
+        guard let contents = cgImage(from: image) else { return }
+        if crossfade {
+            let transition = CATransition()
+            transition.type = .fade
+            transition.duration = 0.14
+            transition.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            artworkLayer.add(transition, forKey: "alo-record-artwork")
+        }
+        artworkLayer.contents = contents
+    }
+
+    private func flip(to image: NSImage) {
+        flipGeneration &+= 1
+        let generation = flipGeneration
+        isWaitingForFlipSwap = true
+        flipTargetImage = image
+        flipLayer.removeAnimation(forKey: Self.flipKey)
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        flipLayer.transform = CATransform3DMakeRotation(.pi / 2, 0, 1, 0)
+        CATransaction.commit()
+
+        let flipOut = CABasicAnimation(keyPath: "transform.rotation.y")
+        flipOut.fromValue = 0
+        flipOut.toValue = CGFloat.pi / 2
+        flipOut.duration = 0.16
+        flipOut.timingFunction = CAMediaTimingFunction(name: .easeIn)
+        flipLayer.add(flipOut, forKey: Self.flipKey)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + flipOut.duration) { [weak self] in
+            guard let self, self.flipGeneration == generation else { return }
+            self.setImage(self.flipTargetImage ?? image, crossfade: false)
+            self.flipTargetImage = nil
+            self.isWaitingForFlipSwap = false
+
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            self.flipLayer.transform = CATransform3DIdentity
+            CATransaction.commit()
+
+            let flipIn = CABasicAnimation(keyPath: "transform.rotation.y")
+            flipIn.fromValue = -CGFloat.pi / 2
+            flipIn.toValue = 0
+            flipIn.duration = 0.2
+            flipIn.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            self.flipLayer.add(flipIn, forKey: Self.flipKey)
+        }
+    }
+
+    private func installSpinAnimation() {
+        let animation = CABasicAnimation(keyPath: "transform.rotation.z")
+        animation.fromValue = 0
+        animation.toValue = CGFloat.pi * 2
+        animation.duration = 9
+        animation.repeatCount = .infinity
+        animation.timingFunction = CAMediaTimingFunction(name: .linear)
+        artworkLayer.add(animation, forKey: Self.spinKey)
+        artworkLayer.speed = 0
+        artworkLayer.timeOffset = 0
+    }
+
+    private func setSpinning(_ spinning: Bool) {
+        guard spinning != isSpinning else { return }
+        isSpinning = spinning
+        if spinning {
+            let pausedTime = artworkLayer.timeOffset
+            artworkLayer.speed = 1
+            artworkLayer.timeOffset = 0
+            artworkLayer.beginTime = 0
+            artworkLayer.beginTime = artworkLayer.convertTime(CACurrentMediaTime(), from: nil) - pausedTime
+        } else {
+            let pausedTime = artworkLayer.convertTime(CACurrentMediaTime(), from: nil)
+            artworkLayer.speed = 0
+            artworkLayer.timeOffset = pausedTime
+        }
+    }
+
+    private func cgImage(from image: NSImage) -> CGImage? {
+        var rect = NSRect(origin: .zero, size: image.size)
+        return image.cgImage(forProposedRect: &rect, context: nil, hints: nil)
     }
 }
 
@@ -780,10 +824,9 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
     private let openMainWindow: () -> Void
     private let statusItem: NSStatusItem
     private let popover = NSPopover()
-    private var hoverView: ALOStatusHoverView?
+    private var recordView: ALOStatusRecordView?
     private var observers = Set<AnyCancellable>()
     private var isLive = false
-    private var isHovered = false
     private var isTransmittingVoice = false
     private var isReceivingVoice = false
     private var unreadCount = 0
@@ -794,25 +837,23 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
     init(model: WERAIViewModel, openMainWindow: @escaping () -> Void) {
         self.model = model
         self.openMainWindow = openMainWindow
-        statusItem = NSStatusBar.system.statusItem(withLength: ALOMenuBarPill.statusItemWidth)
+        statusItem = NSStatusBar.system.statusItem(withLength: ALOMenuBarRecord.statusItemWidth)
         super.init()
         statusItem.button?.toolTip = ALOAppFlavor.displayName
         if let button = statusItem.button {
-            button.imagePosition = .imageOnly
-            button.imageScaling = .scaleProportionallyDown
+            button.image = nil
+            button.title = ""
             button.target = self
             button.action = #selector(handleStatusItemClick(_:))
             button.sendAction(on: [.leftMouseUp])
-            button.setAccessibilityHelp("Hover for broadcast, playback, and chat controls")
+            button.setAccessibilityHelp("Click to open room controls")
             button.wantsLayer = true
-            let hoverView = ALOStatusHoverView(frame: button.bounds) { [weak self] hovered in
-                self?.setHovered(hovered)
-            }
-            hoverView.autoresizingMask = [.width, .height]
-            button.addSubview(hoverView)
-            self.hoverView = hoverView
+            let recordView = ALOStatusRecordView(frame: button.bounds)
+            recordView.autoresizingMask = [.width, .height]
+            button.addSubview(recordView)
+            self.recordView = recordView
         }
-        refreshStatusPill()
+        refreshStatusRecord()
 
         popover.behavior = .transient
         popover.animates = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -845,12 +886,12 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
             .removeDuplicates()
             .sink { [weak self] palette in
                 self?.artworkPalette = palette
-                self?.refreshStatusPill()
+                self?.refreshStatusRecord()
             }
             .store(in: &observers)
         model.$audioIsRendering
             .removeDuplicates()
-            .sink { [weak self] _ in self?.refreshStatusPill() }
+            .sink { [weak self] _ in self?.refreshStatusRecord() }
             .store(in: &observers)
         Publishers.CombineLatest4(
             model.$walkieTalking.removeDuplicates(),
@@ -919,37 +960,7 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
             openMainWindow()
             return
         }
-        guard isHovered, let event = NSApp.currentEvent else {
-            popover.isShown ? closePopover() : showPopover()
-            return
-        }
-
-        let point = sender.convert(event.locationInWindow, from: nil)
-        let imageRect = sender.cell?.imageRect(forBounds: sender.bounds) ?? sender.bounds
-        guard imageRect.contains(point) else {
-            popover.isShown ? closePopover() : showPopover()
-            return
-        }
-        let componentX = (point.x - imageRect.minX) / max(1, imageRect.width) * 113
-        guard componentX >= 28,
-              let action = ALOMenuBarPill.hoverAction(
-                  at: componentX,
-                  canControlPlayback: model.canControlRoomPlayback
-              )
-        else {
-            popover.isShown ? closePopover() : showPopover()
-            return
-        }
-        switch action {
-        case .broadcast:
-            model.toggleBroadcasting()
-            DispatchQueue.main.async { [weak self] in self?.refreshStatusPill() }
-        case .playback:
-            model.toggleRoomPlayback()
-        case .chat:
-            if model.floatingSection != .chat { model.showChat() }
-            showPopover()
-        }
+        popover.isShown ? closePopover() : showPopover()
     }
 
     private var panelSize: NSSize {
@@ -969,18 +980,21 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
     }
 
     private func syncMotionPreference() {
-        popover.animates = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        popover.animates = !reduceMotion
+        recordView?.setReduceMotion(reduceMotion)
+        refreshStatusRecord()
     }
 
     private func updateBadge(count: Int) {
         unreadCount = count
-        refreshStatusPill()
+        refreshStatusRecord()
     }
 
     private func updatePhase(_ phase: WERAIViewModel.Phase) {
         if phase != .live { closePopover() }
         isLive = phase == .live
-        refreshStatusPill()
+        refreshStatusRecord()
     }
 
     private func updateNowPlaying(_ media: NowPlayingMedia) {
@@ -988,51 +1002,36 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
             artworkData = media.artworkData
             artwork = media.artworkData.flatMap(NSImage.init(data:))
         }
-        refreshStatusPill()
+        refreshStatusRecord()
     }
 
     private func updateVoiceIndicator(transmitting: Bool, receiving: Bool) {
         isTransmittingVoice = transmitting
         isReceivingVoice = receiving
-        refreshStatusPill()
+        refreshStatusRecord()
     }
 
-    private func setHovered(_ hovered: Bool) {
-        guard isHovered != hovered else { return }
-        isHovered = hovered
-        refreshStatusPill(animated: true)
-    }
-
-    private func refreshStatusPill(animated: Bool = false) {
+    private func refreshStatusRecord() {
         guard let button = statusItem.button else { return }
-        if animated, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
-            let transition = CATransition()
-            transition.type = .fade
-            transition.duration = 0.12
-            transition.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            button.layer?.add(transition, forKey: "alo-status-hover")
-        }
         let title = model.nowPlaying.title?.trimmingCharacters(in: .whitespacesAndNewlines)
-        button.image = ALOMenuBarPill.image(
+        recordView?.update(
             active: isLive,
-            hovered: isHovered,
-            broadcasting: model.isHost,
-            isPlaying: model.roomIsPlaying,
-            canControlPlayback: model.canControlRoomPlayback,
-            transmitting: isTransmittingVoice,
-            receiving: isReceivingVoice,
+            playing: model.roomIsPlaying,
             unreadCount: unreadCount,
-            title: title.flatMap { $0.isEmpty ? nil : $0 } ?? (isLive ? "Nothing playing" : "Ready"),
+            media: model.nowPlaying,
             artwork: artwork,
             palette: artworkPalette
         )
+        let playbackDetail = title.flatMap { $0.isEmpty ? nil : $0 }.map {
+            " · \($0) · \(model.roomIsPlaying ? "playing" : "paused")"
+        } ?? ""
         let voiceDetail = isTransmittingVoice
             ? " · speaking"
             : isReceivingVoice ? " · receiving voice" : ""
         let unreadDetail = unreadCount == 0
             ? ""
             : " · \(unreadCount) unread message\(unreadCount == 1 ? "" : "s")"
-        let detail = ALOAppFlavor.displayName + voiceDetail + unreadDetail
+        let detail = ALOAppFlavor.displayName + playbackDetail + voiceDetail + unreadDetail
         button.toolTip = detail
         button.setAccessibilityLabel(detail)
     }

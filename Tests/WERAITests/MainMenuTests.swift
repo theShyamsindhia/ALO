@@ -1,50 +1,48 @@
 import AppKit
 import Testing
 @testable import WERAI
+import WERAICore
 
 @MainActor
 struct MainMenuTests {
-    @Test("Menu bar transport exists only when room media is controllable")
-    func menuBarPillControls() {
-        #expect(ALOMenuBarPill.hoverAction(at: 40, canControlPlayback: true) == .broadcast)
-        #expect(ALOMenuBarPill.hoverAction(at: 69, canControlPlayback: true) == .playback)
-        #expect(ALOMenuBarPill.hoverAction(at: 98, canControlPlayback: true) == .chat)
+    @Test("Menu bar record flips only when the track identity changes")
+    func menuBarRecordIdentity() throws {
+        let paused = NowPlayingMedia(
+            title: "  Water Flow  ",
+            artist: "Yosi Horikawa",
+            album: "Spaces",
+            isPlaying: false
+        )
+        let playing = NowPlayingMedia(
+            title: "Water Flow",
+            artist: "Yosi Horikawa",
+            album: "Spaces",
+            isPlaying: true
+        )
+        let next = NowPlayingMedia(title: "Bubbles", artist: "Yosi Horikawa", album: "Wandering")
 
-        #expect(ALOMenuBarPill.hoverAction(at: 54, canControlPlayback: false) == .broadcast)
-        #expect(ALOMenuBarPill.hoverAction(at: 70, canControlPlayback: false) == nil)
-        #expect(ALOMenuBarPill.hoverAction(at: 83, canControlPlayback: false) == .chat)
+        let pausedIdentity = try #require(ALOMenuBarRecord.trackIdentity(for: paused))
+        let playingIdentity = try #require(ALOMenuBarRecord.trackIdentity(for: playing))
+        let nextIdentity = try #require(ALOMenuBarRecord.trackIdentity(for: next))
+        #expect(pausedIdentity == playingIdentity)
+        #expect(!ALOMenuBarRecord.shouldFlip(from: nil, to: pausedIdentity))
+        #expect(!ALOMenuBarRecord.shouldFlip(from: pausedIdentity, to: playingIdentity))
+        #expect(ALOMenuBarRecord.shouldFlip(from: playingIdentity, to: nextIdentity))
+        #expect(ALOMenuBarRecord.trackIdentity(for: NowPlayingMedia()) == nil)
     }
 
-    @Test("Menu bar pill renders with and without transport controls")
-    func menuBarPillRendering() {
-        let idle = ALOMenuBarPill.image(
-            active: false,
-            hovered: false,
-            broadcasting: false,
-            isPlaying: false,
-            canControlPlayback: false,
-            transmitting: false,
-            receiving: false,
-            unreadCount: 0,
-            title: "Ready",
-            artwork: nil,
-            palette: nil
-        )
-        let playing = ALOMenuBarPill.image(
-            active: true,
-            hovered: true,
-            broadcasting: true,
-            isPlaying: true,
-            canControlPlayback: true,
-            transmitting: false,
-            receiving: false,
-            unreadCount: 1,
-            title: "Water Flow",
-            artwork: nil,
-            palette: nil
-        )
+    @Test("Menu bar record renders artwork and fallback states")
+    func menuBarRecordRendering() {
+        let artwork = NSImage(size: NSSize(width: 16, height: 16))
+        artwork.lockFocus()
+        NSColor.systemBlue.setFill()
+        NSRect(x: 0, y: 0, width: 16, height: 16).fill()
+        artwork.unlockFocus()
 
-        #expect(idle.size == NSSize(width: 113, height: 29))
+        let idle = ALOMenuBarRecord.image(active: false, artwork: nil, palette: nil)
+        let playing = ALOMenuBarRecord.image(active: true, artwork: artwork, palette: nil)
+
+        #expect(idle.size == NSSize(width: 27, height: 27))
         #expect(playing.size == idle.size)
         #expect(idle.tiffRepresentation != nil)
         #expect(playing.tiffRepresentation != nil)

@@ -255,7 +255,7 @@ struct WalkieTalkieAudioTests {
             return voiceNodeID != nil
         })
 
-        weak let releasedPlayer = player
+        weak var releasedPlayer = player
         player = nil
         #expect(waitUntil(timeout: 1) { releasedPlayer == nil })
         #expect(waitUntil(timeout: 1) {
