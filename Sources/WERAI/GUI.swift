@@ -16,16 +16,25 @@ private enum ALOAppFlavor {
     static var displayName: String { isDevelopment ? "ALO Dev" : "ALO" }
 }
 
-private enum ALOMenuBarPill {
+enum ALOMenuBarPill {
+    enum HoverAction: Equatable {
+        case broadcast
+        case playback
+        case chat
+    }
+
     static let statusItemWidth: CGFloat = 117
     private static let imageSize = NSSize(width: 113, height: 29)
     private static let mediaRect = NSRect(x: 28, y: 2, width: 83, height: 25)
+    private static let controlSize: CGFloat = 25
+    private static let iconPointSize: CGFloat = 12
 
     static func image(
         active: Bool,
         hovered: Bool,
         broadcasting: Bool,
         isPlaying: Bool,
+        canControlPlayback: Bool,
         transmitting: Bool,
         receiving: Bool,
         unreadCount: Int,
@@ -39,13 +48,14 @@ private enum ALOMenuBarPill {
             NSColor.black.setFill()
             pill.fill()
 
-            drawWordmark(active: active)
+            drawPeopleIcon(active: active)
             drawArtwork(artwork, palette: palette, in: mediaRect)
 
             if active && hovered {
                 drawHoverControls(
                     broadcasting: broadcasting,
                     isPlaying: isPlaying,
+                    canControlPlayback: canControlPlayback,
                     transmitting: transmitting,
                     receiving: receiving,
                     unreadCount: unreadCount,
@@ -64,18 +74,12 @@ private enum ALOMenuBarPill {
         return image
     }
 
-    private static func drawWordmark(active: Bool) {
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .center
-        let font = NSFont(name: "Fredoka One", size: 8)
-            ?? NSFont.systemFont(ofSize: 8, weight: .heavy)
-        ("ALO" as NSString).draw(
-            in: NSRect(x: 4, y: 9, width: 21, height: 11),
-            withAttributes: [
-                .font: font,
-                .foregroundColor: NSColor.white.withAlphaComponent(active ? 1 : 0.72),
-                .paragraphStyle: paragraph,
-            ]
+    private static func drawPeopleIcon(active: Bool) {
+        drawSymbol(
+            "person.2.fill",
+            in: NSRect(x: 8, y: 8.5, width: iconPointSize, height: iconPointSize),
+            color: NSColor.white.withAlphaComponent(active ? 1 : 0.72),
+            pointSize: iconPointSize
         )
     }
 
@@ -135,32 +139,24 @@ private enum ALOMenuBarPill {
     private static func drawHoverControls(
         broadcasting: Bool,
         isPlaying: Bool,
+        canControlPlayback: Bool,
         transmitting: Bool,
         receiving: Bool,
         unreadCount: Int,
         palette: ArtworkPalette?
     ) {
         let paletteColors = palette?.hexes.map(NSColor.deviceIdentity)
-        let controls = [
-            (
-                x: CGFloat(28),
-                symbol: broadcasting ? "dot.radiowaves.left.and.right" : "waveform.badge.mic",
-                size: CGFloat(13)
-            ),
-            (x: CGFloat(57), symbol: isPlaying ? "pause.fill" : "play.fill", size: CGFloat(15)),
-            (
-                x: CGFloat(86),
-                symbol: unreadCount > 0
-                    ? "bubble.left.and.text.bubble.right.fill"
-                    : "bubble.left.and.text.bubble.right",
-                size: CGFloat(12)
-            ),
-        ]
+        let controls = hoverControls(
+            broadcasting: broadcasting,
+            isPlaying: isPlaying,
+            canControlPlayback: canControlPlayback,
+            unreadCount: unreadCount
+        )
 
-        for (index, control) in controls.enumerated() {
-            let rect = NSRect(x: control.x, y: 2, width: 25, height: 25)
-            let highlighted = index == 0 && (broadcasting || transmitting || receiving)
-            let source = paletteColors.map { $0[index] }
+        for control in controls {
+            let rect = NSRect(x: control.x, y: 2, width: controlSize, height: controlSize)
+            let highlighted = control.action == .broadcast && (broadcasting || transmitting || receiving)
+            let source = paletteColors.map { $0[control.paletteIndex] }
                 ?? NSColor(calibratedWhite: 0.78, alpha: 1)
             let fill = controlFill(source, highlighted: highlighted)
             fill.setFill()
@@ -171,22 +167,63 @@ private enum ALOMenuBarPill {
             edge.stroke()
 
             let iconRect = NSRect(
-                x: rect.midX - control.size / 2,
-                y: rect.midY - control.size / 2,
-                width: control.size,
-                height: control.size
+                x: rect.midX - iconPointSize / 2,
+                y: rect.midY - iconPointSize / 2,
+                width: iconPointSize,
+                height: iconPointSize
             )
             drawSymbol(
                 control.symbol,
                 in: iconRect,
                 color: contrastingForeground(for: fill),
-                pointSize: control.size
+                pointSize: iconPointSize
             )
         }
 
         if unreadCount > 0 {
             drawBadge(in: NSRect(x: 106, y: 21, width: 6, height: 6))
         }
+    }
+
+    static func hoverAction(at x: CGFloat, canControlPlayback: Bool) -> HoverAction? {
+        controlPositions(canControlPlayback: canControlPlayback).first { position in
+            x >= position.x && x < position.x + controlSize
+        }?.action
+    }
+
+    private static func hoverControls(
+        broadcasting: Bool,
+        isPlaying: Bool,
+        canControlPlayback: Bool,
+        unreadCount: Int
+    ) -> [(action: HoverAction, x: CGFloat, symbol: String, paletteIndex: Int)] {
+        controlPositions(canControlPlayback: canControlPlayback).map { position in
+            let symbol: String
+            let paletteIndex: Int
+            switch position.action {
+            case .broadcast:
+                symbol = broadcasting ? "dot.radiowaves.left.and.right" : "waveform.badge.mic"
+                paletteIndex = 0
+            case .playback:
+                symbol = isPlaying ? "pause.fill" : "play.fill"
+                paletteIndex = 1
+            case .chat:
+                symbol = unreadCount > 0
+                    ? "bubble.left.and.text.bubble.right.fill"
+                    : "bubble.left.and.text.bubble.right"
+                paletteIndex = 2
+            }
+            return (position.action, position.x, symbol, paletteIndex)
+        }
+    }
+
+    private static func controlPositions(
+        canControlPlayback: Bool
+    ) -> [(action: HoverAction, x: CGFloat)] {
+        if canControlPlayback {
+            return [(.broadcast, 28), (.playback, 57), (.chat, 86)]
+        }
+        return [(.broadcast, 42), (.chat, 71)]
     }
 
     private static func drawSymbol(
@@ -894,15 +931,22 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
             return
         }
         let componentX = (point.x - imageRect.minX) / max(1, imageRect.width) * 113
-        switch componentX {
-        case ..<28:
+        guard componentX >= 28,
+              let action = ALOMenuBarPill.hoverAction(
+                  at: componentX,
+                  canControlPlayback: model.canControlRoomPlayback
+              )
+        else {
             popover.isShown ? closePopover() : showPopover()
-        case ..<57:
+            return
+        }
+        switch action {
+        case .broadcast:
             model.toggleBroadcasting()
             DispatchQueue.main.async { [weak self] in self?.refreshStatusPill() }
-        case ..<86:
+        case .playback:
             model.toggleRoomPlayback()
-        default:
+        case .chat:
             if model.floatingSection != .chat { model.showChat() }
             showPopover()
         }
@@ -974,6 +1018,7 @@ private final class WERAIStatusMenuController: NSObject, NSPopoverDelegate {
             hovered: isHovered,
             broadcasting: model.isHost,
             isPlaying: model.roomIsPlaying,
+            canControlPlayback: model.canControlRoomPlayback,
             transmitting: isTransmittingVoice,
             receiving: isReceivingVoice,
             unreadCount: unreadCount,
@@ -1521,7 +1566,15 @@ final class WERAIViewModel: ObservableObject {
         Self.effectivePlaybackState(
             metadataIsPlaying: nowPlaying.isPlaying,
             audioIsRendering: audioIsRendering,
-            hasMedia: !nowPlaying.isEmpty
+            hasMedia: !nowPlaying.isEmpty || audioIsRendering
+        )
+    }
+    var canControlRoomPlayback: Bool {
+        Self.playbackControlAvailable(
+            isLive: phase == .live,
+            hasBroadcaster: hasBroadcaster,
+            isHost: isHost,
+            hasMedia: !nowPlaying.isEmpty || audioIsRendering
         )
     }
     var roomAccentColor: Color {
@@ -1872,6 +1925,12 @@ final class WERAIViewModel: ObservableObject {
     }
 
     func toggleRoomPlayback() {
+        guard canControlRoomPlayback else {
+            statusText = hasBroadcaster
+                ? "Nothing is playing yet"
+                : "Wait for the broadcaster connection, then try again"
+            return
+        }
         let command = Self.playbackCommand(
             metadataIsPlaying: nowPlaying.isPlaying,
             audioIsRendering: audioIsRendering
@@ -1886,6 +1945,15 @@ final class WERAIViewModel: ObservableObject {
         audioIsRendering: Bool
     ) -> RoomMediaCommand {
         (metadataIsPlaying ?? audioIsRendering) ? .pause : .play
+    }
+
+    nonisolated static func playbackControlAvailable(
+        isLive: Bool,
+        hasBroadcaster: Bool,
+        isHost: Bool,
+        hasMedia: Bool
+    ) -> Bool {
+        isLive && (hasBroadcaster || isHost) && hasMedia
     }
 
     func toggleBroadcasting() {
@@ -3669,11 +3737,13 @@ private struct FloatingRoomView: View {
             ) { model.toggleBroadcasting() }
 
             if model.hasBroadcaster || model.isHost {
-                roomBarButton(
-                    icon: model.roomIsPlaying ? "pause.fill" : "play.fill",
-                    active: false,
-                    help: model.roomIsPlaying ? "Pause everywhere" : "Play everywhere"
-                ) { model.toggleRoomPlayback() }
+                if model.canControlRoomPlayback {
+                    roomBarButton(
+                        icon: model.roomIsPlaying ? "pause.fill" : "play.fill",
+                        active: false,
+                        help: model.roomIsPlaying ? "Pause everywhere" : "Play everywhere"
+                    ) { model.toggleRoomPlayback() }
+                }
 
                 roomBarButton(
                     icon: "music.note.list",

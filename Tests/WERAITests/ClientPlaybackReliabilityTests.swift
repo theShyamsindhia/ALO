@@ -182,6 +182,39 @@ struct ClientPlaybackReliabilityTests {
         ))
     }
 
+    @Test func playbackControlRequiresLiveControllableMedia() {
+        #expect(WERAIViewModel.playbackControlAvailable(
+            isLive: true,
+            hasBroadcaster: true,
+            isHost: false,
+            hasMedia: true
+        ))
+        #expect(WERAIViewModel.playbackControlAvailable(
+            isLive: true,
+            hasBroadcaster: false,
+            isHost: true,
+            hasMedia: true
+        ))
+        #expect(!WERAIViewModel.playbackControlAvailable(
+            isLive: false,
+            hasBroadcaster: true,
+            isHost: false,
+            hasMedia: true
+        ))
+        #expect(!WERAIViewModel.playbackControlAvailable(
+            isLive: true,
+            hasBroadcaster: false,
+            isHost: false,
+            hasMedia: true
+        ))
+        #expect(!WERAIViewModel.playbackControlAvailable(
+            isLive: true,
+            hasBroadcaster: true,
+            isHost: false,
+            hasMedia: false
+        ))
+    }
+
     @Test func unrelatedAudioConfigurationChangesDoNotRestartAHealthyEngine() {
         #expect(!SynchronizedPlayer.shouldRecoverAfterConfigurationChange(
             engineIsRunning: true, deviceChanged: false, latencyChanged: false
