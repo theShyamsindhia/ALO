@@ -231,6 +231,10 @@ final class HostSession {
         host?.setParticipantLevel(id: id, volume: volume, muted: muted)
     }
 
+    func setLocalPlaybackMuted(_ muted: Bool) {
+        localReceiver?.setLocalPlaybackMuted(muted)
+    }
+
     func setVoiceDuckingActive(_ active: Bool) {
         localReceiver?.setVoiceDuckingActive(active)
     }

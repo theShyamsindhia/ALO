@@ -4,6 +4,32 @@ import Testing
 @testable import WERAICore
 
 struct ClientPlaybackReliabilityTests {
+    @Test("Incoming media mute does not mute incoming voice or alter room participant state")
+    func incomingMediaMuteIsIndependentFromVoice() {
+        let routing = IncomingAudioMuteRouting(
+            participantMediaMuted: false,
+            incomingMediaMuted: true,
+            incomingVoiceMuted: false
+        )
+
+        #expect(routing.localMediaPlaybackMuted)
+        #expect(!routing.voicePlaybackMuted)
+        #expect(!routing.publishedParticipantMediaMuted)
+    }
+
+    @Test("Incoming voice mute does not mute synchronized media")
+    func incomingVoiceMuteIsIndependentFromMedia() {
+        let routing = IncomingAudioMuteRouting(
+            participantMediaMuted: false,
+            incomingMediaMuted: false,
+            incomingVoiceMuted: true
+        )
+
+        #expect(!routing.localMediaPlaybackMuted)
+        #expect(routing.voicePlaybackMuted)
+        #expect(!routing.publishedParticipantMediaMuted)
+    }
+
     @Test("Talk selection is additive and Everyone is a present-device snapshot") @MainActor
     func talkTargetSelection() {
         let initial: Set<String> = ["mac-a", "mac-b"]

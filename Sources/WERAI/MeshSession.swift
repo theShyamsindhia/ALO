@@ -2,6 +2,16 @@ import CoreGraphics
 import Foundation
 import WERAICore
 
+struct IncomingAudioMuteRouting: Equatable {
+    var participantMediaMuted: Bool
+    var incomingMediaMuted: Bool
+    var incomingVoiceMuted: Bool
+
+    var publishedParticipantMediaMuted: Bool { participantMediaMuted }
+    var localMediaPlaybackMuted: Bool { participantMediaMuted || incomingMediaMuted }
+    var voicePlaybackMuted: Bool { incomingVoiceMuted }
+}
+
 @MainActor
 final class MeshSession {
     let room: RoomConfiguration
@@ -93,6 +103,7 @@ final class MeshSession {
     private var transitionTask: Task<Void, Never>?
     private var isStopped = true
     private var incomingMediaMuted = false
+    private var incomingVoiceMuted = false
     private var localVolume = 1.0
     private var localParticipantMuted = false
     private var walkieStartGeneration: Int?
@@ -103,6 +114,13 @@ final class MeshSession {
 
     var isBroadcasting: Bool { replica.broadcaster?.nodeID == nodeID }
     var hasBroadcaster: Bool { replica.broadcaster != nil }
+    private var incomingAudioMuteRouting: IncomingAudioMuteRouting {
+        IncomingAudioMuteRouting(
+            participantMediaMuted: localParticipantMuted,
+            incomingMediaMuted: incomingMediaMuted,
+            incomingVoiceMuted: incomingVoiceMuted
+        )
+    }
 
     func diagnosticsSnapshot() -> SessionTimingDiagnostics? {
         if let hostSession { return hostSession.diagnosticsSnapshot() }
@@ -640,7 +658,9 @@ final class MeshSession {
     func setLocalLevel(volume: Double, muted: Bool) {
         localVolume = min(max(volume, 0), 1)
         localParticipantMuted = muted
-        receiver?.setLocalLevel(volume: localVolume, muted: muted || incomingMediaMuted)
+        let routing = incomingAudioMuteRouting
+        receiver?.setLocalLevel(volume: localVolume, muted: routing.publishedParticipantMediaMuted)
+        receiver?.setLocalPlaybackMuted(routing.incomingMediaMuted)
     }
     func setParticipantLevel(id: String, volume: Double, muted: Bool) {
         if id == nodeID {
@@ -650,19 +670,24 @@ final class MeshSession {
         hostSession?.setParticipantLevel(
             id: id,
             volume: volume,
-            muted: muted || (id == nodeID && incomingMediaMuted)
+            muted: id == nodeID
+                ? incomingAudioMuteRouting.publishedParticipantMediaMuted
+                : muted
         )
     }
     func setIncomingMediaMuted(_ muted: Bool) {
         incomingMediaMuted = muted
-        let effectiveMute = localParticipantMuted || muted
+        let routing = incomingAudioMuteRouting
         if isBroadcasting {
-            hostSession?.setParticipantLevel(id: nodeID, volume: localVolume, muted: effectiveMute)
+            hostSession?.setLocalPlaybackMuted(routing.incomingMediaMuted)
         } else {
-            receiver?.setLocalLevel(volume: localVolume, muted: effectiveMute)
+            receiver?.setLocalPlaybackMuted(routing.incomingMediaMuted)
         }
     }
-    func setIncomingWalkieTalkieMuted(_ muted: Bool) { walkieTalkiePlayer.setMuted(muted) }
+    func setIncomingWalkieTalkieMuted(_ muted: Bool) {
+        incomingVoiceMuted = muted
+        walkieTalkiePlayer.setMuted(incomingAudioMuteRouting.voicePlaybackMuted)
+    }
 
     private func updateIncomingVoiceActivity(
         sessionID: String,
@@ -883,11 +908,13 @@ final class MeshSession {
                             return host?.requestResync(participantID: targetID) ?? false
                         }
                     )
+                    let routing = incomingAudioMuteRouting
                     host.setParticipantLevel(
                         id: nodeID,
                         volume: localVolume,
-                        muted: localParticipantMuted || incomingMediaMuted
+                        muted: routing.publishedParticipantMediaMuted
                     )
+                    host.setLocalPlaybackMuted(routing.incomingMediaMuted)
                     applyIncomingVoiceDucking()
                 } else {
                     statusHandler("Connecting to the room broadcaster")
@@ -924,10 +951,12 @@ final class MeshSession {
                     )
                     self.receiver = receiver
                     try receiver.start()
+                    let routing = incomingAudioMuteRouting
                     receiver.setLocalLevel(
                         volume: localVolume,
-                        muted: localParticipantMuted || incomingMediaMuted
+                        muted: routing.publishedParticipantMediaMuted
                     )
+                    receiver.setLocalPlaybackMuted(routing.incomingMediaMuted)
                     applyIncomingVoiceDucking()
                     guard generation == transitionGeneration,
                           replica.broadcaster == broadcaster else {
