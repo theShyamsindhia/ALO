@@ -27,6 +27,7 @@ final class VideoPresentationQueue<Image> {
     private var latestDeadlineMissNanos: UInt64?
     private var maximumDeadlineMissNanos: UInt64 = 0
     private var presentedCount: UInt64 = 0
+    private var generation: UInt64 = 0
     var pendingCount: Int { lock.withLock { frames.count } }
 
     var timingSnapshot: VideoPresentationTimingSnapshot {
@@ -85,8 +86,11 @@ final class VideoPresentationQueue<Image> {
         }
     }
 
+    // Invalidate handoffs not yet admitted. A callback already admitted/executing
+    // cannot be rewound; user handlers always execute outside the queue lock.
     func reset() {
         lock.withLock {
+            generation &+= 1
             frames.removeAll(); timer?.cancel(); timer = nil
             latestHandoffAtNanos = nil; latestDeadlineMissNanos = nil
             maximumDeadlineMissNanos = 0; presentedCount = 0
@@ -94,23 +98,25 @@ final class VideoPresentationQueue<Image> {
     }
 
     private func drain() {
-        let due: [Frame] = lock.withLock {
+        let extracted: (frames: [Frame], generation: UInt64) = lock.withLock {
             let time = now()
             let due = frames.filter { $0.deadline <= time }
             frames.removeAll { $0.deadline <= time || !$0.isCurrent() }
             if frames.isEmpty { timer?.cancel(); timer = nil }
-            return due
+            return (due, generation)
         }
         // Present the most recent frame after a scheduler delay, avoiding a burst of stale UI work.
-        if let frame = due.last, frame.isCurrent() {
-            lock.withLock {
+        if let frame = extracted.frames.last, frame.isCurrent() {
+            let admitted = lock.withLock {
+                guard generation == extracted.generation else { return false }
                 let time = now()
                 let miss = time > frame.deadline ? time - frame.deadline : 0
                 latestHandoffAtNanos = time; latestDeadlineMissNanos = miss
                 maximumDeadlineMissNanos = max(maximumDeadlineMissNanos, miss)
                 if presentedCount < .max { presentedCount += 1 }
+                return true
             }
-            handler(frame.image)
+            if admitted { handler(frame.image) }
         }
     }
 }

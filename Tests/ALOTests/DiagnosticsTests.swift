@@ -151,6 +151,48 @@ struct DiagnosticsTests {
         #expect(context(video: blocked).result.outcome == .warning)
     }
 
+    @Test("Broadcasters verify fresh listener drift and local playback without assuming old peers are healthy")
+    func broadcasterTimingHealth() {
+        let healthyLocal = ReceiverTimingDiagnostics(roundTripMilliseconds: 1,
+            clockOffsetMilliseconds: 0, jitterMilliseconds: 0,
+            recommendedBufferMilliseconds: 250, outputLatencyMilliseconds: 10,
+            renderHeadroomMilliseconds: 25, outputSampleRate: 48_000,
+            outputChannelCount: 2, latenessMilliseconds: 0, latePacketCount: 0,
+            resyncCount: 0, currentDriftMilliseconds: 2, driftMeasurementAgeMilliseconds: 20)
+        func context(count: Int = 1, drift: Double? = 2, age: Double? = 20,
+                     reportAge: Double? = 100, local: ReceiverTimingDiagnostics? = nil,
+                     rendering: Bool = true) -> DiagnosticRoomContext {
+            let listener = HostListenerTimingDiagnostics(peerID: "private-peer",
+                isTimingEligible: true, reportAgeMilliseconds: 100,
+                recommendedBufferMilliseconds: 250, hardwareFloorMilliseconds: 250,
+                driftMilliseconds: drift, driftSampleAgeMilliseconds: age,
+                playbackReportAgeMilliseconds: reportAge)
+            let host = HostTimingDiagnostics(listenerCount: count,
+                reportingListenerCount: count, groupBufferMilliseconds: 250,
+                maximumLatenessMilliseconds: 0, totalResyncCount: 0,
+                listeners: count == 0 ? [] : [listener])
+            return DiagnosticRoomContext(isActive: true, role: .broadcaster,
+                participantCount: count + 1, remotePeerCount: count, syncLabel: "Broadcasting",
+                audioIsRendering: rendering, hasBroadcaster: true,
+                timing: SessionTimingDiagnostics(receiver: local, host: host))
+        }
+        #expect(context().result.outcome == .passed)
+        #expect(context(drift: 150).result.outcome == .warning)
+        #expect(context(age: 501).result.outcome == .warning)
+        #expect(context(reportAge: 2_501).result.outcome == .warning)
+        #expect(context(reportAge: nil).result.outcome == .warning)
+        #expect(context(drift: nil).result.outcome == .warning)
+        #expect(context(drift: nil).result.detail.contains("listener 1 render drift not reported"))
+        #expect(!context(drift: nil).result.detail.contains("private-peer"))
+        #expect(context(count: 0).result.outcome == .warning)
+        #expect(context(count: 0).result.detail.contains("No listeners available"))
+        #expect(context(local: healthyLocal).result.outcome == .passed)
+        #expect(context(local: healthyLocal, rendering: false).result.outcome == .warning)
+        var staleLocal = healthyLocal
+        staleLocal.driftMeasurementAgeMilliseconds = 501
+        #expect(context(local: staleLocal).result.outcome == .warning)
+    }
+
     @Test("Room diagnostics explain when no live room exists")
     func inactiveRoomGuidance() {
         let context = DiagnosticRoomContext(

@@ -107,4 +107,30 @@ struct VideoPresentationTimingTests {
         #expect(queue.timingSnapshot.presentedCount == 0)
         #expect(queue.timingSnapshot.latestDeadlineMissNanos == nil)
     }
+
+    @Test
+    func resetAfterExtractionPreventsUnadmittedHandoff() throws {
+        let fixture = Fixture()
+        let executor = DispatchQueue(label: "test.video.reset-extracted-presentation")
+        let checked = DispatchSemaphore(value: 0)
+        let queue = VideoPresentationQueue<Int>(now: { fixture.now }, deliveryQueue: executor) {
+            fixture.accept($0)
+        }
+        // Enqueue checks once under the queue lock. The next check occurs
+        // outside that lock, after drain has extracted this already-due frame.
+        var checks = 0
+        queue.enqueue(1, deadline: 900_000_000, bytes: 1) {
+            checks += 1
+            if checks == 2 {
+                queue.reset()
+                checked.signal()
+            }
+            return true
+        }
+        try #require(checked.wait(timeout: .now() + 1) == .success)
+        executor.sync {}
+        #expect(fixture.delivered.isEmpty)
+        #expect(queue.timingSnapshot.presentedCount == 0)
+        #expect(queue.timingSnapshot.latestDeadlineMissNanos == nil)
+    }
 }

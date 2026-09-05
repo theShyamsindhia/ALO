@@ -170,7 +170,7 @@ struct DiagnosticRoomContext: Sendable, Equatable {
             }
             if let video = receiver.video, video.presentedCount > 0 || video.pendingCount > 0 {
                 let miss = video.latestDeadlineMissNanos.map { Self.milliseconds(Double($0) / 1_000_000) } ?? "not measured"
-                parts.append("screen UI handoff lateness \(miss), peak \(Self.milliseconds(Double(video.maximumDeadlineMissNanos) / 1_000_000)), \(video.pendingCount) pending")
+                parts.append("screen deadline miss at UI handoff \(miss), peak \(Self.milliseconds(Double(video.maximumDeadlineMissNanos) / 1_000_000)), \(video.pendingCount) pending")
                 parts.append("UI handoff timing is not a physical display or lip-sync measurement")
             }
         }
@@ -185,9 +185,14 @@ struct DiagnosticRoomContext: Sendable, Equatable {
                 parts.append("listener \(index + 1): network \(Self.milliseconds(listener.recommendedBufferMilliseconds)), hardware floor \(Self.milliseconds(listener.hardwareFloorMilliseconds)), network vote \(listener.isTimingEligible ? "eligible" : "late join"), report age \(age)")
                 parts.append("audio packets: \(listener.audioSent)/\(listener.audioEnqueued) submitted, wait expired \(listener.audioExpiredWait), capture expired \(listener.audioExpiredAge), local-send budget rejected \(listener.audioAdmissionRejected), congestion replaced \(listener.audioReplaced), transition discarded \(listener.audioDiscardedBoundary)")
                 if let drift = listener.driftMilliseconds {
-                    parts.append("listener \(index + 1) render drift \(Self.milliseconds(drift))")
+                    let sampleAge = listener.driftSampleAgeMilliseconds.map(Self.milliseconds) ?? "unknown"
+                    let reportAge = listener.playbackReportAgeMilliseconds.map(Self.milliseconds) ?? "unknown"
+                    parts.append("listener \(index + 1) render drift \(Self.milliseconds(drift)), sample age \(sampleAge), playback report age \(reportAge)")
+                } else {
+                    parts.append("listener \(index + 1) render drift not reported; playback may be idle or the peer may need updating")
                 }
             }
+            if host.listenerCount == 0 { parts.append("No listeners available to verify remote playback") }
         }
         // A connected clock is not evidence of timely rendering. Unknown or
         // stale samples remain a warning; historical counters alone do not fail
