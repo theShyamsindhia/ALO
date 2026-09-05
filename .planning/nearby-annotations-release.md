@@ -1,6 +1,32 @@
 # Integrated nearby + screen annotations release
 
-Status: full 0.14.0 integration in progress, **not released**. Latest published release is 0.13.49. Historical checkpoints below are append-only; see the latest runtime checkpoint for current verification.
+Status: full integration now targets **0.14.1/build 82**, not released. Latest published release is 0.14.0, independently published from8437bf0. Historical checkpoints below are append-only; see the latest runtime checkpoint for current verification.
+
+## Current handoff — September 6
+
+- User requested removal of obsolete drafts and an increment over the actual
+  latest published release. Removed empty draft release records383084669(v0.13.48)
+  and383079720(v0.13.47), preserving JSON metadata outside repo under
+  `/Users/raj/.codex/alo-release-validation/deleted-draft-*.json`. No tags or
+  published releases were deleted. Confirmed no draft releases remain.
+- Origin/main36f6c08 merged. Version0.14.1/build82 committed/pushed45657ba on
+  codex/full-nearby-integration; published0.14.0 notes preserved separately.
+- Prior85336fe full670test local/CI failed only deterministic110ms capture
+  stall274.816ms/250ms. b4db040 uses max recent service interval rather than mean;
+  focused16testsPASS,110ms case236.928ms with54packets/min50. Fable closure
+  review-interval-closure.log has no remaining actionable finding.
+- However b4db040 full local run failed live terminal liveness: one congested
+  peer's last sequence179 was below required183. Latest merged45657ba full
+ 716tests/117suites reproduced the same failure and also an apparent stale-ABI
+  optional comparison (`nil == nil` reports false) after new remote model fields.
+  Do not treat candidate as validated, weaken assertions, or rerun until lucky.
+  Diagnose sender terminal-tail starvation and clean-build metadata ABI first.
+- CurrentCI33984248986 running at checkpoint; iOS jobPASS, Mac jobpending.
+  CurrentFable read-only review b4db040..45657ba in tmuxalo-0141-merge-review,
+  logreview-0141-merge.log. It must be read fully before final review claims.
+- No0.14.1release/tag/mainintegrationpush. No local signing or installed app/data
+  changes. All three subagents are unavailable/idle after usage-limit errors;
+  do not infer their tasks are still running. Source tree otherwise clean.
 
 Requested sources: latest **Explain AirDrop in airplane mode** plan (5 September
 2026) and **Design realtime screenshare UX** plan, plus the report that one M4
