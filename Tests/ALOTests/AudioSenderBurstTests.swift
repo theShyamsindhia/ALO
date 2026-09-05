@@ -6,6 +6,35 @@ import ALOCore
 
 @Suite("Bounded audio sender bursts", .serialized)
 struct AudioSenderBurstTests {
+    @Test func completionSamplesOlderThanTheSenderQueueHorizonDoNotStarveARecoveringPeer() throws {
+        let fixture = try AudioBurstFixture()
+        defer { fixture.stop() }
+        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 2 * 240 * 2),
+            captureTimeNanos: fixture.audioNowNanos)
+        fixture.barrier()
+        fixture.advanceAudioClock(by: 130_000_000)
+        fixture.completeOne()
+        // Keep the path active so its idle reset cannot erase the old sample.
+        // The peer then demonstrates six current 50ms completion intervals.
+        for _ in 0..<6 {
+            fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 240 * 2),
+                captureTimeNanos: fixture.audioNowNanos)
+            fixture.barrier()
+            fixture.advanceAudioClock(by: 50_000_000)
+            fixture.completeOne()
+        }
+        // The initial 130/180ms completion samples are now outside the sender's
+        // 80ms queue horizon. A count-only window wrongly lets them starve this
+        // recovering peer because rejected peers replace samples more slowly.
+        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 240 * 2),
+            captureTimeNanos: fixture.audioNowNanos - 110_000_000)
+        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 240 * 2),
+            captureTimeNanos: fixture.audioNowNanos)
+        fixture.barrier()
+        #expect(fixture.probe.sequences == Array(0..<10))
+        #expect(fixture.host.audioSenderSnapshot().first?.admissionRejected == 0)
+    }
+
     @Test func freshTerminalCaptureWaitsForOutstandingSendsInsteadOfDisappearing() throws {
         let fixture = try AudioBurstFixture()
         defer { fixture.stop() }

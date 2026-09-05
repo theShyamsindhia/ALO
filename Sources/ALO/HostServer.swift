@@ -22,6 +22,10 @@ final class HostServer {
         let captureTimeNanos: UInt64
         let enqueuedAtNanos: UInt64
     }
+    private struct AudioCompletionSample {
+        let value: UInt64
+        let observedAtNanos: UInt64
+    }
     struct AudioSenderSnapshot {
         let participantID: String
         let udpPort: UInt16
@@ -67,10 +71,11 @@ final class HostServer {
         var audioExpiredAge: UInt64 = 0
         var audioAdmissionRejected: UInt64 = 0
         // Local contentProcessed durations, not receiver acknowledgments or
-        // measured network delivery. A bounded recent maximum is a conservative
-        // admission estimate; it cannot guarantee a remote playback deadline.
-        var audioCompletionDurations: [UInt64] = []
-        var audioCompletionIntervals: [UInt64] = []
+        // measured network delivery. Samples are bounded by count and by the
+        // current playout horizon; a starved peer must not retain old evidence
+        // longer merely because it completes fewer sends.
+        var audioCompletionDurations: [AudioCompletionSample] = []
+        var audioCompletionIntervals: [AudioCompletionSample] = []
         var lastAudioCompletionNanos: UInt64?
         var audioReplaced: UInt64 = 0
         var audioDiscardedBoundary: UInt64 = 0
@@ -98,6 +103,9 @@ final class HostServer {
     private let playbackRequestHandler: ((RoomMediaCommand) -> Bool)?
     private let localParticipantID: String?
     private let packetizer = AudioPacketizer()
+    /// Rotate first submission on every packet so a shared outbound link cannot
+    /// permanently favor the same listener. Owned by `queue` with packetizer.
+    private var audioFanoutOffset = 0
     private var listener: NWListener?
     private var clients = [ObjectIdentifier: Client]()
     private var videoEnabled = false
@@ -279,10 +287,23 @@ final class HostServer {
                 }
             }
 
-            let audioClients = audioClientEntries.map(\.value)
+            // Stable order plus a rotating start makes the shared-link queue
+            // fair without changing packet order within any listener's stream.
+            let audioClients = audioClientEntries.map(\.value).sorted {
+                ($0.id ?? "") < ($1.id ?? "")
+            }
             for packet in packets {
                 let data = packet.encoded()
-                for client in audioClients {
+                let start = audioClients.isEmpty ? 0 : self.audioFanoutOffset % audioClients.count
+                let fairOrder = audioClients.indices.sorted { lhs, rhs in
+                    let left = audioClients[lhs], right = audioClients[rhs]
+                    if left.audioSent != right.audioSent { return left.audioSent < right.audioSent }
+                    let leftRank = (lhs - start + audioClients.count) % audioClients.count
+                    let rightRank = (rhs - start + audioClients.count) % audioClients.count
+                    return leftRank < rightRank
+                }
+                for index in fairOrder {
+                    let client = audioClients[index]
                     if let sealer = client.audioSealer {
                         if let protected = try? sealer.seal(data) {
                             self.sendAudio(protected, captureTimeNanos: packet.captureTimeNanos, to: client)
@@ -291,6 +312,7 @@ final class HostServer {
                         self.sendAudio(data, captureTimeNanos: packet.captureTimeNanos, to: client)
                     }
                 }
+                if !audioClients.isEmpty { self.audioFanoutOffset = (start + 1) % audioClients.count }
             }
         }
     }
@@ -1086,11 +1108,23 @@ final class HostServer {
             let schedulingHeadroom = RoomTiming.renderSchedulingHeadroomNanos
             let admissionBudget = groupPlayoutDelayNanos > schedulingHeadroom
                 ? groupPlayoutDelayNanos - schedulingHeadroom : 0
-            let estimatedLocalCompletion = client.audioCompletionDurations.max() ?? 0
+            // Pending audio itself may wait for at most 80ms. Older completed
+            // evidence cannot describe its remaining queue residence, while an
+            // actually slow active path remains covered by the unfinished term.
+            let completionSampleHorizon = min(groupPlayoutDelayNanos, Self.maximumPendingAudioWaitNanos)
+            client.audioCompletionDurations.removeAll {
+                submittedAt >= $0.observedAtNanos
+                    && submittedAt - $0.observedAtNanos >= completionSampleHorizon
+            }
+            client.audioCompletionIntervals.removeAll {
+                submittedAt >= $0.observedAtNanos
+                    && submittedAt - $0.observedAtNanos >= completionSampleHorizon
+            }
+            let estimatedLocalCompletion = client.audioCompletionDurations.map(\.value).max() ?? 0
             // Completion callbacks may arrive in a burst after a slow service
             // interval. Averaging those near-zero intervals erases the observed
             // backlog cost just when delayed capture needs a conservative budget.
-            let recentCompletionInterval = client.audioCompletionIntervals.max() ?? 0
+            let recentCompletionInterval = client.audioCompletionIntervals.map(\.value).max() ?? 0
             // An outstanding interval is already at least this long, even
             // before its completion arrives. Otherwise a slowing path keeps
             // admitting against an obsolete fast rate until the next callback.
@@ -1142,13 +1176,15 @@ final class HostServer {
                         return
                     }
                     if completedAt >= submittedAt {
-                        client.audioCompletionDurations.append(completedAt - submittedAt)
+                        client.audioCompletionDurations.append(AudioCompletionSample(
+                            value: completedAt - submittedAt, observedAtNanos: completedAt))
                         if client.audioCompletionDurations.count > Self.maximumAudioCompletionSamples {
                             client.audioCompletionDurations.removeFirst()
                         }
                     }
                     if let previous = client.lastAudioCompletionNanos, completedAt >= previous {
-                        client.audioCompletionIntervals.append(completedAt - previous)
+                        client.audioCompletionIntervals.append(AudioCompletionSample(
+                            value: completedAt - previous, observedAtNanos: completedAt))
                         if client.audioCompletionIntervals.count > Self.maximumAudioCompletionSamples {
                             client.audioCompletionIntervals.removeFirst()
                         }

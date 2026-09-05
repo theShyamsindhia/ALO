@@ -9,6 +9,15 @@ import ALOCore
 /// its queue policy, and the TCP join/report/resync path are production code.
 @Suite("Deterministic real-host audio fan-out", .serialized)
 struct DeterministicAudioFanoutTests {
+    @Test func batchedSharedLinkCompletionsDoNotStarveOneListener() throws {
+        let room = try simulate(peers: 8, rate: 4_000_000,
+            policy: .boundedLatest(maxInFlight: 8), oversleep: 0,
+            callbackQuantumNanos: 25_000_000)
+        #expect(room.maximumAge < SynchronizedPlayer.targetLatencyNanos)
+        #expect(room.minimumPackets >= 60,
+            "Batched completions must preserve a fair minimum for every listener")
+    }
+
     @Test(arguments: [UInt64(70_000_000), 110_000_000])
     func delayedCaptureStillFitsTheSharedLinkBudget(wakeOversleep: UInt64) throws {
         let room = try simulate(peers: 8, rate: 4_000_000,
@@ -47,8 +56,8 @@ struct DeterministicAudioFanoutTests {
     }
 
     private func simulate(peers count: Int, rate: UInt64?, policy: HostServer.AudioBackpressurePolicy,
-                          oversleep: UInt64) throws -> SimulatedRoomResult {
-        let wire = SimulatedAudioWire(bitsPerSecond: rate)
+                          oversleep: UInt64, callbackQuantumNanos: UInt64? = nil) throws -> SimulatedRoomResult {
+        let wire = SimulatedAudioWire(bitsPerSecond: rate, callbackQuantumNanos: callbackQuantumNanos)
         let controls = SimulationControlPeers()
         let hostReady = DispatchSemaphore(value: 0)
         let host = HostServer(roomName: "Virtual-time real host", advertise: false,
@@ -155,7 +164,7 @@ struct DeterministicAudioFanoutTests {
         }.max() ?? 0
         let result = SimulatedRoomResult(finalAge: finalAges.max() ?? 0, maximumAge: allAges.max() ?? 0,
             maximumDeadlineMiss: deadlineMisses.max() ?? 0, minimumPackets: counts.min() ?? 0,
-            maximumSkew: skew, resyncs: reportedPeers.count)
+            maximumPackets: counts.max() ?? 0, maximumSkew: skew, resyncs: reportedPeers.count)
         print("Virtual real-host peers=\(count) rate=\(rate.map(String.init) ?? "direct") policy=\(policy) wake=\(oversleep / 1_000_000)ms: \(result)")
         return result
     }
@@ -178,6 +187,7 @@ private struct SimulatedRoomResult {
     let maximumAge: UInt64
     let maximumDeadlineMiss: UInt64
     let minimumPackets: Int
+    let maximumPackets: Int
     let maximumSkew: UInt64
     let resyncs: Int
 }
@@ -202,6 +212,7 @@ private final class SimulatedAudioWire: @unchecked Sendable {
     }
     private let lock = NSLock()
     private let bitsPerSecond: UInt64?
+    private let callbackQuantumNanos: UInt64?
     private var current = MonotonicClock.nowNanos()
     private var linkAvailable: UInt64 = 0
     private var nextOrder = 0
@@ -209,7 +220,10 @@ private final class SimulatedAudioWire: @unchecked Sendable {
     private var submitted: [UInt16: [UInt32]] = [:]
     private var arrivals: [UInt16: [UInt32: Arrival]] = [:]
     private var invalidEndpoints = 0
-    init(bitsPerSecond: UInt64?) { self.bitsPerSecond = bitsPerSecond }
+    init(bitsPerSecond: UInt64?, callbackQuantumNanos: UInt64? = nil) {
+        self.bitsPerSecond = bitsPerSecond
+        self.callbackQuantumNanos = callbackQuantumNanos
+    }
     var now: UInt64 { lock.withLock { current } }
     func setNow(_ value: UInt64) { lock.withLock { current = value } }
     var snapshot: Snapshot { lock.withLock {
@@ -226,7 +240,12 @@ private final class SimulatedAudioWire: @unchecked Sendable {
                 // Ceiling division preserves the specified aggregate wire rate.
                 let duration = (UInt64(byteCount) * 8 * 1_000_000_000 + rate - 1) / rate
                 linkAvailable = max(current, linkAvailable) + duration
-                delivery = linkAvailable + 1_000_000
+                let serializedDelivery = linkAvailable + 1_000_000
+                if let quantum = callbackQuantumNanos {
+                    delivery = ((serializedDelivery + quantum - 1) / quantum) * quantum
+                } else {
+                    delivery = serializedDelivery
+                }
             } else {
                 // Ideal fast-link baseline, not an OS scheduler reproduction.
                 // Separate burst tests inject 60ms production callback stalls.
