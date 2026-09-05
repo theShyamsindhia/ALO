@@ -75,6 +75,7 @@ struct DJStudioTests {
         var overlayPeak = 0
         for _ in 0..<12 {
             _ = try studio.engine.renderOffline(1024, to: output)
+            studio.relay.flushForTesting()
             let heard = DJLiveAudio.shared.process([Int16](repeating: 0, count: 2048), stage: .broadcast)
             overlayPeak = max(overlayPeak, heard.map { abs(Int($0)) }.max() ?? 0)
         }
