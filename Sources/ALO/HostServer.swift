@@ -360,6 +360,17 @@ final class HostServer {
     func setVideoEnabled(_ enabled: Bool) {
         queue.async { [weak self] in
             guard let self else { return }
+            if enabled, !self.videoEnabled {
+                for client in self.clients.values {
+                    guard let report = client.syncReport else { continue }
+                    // A previous share's static image cannot verify this start.
+                    // Keep the independent audio measurements and report age.
+                    client.syncReport = PlaybackSyncReport(measuredAtNanos: report.measuredAtNanos,
+                        latenessNanos: report.latenessNanos, latePacketCount: report.latePacketCount,
+                        resyncCount: report.resyncCount, driftNanos: report.driftNanos,
+                        driftSampleAgeNanos: report.driftSampleAgeNanos)
+                }
+            }
             self.videoEnabled = enabled
             if !enabled {
                 for client in self.clients.values { client.videoQueue.reset() }

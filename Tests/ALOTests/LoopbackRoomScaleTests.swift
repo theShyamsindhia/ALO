@@ -58,6 +58,19 @@ struct LoopbackRoomScaleTests {
         host.setVideoEnabled(false)
         try #require(waitUntil(timeout: 3) { !host.diagnosticsSnapshot().videoEnabled })
         #expect(result().outcome == .passed, "Audio-only rooms do not require screen telemetry")
+        let previousScreen = PlaybackScreenTimingReport(latestHandoffAgeNanos: 10_000_000_000,
+            latestDeadlineMissNanos: 0)
+        peer.sendRawControl(try ControlMessage(type: "sync_status", participantID: "loopback-peer-720",
+            syncReport: PlaybackSyncReport(measuredAtNanos: 1, latenessNanos: 0,
+                latePacketCount: 0, resyncCount: 0, driftNanos: 2_000_000,
+                driftSampleAgeNanos: 20_000_000, screenTiming: previousScreen)).encodedLine())
+        try #require(waitUntil(timeout: 3) { host.diagnosticsSnapshot().listeners.first?.screenTiming == previousScreen })
+        host.setVideoEnabled(true)
+        try #require(waitUntil(timeout: 3) { host.diagnosticsSnapshot().videoEnabled })
+        #expect(result().outcome == .warning,
+            "Enabling a new share invalidates cached screen proof without waiting for the next peer report")
+        #expect(host.diagnosticsSnapshot().listeners.first?.driftMilliseconds == 2,
+            "Video rearming must preserve the independent audio report")
     }
 
     @Test("A late listener's rising network RTT cannot repeatedly reset every output", arguments: [UInt64(10_000_000), 150_000_000])
