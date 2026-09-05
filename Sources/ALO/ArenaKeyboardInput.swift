@@ -35,7 +35,7 @@ struct ArenaKeyBindings: Equatable {
     init(codes: [ArenaKeyAction: UInt16]) {
         self.codes = Self.defaultCodes
         for action in ArenaKeyAction.allCases {
-            guard let code = codes[action], code != 53 else { continue }
+            guard let code = codes[action], code != 48, code != 53 else { continue }
             assign(code, to: action)
         }
     }
@@ -56,7 +56,8 @@ struct ArenaKeyBindings: Equatable {
     subscript(_ action: ArenaKeyAction) -> UInt16 { codes[action] ?? Self.defaultCodes[action]! }
 
     mutating func assign(_ keyCode: UInt16, to action: ArenaKeyAction) {
-        guard keyCode != 53 else { return } // Escape remains an emergency menu key.
+        // Tab remains focus navigation and Escape remains the emergency menu key.
+        guard keyCode != 48, keyCode != 53 else { return }
         let old = self[action]
         if let occupied = ArenaKeyAction.allCases.first(where: { $0 != action && self[$0] == keyCode }) {
             codes[occupied] = old

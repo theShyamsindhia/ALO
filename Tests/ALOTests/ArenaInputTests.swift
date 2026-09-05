@@ -73,6 +73,8 @@ struct ArenaInputTests {
         let before = bindings
         bindings.assign(53, to: .jump)
         #expect(bindings == before)
+        bindings.assign(48, to: .jump)
+        #expect(bindings == before)
     }
 
     @MainActor @Test func quickNativeAttackTapIsBufferedAndMenuDiscardsHeldKeys() throws {
