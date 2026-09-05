@@ -45,7 +45,7 @@ func isCanvas(_ index: Int) -> Bool {
     let blue = pixels[index + 2]
     let low = min(red, min(green, blue))
     let high = max(red, max(green, blue))
-    return low >= 244 && high - low <= 12
+    return low >= 238 && high - low <= 18
 }
 
 var visited = [Bool](repeating: false, count: width * height)
