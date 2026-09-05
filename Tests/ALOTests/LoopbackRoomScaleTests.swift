@@ -2312,7 +2312,6 @@ private struct AudioProbeHeader {
     let captureTimeNanos: UInt64
 
     static func sequence(in data: Data) -> UInt32? { read(in: data)?.sequence }
-
     /// Inspect only the wire header on the sender queue. Receiver tests still
     /// decode/validate the complete PCM payload, as the real receiver does.
     static func read(in data: Data) -> AudioProbeHeader? {

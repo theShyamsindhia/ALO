@@ -6,6 +6,29 @@ import ALOCore
 
 @Suite("Bounded audio sender bursts", .serialized)
 struct AudioSenderBurstTests {
+    @Test func completionRateBudgetsPacketsStillInFlight() throws {
+        let fixture = try AudioBurstFixture()
+        defer { fixture.stop() }
+        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 8 * 240 * 2),
+            captureTimeNanos: fixture.audioNowNanos - 40_000_000)
+        fixture.barrier()
+        fixture.advanceAudioClock(by: 16_000_000)
+        fixture.completeOne()
+        fixture.advanceAudioClock(by: 16_000_000)
+        fixture.completeOne()
+        // Two early completions took only 16/32ms, but six sends remain.
+        // At one completion per 16ms, admitting another needs 112ms, not
+        // the last completed packet's 32ms. Preserve fresh capture instead.
+        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 240 * 2),
+            captureTimeNanos: fixture.audioNowNanos - 125_000_000)
+        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 240 * 2),
+            captureTimeNanos: fixture.audioNowNanos)
+        fixture.barrier()
+        fixture.drain()
+        #expect(fixture.probe.sequences == Array(0..<8) + [9])
+        #expect(fixture.host.audioSenderSnapshot().first?.admissionRejected == 1)
+    }
+
     @Test func observedLocalSendDurationRejectsOldQueuedAudioButAdmitsFreshAudio() throws {
         let fixture = try AudioBurstFixture()
         defer { fixture.stop() }

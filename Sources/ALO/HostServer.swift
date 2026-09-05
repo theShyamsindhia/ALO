@@ -70,6 +70,8 @@ final class HostServer {
         // measured network delivery. A bounded recent maximum is a conservative
         // admission estimate; it cannot guarantee a remote playback deadline.
         var audioCompletionDurations: [UInt64] = []
+        var audioCompletionIntervals: [UInt64] = []
+        var lastAudioCompletionNanos: UInt64?
         var audioReplaced: UInt64 = 0
         var audioDiscardedBoundary: UInt64 = 0
         var lastAudioAgeWarningNanos: UInt64?
@@ -516,6 +518,8 @@ final class HostServer {
             client.audio?.cancel()
             client.audioSendsInFlight = 0
             client.audioCompletionDurations.removeAll()
+            client.audioCompletionIntervals.removeAll()
+            client.lastAudioCompletionNanos = nil
             discardPendingAudio(for: client)
             client.audioBacklogCongested = false
             let connection = NWConnection(
@@ -1076,12 +1080,19 @@ final class HostServer {
             let admissionBudget = groupPlayoutDelayNanos > schedulingHeadroom
                 ? groupPlayoutDelayNanos - schedulingHeadroom : 0
             let estimatedLocalCompletion = client.audioCompletionDurations.max() ?? 0
+            let completionInterval = client.audioCompletionIntervals.isEmpty ? 0
+                : client.audioCompletionIntervals.reduce(0, +) / UInt64(client.audioCompletionIntervals.count)
             // Queue wait alone ignores capture acquisition age and work already
             // occupying this path. Preserve fresh FIFO packets, but do not admit
             // one whose observed local service estimate consumes its remaining
             // room budget. Subtraction avoids overflowing unsigned timestamps.
             guard captureAge < admissionBudget,
-                  estimatedLocalCompletion < admissionBudget - captureAge else {
+                  estimatedLocalCompletion < admissionBudget - captureAge,
+                  // Early completions understate a growing in-flight backlog.
+                  // Budget its recent average service rate too, without multiplying
+                  // timestamps or treating local completion as a remote ACK.
+                  completionInterval < (admissionBudget - captureAge)
+                    / UInt64(client.audioSendsInFlight + 1) else {
                 client.audioAdmissionRejected &+= 1
                 continue
             }
@@ -1109,6 +1120,13 @@ final class HostServer {
                             client.audioCompletionDurations.removeFirst()
                         }
                     }
+                    if let previous = client.lastAudioCompletionNanos, completedAt >= previous {
+                        client.audioCompletionIntervals.append(completedAt - previous)
+                        if client.audioCompletionIntervals.count > Self.maximumAudioCompletionSamples {
+                            client.audioCompletionIntervals.removeFirst()
+                        }
+                    }
+                    client.lastAudioCompletionNanos = completedAt
                     self.drainAudio(for: client, over: connection, maxInFlight: maxInFlight)
                 }
             }
@@ -1120,6 +1138,8 @@ final class HostServer {
             // A giant stall must not permanently exclude fresh capture after
             // recovery. The next bounded burst probes the now-idle path anew.
             client.audioCompletionDurations.removeAll()
+            client.audioCompletionIntervals.removeAll()
+            client.lastAudioCompletionNanos = nil
         }
     }
 
