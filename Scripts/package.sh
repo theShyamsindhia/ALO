@@ -126,7 +126,7 @@ if $development_build; then
     /usr/libexec/PlistBuddy -c "Set :CFBundleName ALO Dev" "$app/Contents/Info.plist"
 fi
 cp dist/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
-cp -R ".build/${architectures[1]}-apple-macosx/release/ALO_ALO.bundle" "$app/ALO_ALO.bundle"
+cp -R ".build/${architectures[1]}-apple-macosx/release/ALO_ALO.bundle" "$app/Contents/Resources/ALO_ALO.bundle"
 cp Resources/ALOSetupBackground.png "$app/Contents/Resources/ALOSetupBackground.png"
 for setup_slide in Resources/ALOSetupSlide-*.jpg; do
     cp "$setup_slide" "$app/Contents/Resources/${setup_slide:t}"
