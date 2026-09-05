@@ -1,6 +1,8 @@
 import AppKit
 import SwiftUI
 
+private final class AppIconBundleToken: NSObject {}
+
 struct AppIconOption: Identifiable, Equatable {
     let id: String
     let name: String
@@ -33,7 +35,18 @@ struct AppIconOption: Identifiable, Equatable {
 
     @MainActor var image: NSImage? {
         if let cached = Self.imageCache.object(forKey: id as NSString) { return cached }
-        let url = Bundle.module.bundleURL
+        let containingDirectory = Bundle(for: AppIconBundleToken.self).bundleURL
+            .deletingLastPathComponent()
+        let candidates = [
+            Bundle.main.resourceURL?.appendingPathComponent("ALO_ALO.bundle", isDirectory: true),
+            containingDirectory.appendingPathComponent("ALO_ALO.bundle", isDirectory: true),
+            Bundle.main.executableURL?.deletingLastPathComponent()
+                .appendingPathComponent("ALO_ALO.bundle", isDirectory: true)
+        ]
+        guard let resourceBundleURL = candidates.compactMap({ $0 }).first(where: {
+            FileManager.default.fileExists(atPath: $0.path)
+        }) else { return nil }
+        let url = resourceBundleURL
             .appendingPathComponent("AppIcons", isDirectory: true)
             .appendingPathComponent("\(id).png", isDirectory: false)
         guard let image = NSImage(contentsOf: url), image.isValid else { return nil }
