@@ -6033,31 +6033,29 @@ struct WalkieTalkieBar: View {
 
     private var settingsMenu: some View {
         Menu {
-            Menu("Microphone input") {
-                Button {
-                    model.selectVoiceInput(nil)
-                } label: {
-                    if model.selectedVoiceInputUID == nil {
-                        Label(systemDefaultMicrophoneLabel, systemImage: "checkmark")
-                    } else {
-                        Text(systemDefaultMicrophoneLabel)
-                    }
+            Text("Microphone input")
+            Button {
+                model.selectVoiceInput(nil)
+            } label: {
+                if model.selectedVoiceInputUID == nil {
+                    Label(systemDefaultMicrophoneLabel, systemImage: "checkmark")
+                } else {
+                    Text(systemDefaultMicrophoneLabel)
                 }
-                Divider()
-                ForEach(model.voiceInputDevices) { input in
-                    Button {
-                        model.selectVoiceInput(input.id)
-                    } label: {
-                        if input.id == model.selectedVoiceInputUID {
-                            Label(input.menuName, systemImage: "checkmark")
-                        } else {
-                            Text(input.menuName)
-                        }
-                    }
-                }
-                Divider()
-                Button("Refresh microphones") { model.refreshVoiceInputs() }
             }
+            ForEach(model.voiceInputDevices) { input in
+                Button {
+                    model.selectVoiceInput(input.id)
+                } label: {
+                    if input.id == model.selectedVoiceInputUID {
+                        Label(input.menuName, systemImage: "checkmark")
+                    } else {
+                        Text(input.menuName)
+                    }
+                }
+            }
+            Button("Refresh microphones") { model.refreshVoiceInputs() }
+            Divider()
             Menu("Audio to share: \(model.selectedAudioSourceTitle)") {
                 Button {
                     model.selectAudioSource(nil)

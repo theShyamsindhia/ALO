@@ -578,7 +578,7 @@ final class ArenaSession: ObservableObject {
 final class ArenaWindow: NSWindow {
     static func isCloseShortcut(_ event: NSEvent) -> Bool {
         event.type == .keyDown
-            && event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command)
+            && event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command
             && event.charactersIgnoringModifiers?.lowercased() == "w"
     }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
