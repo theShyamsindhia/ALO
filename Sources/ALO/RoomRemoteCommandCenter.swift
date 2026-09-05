@@ -144,7 +144,9 @@ final class RoomRemoteCommandCenter {
             album: media.album,
             artworkData: media.artworkData,
             sourceURL: media.sourceURL,
-            isPlaying: isPlaying
+            isPlaying: isPlaying,
+            elapsedTime: media.elapsedTime,
+            duration: media.duration
         )
     }
 
