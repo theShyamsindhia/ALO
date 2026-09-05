@@ -122,33 +122,35 @@ struct ArenaPanel: View {
             VStack(alignment: .leading, spacing: 14) {
                 ZStack(alignment: .bottomLeading) {
                     if let image = session.arenaBackground {
-                        Image(nsImage: image).resizable().scaledToFill().frame(height: detached ? 185 : 100).clipped()
+                        Image(nsImage: image).resizable().scaledToFill().frame(height: detached ? 185 : 76).clipped()
                     } else { Rectangle().fill(.white.opacity(0.04)).frame(height: 100) }
                     LinearGradient(colors: [.clear, .black.opacity(0.7)], startPoint: .top, endPoint: .bottom)
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Rift Arena").font(.system(size: 22, weight: .semibold))
                         Text("Platform fighter · Up to 4 players").font(.system(size: 11)).foregroundStyle(.white.opacity(0.65))
                     }.padding(14)
-                }.frame(height: detached ? 185 : 100).clipShape(RoundedRectangle(cornerRadius: 14))
+                }.frame(height: detached ? 185 : 76).clipShape(RoundedRectangle(cornerRadius: 14))
                 Text("Choose your fighter").font(.system(size: 12, weight: .semibold))
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                HStack(spacing: 7) {
                     ForEach(ArenaFighterKind.allCases, id: \.self) { fighter in
                         Button { session.selected = fighter } label: {
-                            HStack(spacing: 10) {
+                            VStack(spacing: 5) {
                                 ArenaFighterPortrait(image: (fighter == .nova || fighter == .atlas) ? session.fighterArtwork : session.expandedFighterArtwork, kind: fighter)
-                                    .frame(width: 66, height: 88)
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(fighter.title).font(.system(size: 13, weight: .semibold))
-                                    Text(fighter.subtitle).font(.system(size: 10)).foregroundStyle(.white.opacity(0.5))
-                                }
-                                Spacer(minLength: 0)
-                                if session.selected == fighter { Image(systemName: "checkmark.circle.fill").foregroundStyle(accent) }
-                            }.padding(12).frame(maxWidth: .infinity)
+                                    .frame(width: 52, height: 70)
+                                Text(fighter.title).font(.system(size: 11, weight: .semibold))
+                            }.padding(.vertical, 9).frame(maxWidth: .infinity)
                                 .background(.white.opacity(session.selected == fighter ? 0.09 : 0.03), in: RoundedRectangle(cornerRadius: 12))
                                 .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.white.opacity(session.selected == fighter ? 0.25 : 0.08)))
+                                .overlay(alignment: .topTrailing) {
+                                    if session.selected == fighter {
+                                        Image(systemName: "checkmark.circle.fill").font(.system(size: 10)).foregroundStyle(accent).padding(5)
+                                    }
+                                }
                         }.buttonStyle(.plain).disabled(session.mode != .picker)
+                            .accessibilityLabel("\(fighter.title), \(fighter.subtitle)")
                     }
                 }
+                Text(session.selected.subtitle).font(.system(size: 11)).foregroundStyle(.secondary)
                 Text("Mirror matches welcome. Your player number and colour identify you.")
                     .font(.system(size: 10)).foregroundStyle(.secondary)
                 if session.mode == .picker {

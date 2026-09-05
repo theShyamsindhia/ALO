@@ -414,7 +414,7 @@ struct ArenaRosterDifficultyTests {
             a.countdown = 0; b.countdown = 0
             for _ in 0..<600 {
                 let inputs = a.fighters.indices.map { a.botInput(for: $0, difficulty: difficulty) }
-                #expect(inputs.allSatisfy(\.isValid))
+                #expect(inputs.allSatisfy { $0.isValid })
                 #expect(inputs == b.fighters.indices.map { b.botInput(for: $0, difficulty: difficulty) })
                 a.tick(inputs); b.tick(inputs)
                 #expect(a == b); #expect(a.isValidSnapshot)
