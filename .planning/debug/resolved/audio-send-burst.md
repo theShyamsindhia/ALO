@@ -1,12 +1,12 @@
 ---
-status: verifying
+status: resolved
 trigger: "User authorized investigating and fixing the audio-delivery release blocker before publishing 0.13.49."
 ---
 
 ## Current Focus
 
 - root_cause: A single latest-only pending slot discarded fresh bursts; the replacement queue's initial admission estimate also understated growing in-flight work after delayed capture.
-- next_action: Verify the completion-rate admission regression fix in the full suite and signed CI release gate.
+- resolution: Verified and published ALO 0.13.49 from the successful signed CI commit 39b152e8f275ec5d56037b7485c1a4bb0a52f83e.
 
 ## Evidence
 
@@ -44,3 +44,12 @@ trigger: "User authorized investigating and fixing the audio-delivery release bl
 - Both new regressions and all 38 focused sender/deterministic/real-loopback tests pass. Delayed deterministic maximum age is 234.424ms; fast real links deliver 200/200 per peer; stressed real final ages are 144–154ms. No delivery or latency limits changed. Logs: /tmp/alo-delayed-capture-budget.log, /tmp/alo-flight-rate-baseline.log, /tmp/alo-flight-rate-mean-fixed.log.
 - Final local full suite on bb809b0: 315 tests passed in 175.1 seconds. Log: /tmp/alo-0.13.49-rate-all-tests.log. Signed CI preflight: 33967509740.
 - CI 33967509740 still fails live metrics with source wakes up to 191ms. Found a concrete fixture error in the earlier pacing edit: dispatch_sync explicitly does not observe queue QoS (local SDK dispatch/queue.h lines 283–298). Reuse the asynchronous capture/timeline pattern from e585040, retain absolute deadlines/activity, and assert the actual worker QoS. No source deadline rebasing or assertion weakening.
+- CI 33968027664 on 39b152e passes all 315 tests (210.7s), signing, both Apple notarizations, stapling, architecture checks and Gatekeeper. Fast eight-peer delivery is 200/200 per peer for both wake variants. Stressed maximum packet age is 231/233ms, below 250ms, with final age 221/203ms. Local optimized build also passes. Release artifacts are being downloaded for publication; the installed app remains untouched.
+
+## Publication
+
+- Published https://github.com/theShyamsindhia/WERAI/releases/tag/v0.13.49 with the ZIP and DMG from CI 33968027664, not the local ad-hoc build. Release is non-draft and non-prerelease; both assets are uploaded.
+- Downloaded artifacts independently passed arm64, version 0.13.49/build 80, code signature, stapled ticket and Gatekeeper checks on this Mac.
+- ZIP SHA-256: 1d26e3aaec6057df4ad45d8b536b7bb54b5c30d30b0cb958c9e3f465ad46de6b.
+- DMG SHA-256: 118e805ce4acc0c44c46c64d714b8e03ff944313db50e1c827c1cf8c3644c22c.
+- No installed app replacement, live room interaction, or physical multi-Mac/Bluetooth listening test was performed.
