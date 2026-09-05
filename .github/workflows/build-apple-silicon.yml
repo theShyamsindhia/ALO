@@ -13,6 +13,10 @@ jobs:
   build-arm64:
     runs-on: macos-15
     timeout-minutes: 75
+    env:
+      # Match the locally validated compiler and keep the entrypoint workaround
+      # from silently changing behavior with the runner's default Xcode.
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
 
     steps:
       - name: Check out repository
@@ -29,8 +33,27 @@ jobs:
       - name: Verify Apple Silicon runner
         run: test "$(uname -m)" = "arm64"
 
-      - name: Verify room network and lifecycle scenarios
-        run: bash Scripts/test_room_scenarios.sh
+      - name: Verify pinned toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          test "$(xcodebuild -version | head -n 1)" = "Xcode 26.3"
+
+      - name: Verify Mac regressions, room network and lifecycle scenarios
+        # Exercise optimized media code with testability enabled and all timing
+        # limits intact. This is not a byte-identical packaged-binary measurement.
+        # Apple Swift can give the executable and test runner's async-main thunks
+        # the same optimized symbol. Exempt only C main from CapturePropagation
+        # during test compilation; media optimization and the separate package
+        # build below are unchanged. Do not apply these flags to package.sh.
+        run: |
+          set -euo pipefail
+          swift test -c release --no-parallel \
+            -Xswiftc -Xllvm -Xswiftc -sil-disable-pass=CapturePropagation \
+            -Xswiftc -Xllvm -Xswiftc -sil-disable-pass-only-function=main \
+            2>&1 | tee "$RUNNER_TEMP/alo-tests.log"
+          # A compiler/runner regression must not silently succeed with no tests.
+          grep -Eq 'Test run with [1-9][0-9]* tests?( in [0-9]+ suites)? passed' "$RUNNER_TEMP/alo-tests.log"
 
       - name: Install Developer ID Application certificate
         id: import-application-certificate

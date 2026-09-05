@@ -39,6 +39,35 @@ struct ReceiverLevelPreference {
     }
 }
 
+/// Queue-confined screen-session observations, independent of media delivery.
+struct ReceiverScreenTiming {
+    private(set) var videoEnabled = false
+    private var hasEnabledBefore = false
+    private var requireHandoffAfterNanos: UInt64?
+
+    mutating func update(enabled: Bool, at now: UInt64) {
+        if enabled, !videoEnabled {
+            // The initial video can beat its control notification. After a
+            // restart, however, a retained/disabled-period image is not proof of
+            // new delivery: require another handoff after this local boundary.
+            // A restarted static frame that beats control remains unverified,
+            // rather than guessing its stream generation across transports.
+            if hasEnabledBefore { requireHandoffAfterNanos = now }
+            hasEnabledBefore = true
+        }
+        videoEnabled = enabled
+    }
+
+    func presentationSnapshot(_ snapshot: VideoPresentationTimingSnapshot) -> VideoPresentationTimingSnapshot {
+        guard let boundary = requireHandoffAfterNanos,
+              let handoff = snapshot.latestHandoffAtNanos, handoff <= boundary else { return snapshot }
+        return VideoPresentationTimingSnapshot(measuredAtNanos: snapshot.measuredAtNanos,
+            latestHandoffAtNanos: nil, latestDeadlineMissNanos: nil,
+            maximumDeadlineMissNanos: snapshot.maximumDeadlineMissNanos, presentedCount: 0,
+            pendingCount: snapshot.pendingCount, oldestPendingDeadlineNanos: snapshot.oldestPendingDeadlineNanos)
+    }
+}
+
 final class Receiver {
     private final class PlaybackActivityRelay {
         var handler: (Bool) -> Void = { _ in }
@@ -77,6 +106,7 @@ final class Receiver {
     private var maintenanceTimer: DispatchSourceTimer?
     private var hasChosenRoom = false
     private var hasAuthenticatedControl = false
+    private var screenTiming = ReceiverScreenTiming()
     private var audioListenerReady = false
     private var videoListenerReady = false
     private var audioConnections = [NWConnection]()
@@ -209,13 +239,14 @@ final class Receiver {
             control?.cancel()
             control = nil
             hasAuthenticatedControl = false
+            screenTiming = ReceiverScreenTiming()
             udpListener?.cancel()
             udpListener = nil
             videoListener?.cancel()
             videoListener = nil
             audioConnections.forEach { $0.cancel() }
             audioConnections.removeAll()
-            videoConnections.forEach { $0.cancel() }
+            videoConnections.forEach { $0.stateUpdateHandler = nil; $0.cancel() }
             videoConnections.removeAll()
             player.stop()
             videoDecoder.stop()
@@ -250,7 +281,11 @@ final class Receiver {
                 outputChannelCount: outputFormat?.channelCount,
                 latenessMilliseconds: Double(report.latenessNanos) / 1_000_000,
                 latePacketCount: report.latePacketCount,
-                resyncCount: report.resyncCount
+                resyncCount: report.resyncCount,
+                currentDriftMilliseconds: report.driftNanos.map { Double($0) / 1_000_000 },
+                driftMeasurementAgeMilliseconds: report.driftSampleAgeNanos.map { Double($0) / 1_000_000 },
+                video: screenTiming.presentationSnapshot(videoDecoder.presentationTimingSnapshot),
+                videoEnabled: screenTiming.videoEnabled
             )
         }
     }
@@ -471,7 +506,8 @@ final class Receiver {
                         // newly authenticated transport epoch.
                         self.sendPreferredLevel()
                     case "media_state":
-                        self.mediaStateHandler?(message.videoEnabled ?? false)
+                        self.screenTiming.update(enabled: message.videoEnabled ?? false, at: MonotonicClock.nowNanos())
+                        self.mediaStateHandler?(self.screenTiming.videoEnabled)
                     case "now_playing":
                         let media = message.nowPlaying ?? NowPlayingMedia()
                         if self.capturesSystemMediaCommands {
@@ -527,10 +563,11 @@ final class Receiver {
         control?.cancel()
         control = nil
         hasAuthenticatedControl = false
+        screenTiming = ReceiverScreenTiming()
         controlDecoder = ControlLineDecoder()
         audioConnections.forEach { $0.cancel() }
         audioConnections.removeAll()
-        videoConnections.forEach { $0.cancel() }
+        videoConnections.forEach { $0.stateUpdateHandler = nil; $0.cancel() }
         videoConnections.removeAll()
         clock.reset()
         jitter.reset()
@@ -600,10 +637,16 @@ final class Receiver {
                 renderSchedulingHeadroomNanos: player.renderSchedulingHeadroomForTimingNanos
             )
         ))
+        let audioReport = player.syncReport()
+        let playbackReport = PlaybackSyncReport(measuredAtNanos: audioReport.measuredAtNanos,
+            latenessNanos: audioReport.latenessNanos, latePacketCount: audioReport.latePacketCount,
+            resyncCount: audioReport.resyncCount, driftNanos: audioReport.driftNanos,
+            driftSampleAgeNanos: audioReport.driftSampleAgeNanos,
+            screenTiming: screenTiming.presentationSnapshot(videoDecoder.presentationTimingSnapshot).relativeTimingReport)
         send(ControlMessage(
             type: "sync_status",
             participantID: participantID,
-            syncReport: player.syncReport()
+            syncReport: playbackReport
         ))
     }
 
@@ -619,16 +662,26 @@ final class Receiver {
         let connectionEpoch = transportEpoch.token
         videoConnections.append(connection)
         let decoder = VideoFrameStreamDecoder()
-        connection.stateUpdateHandler = { state in
-            if case .failed(let error) = state {
+        connection.stateUpdateHandler = { [weak self, weak connection] state in
+            guard let self, let connection else { return }
+            switch state {
+            case .failed(let error):
                 fputs("Video receive path failed: \(error)\n", stderr)
+                self.retireVideoConnection(connection)
+            case .cancelled:
+                self.retireVideoConnection(connection)
+            default: break
             }
         }
         connection.start(queue: queue)
 
         func receiveNext() {
             connection.receive(minimumIncompleteLength: 1, maximumLength: 1_048_576) { [weak self] data, _, isComplete, error in
-                guard let self, self.transportEpoch.accepts(connectionEpoch) else { return }
+                guard let self else { connection.cancel(); return }
+                guard self.transportEpoch.accepts(connectionEpoch) else {
+                    self.retireVideoConnection(connection)
+                    return
+                }
                 if let data {
                     for frame in decoder.append(data) {
                         self.videoDecoder.accept(frame)
@@ -636,10 +689,30 @@ final class Receiver {
                 }
                 if !isComplete, error == nil {
                     receiveNext()
+                } else {
+                    self.retireVideoConnection(connection)
                 }
             }
         }
         receiveNext()
+    }
+
+    private func retireVideoConnection(_ connection: NWConnection) {
+        // Stale-epoch callbacks retire only their own transport, never a newer
+        // replacement; they must still release resources after frame admission ends.
+        connection.stateUpdateHandler = nil
+        videoConnections.removeAll { $0 === connection }
+        connection.cancel()
+    }
+
+    var videoConnectionCountForTesting: Int { queue.sync { videoConnections.count } }
+
+    func receiveVideoForTesting(from connection: NWConnection) {
+        queue.async { [weak self] in self?.receiveVideo(from: connection) }
+    }
+
+    func advanceTransportEpochForTesting() {
+        queue.sync { transportEpoch.advance() }
     }
 }
 

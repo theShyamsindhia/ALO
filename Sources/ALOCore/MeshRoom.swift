@@ -27,6 +27,7 @@ public struct RoomConfiguration: Codable, Sendable, Equatable, Hashable, Identif
     public let accessKey: String?
     public let joinedAt: Date
     public let transportPolicy: RoomTransportPolicy
+    public var icon: RoomIcon?
 
     public init(
         id: String = UUID().uuidString,
@@ -35,7 +36,8 @@ public struct RoomConfiguration: Codable, Sendable, Equatable, Hashable, Identif
         isPrivate: Bool = false,
         accessKey: String? = nil,
         joinedAt: Date = Date(),
-        transportPolicy: RoomTransportPolicy = .legacyOnly
+        transportPolicy: RoomTransportPolicy = .legacyOnly,
+        icon: RoomIcon? = nil
     ) {
         self.id = id
         self.name = name
@@ -44,10 +46,11 @@ public struct RoomConfiguration: Codable, Sendable, Equatable, Hashable, Identif
         self.accessKey = isPrivate ? accessKey : nil
         self.joinedAt = joinedAt
         self.transportPolicy = transportPolicy
+        self.icon = icon?.isValid == true ? icon : nil
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, creatorPeerID, isPrivate, accessKey, joinedAt, transportPolicy
+        case id, name, creatorPeerID, isPrivate, accessKey, joinedAt, transportPolicy, icon
     }
 
     public init(from decoder: Decoder) throws {
@@ -58,7 +61,8 @@ public struct RoomConfiguration: Codable, Sendable, Equatable, Hashable, Identif
                   isPrivate: try values.decode(Bool.self, forKey: .isPrivate),
                   accessKey: try values.decodeIfPresent(String.self, forKey: .accessKey),
                   joinedAt: try values.decode(Date.self, forKey: .joinedAt),
-                  transportPolicy: try values.decodeIfPresent(RoomTransportPolicy.self, forKey: .transportPolicy) ?? .legacyOnly)
+                  transportPolicy: try values.decodeIfPresent(RoomTransportPolicy.self, forKey: .transportPolicy) ?? .legacyOnly,
+                  icon: try values.decodeIfPresent(RoomIcon.self, forKey: .icon))
         // Public room metadata omits its private key. A supplied v2 key must still
         // satisfy the credential profile; metadata alone never authorizes joining.
         if transportPolicy == .secureV2, isPrivate, accessKey != nil, secureJoinSecret == nil {
@@ -69,10 +73,10 @@ public struct RoomConfiguration: Codable, Sendable, Equatable, Hashable, Identif
 
     /// Explicitly creates a v2 room. Existing rooms continue to default to legacy.
     public static func secure(id: String = UUID().uuidString, name: String, creatorPeerID: String = "",
-                              isPrivate: Bool = true, joinedAt: Date = Date()) -> Self {
+                              isPrivate: Bool = true, joinedAt: Date = Date(), icon: RoomIcon? = nil) -> Self {
         let key = isPrivate ? SymmetricKey(size: .bits256).withUnsafeBytes { Data($0).base64EncodedString() } : nil
         return Self(id: id, name: name, creatorPeerID: creatorPeerID, isPrivate: isPrivate,
-                    accessKey: key, joinedAt: joinedAt, transportPolicy: .secureV2)
+                    accessKey: key, joinedAt: joinedAt, transportPolicy: .secureV2, icon: icon)
     }
 
     public var secureJoinSecret: Data? {
@@ -95,10 +99,10 @@ public struct RoomConfiguration: Codable, Sendable, Equatable, Hashable, Identif
     public func migrated(to policy: RoomTransportPolicy) -> Self {
         guard policy != transportPolicy else { return self }
         if policy == .secureV2 {
-            return Self.secure(id: id, name: name, creatorPeerID: creatorPeerID, isPrivate: isPrivate, joinedAt: joinedAt)
+            return Self.secure(id: id, name: name, creatorPeerID: creatorPeerID, isPrivate: isPrivate, joinedAt: joinedAt, icon: icon)
         }
         return Self(id: id, name: name, creatorPeerID: creatorPeerID, isPrivate: isPrivate,
-                    accessKey: accessKey, joinedAt: joinedAt, transportPolicy: policy)
+                    accessKey: accessKey, joinedAt: joinedAt, transportPolicy: policy, icon: icon)
     }
 }
 
@@ -218,9 +222,8 @@ public struct MeshRoomReplica: Sendable, Equatable {
     public static let maximumChatEvents = 500
     public static let maximumQueueEvents = 5_000
 
-    /// A million events per second since the Unix epoch is well beyond the
-    /// room's throughput. A moving ceiling leaves room for the next takeover,
-    /// unlike accepting an attacker-chosen value at a fixed integer limit.
+    /// A moving ceiling rejects remote integer poisoning while leaving room for
+    /// the next local event and broadcaster takeover.
     public static func hasPlausibleCounters(_ event: MeshRoomEvent, now: Date = Date()) -> Bool {
         let ceiling = UInt64(max(0, min(now.timeIntervalSince1970 * 1_000_000, Double(UInt64.max / 2))))
         return event.version.counter <= ceiling && (event.broadcasterEpoch ?? 0) <= ceiling
@@ -390,6 +393,7 @@ public struct MeshPeerDirectoryHint: Codable, Sendable, Equatable {
 
 public struct MeshEnvelope: Codable, Sendable {
     public let type: String
+    public let roomIcon: RoomIcon?
     public let room: RoomConfiguration?
     public let nodeID: String?
     public let displayName: String?
@@ -427,6 +431,7 @@ public struct MeshEnvelope: Codable, Sendable {
 
     public init(
         type: String,
+        roomIcon: RoomIcon? = nil,
         room: RoomConfiguration? = nil,
         nodeID: String? = nil,
         displayName: String? = nil,
@@ -461,6 +466,7 @@ public struct MeshEnvelope: Codable, Sendable {
         meshPeerDirectory: [MeshPeerDirectoryHint]? = nil
     ) {
         self.type = type
+        self.roomIcon = roomIcon
         self.room = room
         self.nodeID = nodeID
         self.displayName = displayName

@@ -132,6 +132,22 @@ final class MeshSession {
         return nil
     }
 
+    func sampleTimingDiagnostics() async -> SessionTimingDiagnostics? {
+        let sampledHost = hostSession
+        let sampledReceiver = receiver
+        let snapshot: SessionTimingDiagnostics?
+        if let sampledHost {
+            snapshot = await sampledHost.sampleTimingDiagnostics()
+        } else if let sampledReceiver {
+            snapshot = await Task.detached(priority: .utility) {
+                SessionTimingDiagnostics(receiver: sampledReceiver.diagnosticsSnapshot(), host: nil)
+            }.value
+        } else { return nil }
+        // A takeover/rejoin while sampling cannot apply the previous source's verdict.
+        guard hostSession === sampledHost, receiver === sampledReceiver else { return nil }
+        return snapshot
+    }
+
     private final class CallbackRelay {
         var replica: (MeshRoomReplica) -> Void = { _ in }
         var participants: ([RoomParticipant]) -> Void = { _ in }
@@ -190,6 +206,7 @@ final class MeshSession {
         queueHandler: @escaping ([RoomQueueItem]) -> Void,
         videoHandler: @escaping (CGImage) -> Void,
         peerVersionHandler: @escaping (String) -> Void = { _ in },
+        roomIconHandler: @escaping (RoomIcon) -> Void = { _ in },
         errorHandler: @escaping (Error) -> Void = { _ in },
         walkieTalkieStateHandler: @escaping (String, String, Bool, Double) -> Void = { _, _, _, _ in },
         walkieTalkieTransmissionEndedHandler: @escaping (Error) -> Void = { _ in },
@@ -251,6 +268,9 @@ final class MeshSession {
             },
             participantsHandler: { participants in
                 DispatchQueue.main.async { relay.participants(participants) }
+            },
+            roomIconHandler: { icon in
+                DispatchQueue.main.async { roomIconHandler(icon) }
             },
             peerVersionHandler: { version in
                 DispatchQueue.main.async { peerVersionHandler(version) }
@@ -690,12 +710,9 @@ final class MeshSession {
     }
     func setIncomingMediaMuted(_ muted: Bool) {
         incomingMediaMuted = muted
-        let routing = incomingAudioMuteRouting
-        if isBroadcasting {
-            hostSession?.setLocalPlaybackMuted(routing.incomingMediaMuted)
-        } else {
-            receiver?.setLocalPlaybackMuted(routing.incomingMediaMuted)
-        }
+        // Only the remote receiver is incoming audio. HostSession owns the
+        // source return and its direct-source fallback independently.
+        receiver?.setLocalPlaybackMuted(incomingAudioMuteRouting.incomingMediaMuted)
     }
     func setIncomingWalkieTalkieMuted(_ muted: Bool) {
         incomingVoiceMuted = muted
@@ -830,7 +847,7 @@ final class MeshSession {
 
         transitionTask = Task {
             await previousTransition?.value
-            // Detached resources belong to this task even if a newer transition cancels it.
+            // This task owns the detached host even if a newer transition cancels it.
             await oldHost?.stop()
             guard !Task.isCancelled, generation == transitionGeneration else { return }
             guard let broadcaster else {
@@ -921,7 +938,6 @@ final class MeshSession {
                         volume: localVolume,
                         muted: routing.publishedParticipantMediaMuted
                     )
-                    host.setLocalPlaybackMuted(routing.incomingMediaMuted)
                 } else {
                     statusHandler("Connecting to the room broadcaster")
                     let receiver = try Receiver(

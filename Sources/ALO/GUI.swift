@@ -7,6 +7,7 @@ import QuartzCore
 import SwiftUI
 import UniformTypeIdentifiers
 import ALOCore
+import os
 
 private enum ALOAppFlavor {
     static var isDevelopment: Bool {
@@ -427,6 +428,16 @@ func makeALOEditMenu() -> NSMenu {
 }
 
 @MainActor
+func toggleALOSetupWindow(_ window: NSWindow) {
+    if window.isVisible {
+        window.orderOut(nil)
+    } else {
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+@MainActor
 private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     private enum SetupWindow {
         static let width: CGFloat = 306
@@ -495,7 +506,12 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
         window.standardWindowButton(.closeButton)?.isHidden = true
         window.standardWindowButton(.miniaturizeButton)?.isHidden = true
         window.standardWindowButton(.zoomButton)?.isHidden = true
-        window.contentView = NSHostingView(rootView: ALOView(model: model))
+        window.contentView = NSHostingView(rootView: ALOView(
+            model: model,
+            checkForUpdates: ALOAppFlavor.isDevelopment ? nil : { [weak self] in
+                self?.updater.checkForUpdates(userInitiated: true)
+            }
+        ))
         window.center()
         setupWindowFrame = window.frame
         window.isReleasedWhenClosed = false
@@ -503,10 +519,11 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         self.window = window
         statusMenuController = ALOStatusMenuController(model: model) { [weak self] in
-            self?.window?.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            guard let window = self?.window else { return }
+            toggleALOSetupWindow(window)
         }
         if !ALOAppFlavor.isDevelopment {
+            updater.updateAvailabilityHandler = { [weak model] version in model?.availableUpdateVersion = version }
             updater.updateAvailableHandler = { [weak self] version in self?.presentUpdate(version: version) }
             updater.messageHandler = { [weak self] message in self?.presentUpdateMessage(message) }
             model.peerVersionHandler = { [weak updater] version in updater?.observePeerVersion(version) }
@@ -821,7 +838,7 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
 @MainActor
 private final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
     private let model: ALOViewModel
-    private let openMainWindow: () -> Void
+    private let toggleMainWindow: () -> Void
     private let statusItem: NSStatusItem
     private let popover = NSPopover()
     private var recordView: ALOStatusRecordView?
@@ -834,9 +851,9 @@ private final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
     private var artwork: NSImage?
     private var artworkPalette: ArtworkPalette?
 
-    init(model: ALOViewModel, openMainWindow: @escaping () -> Void) {
+    init(model: ALOViewModel, toggleMainWindow: @escaping () -> Void) {
         self.model = model
-        self.openMainWindow = openMainWindow
+        self.toggleMainWindow = toggleMainWindow
         statusItem = NSStatusBar.system.statusItem(withLength: ALOMenuBarRecord.statusItemWidth)
         super.init()
         statusItem.button?.toolTip = ALOAppFlavor.displayName
@@ -846,7 +863,7 @@ private final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
             button.target = self
             button.action = #selector(handleStatusItemClick(_:))
             button.sendAction(on: [.leftMouseUp])
-            button.setAccessibilityHelp("Click to open room controls")
+            button.setAccessibilityHelp("Click to show or hide ALO")
             button.wantsLayer = true
             let recordView = ALOStatusRecordView(frame: button.bounds)
             recordView.autoresizingMask = [.width, .height]
@@ -957,7 +974,7 @@ private final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
 
     @objc private func handleStatusItemClick(_ sender: NSStatusBarButton) {
         guard model.phase == .live else {
-            openMainWindow()
+            toggleMainWindow()
             return
         }
         popover.isShown ? closePopover() : showPopover()
@@ -1399,6 +1416,9 @@ final class ALOViewModel: ObservableObject {
     @Published var nearbyRooms = [NearbyRoom]()
     @Published var savedRooms = [RoomConfiguration]()
     @Published var selectedRoomID: String?
+    @Published var roomsRefreshing = false
+    @Published var roomsRefreshError: String?
+    @Published var availableUpdateVersion: String?
     @Published var createPrivateRoom = false
     @Published var privateRoomKey = ""
     @Published var statusText = "Ready"
@@ -1445,6 +1465,7 @@ final class ALOViewModel: ObservableObject {
     @Published private(set) var roomArtworkPalette: ArtworkPalette?
     @Published var localNowPlaying = NowPlayingMedia()
     @Published private(set) var audioIsRendering = false
+    @Published private(set) var liveSyncHealth = LiveSyncHealth()
     @Published var experience: Experience = .audio
     @Published var mediaSwitchBusy = false
     @Published var permissionNotice = false
@@ -1455,6 +1476,8 @@ final class ALOViewModel: ObservableObject {
 
     private var roomBrowser: MeshRoomBrowser!
     private var meshSession: MeshSession?
+    private var liveSyncTask: Task<Void, Never>?
+    private let syncHealthLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "in.werai.audio", category: "synchronization")
     private var requestedVideoBroadcast = false
     private var videoBroadcastTimeoutTask: Task<Void, Never>?
     private let roomStore = RoomStore()
@@ -1521,20 +1544,29 @@ final class ALOViewModel: ObservableObject {
         })
             ? savedVoiceInput
             : nil
-        selectedRoomID = lastJoinedRoomStore.roomToRestore(from: savedRooms)?.id
-            ?? savedRooms.first?.id
+        selectedRoomID = nil
         roomBrowser = MeshRoomBrowser(
             updateHandler: { [weak self] rooms in
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.nearbyRooms = rooms
-                    if self.selectedRoomID == nil || !self.roomChoices.contains(where: { $0.id == self.selectedRoomID }) {
-                        self.selectedRoomID = rooms.first?.id ?? self.savedRooms.first?.id
+                    if let selected = self.selectedRoomID, !self.roomChoices.contains(where: { $0.id == selected }) {
+                        self.selectedRoomID = nil
                     }
                 }
             },
             errorHandler: { [weak self] message in
-                DispatchQueue.main.async { self?.statusText = "Local network unavailable: \(message)" }
+                DispatchQueue.main.async {
+                    self?.roomsRefreshing = false
+                    self?.roomsRefreshError = message
+                    self?.statusText = "Local network unavailable: \(message)"
+                }
+            },
+            readyHandler: { [weak self] in
+                DispatchQueue.main.async {
+                    self?.roomsRefreshing = false
+                    self?.roomsRefreshError = nil
+                }
             }
         )
         if discoverRooms { roomBrowser.start() }
@@ -1588,8 +1620,12 @@ final class ALOViewModel: ObservableObject {
     var roomSyncLabel: String {
         if !hasBroadcaster { return "No broadcaster" }
         if nowPlaying.isPlaying == false { return "Paused" }
-        if isHost { return nowPlaying.isEmpty ? "Waiting for audio" : "Broadcasting" }
-        if audioIsRendering { return "Synced" }
+        if isHost {
+            if nowPlaying.isEmpty { return "Waiting for audio" }
+            if participants.count <= 1 { return "Broadcasting" }
+            return liveSyncHealth.playbackLabel(isHost: true, now: MonotonicClock.nowNanos())
+        }
+        if audioIsRendering { return liveSyncHealth.playbackLabel(isHost: false, now: MonotonicClock.nowNanos()) }
         return nowPlaying.isEmpty ? "Waiting for audio" : "Recovering audio…"
     }
     var canSelectVideo: Bool { phase == .live && meshSession != nil }
@@ -1661,7 +1697,8 @@ final class ALOViewModel: ObservableObject {
                 creatorPeerID: room.creatorPeerID,
                 isPrivate: true,
                 accessKey: key,
-                transportPolicy: room.transportPolicy
+                transportPolicy: room.transportPolicy,
+                icon: room.icon
             )
             try? roomStore.save(unlocked)
             savedRooms = roomStore.load()
@@ -1675,7 +1712,7 @@ final class ALOViewModel: ObservableObject {
             try roomStore.forget(roomID: roomID)
             savedRooms = roomStore.load()
             if selectedRoomID == roomID {
-                selectedRoomID = nearbyRooms.first?.id ?? savedRooms.first?.id
+                selectedRoomID = nil
             }
         } catch {
             errorMessage = "Could not forget the room: \(error.localizedDescription)"
@@ -1705,6 +1742,21 @@ final class ALOViewModel: ObservableObject {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(key, forType: .string)
         statusText = "Private space invite key copied"
+    }
+
+    func setRoomIcon(roomID: String, symbol: String) {
+        guard phase == .idle, let room = savedRooms.first(where: { $0.id == roomID }),
+              RoomIcon.choices.contains(where: { $0.symbol == symbol }) else { return }
+        let nearbyIcon = nearbyRooms.first(where: { $0.id == roomID })?.icon
+        let counter = max(room.icon?.version.counter ?? 0, nearbyIcon?.version.counter ?? 0)
+        guard counter < UInt64.max - 1 else { return }
+        let icon = RoomIcon(symbol: symbol, version: MeshVersion(counter: counter + 1, nodeID: nodeID))
+        do {
+            try roomStore.mergeIcon(icon, roomID: roomID)
+            savedRooms = roomStore.load()
+        } catch {
+            errorMessage = "Could not save the space icon: \(error.localizedDescription)"
+        }
     }
 
     func copyPrivateInviteKey() {
@@ -1745,6 +1797,16 @@ final class ALOViewModel: ObservableObject {
             queueHandler: queueCallback,
             videoHandler: videoCallback,
             peerVersionHandler: { [weak self] version in self?.peerVersionHandler(version) },
+            roomIconHandler: { [weak self] icon in
+                guard let self else { return }
+                do {
+                    try self.roomStore.mergeIcon(icon, roomID: room.id)
+                    self.savedRooms = self.roomStore.load()
+                    if self.activeRoomConfiguration?.id == room.id { self.activeRoomConfiguration?.icon = icon }
+                } catch {
+                    self.errorMessage = "Could not save the shared space icon: \(error.localizedDescription)"
+                }
+            },
             errorHandler: { [weak self] error in
                 guard let self else { return }
                 let permissionRelated = self.isPermissionError(error)
@@ -1834,6 +1896,7 @@ final class ALOViewModel: ObservableObject {
             savedRooms = roomStore.load()
             phase = .live
             statusText = broadcastInitially ? "Starting this Mac's broadcast" : "Room open"
+            startLiveSyncMonitoring(session)
             updateLocalNowPlayingMonitor()
         } catch {
             meshSession = nil
@@ -2661,6 +2724,7 @@ final class ALOViewModel: ObservableObject {
 
     func stop() {
         isLeavingRoom = true
+        stopLiveSyncMonitoring()
         lastJoinedRoomStore.clear(ifMatching: activeRoomConfiguration?.id)
         phase = .starting
         statusText = "Leaving the room"
@@ -2681,6 +2745,11 @@ final class ALOViewModel: ObservableObject {
     }
 
     func refreshRooms() {
+        guard phase == .idle, !roomsRefreshing else { return }
+        savedRooms = roomStore.load()
+        nearbyRooms = []
+        roomsRefreshing = true
+        roomsRefreshError = nil
         statusText = "Looking for rooms"
         roomBrowser.restart()
     }
@@ -2723,11 +2792,16 @@ final class ALOViewModel: ObservableObject {
 
     func stopImmediately() {
         isLeavingRoom = true
+        stopLiveSyncMonitoring()
         stopLocalNowPlayingMonitor()
         meshSession?.stopImmediately()
     }
 
     func diagnosticRoomContext() -> DiagnosticRoomContext {
+        diagnosticRoomContext(timing: meshSession?.diagnosticsSnapshot())
+    }
+
+    private func diagnosticRoomContext(timing: SessionTimingDiagnostics?) -> DiagnosticRoomContext {
         let active = phase == .live && meshSession != nil
         let remotePeerCount = participants.filter { $0.id != currentParticipantID }.count
         return DiagnosticRoomContext(
@@ -2738,8 +2812,70 @@ final class ALOViewModel: ObservableObject {
             syncLabel: roomSyncLabel,
             audioIsRendering: audioIsRendering,
             hasBroadcaster: hasBroadcaster,
-            timing: meshSession?.diagnosticsSnapshot()
+            timing: timing
         )
+    }
+
+    private func startLiveSyncMonitoring(_ session: MeshSession) {
+        stopLiveSyncMonitoring()
+        // Retain incidents after leaving for export; only a new room clears them.
+        liveSyncHealth = LiveSyncHealth()
+        liveSyncTask = Task { [weak self, weak session] in
+            while !Task.isCancelled {
+                guard self != nil, let session else { return }
+                let started = MonotonicClock.nowNanos()
+                // A stalled diagnostic read cannot leave the last healthy badge
+                // latched indefinitely. This timeout does not start another read.
+                let freshnessTimeout = Task { [weak self, weak session] in
+                    do { try await Task.sleep(nanoseconds: 2_500_000_000) }
+                    catch { return }
+                    guard !Task.isCancelled, let session, self?.meshSession === session else { return }
+                    self?.invalidateLiveSyncSample()
+                }
+                let timing = await session.sampleTimingDiagnostics()
+                freshnessTimeout.cancel()
+                guard !Task.isCancelled else { return }
+                self?.applyLiveSyncTiming(timing, from: session, sampledAt: started)
+                do { try await Task.sleep(nanoseconds: 1_000_000_000) }
+                catch { return }
+            }
+        }
+    }
+
+    private func applyLiveSyncTiming(_ timing: SessionTimingDiagnostics?, from session: MeshSession, sampledAt: UInt64) {
+        guard meshSession === session, phase == .live, !isLeavingRoom else { return }
+        guard hasBroadcaster, nowPlaying.isPlaying != false else {
+            invalidateLiveSyncSample()
+            return
+        }
+        let now = MonotonicClock.nowNanos()
+        // Snapshot collection can span separate receiver/host queues. Old values
+        // must not become fresh merely because the async call finally completed.
+        let freshTiming = now >= sampledAt && now - sampledAt <= 500_000_000 ? timing : nil
+        guard let freshTiming else {
+            invalidateLiveSyncSample()
+            return
+        }
+        let result = diagnosticRoomContext(timing: freshTiming).result
+        if liveSyncHealth.recentTransitions.last?.outcome != result.outcome {
+            // Anonymous, transition-only evidence; never log peer names or content.
+            let detail = DiagnosticRedactor.redact(result.detail)
+            syncHealthLogger.notice("Playback timing \(result.outcome.rawValue, privacy: .public): \(detail, privacy: .public)")
+        }
+        liveSyncHealth.observe(result, at: sampledAt)
+    }
+
+    private func stopLiveSyncMonitoring() {
+        liveSyncTask?.cancel()
+        liveSyncTask = nil
+        invalidateLiveSyncSample()
+    }
+
+    private func invalidateLiveSyncSample() {
+        // Guard before mutating the @Published value: even an unchanged inout
+        // write would otherwise redraw the whole model on every idle timer tick.
+        guard liveSyncHealth.hasCurrentSample else { return }
+        liveSyncHealth.invalidateCurrentSample()
     }
 
     private func ensureScreenRecordingPermission() -> Bool {
@@ -2875,7 +3011,7 @@ final class ALOViewModel: ObservableObject {
         }
     }
 
-    private var nowPlayingCallback: (NowPlayingMedia) -> Void {
+    var nowPlayingCallback: (NowPlayingMedia) -> Void {
         { [weak self] media in
             let artworkPalette = ArtworkTheme.palette(from: media.artworkData)
             DispatchQueue.main.async {
@@ -2894,7 +3030,10 @@ final class ALOViewModel: ObservableObject {
 
     private var videoCallback: (CGImage) -> Void {
         { [weak self] image in
-            DispatchQueue.main.async { self?.videoFrame = image }
+            // Scheduled decoder presentation already runs on main; another
+            // asynchronous hop would escape its bounded queue and reset gate.
+            if Thread.isMainThread { self?.videoFrame = image }
+            else { DispatchQueue.main.async { self?.videoFrame = image } }
         }
     }
 
@@ -2935,6 +3074,7 @@ final class ALOViewModel: ObservableObject {
     }
 
     private func resetRoomState() {
+        stopLiveSyncMonitoring()
         stopLocalNowPlayingMonitor()
         isLeavingRoom = false
         errorMessage = nil
@@ -3100,12 +3240,14 @@ final class ALOViewModel: ObservableObject {
 
 struct ALOView: View {
     @ObservedObject var model: ALOViewModel
+    var checkForUpdates: (() -> Void)? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var roomNameFocused: Bool
     @FocusState private var privateKeyFocused: Bool
     @FocusState private var roomRenameFocused: Bool
     @State private var editingRoomID: String?
     @State private var editedRoomName = ""
+    @State private var focusedRoomID: String?
 
     var body: some View {
         ZStack {
@@ -3192,10 +3334,34 @@ struct ALOView: View {
     private var setupFooter: some View {
         VStack(spacing: 0) {
             Divider()
-            Text("ALO")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            HStack(spacing: 6) {
+                if let error = model.roomsRefreshError {
+                    Image(systemName: "wifi.exclamationmark")
+                        .help(error)
+                        .accessibilityLabel("Nearby discovery unavailable: \(error)")
+                }
+                Button(action: { checkForUpdates?() }) {
+                    HStack(spacing: 6) {
+                        Label("ALO \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—")",
+                              systemImage: "arrow.down.circle")
+                        if model.availableUpdateVersion != nil {
+                            Circle()
+                                .fill(.tint)
+                                .frame(width: 5, height: 5)
+                                .accessibilityHidden(true)
+                            Text("Update available")
+                                .foregroundStyle(.tint)
+                        }
+                    }
+                }
+                .buttonStyle(.borderless)
+                .disabled(checkForUpdates == nil)
+                .help(model.availableUpdateVersion.map { "ALO \($0) is available" } ?? "Check for updates")
+                .accessibilityLabel(model.availableUpdateVersion.map { "Update available: ALO \($0)" } ?? "Check for ALO updates")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(height: 37)
     }
@@ -3251,14 +3417,31 @@ struct ALOView: View {
                 Text("Spaces")
                     .font(.headline)
                 Spacer()
+                Button(action: model.refreshRooms) {
+                    ZStack {
+                        if model.roomsRefreshing {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                        }
+                    }
+                    .frame(width: 20, height: 20)
+                }
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.circle)
+                .disabled(model.roomsRefreshing)
+                .help(model.roomsRefreshing ? "Looking for nearby spaces…" : "Sync saved and nearby spaces")
+                .accessibilityLabel("Sync spaces")
                 Button {
                     withAnimation(reduceMotion ? nil : .smooth(duration: 0.28)) {
                         model.mode = .share
                     }
                 } label: {
                     Image(systemName: "plus")
+                        .frame(width: 20, height: 20)
                 }
                 .buttonStyle(.bordered)
+                .buttonBorderShape(.circle)
                 .help("Create a space")
                 .accessibilityLabel("Create a space")
             }
@@ -3266,7 +3449,7 @@ struct ALOView: View {
             .frame(height: 45)
 
             ScrollViewReader { proxy in
-                List(selection: $model.selectedRoomID) {
+                List(selection: $focusedRoomID) {
                     if model.roomChoices.isEmpty {
                         VStack(alignment: .leading, spacing: 3) {
                             Text("Looking nearby")
@@ -3288,14 +3471,18 @@ struct ALOView: View {
                 }
                 .listStyle(.inset)
                 .scrollContentBackground(.hidden)
+                .onChange(of: focusedRoomID) { _, selected in
+                    if let selected { model.selectedRoomID = selected }
+                }
                 .onChange(of: model.selectedRoomID, initial: true) { previous, selected in
                     if previous != selected { model.privateRoomKey = "" }
-                    if let selected {
+                    if let selected, model.selectedRoomConfiguration?.isPrivate == true {
                         DispatchQueue.main.async { proxy.scrollTo(selected, anchor: .center) }
                     }
                 }
                 .onKeyPress(.return) {
-                    guard editingRoomID == nil, let room = model.selectedRoomConfiguration else { return .ignored }
+                    guard editingRoomID == nil, focusedRoomID != nil,
+                          let room = model.selectedRoomConfiguration else { return .ignored }
                     if room.isPrivate && room.accessKey == nil {
                         privateKeyFocused = true
                     } else {
@@ -3321,6 +3508,7 @@ struct ALOView: View {
             }
         }
         .frame(width: 286, height: 199)
+        .onAppear { focusedRoomID = nil }
     }
 
     private var setupRoomListHeight: CGFloat {
@@ -3372,10 +3560,11 @@ struct ALOView: View {
                         Text(room.name)
                             .font(.body)
                             .lineLimit(1)
-                        Text(nearby.map { "Nearby · \($0.peerCount) \($0.peerCount == 1 ? "person" : "people")" } ?? "Saved on this Mac")
+                        Text(nearby?.detail ?? (room.isPrivate ? "Private · Saved on this Mac" : "Saved on this Mac"))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
+                            .help(nearby?.activityHelp ?? "Saved on this Mac. Join to open the space.")
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
@@ -3396,7 +3585,9 @@ struct ALOView: View {
     }
 
     private func roomCardIcon(_ room: RoomConfiguration) -> some View {
-        Image(systemName: room.isPrivate ? "lock.fill" : "person.3.fill")
+        let nearbyIcon = model.nearbyRooms.first(where: { $0.id == room.id })?.icon
+        let icon = nearbyIcon?.supersedes(room.icon) == true ? nearbyIcon : room.icon
+        return Image(systemName: icon?.symbol ?? (room.isPrivate ? "lock.fill" : "person.3.fill"))
             .font(.body)
             .foregroundStyle(.secondary)
             .frame(width: 24, height: 24)
@@ -3408,6 +3599,16 @@ struct ALOView: View {
                 beginRoomRename(room)
             } label: {
                 Label("Rename Space", systemImage: "pencil")
+            }
+            Menu {
+                Text("Shared when you join the space")
+                ForEach(RoomIcon.choices, id: \.symbol) { choice in
+                    Button { model.setRoomIcon(roomID: room.id, symbol: choice.symbol) } label: {
+                        Label(choice.name, systemImage: choice.symbol)
+                    }
+                }
+            } label: {
+                Label("Shared Icon", systemImage: "square.grid.2x2")
             }
             if room.isPrivate, room.accessKey != nil {
                 Button {
@@ -3554,12 +3755,12 @@ struct ALOView: View {
     }
 }
 
-private enum RoomControlsPresentation {
+enum RoomControlsPresentation {
     case floating
     case menuBar
 }
 
-private struct FloatingRoomView: View {
+struct FloatingRoomView: View {
     @ObservedObject var model: ALOViewModel
     var presentation: RoomControlsPresentation = .floating
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -3753,6 +3954,7 @@ private struct FloatingRoomView: View {
                 menuBarArtworkBackdrop
             }
         }
+        .background(ArtworkHeaderBackground(palette: model.roomArtworkPalette))
         .clipped()
     }
 
@@ -4863,7 +5065,7 @@ private struct VoiceLevelBadge: View {
     }
 }
 
-private struct WalkieTalkieBar: View {
+struct WalkieTalkieBar: View {
     @ObservedObject var model: ALOViewModel
     var showsCloseButton = true
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -4889,6 +5091,7 @@ private struct WalkieTalkieBar: View {
                 controls
             }
         }
+        .environment(\.colorScheme, .dark)
         .onAppear(perform: model.refreshVoiceInputs)
         .environment(\.roomAccent, model.roomAccentColor)
         .animation(reduceMotion ? nil : .easeInOut(duration: 1.1), value: model.roomArtworkPalette)
@@ -4909,7 +5112,7 @@ private struct WalkieTalkieBar: View {
             minHeight: FloatingMetrics.walkieBarHeight,
             maxHeight: FloatingMetrics.walkieBarHeight
         )
-        .background { WalkieBarBackground(colors: model.roomAtmosphereColors) }
+        .background(Color.black)
         .overlay(alignment: .top) {
             Rectangle()
                 .fill(Palette.glassHighlight.opacity(0.72))
@@ -5020,12 +5223,14 @@ private struct WalkieTalkieBar: View {
         }
         .padding(3)
         .frame(height: 40)
-        .background(Palette.messageSurface.opacity(0.76))
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(
+        .background {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Palette.glassHighlight.opacity(0.62), lineWidth: 1)
-        )
+                .fill(Palette.messageSurface.opacity(0.76))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Palette.glassHighlight.opacity(0.62), lineWidth: 1)
+                )
+        }
     }
 
     private var settingsMenu: some View {
@@ -5059,7 +5264,7 @@ private struct WalkieTalkieBar: View {
             Button(model.incomingCallsMuted ? "Unmute incoming voice" : "Mute incoming voice") {
                 model.toggleIncomingCallsMute()
             }
-            Button(model.incomingMediaMuted ? "Unmute incoming media" : "Mute incoming media") {
+            Button(model.incomingMediaMuted ? "Unmute room media" : "Mute room media") {
                 model.toggleIncomingMediaMute()
             }
             Divider()
@@ -5211,6 +5416,7 @@ private struct WalkieTalkieBar: View {
         .zIndex(badge > 0 ? 1 : 0)
         .help(help)
         .accessibilityLabel(help)
+        .accessibilityValue(badge > 0 ? "\(badge) unread messages" : "")
     }
 
 }
@@ -5737,6 +5943,33 @@ private struct AmbientBackground: View {
     }
 }
 
+struct ArtworkHeaderBackground: View {
+    let palette: ArtworkPalette?
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    var body: some View {
+        ZStack {
+            if let palette {
+                // Carry every sampled hue through the whole header, rather
+                // than fading one accent into a mostly neutral surface.
+                LinearGradient(colors: palette.hexes.map(Color.deviceIdentity),
+                               startPoint: .topLeading, endPoint: .bottomTrailing)
+                if colorScheme == .dark {
+                    Color.black.opacity(contrast == .increased ? 0.72 : 0.62)
+                } else {
+                    Color.white.opacity(contrast == .increased ? 0.90 : 0.68)
+                }
+            } else {
+                Palette.opaqueSurface
+            }
+            StaticGrain().blendMode(.softLight).opacity(0.12)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
 private struct ArtworkAtmosphere: View {
     let colors: [Color]
     var strength = 1.0
@@ -5776,34 +6009,6 @@ private struct ArtworkAtmosphere: View {
             .frame(width: geometry.size.width, height: geometry.size.height)
         }
         .clipped()
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
-    }
-}
-
-private struct WalkieBarBackground: View {
-    let colors: [Color]
-    @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-
-    var body: some View {
-        ZStack {
-            ArtworkAtmosphere(colors: colors, strength: 0.46)
-            Rectangle()
-                .fill(
-                    reduceTransparency
-                        ? AnyShapeStyle(Palette.opaqueSurface)
-                        : AnyShapeStyle(.ultraThinMaterial)
-                )
-            if !reduceTransparency {
-                Rectangle()
-                    .fill(
-                        colorScheme == .dark
-                            ? Palette.opaqueSurface.opacity(0.34)
-                            : Color.white.opacity(0.42)
-                    )
-            }
-        }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
     }

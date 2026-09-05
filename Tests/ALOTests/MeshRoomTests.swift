@@ -6,6 +6,72 @@ import Testing
 import ALOCore
 
 struct MeshRoomTests {
+    @Test func counterPoisoningDoesNotPreventNextBroadcaster() {
+        var replica = MeshRoomReplica()
+        let bad = MeshRoomEvent(roomID: "room", version: .init(counter: .max, nodeID: "attacker"), kind: .broadcaster,
+            broadcasterID: "attacker", broadcasterEpoch: .max, mediaServiceName: "bad", isBroadcasting: true)
+        #expect(replica.merge([bad]).isEmpty)
+        let badEpoch = MeshRoomEvent(roomID: "room", version: .init(counter: 1, nodeID: "attacker"), kind: .broadcaster,
+            broadcasterID: "attacker", broadcasterEpoch: .max, mediaServiceName: "bad", isBroadcasting: true)
+        #expect(replica.merge([badEpoch]).isEmpty)
+        let next = MeshRoomEvent(roomID: "room", version: replica.nextVersion(nodeID: "local"), kind: .broadcaster,
+            broadcasterID: "local", broadcasterEpoch: replica.highestBroadcasterEpoch + 1, mediaServiceName: "good", isBroadcasting: true)
+        replica.merge([next])
+        #expect(replica.broadcaster?.nodeID == "local")
+        #expect(replica.logicalClock == 1)
+    }
+
+    @Test func retentionBoundsHistoryAndDoesNotResurrectStoppedBroadcaster() {
+        let artwork = Data(repeating: 1, count: 20_000)
+        var events = [MeshRoomEvent]()
+        for counter in 1...1_000 {
+            let chatVersion = MeshVersion(counter: UInt64(counter * 2), nodeID: "a")
+            let playbackVersion = MeshVersion(counter: UInt64(counter * 2 + 1), nodeID: "a")
+            events.append(MeshRoomEvent(id: "chat-\(counter)", roomID: "r", version: chatVersion, kind: .chat, text: "chat"))
+            let media = NowPlayingMedia(title: "\(counter)", artworkData: artwork)
+            events.append(MeshRoomEvent(id: "play-\(counter)", roomID: "r", version: playbackVersion, kind: .playback, nowPlaying: media))
+        }
+        var replica = MeshRoomReplica(events: events)
+        #expect(replica.chatEvents.count == 500)
+        #expect(replica.events.count == 501)
+        #expect(replica.nowPlaying.title == "1000")
+        #expect(replica.merge(events).isEmpty)
+        let claim = MeshRoomEvent(roomID: "r", version: .init(counter: 3_000, nodeID: "a"), kind: .broadcaster,
+            broadcasterID: "a", broadcasterEpoch: 1, mediaServiceName: "source", isBroadcasting: true)
+        let stop = MeshRoomEvent(roomID: "r", version: .init(counter: 3_001, nodeID: "a"), kind: .broadcaster,
+            broadcasterID: "a", broadcasterEpoch: 1, isBroadcasting: false)
+        replica.merge([stop, claim])
+        #expect(replica.broadcaster == nil)
+        #expect(replica.merge([claim]).isEmpty)
+        #expect(replica.broadcaster == nil)
+    }
+
+    @Test("A multi-megabyte legacy snapshot converges without reconnecting")
+    func largeLegacySnapshotIsPaced() throws {
+        let room = RoomConfiguration(name: "Large legacy snapshot")
+        let events = (1...500).map { counter in
+            MeshRoomEvent(id: "chat-\(counter)", roomID: room.id,
+                version: MeshVersion(counter: UInt64(counter), nodeID: "a"),
+                kind: .chat, text: String(repeating: "x", count: 4_000))
+        }
+        #expect(try JSONEncoder().encode(events).count > 1_024 * 1_024)
+        let a = MeshProbe(), b = MeshProbe(), ready = PortProbe(), attempts = CountProbe()
+        let nodeA = MeshControlPlane(room: room, nodeID: "a", displayName: "A", initialEvents: events,
+            replicaHandler: { a.update(replica: $0) }, participantsHandler: { a.update(participants: $0) },
+            disableRoomStateSyncDuringAuthenticationForTesting: true,
+            connectionAttemptHandler: { attempts.increment() })
+        let nodeB = MeshControlPlane(room: room, nodeID: "b", displayName: "B",
+            listenerReadyHandler: { ready.set($0) }, replicaHandler: { b.update(replica: $0) },
+            participantsHandler: { b.update(participants: $0) },
+            disableRoomStateSyncDuringAuthenticationForTesting: true)
+        try nodeA.start(advertise: false); try nodeB.start(advertise: false)
+        defer { nodeA.stop(); nodeB.stop() }
+        let port = try #require(ready.wait())
+        nodeA.connectForTesting(to: .hostPort(host: "127.0.0.1", port: port))
+        #expect(waitUntil(timeout: 10) { b.chatCount == 500 && b.participantCount == 2 })
+        #expect(attempts.count == 1)
+    }
+
     @Test("Room discovery and media allow nearby peer-to-peer paths")
     func nearbyPeerToPeerNetworking() {
         let tcp = LocalNetworkParameters.tcp()
@@ -394,7 +460,16 @@ struct MeshRoomTests {
         }
         nodeA.connectForTesting(to: .hostPort(host: "127.0.0.1", port: port))
 
-        #expect(waitUntil(timeout: 4) { b.eventCount == 1 && b.nowPlayingTitle == "Track 16" })
+        // Keep the same four-second total budget, but distinguish failed peer
+        // admission from an admitted connection that fails to transfer history.
+        let deadline = Date().addingTimeInterval(4)
+        let admitted = waitUntil(timeout: max(0, deadline.timeIntervalSinceNow)) {
+            a.participantCount == 2 && b.participantCount == 2
+        }
+        try #require(admitted, "History transfer never admitted both peers: A=\(a.participantCount), B=\(b.participantCount), B events=\(b.eventCount), title=\(b.nowPlayingTitle ?? "none")")
+        #expect(waitUntil(timeout: max(0, deadline.timeIntervalSinceNow)) {
+            b.eventCount == 1 && b.nowPlayingTitle == "Track 16"
+        }, "Admitted history transfer stalled: B events=\(b.eventCount), title=\(b.nowPlayingTitle ?? "none")")
     }
 
     @Test("A relaunched peer recovers the room's active broadcaster")
@@ -1411,6 +1486,45 @@ struct MeshRoomTests {
         #expect(!persisted.contains { $0.id == "removed-add" })
     }
 
+    @Test("Shared icons converge across peers and late joins without changing room history", arguments: [false, true])
+    func sharedRoomIcons(isPrivate: Bool) throws {
+        let first = RoomIcon(symbol: "headphones", version: MeshVersion(counter: 1, nodeID: "a"))
+        let newer = RoomIcon(symbol: "film.fill", version: MeshVersion(counter: 2, nodeID: "b"))
+        var room = RoomConfiguration(name: "Icon test", isPrivate: isPrivate,
+            accessKey: isPrivate ? "secret" : nil, icon: first)
+        let a = RoomIconProbe()
+        let b = RoomIconProbe()
+        let c = RoomIconProbe()
+        let readyB = PortProbe()
+        let readyC = PortProbe()
+        let history = MeshProbe()
+        let nodeA = MeshControlPlane(room: room, nodeID: "a", displayName: "A",
+            replicaHandler: { history.update(replica: $0) }, participantsHandler: { _ in },
+            roomIconHandler: { a.set($0) })
+        room.icon = newer
+        let nodeB = MeshControlPlane(room: room, nodeID: "b", displayName: "B",
+            listenerReadyHandler: { readyB.set($0) }, replicaHandler: { _ in },
+            participantsHandler: { _ in }, roomIconHandler: { b.set($0) })
+        room.icon = nil
+        let nodeC = MeshControlPlane(room: room, nodeID: "c", displayName: "C",
+            listenerReadyHandler: { readyC.set($0) }, replicaHandler: { _ in },
+            participantsHandler: { _ in }, roomIconHandler: { c.set($0) })
+        try nodeA.start(advertise: false)
+        try nodeB.start(advertise: false)
+        try nodeC.start(advertise: false)
+        defer { nodeA.stop(); nodeB.stop(); nodeC.stop() }
+        let portB = try #require(readyB.wait())
+        let portC = try #require(readyC.wait())
+        nodeA.connectForTesting(to: .hostPort(host: "127.0.0.1", port: portB))
+        #expect(waitUntil { a.icon == newer })
+        nodeB.connectForTesting(to: .hostPort(host: "127.0.0.1", port: portC))
+        #expect(waitUntil { c.icon == newer })
+        let latest = RoomIcon(symbol: "leaf.fill", version: MeshVersion(counter: 3, nodeID: "a"))
+        nodeA.updateRoomIcon(latest)
+        #expect(waitUntil { a.icon == latest && b.icon == latest && c.icon == latest })
+        #expect(history.eventCount == 0, "Icon changes must not become chat/playback events")
+    }
+
     private func makeNode(room: RoomConfiguration, id: String, probe: MeshProbe, ports: PortProbe) -> MeshControlPlane {
         MeshControlPlane(
             room: room,
@@ -1449,6 +1563,13 @@ private final class PortProbe: @unchecked Sendable {
         _ = semaphore.wait(timeout: .now() + 3)
         return lock.withLock { value }
     }
+}
+
+private final class RoomIconProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: RoomIcon?
+    var icon: RoomIcon? { lock.withLock { value } }
+    func set(_ icon: RoomIcon) { lock.withLock { value = icon } }
 }
 
 private final class CountProbe: @unchecked Sendable {

@@ -6,6 +6,7 @@ import VideoToolbox
 import ALOCore
 
 // Shared macOS/iOS decoder: the desktop facade reuses this implementation.
+// Decode admission and UI handoff each bound work and invalidate stale frames.
 final class VideoPresentationResyncGate: @unchecked Sendable {
     struct Admission: Sendable {
         fileprivate let generation: UInt64
@@ -62,6 +63,10 @@ public final class VideoDecoder {
         return clockOffsetNanos
     }
 
+    var requiresKeyframeForTesting: Bool { admissionLock.withLock { needsKeyframe } }
+
+    public var presentationTimingSnapshot: VideoPresentationTimingSnapshot { presentations.timingSnapshot }
+
     public init(imageHandler: @escaping ImageHandler) {
         self.imageHandler = imageHandler
         self.presentations = VideoPresentationQueue(handler: imageHandler)
@@ -80,10 +85,14 @@ public final class VideoDecoder {
     }
 
     public func accept(_ frame: VideoFrame) {
-        guard presentationDeadline(for: frame.captureTimeNanos) != nil,
-              let admission = resyncGate.admission(forCaptureTimeNanos: frame.captureTimeNanos) else { return }
+        guard let admission = resyncGate.admission(forCaptureTimeNanos: frame.captureTimeNanos) else { return }
         let byteCount = frame.payload.count + frame.parameterSet1.count + frame.parameterSet2.count
         let accepted = admissionLock.withLock {
+            // A stale resync generation must not invalidate a newer reference
+            // chain. A current frame discarded for timing, however, may be a
+            // dependency of every following P-frame and requires a fresh IDR.
+            guard resyncGate.isCurrent(admission) else { return false }
+            guard presentationDeadline(for: frame.captureTimeNanos) != nil else { needsKeyframe = true; return false }
             guard byteCount <= 12 * 1_024 * 1_024, pendingDecodes < 8,
                   pendingDecodeBytes + byteCount <= 24 * 1_024 * 1_024 else { needsKeyframe = true; return false }
             guard !needsKeyframe || frame.isKeyframe else { return false }
@@ -164,8 +173,7 @@ public final class VideoDecoder {
             flags: [._EnableAsynchronousDecompression, ._EnableTemporalProcessing],
             infoFlagsOut: nil
         ) { [weak self] status, _, imageBuffer, _, _ in
-            guard status == noErr, let self, let imageBuffer,
-                  self.resyncGate.isCurrent(admission),
+            guard let self, self.acceptDecodeStatus(status, admission: admission), let imageBuffer,
                   let image = self.context.createCGImage(CIImage(cvPixelBuffer: imageBuffer), from: CIImage(cvPixelBuffer: imageBuffer).extent)
             else { return }
             if !self.hasDecodedFrame {
@@ -183,6 +191,23 @@ public final class VideoDecoder {
             admissionLock.withLock { needsKeyframe = true }
             fputs("Video decode failed: \(status)\n", stderr)
         }
+    }
+
+    private func acceptDecodeStatus(_ status: OSStatus, admission: VideoPresentationResyncGate.Admission) -> Bool {
+        admissionLock.withLock {
+            guard resyncGate.isCurrent(admission) else { return false }
+            // A failed dependency invalidates subsequent P-frames, but a late
+            // completion from before resync must not poison the new chain.
+            guard status == noErr else { needsKeyframe = true; return false }
+            return true
+        }
+    }
+
+    /// Captures the same admission token held by an asynchronous VT callback.
+    /// Tests can inject a completion status without manufacturing a generation.
+    func decodeStatusHandlerForTesting(captureTimeNanos: UInt64) -> ((OSStatus) -> Bool)? {
+        guard let admission = resyncGate.admission(forCaptureTimeNanos: captureTimeNanos) else { return nil }
+        return { [weak self] status in self?.acceptDecodeStatus(status, admission: admission) ?? false }
     }
 
     private func configure(parameterSets: [Data]) -> Bool {

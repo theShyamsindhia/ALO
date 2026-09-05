@@ -4,6 +4,34 @@ import Testing
 @testable import ALO
 
 struct AppUpdaterTests {
+    @MainActor @Test("The update indicator persists independently of the dismissed alert")
+    func availabilityPersistsUntilUpToDate() {
+        let updater = AppUpdater()
+        var availableVersion: String?
+        var alerts = [String]()
+        updater.updateAvailabilityHandler = { availableVersion = $0 }
+        // Returning without installation mirrors choosing Later in the alert.
+        updater.updateAvailableHandler = { alerts.append($0) }
+        let release = AppUpdater.Release(tagName: "v999.0.1",
+            htmlURL: URL(string: "https://example.com/release")!, assets: [])
+
+        #expect(availableVersion == nil)
+        updater.handleFetchedRelease(release, userInitiated: false)
+        #expect(availableVersion == "999.0.1")
+        #expect(alerts == ["999.0.1"])
+        updater.handleFetchedRelease(release, userInitiated: false)
+        #expect(availableVersion == "999.0.1")
+        #expect(alerts.count == 1, "Automatic checks must not repeat a dismissed alert")
+        updater.handleFetchedRelease(release, userInitiated: true)
+        #expect(alerts.count == 2, "The update button can reopen the alert")
+        #expect(availableVersion == "999.0.1")
+
+        updater.handleFetchedRelease(AppUpdater.Release(tagName: updater.currentVersion.description,
+            htmlURL: release.htmlURL, assets: []), userInitiated: false)
+        #expect(availableVersion == nil)
+        #expect(updater.availableRelease == nil)
+    }
+
     @Test("GitHub release metadata decodes its signed asset digest")
     func releaseMetadataDecodes() throws {
         let json = #"{"tag_name":"v1.2.3","html_url":"https://example.com/release","assets":[{"name":"ALO-macos-arm64.zip","browser_download_url":"https://example.com/app.zip","digest":"sha256:abc","size":123}]}"#

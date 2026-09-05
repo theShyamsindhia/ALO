@@ -16,6 +16,7 @@ final class RoomStore {
         let isPrivate: Bool
         let joinedAt: Date
         let transportPolicy: RoomTransportPolicy?
+        let icon: RoomIcon?
     }
 
     private let fileURL: URL
@@ -60,7 +61,8 @@ final class RoomStore {
                 isPrivate: record.isPrivate,
                 accessKey: key,
                 joinedAt: record.joinedAt,
-                transportPolicy: record.transportPolicy ?? .legacyOnly
+                transportPolicy: record.transportPolicy ?? .legacyOnly,
+                icon: record.icon
             )
             guard room.transportPolicy != .secureV2 || !room.isPrivate || room.secureJoinSecret != nil else { return nil }
             return room
@@ -109,7 +111,8 @@ final class RoomStore {
             isPrivate: room.isPrivate,
             accessKey: room.accessKey,
             joinedAt: room.joinedAt,
-            transportPolicy: room.transportPolicy
+            transportPolicy: room.transportPolicy,
+            icon: room.icon
         )
         try persist(rooms)
         return true
@@ -124,6 +127,16 @@ final class RoomStore {
             try? FileManager.default.removeItem(at: roomStateURL(roomID: roomID))
         }
         secrets.remove(roomID: roomID)
+    }
+
+    @discardableResult
+    func mergeIcon(_ icon: RoomIcon, roomID: String) throws -> Bool {
+        var rooms = load()
+        guard let index = rooms.firstIndex(where: { $0.id == roomID }),
+              icon.supersedes(rooms[index].icon) else { return false }
+        rooms[index].icon = icon
+        try persist(rooms)
+        return true
     }
 
     func loadEvents(roomID: String) -> [MeshRoomEvent] {
@@ -207,7 +220,8 @@ final class RoomStore {
                 creatorPeerID: $0.creatorPeerID,
                 isPrivate: $0.isPrivate,
                 joinedAt: $0.joinedAt,
-                transportPolicy: $0.transportPolicy
+                transportPolicy: $0.transportPolicy,
+                icon: $0.icon
             )
         }
         // Credential availability must not erase a saved policy during an

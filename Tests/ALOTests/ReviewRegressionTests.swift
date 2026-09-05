@@ -2,6 +2,7 @@ import Foundation
 import Security
 import Testing
 import ALOCore
+@testable import ALOAppleMedia
 @testable import ALO
 
 @Suite("Project review regressions")
@@ -116,4 +117,3 @@ struct ReviewRegressionTests {
         #expect(VideoPresentationQueue<Frame>.deadline(capture: .max, offset: .min, delay: 0, now: 0) == nil)
     }
 }
-@testable import ALOAppleMedia

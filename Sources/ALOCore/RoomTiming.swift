@@ -1,6 +1,21 @@
 import Foundation
 
 public enum RoomTiming {
+    /// Clock offsets are signed, but timestamps are unsigned. Reject conversions
+    /// outside that clock's range; negating Int64.min is never representable.
+    public static func hostTimeNanos(clientTimeNanos: UInt64, clockOffsetNanos: Int64) -> UInt64? {
+        shiftedTime(clientTimeNanos, magnitude: clockOffsetNanos.magnitude, adding: clockOffsetNanos >= 0)
+    }
+
+    public static func clientTimeNanos(hostTimeNanos: UInt64, clockOffsetNanos: Int64) -> UInt64? {
+        shiftedTime(hostTimeNanos, magnitude: clockOffsetNanos.magnitude, adding: clockOffsetNanos < 0)
+    }
+
+    private static func shiftedTime(_ value: UInt64, magnitude: UInt64, adding: Bool) -> UInt64? {
+        let result = adding ? value.addingReportingOverflow(magnitude) : value.subtractingReportingOverflow(magnitude)
+        return result.overflow ? nil : result.partialValue
+    }
+
     public static let defaultPlayoutDelayNanos: UInt64 = 250_000_000
     public static let maximumPlayoutDelayNanos: UInt64 = 600_000_000
     public static let timingStepNanos: UInt64 = 5_000_000
@@ -65,13 +80,8 @@ public final class NetworkJitterEstimator {
         receivedAt clientNanos: UInt64,
         clockOffsetNanos: Int64
     ) {
-        let hostArrivalNanos: UInt64
-        if clockOffsetNanos >= 0 {
-            hostArrivalNanos = clientNanos &+ UInt64(clockOffsetNanos)
-        } else {
-            let magnitude = UInt64(-clockOffsetNanos)
-            hostArrivalNanos = clientNanos > magnitude ? clientNanos - magnitude : 0
-        }
+        guard let hostArrivalNanos = RoomTiming.hostTimeNanos(clientTimeNanos: clientNanos,
+                                                            clockOffsetNanos: clockOffsetNanos) else { return }
         guard hostArrivalNanos >= captureTimeNanos else { return }
 
         transitSamples.append(hostArrivalNanos - captureTimeNanos)

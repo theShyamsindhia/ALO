@@ -6,14 +6,106 @@ public struct NearbyRoom: Identifiable, Equatable, Sendable {
     public let id: String
     public let name: String
     public let isPrivate: Bool
-    public let peerCount: Int
+    public var peerCount: Int
     public let accessProof: String?
     public let transportPolicy: RoomTransportPolicy
+    public var memberNames: [String]
+    public var trackTitle: String?
+    public var isPlaying: Bool?
+    public var icon: RoomIcon?
 
-    public init(id: String, name: String, isPrivate: Bool, peerCount: Int, accessProof: String?, transportPolicy: RoomTransportPolicy = .legacyOnly) {
+    public init(id: String, name: String, isPrivate: Bool, peerCount: Int, accessProof: String?,
+                transportPolicy: RoomTransportPolicy = .legacyOnly, memberNames: [String] = [],
+                trackTitle: String? = nil, isPlaying: Bool? = nil, icon: RoomIcon? = nil) {
         self.id = id; self.name = name; self.isPrivate = isPrivate
         self.peerCount = peerCount; self.accessProof = accessProof
         self.transportPolicy = transportPolicy
+        self.memberNames = memberNames
+        self.trackTitle = trackTitle
+        self.isPlaying = isPlaying
+        self.icon = icon
+    }
+
+    public var detail: String {
+        let count = "\(peerCount) \(peerCount == 1 ? "person" : "people")"
+        if isPrivate { return "Private · \(count)" }
+        if let trackTitle {
+            let who = memberNames.first.map { peerCount > 1 ? "\($0) + \(peerCount - 1)" : $0 } ?? count
+            return "\(who) · \(isPlaying == false ? "Paused: " : "")\(trackTitle)"
+        }
+        if let first = memberNames.first {
+            return peerCount > 1 ? "\(first) + \(peerCount - 1) nearby" : "\(first) is here"
+        }
+        return "Nearby · \(count)"
+    }
+
+    public var activityHelp: String {
+        ([detail, "\(peerCount) \(peerCount == 1 ? "person" : "people")"]
+            + (isPrivate ? [] : memberNames)).joined(separator: "\n")
+    }
+}
+
+public enum RoomDiscovery {
+    // TXT entries are limited to 255 bytes including the key. Bound by UTF-8,
+    // not Character count, so emoji names cannot invalidate the advertisement.
+    public static func text(_ value: String) -> String {
+        var result = ""
+        for character in value where !character.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) {
+            guard result.utf8.count + String(character).utf8.count <= 120 else { break }
+            result.append(character)
+        }
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    public static func record(room: RoomConfiguration, nodeID: String, displayName: String,
+                       appVersion: String, accessProof: String?, icon: RoomIcon?,
+                       media: NowPlayingMedia?) -> [String: String] {
+        var record = ["roomID": room.id, "roomName": text(room.name), "nodeID": nodeID,
+                       "private": room.isPrivate ? "1" : "0",
+                       "version": room.transportPolicy == .secureV2 ? "2" : "1", "appVersion": appVersion]
+        if room.transportPolicy == .legacyOnly, let accessProof { record["accessProof"] = accessProof }
+        guard !room.isPrivate else { return record }
+        record["memberName"] = text(displayName)
+        if let media, let title = media.title, !text(title).isEmpty {
+            record["trackTitle"] = text(title)
+            record["playing"] = media.isPlaying.map { $0 ? "1" : "0" }
+        }
+        if let icon, icon.isValid {
+            record["roomIcon"] = icon.symbol
+            record["iconCounter"] = String(icon.version.counter)
+            record["iconAuthor"] = icon.version.nodeID
+        }
+        return record
+    }
+
+    public static func rooms(from records: [NWTXTRecord], transportPolicy: RoomTransportPolicy = .legacyOnly) -> [NearbyRoom] {
+        var rooms = [String: NearbyRoom]()
+        var members = [String: Set<String>]()
+        for record in records.prefix(256).sorted(by: { ($0["nodeID"] ?? "") < ($1["nodeID"] ?? "") }) {
+            guard let id = record["roomID"], let name = record["roomName"] else { continue }
+            let isPrivate = record["private"] == "1"
+            let proof = transportPolicy == .secureV2 ? nil : record["accessProof"]
+            if let existing = rooms[id], existing.isPrivate != isPrivate || existing.accessProof != proof { continue }
+            let memberID = record["nodeID"] ?? UUID().uuidString
+            guard members[id, default: []].insert(memberID).inserted else { continue }
+            var room = rooms[id] ?? NearbyRoom(id: id, name: text(name), isPrivate: isPrivate, peerCount: 0,
+                                             accessProof: proof, transportPolicy: transportPolicy)
+            if !isPrivate {
+                if let member = record["memberName"], !text(member).isEmpty { room.memberNames.append(text(member)) }
+                if let title = record["trackTitle"], !text(title).isEmpty {
+                    room.trackTitle = text(title)
+                    room.isPlaying = record["playing"].map { $0 == "1" }
+                }
+                if let symbol = record["roomIcon"], let author = record["iconAuthor"],
+                   let counter = record["iconCounter"].flatMap(UInt64.init) {
+                    let icon = RoomIcon(symbol: symbol, version: MeshVersion(counter: counter, nodeID: author))
+                    if icon.supersedes(room.icon) { room.icon = icon }
+                }
+            }
+            room.peerCount += 1
+            rooms[id] = room
+        }
+        return rooms.values.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 }
 
@@ -24,17 +116,20 @@ public final class MeshRoomBrowser {
     private let queue = DispatchQueue(label: "in.werai.mesh.browser", qos: .userInitiated)
     private let updateHandler: ([NearbyRoom]) -> Void
     private let errorHandler: (String) -> Void
+    private let readyHandler: () -> Void
     private var browser: NWBrowser?
     private let transportPolicy: RoomTransportPolicy
 
     public init(
         updateHandler: @escaping ([NearbyRoom]) -> Void,
         errorHandler: @escaping (String) -> Void = { _ in },
-        transportPolicy: RoomTransportPolicy = .legacyOnly
+        transportPolicy: RoomTransportPolicy = .legacyOnly,
+        readyHandler: @escaping () -> Void = {}
     ) {
         self.updateHandler = updateHandler
         self.errorHandler = errorHandler
         self.transportPolicy = transportPolicy
+        self.readyHandler = readyHandler
     }
 
     public func start() {
@@ -45,43 +140,23 @@ public final class MeshRoomBrowser {
             for: .bonjourWithTXTRecord(type: transportPolicy == .secureV2 ? Self.secureServiceType : Self.serviceType, domain: nil),
             using: transportPolicy == .secureV2 ? parameters : LocalNetworkParameters.tcp()
         )
-        browser.browseResultsChangedHandler = { [weak self] results, _ in
-            var rooms = [String: (name: String, isPrivate: Bool, peers: Int, accessProof: String?)]()
-            for result in results.prefix(256) {
-                guard case .bonjour(let record) = result.metadata,
-                      let id = record["roomID"],
-                      let name = record["roomName"]
-                else { continue }
-                let existing = rooms[id]
-                let isPrivate = record["private"] == "1"
-                let proof = self?.transportPolicy == .secureV2 ? nil : record["accessProof"]
-                if let existing,
-                   existing.isPrivate != isPrivate || existing.accessProof != proof {
-                    continue
-                }
-                rooms[id] = (
-                    name: name,
-                    isPrivate: isPrivate,
-                    peers: (existing?.peers ?? 0) + 1,
-                    accessProof: proof
-                )
+        browser.browseResultsChangedHandler = { [weak self, weak browser] results, _ in
+            guard let self, let browser, self.browser === browser else { return }
+            self.updateHandler(RoomDiscovery.rooms(from: results.prefix(256).compactMap {
+                guard case .bonjour(let record) = $0.metadata else { return nil }
+                return record
+            }, transportPolicy: self.transportPolicy))
+        }
+        browser.stateUpdateHandler = { [weak self, weak browser] state in
+            guard let self, let browser, self.browser === browser else { return }
+            switch state {
+            case .ready: self.readyHandler()
+            case .failed(let error), .waiting(let error): self.errorHandler(error.localizedDescription)
+            default: break
             }
-            self?.updateHandler(rooms.map {
-                NearbyRoom(
-                    id: $0.key,
-                    name: $0.value.name,
-                    isPrivate: $0.value.isPrivate,
-                    peerCount: $0.value.peers,
-                    accessProof: $0.value.accessProof,
-                    transportPolicy: self?.transportPolicy ?? .legacyOnly
-                )
-            }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending })
         }
-        browser.stateUpdateHandler = { [weak self] state in
-            if case .failed(let error) = state { self?.errorHandler(error.localizedDescription) }
-        }
-        browser.start(queue: queue)
         self.browser = browser
+        browser.start(queue: queue)
     }
 
     public func restart() {

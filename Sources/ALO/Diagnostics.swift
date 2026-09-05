@@ -80,6 +80,10 @@ struct ReceiverTimingDiagnostics: Sendable, Equatable {
     let latenessMilliseconds: Double
     let latePacketCount: UInt64
     let resyncCount: UInt64
+    var currentDriftMilliseconds: Double? = nil
+    var driftMeasurementAgeMilliseconds: Double? = nil
+    var video: VideoPresentationTimingSnapshot? = nil
+    var videoEnabled = false
 }
 
 struct HostListenerTimingDiagnostics: Sendable, Equatable {
@@ -88,6 +92,17 @@ struct HostListenerTimingDiagnostics: Sendable, Equatable {
     let reportAgeMilliseconds: Double?
     let recommendedBufferMilliseconds: Double
     let hardwareFloorMilliseconds: Double
+    var audioEnqueued: UInt64 = 0
+    var audioSent: UInt64 = 0
+    var audioExpiredWait: UInt64 = 0
+    var audioExpiredAge: UInt64 = 0
+    var audioAdmissionRejected: UInt64 = 0
+    var audioReplaced: UInt64 = 0
+    var audioDiscardedBoundary: UInt64 = 0
+    var driftMilliseconds: Double? = nil
+    var driftSampleAgeMilliseconds: Double? = nil
+    var playbackReportAgeMilliseconds: Double? = nil
+    var screenTiming: PlaybackScreenTimingReport? = nil
 }
 
 struct HostTimingDiagnostics: Sendable, Equatable {
@@ -97,6 +112,7 @@ struct HostTimingDiagnostics: Sendable, Equatable {
     let maximumLatenessMilliseconds: Double
     let totalResyncCount: UInt64
     var roomTimingChangeCount: UInt64 = 0
+    var videoEnabled = false
     var listeners: [HostListenerTimingDiagnostics] = []
 }
 
@@ -106,6 +122,7 @@ struct SessionTimingDiagnostics: Sendable, Equatable {
 }
 
 struct DiagnosticRoomContext: Sendable, Equatable {
+    private static let driftWarningMilliseconds = Double(SynchronizedPlayer.hardResyncThresholdNanos) / 1_000_000
     enum Role: String, Sendable {
         case none
         case broadcaster
@@ -148,6 +165,20 @@ struct DiagnosticRoomContext: Sendable, Equatable {
             }
             parts.append("lateness \(Self.milliseconds(receiver.latenessMilliseconds))")
             parts.append("late \(receiver.latePacketCount), resyncs \(receiver.resyncCount)")
+            if let drift = receiver.currentDriftMilliseconds,
+               let age = receiver.driftMeasurementAgeMilliseconds {
+                parts.append("render drift \(Self.milliseconds(drift)), sample age \(Self.milliseconds(age))")
+            } else {
+                parts.append("render drift not currently measured")
+            }
+            if let video = receiver.video, video.presentedCount > 0 || video.pendingCount > 0 {
+                let miss = video.latestDeadlineMissNanos.map { Self.milliseconds(Double($0) / 1_000_000) } ?? "not measured"
+                parts.append("screen deadline miss at UI handoff \(miss), peak \(Self.milliseconds(Double(video.maximumDeadlineMissNanos) / 1_000_000)), \(video.pendingCount) pending")
+                parts.append("UI handoff timing is not a physical display or lip-sync measurement")
+            }
+            if receiver.videoEnabled, receiver.video?.latestHandoffAtNanos == nil {
+                parts.append("Screen sharing is enabled, but no screen frame has reached the UI yet")
+            }
         }
         if let host = timing?.host {
             parts.append("room buffer \(Self.milliseconds(host.groupBufferMilliseconds))")
@@ -158,14 +189,90 @@ struct DiagnosticRoomContext: Sendable, Equatable {
             for (index, listener) in host.listeners.enumerated() {
                 let age = listener.reportAgeMilliseconds.map(Self.milliseconds) ?? "not reported"
                 parts.append("listener \(index + 1): network \(Self.milliseconds(listener.recommendedBufferMilliseconds)), hardware floor \(Self.milliseconds(listener.hardwareFloorMilliseconds)), network vote \(listener.isTimingEligible ? "eligible" : "late join"), report age \(age)")
+                parts.append("audio packets: \(listener.audioSent)/\(listener.audioEnqueued) submitted, wait expired \(listener.audioExpiredWait), capture expired \(listener.audioExpiredAge), local-send budget rejected \(listener.audioAdmissionRejected), congestion replaced \(listener.audioReplaced), transition discarded \(listener.audioDiscardedBoundary)")
+                if let drift = listener.driftMilliseconds {
+                    let sampleAge = listener.driftSampleAgeMilliseconds.map(Self.milliseconds) ?? "unknown"
+                    let reportAge = listener.playbackReportAgeMilliseconds.map(Self.milliseconds) ?? "unknown"
+                    parts.append("listener \(index + 1) render drift \(Self.milliseconds(drift)), sample age \(sampleAge), playback report age \(reportAge)")
+                } else {
+                    parts.append("listener \(index + 1) render drift not reported; playback may be idle or the peer may need updating")
+                }
+                if host.videoEnabled {
+                    if let screen = listener.screenTiming {
+                        let miss = screen.latestDeadlineMissNanos.map { Self.milliseconds(Double($0) / 1_000_000) } ?? "not measured"
+                        let pending = screen.oldestPendingDeadlineMissNanos.map { Self.milliseconds(Double($0) / 1_000_000) } ?? "none"
+                        parts.append("listener \(index + 1) screen UI handoff miss \(miss), pending deadline miss \(pending)")
+                    } else {
+                        parts.append("listener \(index + 1) screen timing unverified; peer may need updating")
+                    }
+                }
             }
+            if host.videoEnabled { parts.append("Remote UI handoff timing is not a physical display or lip-sync measurement") }
+            if host.listenerCount == 0 { parts.append("No listeners available to verify remote playback") }
         }
-        let ready = hasBroadcaster && (role == .broadcaster || timing?.receiver?.roundTripMilliseconds != nil)
+        // A connected clock is not evidence of timely rendering. Unknown or
+        // stale samples remain a warning; historical counters alone do not fail
+        // a recovered stream, and a static screen is not inferred to be stalled.
+        var ready = hasBroadcaster
+        if let receiver = timing?.receiver {
+            ready = ready && audioIsRendering && receiver.roundTripMilliseconds != nil
+                && Self.isFreshDrift(receiver.currentDriftMilliseconds, age: receiver.driftMeasurementAgeMilliseconds)
+                && receiver.latenessMilliseconds < Self.driftWarningMilliseconds
+            if let video = receiver.video, Self.videoIsCurrentlyLate(video) { ready = false }
+            if receiver.videoEnabled, receiver.video?.latestHandoffAtNanos == nil { ready = false }
+        } else if role == .listener {
+            ready = false
+        }
+        if role == .broadcaster {
+            if let host = timing?.host {
+                ready = ready && host.listenerCount > 0
+                    && host.reportingListenerCount == host.listenerCount
+                    && host.listeners.count == host.listenerCount
+                    && host.maximumLatenessMilliseconds < Self.driftWarningMilliseconds
+                    && host.listeners.allSatisfy { listener in
+                        guard let reportAge = listener.playbackReportAgeMilliseconds,
+                              reportAge.isFinite, reportAge >= 0, reportAge <= 2_500 else { return false }
+                        return Self.isFreshDrift(listener.driftMilliseconds, age: listener.driftSampleAgeMilliseconds)
+                            && (!host.videoEnabled || Self.remoteScreenIsVerified(listener.screenTiming,
+                                reportAgeNanos: UInt64(reportAge * 1_000_000)))
+                    }
+            } else { ready = false }
+        }
+        if !ready { parts.append("Timely playback is not currently verified; inspect drift, playback state, and sample age") }
         return DiagnosticCheckResult(
             outcome: ready ? .passed : .warning,
             detail: parts.joined(separator: " · "),
             checkedAt: Date()
         )
+    }
+
+    private static func isFreshDrift(_ drift: Double?, age: Double?) -> Bool {
+        guard let drift, let age else { return false }
+        return drift.isFinite && drift >= 0 && drift < driftWarningMilliseconds
+            && age.isFinite && age >= 0 && age <= 500
+    }
+
+    private static func videoIsCurrentlyLate(_ video: VideoPresentationTimingSnapshot) -> Bool {
+        let threshold = SynchronizedPlayer.hardResyncThresholdNanos
+        if let deadline = video.oldestPendingDeadlineNanos, video.measuredAtNanos >= deadline,
+           video.measuredAtNanos - deadline >= threshold { return true }
+        guard let handoff = video.latestHandoffAtNanos, let miss = video.latestDeadlineMissNanos,
+              video.measuredAtNanos >= handoff, video.measuredAtNanos - handoff <= 2_000_000_000 else { return false }
+        return miss >= threshold
+    }
+
+    private static func remoteScreenIsVerified(_ screen: PlaybackScreenTimingReport?, reportAgeNanos: UInt64) -> Bool {
+        guard let screen else { return false }
+        let threshold = SynchronizedPlayer.hardResyncThresholdNanos
+        if let pending = screen.oldestPendingDeadlineMissNanos, pending >= threshold { return false }
+        guard let handoffAge = screen.latestHandoffAgeNanos,
+              let miss = screen.latestDeadlineMissNanos else { return false }
+        // Add only elapsed time on this host since receipt, never subtract the
+        // peer's absolute measuredAtNanos from this Mac's monotonic clock.
+        let age = handoffAge.addingReportingOverflow(reportAgeNanos)
+        guard !age.overflow else { return false }
+        // A static screen with no overdue work is not inferred to be stalled.
+        return age.partialValue > 2_000_000_000 || miss < threshold
     }
 
     private static func milliseconds(_ value: Double) -> String {
@@ -185,6 +292,7 @@ struct DiagnosticReportContext: Sendable {
     let architecture: String
     let room: DiagnosticRoomContext
     let microphoneSelection: String
+    var recentSyncEvents: [DiagnosticCheckResult] = []
 }
 
 enum DiagnosticRedactor {
@@ -236,6 +344,14 @@ enum DiagnosticReportBuilder {
         for id in DiagnosticCheckID.allCases {
             let result = results[id] ?? .idle
             lines.append("- \(id.title): \(result.outcome.label) — \(DiagnosticRedactor.redact(result.detail))")
+        }
+        if !context.recentSyncEvents.isEmpty {
+            lines.append("")
+            lines.append("Recent synchronization transitions (up to 16)")
+            for event in context.recentSyncEvents.suffix(16) {
+                let time = event.checkedAt.map { ISO8601DateFormatter().string(from: $0) } ?? "unknown time"
+                lines.append("- \(time): \(event.outcome.label) — \(DiagnosticRedactor.redact(event.detail))")
+            }
         }
         return DiagnosticRedactor.redact(lines.joined(separator: "\n")) + "\n"
     }
@@ -397,6 +513,25 @@ final class DiagnosticsRunner: ObservableObject {
         results[.roomSync] = room.result
     }
 
+    func acceptLiveRoomResult(_ result: DiagnosticCheckResult?, isActive: Bool = true,
+                              isPaused: Bool = false, hasBroadcaster: Bool = true) {
+        if let result {
+            results[.roomSync] = result
+        } else {
+            let guidance: (DiagnosticOutcome, String)
+            if !isActive {
+                guidance = (.warning, "Open a room to inspect its live clock and synchronization state.")
+            } else if isPaused {
+                guidance = (.warning, "Playback is paused; resume to measure current synchronization.")
+            } else if !hasBroadcaster {
+                guidance = (.warning, "Waiting for a broadcaster; current synchronization is not yet measured.")
+            } else {
+                guidance = (.running, "Checking current synchronization; no fresh timing measurement is available yet.")
+            }
+            results[.roomSync] = DiagnosticCheckResult(outcome: guidance.0, detail: guidance.1, checkedAt: Date())
+        }
+    }
+
     func copyReport(context: DiagnosticReportContext) {
         let report = DiagnosticReportBuilder.build(context: context, results: results)
         NSPasteboard.general.clearContents()
@@ -499,6 +634,12 @@ private struct DiagnosticsView: View {
             model.refreshVoiceInputs()
             runner.refreshPassivePermissions()
             runner.testRoom(model.diagnosticRoomContext())
+        }
+        .onReceive(model.$liveSyncHealth) { health in
+            // Reuse the existing sample and cheap UI state; never start another
+            // synchronous receiver/host snapshot on every published tick.
+            runner.acceptLiveRoomResult(health.result, isActive: model.phase == .live,
+                isPaused: model.nowPlaying.isPlaying == false, hasBroadcaster: model.hasBroadcaster)
         }
     }
 
@@ -638,7 +779,8 @@ private struct DiagnosticsView: View {
             operatingSystem: ProcessInfo.processInfo.operatingSystemVersionString,
             architecture: Self.architecture,
             room: model.diagnosticRoomContext(),
-            microphoneSelection: model.selectedVoiceInputUID == nil ? "system default" : "custom input"
+            microphoneSelection: model.selectedVoiceInputUID == nil ? "system default" : "custom input",
+            recentSyncEvents: model.liveSyncHealth.recentTransitions
         )
     }
 

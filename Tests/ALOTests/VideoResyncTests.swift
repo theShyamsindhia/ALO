@@ -1,5 +1,6 @@
 import Testing
 @testable import ALO
+@testable import ALOAppleMedia
 
 struct VideoResyncTests {
     @Test("A transport reconnect clears the previous host's video clock")

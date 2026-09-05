@@ -236,10 +236,6 @@ final class HostSession {
         host?.setParticipantLevel(id: id, volume: volume, muted: muted)
     }
 
-    func setLocalPlaybackMuted(_ muted: Bool) {
-        localReceiver?.setLocalPlaybackMuted(muted)
-    }
-
     @discardableResult
     func sendRoomMediaCommand(_ command: RoomMediaCommand) -> Bool {
         host?.sendRoomMediaCommand(command) ?? false
@@ -255,6 +251,19 @@ final class HostSession {
             receiver: localReceiver?.diagnosticsSnapshot(),
             host: host?.diagnosticsSnapshot()
         )
+    }
+
+    /// Polling live health must not wait on audio/network queues on the UI thread.
+    func sampleTimingDiagnostics() async -> SessionTimingDiagnostics? {
+        let sampledReceiver = localReceiver
+        let sampledHost = host
+        let snapshot = await Task.detached(priority: .utility) {
+            SessionTimingDiagnostics(
+                receiver: sampledReceiver?.diagnosticsSnapshot(),
+                host: sampledHost?.diagnosticsSnapshot())
+        }.value
+        guard localReceiver === sampledReceiver, host === sampledHost else { return nil }
+        return snapshot
     }
 
     func setVideoEnabled(_ enabled: Bool) async throws {

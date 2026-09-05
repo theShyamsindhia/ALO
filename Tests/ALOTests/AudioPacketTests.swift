@@ -204,7 +204,11 @@ struct AudioPacketTests {
             measuredAtNanos: 1_000,
             latenessNanos: 125_000_000,
             latePacketCount: 3,
-            resyncCount: 1
+            resyncCount: 1,
+            driftNanos: 150_000_000,
+            driftSampleAgeNanos: 20_000_000,
+            screenTiming: PlaybackScreenTimingReport(latestHandoffAgeNanos: 20_000_000,
+                latestDeadlineMissNanos: 150_000_000, oldestPendingDeadlineMissNanos: 25_000_000)
         )
         let data = try ControlMessage(
             type: "sync_status",
@@ -215,6 +219,13 @@ struct AudioPacketTests {
 
         #expect(decoded?.participantID == "mac-a")
         #expect(decoded?.syncReport == report)
+    }
+
+    @Test func olderPlaybackReportLeavesCurrentDriftUnknown() throws {
+        let bytes = Data(#"{"measuredAtNanos":1000,"latenessNanos":0,"latePacketCount":0,"resyncCount":0}"#.utf8)
+        let report = try JSONDecoder().decode(PlaybackSyncReport.self, from: bytes)
+        #expect(report.driftNanos == nil && report.driftSampleAgeNanos == nil)
+        #expect(report.screenTiming == nil)
     }
 
     @Test func nowPlayingArtworkRoundTrip() throws {

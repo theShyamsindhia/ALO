@@ -97,6 +97,7 @@ final class SynchronizedPlayer {
     private var smoothedCorrection = 0.0
     private let playbackActivityChanged: ((Bool) -> Void)?
     private var latestLatenessNanos: UInt64 = 0
+    private var latestDriftMeasurement: (magnitude: UInt64, time: UInt64)?
     private var latePacketCount: UInt64 = 0
     private var resyncCount: UInt64 = 0
     private var lastPacketReceivedNanos: UInt64?
@@ -198,6 +199,8 @@ final class SynchronizedPlayer {
     }
 
     func maintainSync() {
+        // An unavailable render clock is unknown, not a fresh zero-error sample.
+        latestDriftMeasurement = nil
         guard nodesAreAttached else { return }
         let now = MonotonicClock.nowNanos()
         guard roomPlaybackIsPlaying else {
@@ -234,7 +237,8 @@ final class SynchronizedPlayer {
         else { return }
 
         let renderLocalNanos = MonotonicClock.ticksToNanos(renderTime.hostTime)
-        let renderHostNanos = addSigned(renderLocalNanos, offset)
+        guard let renderHostNanos = RoomTiming.hostTimeNanos(clientTimeNanos: renderLocalNanos,
+                                                           clockOffsetNanos: offset) else { return }
         let audibleHostNanos = renderHostNanos &+ outputLatencyNanos
         let timelineStart = anchorCaptureNanos &+ targetLatencyNanos
         let expectedNanos = audibleHostNanos > timelineStart
@@ -247,6 +251,7 @@ final class SynchronizedPlayer {
         let absoluteErrorNanos = UInt64(
             abs(errorFrames) * 1_000_000_000 / Double(AudioPacket.sampleRate)
         )
+        latestDriftMeasurement = (absoluteErrorNanos, now)
         if driftRecovery.shouldResynchronize(latenessNanos: absoluteErrorNanos) {
             latestLatenessNanos = absoluteErrorNanos
             hardResynchronize()
@@ -278,8 +283,17 @@ final class SynchronizedPlayer {
                 return
             }
 
-            let desiredAudibleNanos = addSigned(packet.captureTimeNanos, -offset)
-                &+ targetLatencyNanos
+            guard let localCaptureNanos = RoomTiming.clientTimeNanos(hostTimeNanos: packet.captureTimeNanos,
+                                                                    clockOffsetNanos: offset) else {
+                expectedSequence = sequence &+ 1
+                continue
+            }
+            let audibleTime = localCaptureNanos.addingReportingOverflow(targetLatencyNanos)
+            guard !audibleTime.overflow else {
+                expectedSequence = sequence &+ 1
+                continue
+            }
+            let desiredAudibleNanos = audibleTime.partialValue
             let desiredRenderNanos = desiredAudibleNanos > outputLatencyNanos
                 ? desiredAudibleNanos - outputLatencyNanos
                 : desiredAudibleNanos
@@ -333,6 +347,7 @@ final class SynchronizedPlayer {
         setPlaybackActive(false)
         playbackWatchdog.reset()
         driftRecovery.reset()
+        latestDriftMeasurement = nil
         applyOutputGain()
         detachOutputNodes()
     }
@@ -364,6 +379,7 @@ final class SynchronizedPlayer {
         resyncCutoverCaptureNanos = nil
         playbackWatchdog.reset()
         driftRecovery.reset()
+        latestDriftMeasurement = nil
         setPlaybackActive(false)
     }
 
@@ -389,11 +405,14 @@ final class SynchronizedPlayer {
     }
 
     func syncReport() -> PlaybackSyncReport {
-        PlaybackSyncReport(
-            measuredAtNanos: MonotonicClock.nowNanos(),
+        let now = MonotonicClock.nowNanos()
+        return PlaybackSyncReport(
+            measuredAtNanos: now,
             latenessNanos: latestLatenessNanos,
             latePacketCount: latePacketCount,
-            resyncCount: resyncCount
+            resyncCount: resyncCount,
+            driftNanos: latestDriftMeasurement?.magnitude,
+            driftSampleAgeNanos: latestDriftMeasurement.flatMap { now >= $0.time ? now - $0.time : nil }
         )
     }
 
@@ -419,6 +438,7 @@ final class SynchronizedPlayer {
         lastPacketReceivedNanos = nil
         playbackWatchdog.reset()
         driftRecovery.reset()
+        latestDriftMeasurement = nil
         resyncCutoverCaptureNanos = cutoverCaptureNanos
         resyncCount &+= 1
         setPlaybackActive(false)
@@ -442,6 +462,7 @@ final class SynchronizedPlayer {
         resyncCutoverCaptureNanos = nil
         playbackWatchdog.reset()
         driftRecovery.reset()
+        latestDriftMeasurement = nil
         setPlaybackActive(false)
     }
 
@@ -800,6 +821,7 @@ final class SynchronizedPlayer {
         hasStarted = false
         playbackWatchdog.reset()
         driftRecovery.reset()
+        latestDriftMeasurement = nil
         resyncCount &+= 1
         if let next = pending.values.min(by: { $0.sequence < $1.sequence }) {
             expectedSequence = next.sequence
@@ -812,8 +834,11 @@ final class SynchronizedPlayer {
               next.sequence > sequence
         else { return }
 
-        let nextAudibleNanos = addSigned(next.captureTimeNanos, -offset)
-            &+ targetLatencyNanos
+        guard let localCaptureNanos = RoomTiming.clientTimeNanos(hostTimeNanos: next.captureTimeNanos,
+                                                                clockOffsetNanos: offset) else { return }
+        let audibleTime = localCaptureNanos.addingReportingOverflow(targetLatencyNanos)
+        guard !audibleTime.overflow else { return }
+        let nextAudibleNanos = audibleTime.partialValue
         let nextRenderNanos = nextAudibleNanos > outputLatencyNanos
             ? nextAudibleNanos - outputLatencyNanos
             : nextAudibleNanos
@@ -846,12 +871,6 @@ final class SynchronizedPlayer {
         return buffer
     }
 
-    private func addSigned(_ value: UInt64, _ delta: Int64) -> UInt64 {
-        if delta >= 0 {
-            return value &+ UInt64(delta)
-        }
-        return value > UInt64(-delta) ? value - UInt64(-delta) : 0
-    }
 }
 
 struct PlaybackDriftRecovery {
