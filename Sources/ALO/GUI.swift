@@ -428,6 +428,16 @@ func makeALOEditMenu() -> NSMenu {
 }
 
 @MainActor
+func toggleALOSetupWindow(_ window: NSWindow) {
+    if window.isVisible {
+        window.orderOut(nil)
+    } else {
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+@MainActor
 private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     private enum SetupWindow {
         static let width: CGFloat = 306
@@ -509,8 +519,8 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
         self.window = window
         statusMenuController = ALOStatusMenuController(model: model) { [weak self] in
-            self?.window?.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            guard let window = self?.window else { return }
+            toggleALOSetupWindow(window)
         }
         if !ALOAppFlavor.isDevelopment {
             updater.updateAvailabilityHandler = { [weak model] version in model?.availableUpdateVersion = version }
@@ -828,7 +838,7 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
 @MainActor
 private final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
     private let model: ALOViewModel
-    private let openMainWindow: () -> Void
+    private let toggleMainWindow: () -> Void
     private let statusItem: NSStatusItem
     private let popover = NSPopover()
     private var recordView: ALOStatusRecordView?
@@ -841,9 +851,9 @@ private final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
     private var artwork: NSImage?
     private var artworkPalette: ArtworkPalette?
 
-    init(model: ALOViewModel, openMainWindow: @escaping () -> Void) {
+    init(model: ALOViewModel, toggleMainWindow: @escaping () -> Void) {
         self.model = model
-        self.openMainWindow = openMainWindow
+        self.toggleMainWindow = toggleMainWindow
         statusItem = NSStatusBar.system.statusItem(withLength: ALOMenuBarRecord.statusItemWidth)
         super.init()
         statusItem.button?.toolTip = ALOAppFlavor.displayName
@@ -853,7 +863,7 @@ private final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
             button.target = self
             button.action = #selector(handleStatusItemClick(_:))
             button.sendAction(on: [.leftMouseUp])
-            button.setAccessibilityHelp("Click to open room controls")
+            button.setAccessibilityHelp("Click to show or hide ALO")
             button.wantsLayer = true
             let recordView = ALOStatusRecordView(frame: button.bounds)
             recordView.autoresizingMask = [.width, .height]
@@ -964,7 +974,7 @@ private final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
 
     @objc private func handleStatusItemClick(_ sender: NSStatusBarButton) {
         guard model.phase == .live else {
-            openMainWindow()
+            toggleMainWindow()
             return
         }
         popover.isShown ? closePopover() : showPopover()
@@ -5042,7 +5052,7 @@ private struct VoiceLevelBadge: View {
     }
 }
 
-private struct WalkieTalkieBar: View {
+struct WalkieTalkieBar: View {
     @ObservedObject var model: ALOViewModel
     var showsCloseButton = true
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -5068,6 +5078,7 @@ private struct WalkieTalkieBar: View {
                 controls
             }
         }
+        .environment(\.colorScheme, .dark)
         .onAppear(perform: model.refreshVoiceInputs)
         .environment(\.roomAccent, model.roomAccentColor)
         .animation(reduceMotion ? nil : .easeInOut(duration: 1.1), value: model.roomArtworkPalette)
@@ -5088,7 +5099,7 @@ private struct WalkieTalkieBar: View {
             minHeight: FloatingMetrics.walkieBarHeight,
             maxHeight: FloatingMetrics.walkieBarHeight
         )
-        .background { WalkieBarBackground(colors: model.roomAtmosphereColors) }
+        .background(Color.black)
         .overlay(alignment: .top) {
             Rectangle()
                 .fill(Palette.glassHighlight.opacity(0.72))
@@ -5199,12 +5210,14 @@ private struct WalkieTalkieBar: View {
         }
         .padding(3)
         .frame(height: 40)
-        .background(Palette.messageSurface.opacity(0.76))
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(
+        .background {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Palette.glassHighlight.opacity(0.62), lineWidth: 1)
-        )
+                .fill(Palette.messageSurface.opacity(0.76))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Palette.glassHighlight.opacity(0.62), lineWidth: 1)
+                )
+        }
     }
 
     private var settingsMenu: some View {
@@ -5238,7 +5251,7 @@ private struct WalkieTalkieBar: View {
             Button(model.incomingCallsMuted ? "Unmute incoming voice" : "Mute incoming voice") {
                 model.toggleIncomingCallsMute()
             }
-            Button(model.incomingMediaMuted ? "Unmute incoming media" : "Mute incoming media") {
+            Button(model.incomingMediaMuted ? "Unmute room media" : "Mute room media") {
                 model.toggleIncomingMediaMute()
             }
             Divider()
@@ -5390,6 +5403,7 @@ private struct WalkieTalkieBar: View {
         .zIndex(badge > 0 ? 1 : 0)
         .help(help)
         .accessibilityLabel(help)
+        .accessibilityValue(badge > 0 ? "\(badge) unread messages" : "")
     }
 
 }
@@ -5955,34 +5969,6 @@ private struct ArtworkAtmosphere: View {
             .frame(width: geometry.size.width, height: geometry.size.height)
         }
         .clipped()
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
-    }
-}
-
-private struct WalkieBarBackground: View {
-    let colors: [Color]
-    @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-
-    var body: some View {
-        ZStack {
-            ArtworkAtmosphere(colors: colors, strength: 0.46)
-            Rectangle()
-                .fill(
-                    reduceTransparency
-                        ? AnyShapeStyle(Palette.opaqueSurface)
-                        : AnyShapeStyle(.ultraThinMaterial)
-                )
-            if !reduceTransparency {
-                Rectangle()
-                    .fill(
-                        colorScheme == .dark
-                            ? Palette.opaqueSurface.opacity(0.34)
-                            : Color.white.opacity(0.42)
-                    )
-            }
-        }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
     }

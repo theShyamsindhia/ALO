@@ -710,12 +710,9 @@ final class MeshSession {
     }
     func setIncomingMediaMuted(_ muted: Bool) {
         incomingMediaMuted = muted
-        let routing = incomingAudioMuteRouting
-        if isBroadcasting {
-            hostSession?.setLocalPlaybackMuted(routing.incomingMediaMuted)
-        } else {
-            receiver?.setLocalPlaybackMuted(routing.incomingMediaMuted)
-        }
+        // Only the remote receiver is incoming audio. HostSession owns the
+        // source return and its direct-source fallback independently.
+        receiver?.setLocalPlaybackMuted(incomingAudioMuteRouting.incomingMediaMuted)
     }
     func setIncomingWalkieTalkieMuted(_ muted: Bool) {
         incomingVoiceMuted = muted
@@ -941,7 +938,6 @@ final class MeshSession {
                         volume: localVolume,
                         muted: routing.publishedParticipantMediaMuted
                     )
-                    host.setLocalPlaybackMuted(routing.incomingMediaMuted)
                 } else {
                     statusHandler("Connecting to the room broadcaster")
                     let receiver = try Receiver(

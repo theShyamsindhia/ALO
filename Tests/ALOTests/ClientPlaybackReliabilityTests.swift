@@ -4,6 +4,24 @@ import Testing
 @testable import ALOCore
 
 struct ClientPlaybackReliabilityTests {
+    @Test("Room mute never changes local source playback or voice/mixer preferences",
+          arguments: [false, true], [false, true])
+    func roomMuteKeepsSourcePlayback(participantMuted: Bool, voiceMuted: Bool) {
+        var routing = IncomingAudioMuteRouting(
+            participantMediaMuted: participantMuted,
+            incomingMediaMuted: false,
+            incomingVoiceMuted: voiceMuted
+        )
+        // The incoming receiver applies this preference separately from the
+        // participant setting used for our own source's synchronized return.
+        for muted in [true, false, true] {
+            routing.incomingMediaMuted = muted
+            #expect(routing.localMediaPlaybackMuted == (participantMuted || muted))
+            #expect(routing.publishedParticipantMediaMuted == participantMuted)
+            #expect(routing.voicePlaybackMuted == voiceMuted)
+        }
+    }
+
     @Test("Incoming media mute does not mute incoming voice or alter room participant state")
     func incomingMediaMuteIsIndependentFromVoice() {
         let routing = IncomingAudioMuteRouting(

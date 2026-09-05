@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Network
 import Testing
@@ -1309,6 +1310,15 @@ struct LoopbackRoomScaleTests {
         schedulerOversleep: TimeInterval,
         deferredPCM: Bool = false
     ) throws -> RoomMeasurements {
+        // This headless fixture has no active audio device. Request precise
+        // scheduling only while measuring live capture/transport, as a real
+        // audio session would; do not let background throttling become network
+        // delay. End the activity on success and on every error path.
+        let activity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
+            reason: "Measure live room audio delivery at the capture rate"
+        )
+        defer { ProcessInfo.processInfo.endActivity(activity) }
         let hostReady = DispatchSemaphore(value: 0)
         let state = PortState()
         let shaper = linkBitsPerSecond.map(FluidLinkShaper.init(bitsPerSecond:))
@@ -1397,6 +1407,7 @@ struct LoopbackRoomScaleTests {
             // Capture timestamps follow the nominal 20 ms sample timeline;
             // missed callback deadlines catch up without another relative sleep.
             let callbackDurationNanos: UInt64 = 20_000_000
+            let captureWakeDelays = AudioCompletionLatencies()
             // Match both production capture backends rather than inheriting the
             // Swift Testing worker's priority. This does not suppress OS stalls.
             let sourceQueue = DispatchQueue(label: "in.werai.tests.fanout-capture", qos: .userInteractive)
@@ -1410,9 +1421,15 @@ struct LoopbackRoomScaleTests {
                     let callbackDeadlineNanos = captureAnchorNanos + UInt64(callbackIndex) * callbackDurationNanos
                     let now = MonotonicClock.nowNanos()
                     if now < callbackDeadlineNanos {
-                        let remaining = Double(callbackDeadlineNanos - now) / 1_000_000_000
-                        Thread.sleep(forTimeInterval: remaining + schedulerOversleep)
+                        // Preserve monotonic source deadlines without Foundation
+                        // relative-sleep coalescing; keep the injected late wake.
+                        let wakeDeadline = callbackDeadlineNanos + UInt64(schedulerOversleep * 1_000_000_000)
+                        while MonotonicClock.nowNanos() < wakeDeadline {
+                            _ = mach_wait_until(MonotonicClock.nanosToTicks(wakeDeadline))
+                        }
                     }
+                    let wokeAt = MonotonicClock.nowNanos()
+                    captureWakeDelays.record(wokeAt > callbackDeadlineNanos ? wokeAt - callbackDeadlineNanos : 0)
                     let captureTimeNanos = callbackDeadlineNanos - callbackDurationNanos
                     captureCallbackAges.record(MonotonicClock.nowNanos() - captureTimeNanos)
                     host.acceptAudio(samples: samples, captureTimeNanos: captureTimeNanos)
@@ -1423,6 +1440,7 @@ struct LoopbackRoomScaleTests {
             }
             sourceFinished.wait()
             let captureAnchorNanos = sourceTimeline.anchorNanos
+            print("Capture wake delay: peers=\(peerCount), policy=\(policy), injected=\(schedulerOversleep * 1_000)ms, \(captureWakeDelays.summary)")
 
             let expectedIDs = Set((0..<peerCount).map { "loopback-peer-\($0)" })
             let peerPorts = try peers.map { try #require($0.audioPort) }
