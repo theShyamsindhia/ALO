@@ -462,6 +462,7 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow?
     private var roomBarController: FloatingRoomWindowController?
     private var walkieTalkieBarController: WalkieTalkieWindowController?
+    private var notchController: ALONotchWindowController?
     private var fullScreenVideoController: FullScreenVideoWindowController?
     private var statusMenuController: ALOStatusMenuController?
     private var diagnosticsController: DiagnosticsWindowController?
@@ -481,6 +482,7 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         installTerminationSignalHandlers()
         installMainMenu()
+        notchController = ALONotchWindowController(model: model)
         RoomMentionNotifier.shared.prepare { [weak self] in
             self?.model.showChatInFloatingBar()
         }
@@ -1491,6 +1493,7 @@ final class ALOViewModel: ObservableObject {
     @Published var floatingSection: FloatingSection = .collapsed
     @Published var floatingBarHidden: Bool
     @Published private(set) var menuBarPopoverVisible = false
+    @Published var notchExpandedVisible = false
 
     private var roomBrowser: MeshRoomBrowser!
     private var secureRoomBrowser: MeshRoomBrowser!
@@ -2878,7 +2881,7 @@ final class ALOViewModel: ObservableObject {
 
     func setMenuBarPopoverVisible(_ visible: Bool) {
         menuBarPopoverVisible = visible
-        if !visible, floatingBarHidden {
+        if !visible, floatingBarHidden, !notchExpandedVisible {
             floatingSection = .collapsed
         }
     }
@@ -3351,7 +3354,7 @@ final class ALOViewModel: ObservableObject {
                 self.messages = self.chatDocument.messages
                 guard isNewMessage, let receivedMessage = self.messages.first(where: { $0.senderID == senderID && $0.sentNanos == sentNanos }) else { return }
                 let chatIsVisible = self.floatingSection == .chat
-                    && (!self.floatingBarHidden || self.menuBarPopoverVisible)
+                    && (!self.floatingBarHidden || self.menuBarPopoverVisible || self.notchExpandedVisible)
                 let chatIsAtLatest = chatIsVisible && !self.chatViewportsAtLatest.isEmpty
                 if senderID != self.currentParticipantID {
                     let mentionsThisMac = ChatNotificationMode.mentions.shouldPreview(
@@ -4143,6 +4146,7 @@ struct ALOView: View {
 enum RoomControlsPresentation {
     case floating
     case menuBar
+    case notch
 }
 
 struct FloatingRoomView: View {
@@ -4189,7 +4193,7 @@ struct FloatingRoomView: View {
     }
 
     private var roomBarHeight: CGFloat {
-        if presentation == .menuBar { return FloatingMetrics.menuBarMediaHeight }
+        if presentation != .floating { return FloatingMetrics.menuBarMediaHeight }
         return compactRoomBar ? 44 : FloatingMetrics.barHeight
     }
 
@@ -4445,7 +4449,7 @@ struct FloatingRoomView: View {
                 .padding(8).frame(width: 220)
             }
 
-            if presentation == .menuBar {
+            if presentation != .floating {
                 Divider().frame(height: 20)
 
                 Button(action: model.stop) {
@@ -4463,12 +4467,12 @@ struct FloatingRoomView: View {
         .frame(maxWidth: .infinity)
         .frame(height: roomBarHeight)
         .background(alignment: .leading) {
-            if presentation == .menuBar {
+            if presentation != .floating {
                 menuBarArtworkBackdrop
             }
         }
         .background {
-            if presentation == .menuBar {
+            if presentation != .floating {
                 ArtworkHeaderBackground(palette: model.roomArtworkPalette)
             }
         }
@@ -4478,7 +4482,7 @@ struct FloatingRoomView: View {
     @ViewBuilder
     private var roomIdentity: some View {
         let identity = HStack(spacing: 9) {
-            if presentation == .menuBar {
+            if presentation != .floating {
                 // The artwork itself bleeds to the row edge behind this clear
                 // lane; text begins after its strongest, most legible area.
                 Color.clear
@@ -4569,8 +4573,8 @@ struct FloatingRoomView: View {
     }
 
     private var artworkTile: some View {
-        let size: CGFloat = presentation == .menuBar ? 62 : compactRoomBar ? 28 : 38
-        let radius: CGFloat = presentation == .menuBar ? 17 : compactRoomBar ? 8 : 11
+        let size: CGFloat = presentation != .floating ? 62 : compactRoomBar ? 28 : 38
+        let radius: CGFloat = presentation != .floating ? 17 : compactRoomBar ? 8 : 11
         return Group {
             if let data = model.nowPlaying.artworkData, let image = NSImage(data: data) {
                 Image(nsImage: image)
@@ -4876,10 +4880,14 @@ struct FloatingRoomView: View {
     }
 
     private var chatIsPresented: Bool {
-        !showsGames && model.phase == .live && model.floatingSection == .chat && !model.permissionNotice
-            && (presentation == .menuBar
-                ? model.menuBarPopoverVisible
-                : !model.floatingBarHidden && !model.videoFullscreen)
+        guard !showsGames, model.phase == .live, model.floatingSection == .chat, !model.permissionNotice else {
+            return false
+        }
+        switch presentation {
+        case .floating: return !model.floatingBarHidden && !model.videoFullscreen
+        case .menuBar: return model.menuBarPopoverVisible
+        case .notch: return model.notchExpandedVisible
+        }
     }
 
     private var chatHeader: some View {
@@ -6103,6 +6111,7 @@ struct WalkieTalkieBar: View {
             Button(model.floatingBarHidden ? "Show media floating bar" : "Hide media floating bar") {
                 model.floatingBarHidden ? model.showFloatingBar() : model.hideFloatingBar()
             }
+            ALONotchSettingsMenu()
             Divider()
             Button("Shortcut Mapper…") {
                 (NSApp.delegate as? ALOAppDelegate)?.showShortcutMapper(nil)

@@ -1,0 +1,47 @@
+[
+  {
+    "source": "Vendor/DynamicNotch/DynamicNotch/Shared/UI/Shapes/NotchShape.swift",
+    "compiled_copy": "Sources/ALO/DynamicNotch/NotchShape.swift",
+    "sha256": "5bc49536bb5abd2c7bbf324b2651b5f914ae5fc528d714a7846dabd5b538879e"
+  },
+  {
+    "source": "Vendor/DynamicNotch/DynamicNotch/Shared/UI/Shapes/DynamicIslandShape.swift",
+    "compiled_copy": "Sources/ALO/DynamicNotch/DynamicIslandShape.swift",
+    "sha256": "8442a6b7511f345522e950376fe80576ea2faf77781ac09f901d167156243464"
+  },
+  {
+    "source": "Vendor/DynamicNotch/DynamicNotch/Shared/UI/Modifiers/NotchTransitionModifier.swift",
+    "compiled_copy": "Sources/ALO/DynamicNotch/NotchTransitionModifier.swift",
+    "sha256": "81586f0ad00012f6a2a02e511fa276f2bb22fe7a76b9b389fd18f583c95eda91"
+  },
+  {
+    "source": "Vendor/DynamicNotch/DynamicNotch/Shared/UI/Modifiers/BlurFadeModifier.swift",
+    "compiled_copy": "Sources/ALO/DynamicNotch/BlurFadeModifier.swift",
+    "sha256": "360add90578e092e85c44886f8edd6c47e2f7a143177004c5e2918fa28194c8d"
+  },
+  {
+    "source": "Vendor/DynamicNotch/DynamicNotch/Shared/Extensions/extension+AnyTransition.swift",
+    "compiled_copy": "Sources/ALO/DynamicNotch/extension+AnyTransition.swift",
+    "sha256": "0af8cff33f8924bd0b1ce4e60b95cb50f2401079daeec3b34e42eb89e09bb017"
+  },
+  {
+    "source": "Vendor/DynamicNotch/DynamicNotch/Core/NotchEngine/Models/NotchTransitionMetrics.swift",
+    "compiled_copy": "Sources/ALO/DynamicNotch/NotchTransitionMetrics.swift",
+    "sha256": "1701a6888fe2621b5520d6ce468d8f62bd3c9eb382df081dfdcfe5fdb8f1bf8e"
+  },
+  {
+    "source": "Vendor/DynamicNotch/DynamicNotch/Core/NotchEngine/Models/NotchAnimationPreset.swift",
+    "compiled_copy": "Sources/ALO/DynamicNotch/NotchAnimationPreset.swift",
+    "sha256": "c2408c6a52fe9f513646d1a74638a2737c8c38c1b4cc6c57ab638af1c03b463a"
+  },
+  {
+    "source": "Vendor/DynamicNotch/DynamicNotch/Features/Notch/NotchAnimations.swift",
+    "compiled_copy": "Sources/ALO/DynamicNotch/NotchAnimations.swift",
+    "sha256": "3131330aa5bd8631605d24d90957cc3e202f0e1cc733bfd65c97fee775b2a481"
+  },
+  {
+    "source": "Vendor/DynamicNotch/DynamicNotch/Application/Windows/OverlayWindowLayout.swift",
+    "compiled_copy": "Sources/ALO/DynamicNotch/OverlayWindowLayout.swift",
+    "sha256": "6480f1f79d4a6d082690bc3dbf504f3dc84b7a207382dada30b1cf6d145baf8d"
+  }
+]

@@ -1,0 +1,647 @@
+internal import AppKit
+import Combine
+import SwiftUI
+
+@MainActor
+final class NowPlayingViewModel: ObservableObject {
+    private static let favoriteTrackKeysStorageKey = "settings.nowPlaying.favoriteTrackKeys"
+
+    @Published private(set) var snapshot: NowPlayingSnapshot?
+    @Published private(set) var artworkImage: NSImage?
+    @Published private(set) var artworkPalette = NowPlayingArtworkPalette.fallback
+    @Published private(set) var artworkFlipAngle: Double = 0
+    @Published private(set) var audioOutputRoutes: [AudioOutputRoute] = []
+    @Published private(set) var currentAudioOutputRoute: AudioOutputRoute?
+    @Published private(set) var isCurrentTrackFavorite = false
+    @Published private(set) var lyricsState: NowPlayingLyricsState = .idle
+    @Published var event: NowPlayingEvent?
+
+    private var service: any NowPlayingMonitoring
+    private let audioOutputRouting: any AudioOutputRouting
+    private let lyricsProvider: any LyricsProviding
+    private let favoritesStore: UserDefaults
+    private let detailPollingService: (any NowPlayingDetailPollingConfigurable)?
+    private let playbackSourceOpener: any PlaybackSourceOpening
+    private let artworkFlipAnimationDuration: TimeInterval = 0.45
+    private let transientSessionGracePeriod: TimeInterval = 0.55
+    private var sourceFilter: NowPlayingSourceFilter
+    private var hasStartedMonitoring = false
+    private var ignoresServiceSnapshots = false
+    private var latestServiceSnapshot: NowPlayingSnapshot?
+    private var artworkFlipCooldownActive = false
+    private var artworkPresentationWorkItem: DispatchWorkItem?
+    private var pendingSessionEndWorkItem: DispatchWorkItem?
+    private var lyricsLookupTask: Task<Void, Never>?
+    private var artworkFlipTrackKey: String?
+    private var artworkFlipStartedAt: Date?
+    private var activeDetailedPresentationSources = Set<String>()
+    private var isLyricsPresentationActive = false
+    private var recentSeekTargetTime: TimeInterval?
+    private var recentSeekDate: Date?
+    private let seekGracePeriodDuration: TimeInterval = 1.5
+    private var recentPlaybackToggleTargetIsPlaying: Bool?
+    private var recentPlaybackToggleDate: Date?
+    private let playbackToggleGracePeriodDuration: TimeInterval = 0.8
+    private var lastValidFilteredSnapshot: NowPlayingSnapshot?
+    #if DEBUG
+    private var isShowingDebugPreviewSnapshot = false
+    #endif
+
+    var hasActiveSession: Bool {
+        snapshot != nil
+    }
+
+    private var artworkSwapDelay: TimeInterval {
+        artworkFlipAnimationDuration / 2
+    }
+
+    convenience init() {
+        self.init(
+            service: MediaRemoteNowPlayingService(),
+            audioOutputRouting: SystemAudioOutputRoutingService(),
+            lyricsProvider: LRCLIBLyricsProvider(),
+            favoritesStore: .standard,
+            playbackSourceOpener: WorkspacePlaybackSourceOpener(),
+            sourceFilter: .any
+        )
+    }
+
+    init(
+        service: any NowPlayingMonitoring,
+        audioOutputRouting: (any AudioOutputRouting)? = nil,
+        lyricsProvider: (any LyricsProviding)? = nil,
+        favoritesStore: UserDefaults = .standard,
+        playbackSourceOpener: (any PlaybackSourceOpening)? = nil,
+        sourceFilter: NowPlayingSourceFilter = .any
+    ) {
+        self.service = service
+        self.audioOutputRouting = audioOutputRouting ?? InactiveAudioOutputRoutingService()
+        self.lyricsProvider = lyricsProvider ?? CompositeLyricsProvider(providers: [
+            LRCLIBLyricsProvider(),
+            OvhLyricsProvider()
+        ])
+        self.favoritesStore = favoritesStore
+        self.detailPollingService = service as? any NowPlayingDetailPollingConfigurable
+        self.playbackSourceOpener = playbackSourceOpener ?? WorkspacePlaybackSourceOpener()
+        self.sourceFilter = sourceFilter
+        self.service.onSnapshotChange = { [weak self] snapshot in
+            guard let self else { return }
+
+            if Thread.isMainThread {
+                MainActor.assumeIsolated {
+                    self.handleServiceSnapshot(snapshot)
+                }
+            } else {
+                DispatchQueue.main.async { [weak self] in
+                    self?.handleServiceSnapshot(snapshot)
+                }
+            }
+        }
+        refreshAudioOutputRoutes()
+    }
+
+    func startMonitoring() {
+        guard !hasStartedMonitoring else { return }
+        hasStartedMonitoring = true
+        ignoresServiceSnapshots = false
+        service.startMonitoring()
+        updateDetailPollingState()
+    }
+
+    func stopMonitoring() {
+        guard hasStartedMonitoring else { return }
+        hasStartedMonitoring = false
+        ignoresServiceSnapshots = true
+        service.stopMonitoring()
+        activeDetailedPresentationSources.removeAll()
+        setLyricsPresentationActive(false)
+        updateDetailPollingState()
+        cancelPendingSessionEnd()
+        cancelPendingArtworkPresentation()
+        cancelLyricsLookup()
+        latestServiceSnapshot = nil
+        lastValidFilteredSnapshot = nil
+        recentPlaybackToggleTargetIsPlaying = nil
+        recentPlaybackToggleDate = nil
+        apply(snapshot: nil)
+    }
+
+    func updateSourceFilter(_ sourceFilter: NowPlayingSourceFilter) {
+        guard self.sourceFilter != sourceFilter else { return }
+
+        self.sourceFilter = sourceFilter
+        lastValidFilteredSnapshot = nil
+
+        #if DEBUG
+        guard !isShowingDebugPreviewSnapshot else { return }
+        #endif
+
+        refreshVisibleSnapshotForCurrentSourceFilter()
+    }
+
+    func togglePlayPause() {
+        guard let snapshot else {
+            service.send(.togglePlayPause)
+            return
+        }
+
+        let targetIsPlaying = !snapshot.isPlaying
+        recentPlaybackToggleTargetIsPlaying = targetIsPlaying
+        recentPlaybackToggleDate = Date()
+        apply(snapshot: snapshot.togglingPlaybackState())
+        service.send(snapshot.isPlaying ? .pause : .play)
+    }
+
+    func play() {
+        recentPlaybackToggleTargetIsPlaying = true
+        recentPlaybackToggleDate = Date()
+        if let snapshot, !snapshot.isPlaying {
+            apply(snapshot: snapshot.settingPlaybackRate(1))
+        }
+
+        service.send(.play)
+    }
+
+    func pause() {
+        recentPlaybackToggleTargetIsPlaying = false
+        recentPlaybackToggleDate = Date()
+        if let snapshot, snapshot.isPlaying {
+            apply(snapshot: snapshot.settingPlaybackRate(0))
+        }
+
+        service.send(.pause)
+    }
+
+    func nextTrack() {
+        service.send(.nextTrack)
+    }
+
+    func previousTrack() {
+        service.send(.previousTrack)
+    }
+
+    func seek(to elapsedTime: TimeInterval) {
+        guard let snapshot, snapshot.duration > 0 else { return }
+
+        let clampedElapsedTime = min(max(elapsedTime, 0), snapshot.duration)
+        recentSeekTargetTime = clampedElapsedTime
+        recentSeekDate = Date()
+        apply(snapshot: snapshot.settingElapsedTime(clampedElapsedTime))
+        service.send(.seek(clampedElapsedTime))
+    }
+
+    func skip(seconds: TimeInterval) {
+        guard let snapshot else { return }
+        seek(to: snapshot.elapsedTime(at: .now) + seconds)
+    }
+
+    func toggleShuffle() {
+        guard let snapshot else { return }
+
+        let isShuffled = !snapshot.isShuffled
+        apply(snapshot: snapshot.settingShuffle(isShuffled), emitEvent: false)
+        service.send(.setShuffle(isShuffled))
+    }
+
+    func toggleRepeat() {
+        guard let snapshot else { return }
+
+        let repeatMode = snapshot.repeatMode.next
+        apply(snapshot: snapshot.settingRepeatMode(repeatMode), emitEvent: false)
+        service.send(.setRepeatMode(repeatMode))
+    }
+
+    func setVolume(_ volume: Double) {
+        guard let snapshot, snapshot.supportsVolumeControl else { return }
+
+        let clampedVolume = min(max(volume, 0), 1)
+        apply(snapshot: snapshot.settingVolume(clampedVolume), emitEvent: false)
+        service.send(.setVolume(clampedVolume))
+    }
+
+    func refreshAudioOutputRoutes() {
+        let routes = audioOutputRouting.availableRoutes()
+        audioOutputRoutes = routes
+        currentAudioOutputRoute = routes.first(where: \.isCurrent)
+    }
+
+    func switchAudioOutput(to route: AudioOutputRoute) {
+        guard audioOutputRouting.setCurrentRoute(route.id) else {
+            refreshAudioOutputRoutes()
+            return
+        }
+
+        refreshAudioOutputRoutes()
+    }
+
+    var canToggleFavorite: Bool {
+        snapshot?.supportsFavorite == true || snapshot?.favoriteTrackKey != nil
+    }
+
+    var canOpenPlaybackSource: Bool {
+        snapshot?.playbackSource?.hasOpenableTarget == true
+    }
+
+    func openPlaybackSource() {
+        guard let source = snapshot?.playbackSource else { return }
+        playbackSourceOpener.openPlaybackSource(source)
+    }
+
+    func toggleFavorite() {
+        guard let snapshot else { return }
+
+        if snapshot.supportsFavorite {
+            let isFavorite = !(snapshot.isFavorite ?? isCurrentTrackFavorite)
+            isCurrentTrackFavorite = isFavorite
+            apply(snapshot: snapshot.settingFavorite(isFavorite), emitEvent: false)
+            service.send(.setFavorite(isFavorite))
+            return
+        }
+
+        guard let favoriteTrackKey = snapshot.favoriteTrackKey else { return }
+
+        var favoriteTrackKeys = storedFavoriteTrackKeys
+
+        if favoriteTrackKeys.contains(favoriteTrackKey) {
+            favoriteTrackKeys.remove(favoriteTrackKey)
+        } else {
+            favoriteTrackKeys.insert(favoriteTrackKey)
+        }
+
+        favoritesStore.set(Array(favoriteTrackKeys).sorted(), forKey: Self.favoriteTrackKeysStorageKey)
+        isCurrentTrackFavorite = favoriteTrackKeys.contains(favoriteTrackKey)
+    }
+
+    func elapsedTime(at date: Date) -> TimeInterval {
+        snapshot?.elapsedTime(at: date) ?? 0
+    }
+
+    func setDetailedPresentationActive(_ isActive: Bool, source: String) {
+        if isActive {
+            activeDetailedPresentationSources.insert(source)
+        } else {
+            activeDetailedPresentationSources.remove(source)
+        }
+
+        updateDetailPollingState()
+    }
+
+    func setLyricsPresentationActive(_ isActive: Bool) {
+        guard isLyricsPresentationActive != isActive else {
+            if isActive {
+                loadLyricsIfNeeded(for: snapshot)
+            }
+            return
+        }
+
+        isLyricsPresentationActive = isActive
+
+        if isActive {
+            loadLyricsIfNeeded(for: snapshot)
+        } else {
+            cancelLyricsLookup()
+        }
+    }
+
+    func clearPresentationActivityState() {
+        activeDetailedPresentationSources.removeAll()
+        setLyricsPresentationActive(false)
+        updateDetailPollingState()
+    }
+
+    #if DEBUG
+    func showDebugPreviewSnapshotIfNeeded() {
+        guard snapshot == nil else { return }
+        isShowingDebugPreviewSnapshot = true
+        apply(snapshot: Self.makeDebugPreviewSnapshot(), emitEvent: false)
+    }
+
+    func hideDebugPreviewSnapshotIfNeeded() {
+        guard isShowingDebugPreviewSnapshot else { return }
+        isShowingDebugPreviewSnapshot = false
+        apply(snapshot: nil, emitEvent: false)
+    }
+
+    private static func makeDebugPreviewSnapshot() -> NowPlayingSnapshot {
+        NowPlayingSnapshot(
+            title: "Midnight Echoes",
+            artist: "Debug Ensemble",
+            album: "Preview Mode",
+            duration: 214,
+            elapsedTime: 81,
+            playbackRate: 1,
+            artworkData: makeDebugArtworkData(),
+            refreshedAt: .now
+        )
+    }
+
+    private static func makeDebugArtworkData() -> Data? {
+        let size = NSSize(width: 48, height: 48)
+        let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int(size.width),
+            pixelsHigh: Int(size.height),
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        )
+
+        guard let rep else { return nil }
+
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+
+        let bounds = NSRect(origin: .zero, size: size)
+        NSColor(calibratedRed: 0.96, green: 0.48, blue: 0.2, alpha: 1).setFill()
+        NSBezierPath(rect: bounds).fill()
+
+        NSColor(calibratedRed: 1, green: 0.79, blue: 0.29, alpha: 1).setFill()
+        NSBezierPath(rect: NSRect(x: 0, y: 0, width: size.width * 0.42, height: size.height)).fill()
+
+        NSGraphicsContext.restoreGraphicsState()
+        return rep.representation(using: .png, properties: [:])
+    }
+    #endif
+}
+
+private extension NowPlayingViewModel {
+    func handleServiceSnapshot(_ snapshot: NowPlayingSnapshot?) {
+        guard !ignoresServiceSnapshots else { return }
+
+        var resolvedSnapshot = snapshot
+
+        if let serviceSnapshot = snapshot,
+           let seekTarget = recentSeekTargetTime,
+           let seekDate = recentSeekDate {
+            let elapsedSinceSeek = Date().timeIntervalSince(seekDate)
+            if elapsedSinceSeek < seekGracePeriodDuration {
+                let expectedTime = seekTarget + (serviceSnapshot.isPlaying ? elapsedSinceSeek : 0)
+                let actualTime = serviceSnapshot.elapsedTime(at: .now)
+
+                if abs(actualTime - expectedTime) > 1.5 {
+                    resolvedSnapshot = serviceSnapshot.settingElapsedTime(expectedTime)
+                } else {
+                    recentSeekTargetTime = nil
+                    recentSeekDate = nil
+                }
+            } else {
+                recentSeekTargetTime = nil
+                recentSeekDate = nil
+            }
+        }
+
+        if let serviceSnapshot = resolvedSnapshot,
+           let targetIsPlaying = recentPlaybackToggleTargetIsPlaying,
+           let toggleDate = recentPlaybackToggleDate {
+            let elapsedSinceToggle = Date().timeIntervalSince(toggleDate)
+            if elapsedSinceToggle < playbackToggleGracePeriodDuration {
+                if serviceSnapshot.isPlaying != targetIsPlaying {
+                    let expectedPlaybackRate: Double = targetIsPlaying ? max(serviceSnapshot.playbackRate, 1) : 0
+                    resolvedSnapshot = serviceSnapshot.settingPlaybackRate(expectedPlaybackRate)
+                } else {
+                    recentPlaybackToggleTargetIsPlaying = nil
+                    recentPlaybackToggleDate = nil
+                }
+            } else {
+                recentPlaybackToggleTargetIsPlaying = nil
+                recentPlaybackToggleDate = nil
+            }
+        }
+
+        latestServiceSnapshot = resolvedSnapshot
+
+        if let resolvedSnapshot {
+            applyServiceSnapshotIfAllowed(resolvedSnapshot)
+        } else {
+            scheduleSessionEnd()
+        }
+    }
+
+    var storedFavoriteTrackKeys: Set<String> {
+        Set(favoritesStore.stringArray(forKey: Self.favoriteTrackKeysStorageKey) ?? [])
+    }
+
+    func apply(snapshot newSnapshot: NowPlayingSnapshot?, emitEvent: Bool = true) {
+        if let newSnapshot, shouldPresentTrackChangeWithFlip(newSnapshot) {
+            scheduleFlippedTrackPresentation(newSnapshot, emitEvent: emitEvent)
+            return
+        }
+
+        applyPresentedSnapshot(newSnapshot, emitEvent: emitEvent)
+    }
+
+    func applyPresentedSnapshot(_ newSnapshot: NowPlayingSnapshot?, emitEvent: Bool = true) {
+        let wasActive = snapshot != nil
+        let wasPlaying = snapshot?.isPlaying
+        let previousTrackKey = snapshot?.favoriteTrackKey
+        let newTrackKey = newSnapshot?.favoriteTrackKey
+        let previousLyricsKey = snapshot?.lyricsLookupKey
+        let newLyricsKey = newSnapshot?.lyricsLookupKey
+        let previousArtworkData = snapshot?.artworkData
+
+        if previousTrackKey != newTrackKey {
+            cancelPendingArtworkPresentation()
+            recentSeekTargetTime = nil
+            recentSeekDate = nil
+            recentPlaybackToggleTargetIsPlaying = nil
+            recentPlaybackToggleDate = nil
+        }
+
+        if previousLyricsKey != newLyricsKey {
+            cancelLyricsLookup()
+            lyricsState = .idle
+        }
+
+        snapshot = newSnapshot
+        if let remoteFavorite = newSnapshot?.isFavorite {
+            isCurrentTrackFavorite = remoteFavorite
+        } else {
+            isCurrentTrackFavorite = newSnapshot?.favoriteTrackKey.map(storedFavoriteTrackKeys.contains) ?? false
+        }
+
+        switch newSnapshot?.artworkData {
+        case let artworkData?:
+            guard previousArtworkData != artworkData || artworkImage == nil else {
+                break
+            }
+
+            applyArtworkPresentation(artworkData)
+        case nil:
+            if newSnapshot == nil || previousTrackKey != newTrackKey {
+                cancelPendingArtworkPresentation()
+                artworkImage = nil
+                artworkPalette = .fallback
+            }
+        }
+
+        let isActive = newSnapshot != nil
+        let isPlaying = newSnapshot?.isPlaying
+
+        if emitEvent {
+            if !wasActive && isActive {
+                event = .started
+            } else if wasActive && !isActive {
+                event = .stopped
+            } else if let wasPlaying, let isPlaying, wasPlaying != isPlaying {
+                event = .playbackStateChanged(isPlaying: isPlaying)
+            }
+        }
+
+        if isLyricsPresentationActive {
+            loadLyricsIfNeeded(for: newSnapshot)
+        }
+    }
+
+    func shouldPresentTrackChangeWithFlip(_ newSnapshot: NowPlayingSnapshot) -> Bool {
+        guard let previousTrackKey = snapshot?.favoriteTrackKey,
+              let newTrackKey = newSnapshot.favoriteTrackKey else {
+            return false
+        }
+
+        return previousTrackKey != newTrackKey
+    }
+
+    func applyServiceSnapshotIfAllowed(_ serviceSnapshot: NowPlayingSnapshot) {
+        cancelPendingSessionEnd()
+
+        if sourceFilter.allows(serviceSnapshot.playbackSource) {
+            lastValidFilteredSnapshot = serviceSnapshot
+            apply(snapshot: serviceSnapshot)
+        } else {
+            if let lastValidFilteredSnapshot,
+               sourceFilter.allows(lastValidFilteredSnapshot.playbackSource),
+               lastValidFilteredSnapshot.hasVisibleMetadata {
+                apply(snapshot: lastValidFilteredSnapshot)
+            } else {
+                cancelPendingArtworkPresentation()
+                apply(snapshot: nil)
+            }
+        }
+    }
+
+    func refreshVisibleSnapshotForCurrentSourceFilter() {
+        cancelPendingSessionEnd()
+
+        guard let latestServiceSnapshot else {
+            apply(snapshot: nil)
+            return
+        }
+
+        applyServiceSnapshotIfAllowed(latestServiceSnapshot)
+    }
+
+    func updateDetailPollingState() {
+        detailPollingService?.setDetailPollingEnabled(
+            hasStartedMonitoring && !activeDetailedPresentationSources.isEmpty
+        )
+    }
+
+    func loadLyricsIfNeeded(for snapshot: NowPlayingSnapshot?) {
+        guard let snapshot, let trackKey = snapshot.lyricsLookupKey else {
+            cancelLyricsLookup()
+            lyricsState = .idle
+            return
+        }
+
+        guard lyricsState.trackKey != trackKey else { return }
+
+        cancelLyricsLookup()
+        lyricsState = .loading(trackKey: trackKey)
+
+        lyricsLookupTask = Task { [weak self, snapshot, trackKey] in
+            guard let self else { return }
+
+            do {
+                let lyrics = try await lyricsProvider.lyrics(for: snapshot)
+                guard Task.isCancelled == false else { return }
+
+                if let lyrics {
+                    lyricsState = .loaded(lyrics)
+                } else {
+                    lyricsState = .notFound(trackKey: trackKey)
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                guard Task.isCancelled == false else { return }
+                lyricsState = .failed(trackKey: trackKey)
+            }
+        }
+    }
+
+    func cancelLyricsLookup() {
+        lyricsLookupTask?.cancel()
+        lyricsLookupTask = nil
+    }
+
+    func scheduleSessionEnd() {
+        guard snapshot != nil else { return }
+        guard pendingSessionEndWorkItem == nil else { return }
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingSessionEndWorkItem = nil
+            self.lastValidFilteredSnapshot = nil
+            self.cancelPendingArtworkPresentation()
+            self.apply(snapshot: nil)
+        }
+
+        pendingSessionEndWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + transientSessionGracePeriod, execute: workItem)
+    }
+
+    func cancelPendingSessionEnd() {
+        pendingSessionEndWorkItem?.cancel()
+        pendingSessionEndWorkItem = nil
+    }
+
+    func triggerArtworkFlip(for trackKey: String?) {
+        guard !artworkFlipCooldownActive else { return }
+
+        artworkFlipCooldownActive = true
+        artworkFlipTrackKey = trackKey
+        artworkFlipStartedAt = .now
+
+        withAnimation(.easeInOut(duration: artworkFlipAnimationDuration)) {
+            artworkFlipAngle += 180
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + artworkFlipAnimationDuration + 0.15) { [weak self] in
+            guard let self else { return }
+
+            self.artworkFlipTrackKey = nil
+            self.artworkFlipStartedAt = nil
+            self.artworkFlipCooldownActive = false
+        }
+    }
+
+    func scheduleFlippedTrackPresentation(_ newSnapshot: NowPlayingSnapshot, emitEvent: Bool) {
+        cancelPendingArtworkPresentation()
+        triggerArtworkFlip(for: newSnapshot.favoriteTrackKey)
+
+        let elapsed = artworkFlipStartedAt.map { Date().timeIntervalSince($0) } ?? 0
+        let delay = max(0, artworkSwapDelay - elapsed)
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.applyPresentedSnapshot(newSnapshot, emitEvent: emitEvent)
+        }
+
+        artworkPresentationWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    func cancelPendingArtworkPresentation() {
+        artworkPresentationWorkItem?.cancel()
+        artworkPresentationWorkItem = nil
+    }
+
+    func applyArtworkPresentation(_ artworkData: Data) {
+        cancelPendingArtworkPresentation()
+        artworkImage = NSImage(data: artworkData)
+        artworkPalette = NowPlayingArtworkPaletteExtractor.extract(from: artworkData)
+    }
+}

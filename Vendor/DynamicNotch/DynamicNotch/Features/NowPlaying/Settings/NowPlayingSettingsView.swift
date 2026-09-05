@@ -1,0 +1,333 @@
+import SwiftUI
+
+struct NowPlayingSettingsView: View {
+    @ObservedObject var settings: MediaAndFilesSettingsStore
+    @ObservedObject var applicationSettings: ApplicationSettingsStore
+
+    private var temporaryActivityDurationRange: ClosedRange<Double> {
+        Double(SettingsStoreBase.temporaryActivityDurationRange.lowerBound)...Double(SettingsStoreBase.temporaryActivityDurationRange.upperBound)
+    }
+
+    private var isWithoutCloseTimer: Binding<Bool> {
+        Binding(
+            get: { !settings.isNowPlayingPauseHideTimerEnabled },
+            set: { settings.isNowPlayingPauseHideTimerEnabled = !$0 }
+        )
+    }
+    
+    var body: some View {
+        SettingsPageScrollView {
+            playbackActivity
+            pausedPlaybackBehavior
+            playerAppearance
+        }
+    }
+    
+    private var playbackActivity: some View {
+        SettingsCard(title: "settings.nowPlaying.card.playback") {
+            SettingsToggleRow(
+                title: "settings.nowPlaying.liveActivity.title",
+                description: "settings.nowPlaying.liveActivity.desc",
+                systemImage: "music.note",
+                color: .red,
+                isOn: $settings.isNowPlayingLiveActivityEnabled,
+                accessibilityIdentifier: "settings.activities.live.nowPlaying"
+            )
+            
+
+
+            Divider().opacity(0.6)
+
+            SettingsMenuRow(
+                title: "settings.nowPlaying.playbackSource.title",
+                description: "settings.nowPlaying.playbackSource.desc",
+                options: Array(NowPlayingSourceFilter.allCases),
+                optionTitle: { $0.title },
+                accessibilityIdentifier: "settings.activities.live.nowPlaying.sourceFilter",
+                selection: $settings.nowPlayingSourceFilter
+            )
+        }
+    }
+
+    private var pausedPlaybackBehavior: some View {
+        SettingsCard(title: "settings.nowPlaying.card.paused") {
+            SettingsToggleRow(
+                title: "settings.nowPlaying.withoutCloseTimer.title",
+                description: "settings.nowPlaying.withoutCloseTimer.desc",
+                systemImage: "pause.circle",
+                color: .orange,
+                isOn: isWithoutCloseTimer,
+                accessibilityIdentifier: "settings.activities.live.nowPlaying.withoutCloseTimer"
+            )
+
+            Divider().opacity(0.6)
+
+            SettingsSliderRow(
+                title: "settings.nowPlaying.closeDelay.title",
+                description: "settings.nowPlaying.closeDelay.desc",
+                range: temporaryActivityDurationRange,
+                step: 1,
+                fractionLength: 0,
+                suffix: "s",
+                accessibilityIdentifier: "settings.activities.live.nowPlaying.closeDelay",
+                value: Binding(
+                    get: { Double(settings.nowPlayingPauseHideDelay) },
+                    set: { settings.nowPlayingPauseHideDelay = Int($0.rounded()) }
+                )
+            )
+            .disabled(!settings.isNowPlayingPauseHideTimerEnabled || !settings.isNowPlayingLiveActivityEnabled)
+            .opacity(settings.isNowPlayingPauseHideTimerEnabled && settings.isNowPlayingLiveActivityEnabled ? 1 : 0.5)
+        }
+    }
+    
+    private var playerAppearance: some View {
+        SettingsCard(title: "settings.nowPlaying.card.playerAppearance") {
+            NowPlayingAppearancePreview(
+                settings: settings,
+                applicationSettings: applicationSettings
+            )
+
+            Divider().opacity(0.6)
+            
+            SettingsMenuRow(
+                title: "settings.nowPlaying.progressBarTint.title",
+                description: "settings.nowPlaying.progressBarTint.desc",
+                options: Array(NowPlayingProgressTintStyle.allCases),
+                optionTitle: { $0.title },
+                accessibilityIdentifier: "settings.activities.live.nowPlaying.progressTintStyle",
+                selection: $settings.nowPlayingProgressTintStyle
+            )
+
+            Divider().opacity(0.6)
+            
+            SettingsToggleRow(
+                title: "settings.nowPlaying.artwork3D.title",
+                description: "settings.nowPlaying.artwork3D.desc",
+                systemImage: "rotate.3d.fill",
+                color: .blue,
+                iconBadge: false,
+                isOn: $settings.isNowPlayingArtwork3DEffectEnabled,
+                accessibilityIdentifier: "settings.activities.live.nowPlaying.artwork3DEffect"
+            )
+            
+            Divider().opacity(0.6)
+
+            SettingsToggleRow(
+                title: "settings.nowPlaying.hideFavorite.title",
+                description: "settings.nowPlaying.hideFavorite.desc",
+                systemImage: "star.slash.fill",
+                color: .red,
+                iconBadge: false,
+                isOn: Binding(
+                    get: { !settings.isNowPlayingFavoriteButtonVisible },
+                    set: { settings.isNowPlayingFavoriteButtonVisible = !$0 }
+                ),
+                accessibilityIdentifier: "settings.activities.live.nowPlaying.hideFavorite"
+            )
+            
+            Divider()
+                .opacity(0.6)
+                .padding(.leading, 43)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+            
+            SettingsToggleRow(
+                title: "settings.nowPlaying.hideOutputDevice.title",
+                description: "settings.nowPlaying.hideOutputDevice.desc",
+                systemImage: "airplay.audio",
+                color: .red,
+                iconBadge: false,
+                isOn: Binding(
+                    get: { !settings.isNowPlayingOutputDeviceButtonVisible },
+                    set: { settings.isNowPlayingOutputDeviceButtonVisible = !$0 }
+                ),
+                accessibilityIdentifier: "settings.activities.live.nowPlaying.hideOutputDevice"
+            )
+        }
+    }
+}
+
+private struct NowPlayingAppearancePreview: View {
+    @ObservedObject var settings: MediaAndFilesSettingsStore
+    @ObservedObject var applicationSettings: ApplicationSettingsStore
+    
+    private let highlightColor = Color(red: 0.98, green: 0.77, blue: 0.31)
+    private let baseColor = Color(red: 0.96, green: 0.48, blue: 0.2)
+    
+    var body: some View {
+        let appearance = settings.resolvedNowPlayingAppearanceOptions(
+            isDefaultActivityStrokeEnabled: applicationSettings.isDefaultActivityStrokeEnabled
+        )
+        let previewEqualizerHeights: [CGFloat] = [8, 6, 9, 5, 9]
+        let showsNotchStroke = applicationSettings.isShowNotchStrokeEnabled
+        let progressGradient = LinearGradient(
+            colors: [highlightColor, baseColor],
+            startPoint: .leading,
+            endPoint: .trailing
+        )
+        
+        SettingsNotchPreview(
+            width: 360,
+            height: 168,
+            previewHeight: 186,
+            topCornerRadius: 28,
+            bottomCornerRadius: 38,
+            backgroundStyle: .black,
+            showsStroke: showsNotchStroke,
+            strokeColor: showsNotchStroke
+            ? Color.white.opacity(0.2).opacity(applicationSettings.notchStrokeOpacity)
+            : .clear,
+            strokeWidth: 1.5,
+            lightBackgroundImage: Image("backgroundLight"),
+            darkBackgroundImage: Image("backgroundDark")
+        ) {
+            VStack(spacing: 13) {
+                HStack(spacing: 13) {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [baseColor, highlightColor],
+                                startPoint: .bottomLeading,
+                                endPoint: .topTrailing
+                            )
+                        )
+                        .overlay {
+                            Image(systemName: "music.note")
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundStyle(.white.opacity(0.82))
+                        }
+                        .frame(width: 54, height: 54)
+                    
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(alignment: .center, spacing: 8) {
+                            Text("Midnight Echoes")
+                                .font(.system(size: 15, weight: .medium))
+                                .foregroundStyle(.white.opacity(0.85))
+                                .lineLimit(1)
+                            
+                            Spacer(minLength: 0)
+                            
+                            HStack(alignment: .bottom, spacing: 2.5) {
+                                ForEach(Array(previewEqualizerHeights.enumerated()), id: \.offset) { entry in
+                                    let height = entry.element
+                                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                        .fill(
+                                            LinearGradient(
+                                                colors: [highlightColor, baseColor],
+                                                startPoint: .top,
+                                                endPoint: .bottom
+                                            )
+                                        )
+                                        .frame(width: 2.5, height: height)
+                                }
+                            }
+                            .frame(height: 15, alignment: .bottom)
+                            
+                        }
+                        Text("Debug Ensemble")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.white.opacity(0.5))
+                            .lineLimit(1)
+                    }
+                }
+                
+                HStack(spacing: 8) {
+                    Text("01:21")
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(progressTimeColor(isPrimary: true, style: appearance.progressTintStyle))
+                    
+                    GeometryReader { proxy in
+                        let trackHeight: CGFloat = 6
+                        
+                        ZStack(alignment: .leading) {
+                            Capsule(style: .continuous)
+                                .fill(.white.opacity(0.15))
+                                .frame(height: trackHeight)
+                            
+                            Capsule(style: .continuous)
+                                .fill(progressFillStyle(style: appearance.progressTintStyle, gradient: progressGradient))
+                                .frame(width: proxy.size.width * 0.38, height: trackHeight)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                    }
+                    .frame(height: 14)
+                    
+                    Text("03:34")
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(progressTimeColor(isPrimary: false, style: appearance.progressTintStyle))
+                }
+                
+                ZStack {
+                    HStack(spacing: 22) {
+                        previewControlButton(systemImage: "backward.fill", fontSize: 20)
+                        previewControlButton(systemImage: "pause.fill", fontSize: 28)
+                        previewControlButton(systemImage: "forward.fill", fontSize: 20)
+                    }
+                    
+                    HStack {
+                        if appearance.showsFavoriteButton {
+                            previewSideButton(systemImage: "star")
+                        }
+                        
+                        Spacer()
+                        
+                        if appearance.showsOutputDeviceButton {
+                            previewSideButton(systemImage: "airplayaudio")
+                        }
+                    }
+                    .padding(.horizontal, 4)
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .padding(.horizontal, 40)
+            .padding(.top, 20)
+            .padding(.bottom, 16)
+        }
+    }
+    
+    private func previewControlButton(systemImage: String, fontSize: CGFloat) -> some View {
+        ZStack {
+            Image(systemName: systemImage)
+                .font(.system(size: fontSize, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.92))
+        }
+        .frame(width: 38, height: 38)
+    }
+    
+    private func previewSideButton(systemImage: String) -> some View {
+        ZStack {
+            Image(systemName: systemImage)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.52))
+        }
+        .frame(width: 34, height: 34)
+    }
+
+    private func progressTimeColor(isPrimary: Bool, style: NowPlayingProgressTintStyle) -> Color {
+        switch style {
+        case .default:
+            return .white.opacity(0.4)
+        case .artwork:
+            return isPrimary ? highlightColor : baseColor
+        case .systemAccent:
+            return isPrimary ? .accentColor : .accentColor.opacity(0.7)
+        }
+    }
+
+    private func progressFillStyle(style: NowPlayingProgressTintStyle, gradient: LinearGradient) -> AnyShapeStyle {
+        switch style {
+        case .default:
+            return AnyShapeStyle(.white.opacity(0.5))
+        case .artwork:
+            return AnyShapeStyle(gradient)
+        case .systemAccent:
+            let systemGradient = LinearGradient(
+                colors: [.accentColor, .accentColor.opacity(0.7)],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            return AnyShapeStyle(systemGradient)
+        }
+    }
+}

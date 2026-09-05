@@ -418,3 +418,17 @@ sudo /usr/bin/killall coreaudiod
 ## License
 
 MIT. No paid service, account, server, or third-party runtime dependency.
+
+## Optional notch presentation
+
+In a live room, open **Talk settings → Notch → Show room in notch**. The notch reuses
+ALO's media, voice, chat, queue, and people controls. Hover to expand (optional), click
+to open, and use the top chevron or Escape to collapse. Settings persist for floating
+island style, built-in display preference, and five motion speeds. Reduced Motion is
+respected. The feature starts disabled.
+
+The original DynamicNotch geometry and motion sources are used directly. The full
+reference source, including additional feature settings, is preserved in `Vendor/DynamicNotch`.
+See [the feature inventory](docs/dynamic-notch-features.md) and
+[third-party provenance/license](Vendor/README.md). Additional imported modules are source
+only; they are not enabled in ALO.

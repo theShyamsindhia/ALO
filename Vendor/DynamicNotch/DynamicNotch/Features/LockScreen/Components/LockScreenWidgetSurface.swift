@@ -1,0 +1,97 @@
+import SwiftUI
+
+struct LockScreenWidgetSurface: View {
+    let style: LockScreenWidgetAppearanceStyle
+    let tintStyle: LockScreenWidgetTintStyle
+    let brightness: Double
+    let cornerRadius: CGFloat
+    var liquidGlassVariant: Int = 8
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+
+        baseSurface(shape: shape)
+            .overlay {
+                if let tintColor = tintStyle.resolvedColor() {
+                    shape
+                        .fill(tintColor.opacity(tintOpacity))
+                }
+            }
+            .overlay {
+                shape
+                    .fill(brightnessOverlayColor)
+            }
+            .overlay {
+                shape
+                    .stroke(strokeColor, lineWidth: 1)
+            }
+    }
+
+    @ViewBuilder
+    private func baseSurface(shape: RoundedRectangle) -> some View {
+        switch style {
+        case .ultraThinMaterial:
+            shape.fill(.ultraThinMaterial)
+
+        case .ultraThickMaterial:
+            shape.fill(.ultraThickMaterial)
+
+        case .liquidGlass:
+            LiquidGlassBackground(
+                variant: LiquidGlassVariant.clamped(liquidGlassVariant),
+                cornerRadius: cornerRadius
+            ) {
+                Color.clear
+            }
+            .clipShape(shape)
+            .environment(\.controlActiveState, .active)
+        }
+    }
+
+    private var tintOpacity: Double {
+        switch style {
+        case .ultraThinMaterial:
+            return 0.14
+        case .ultraThickMaterial:
+            return 0.18
+        case .liquidGlass:
+            return 0.10
+        }
+    }
+
+    private var brightnessOverlayColor: Color {
+        let clampedBrightness = min(
+            max(brightness, LockScreenSettings.widgetBackgroundBrightnessRange.lowerBound),
+            LockScreenSettings.widgetBackgroundBrightnessRange.upperBound
+        )
+        let delta = clampedBrightness - 1
+
+        if delta >= 0 {
+            return .white.opacity(delta * 0.42)
+        }
+
+        return .black.opacity(abs(delta) * 0.55)
+    }
+
+    private var strokeColor: Color {
+        if let tintColor = tintStyle.resolvedColor() {
+            switch style {
+            case .ultraThinMaterial:
+                return tintColor.opacity(0.24)
+            case .ultraThickMaterial:
+                return tintColor.opacity(0.28)
+            case .liquidGlass:
+                return tintColor.opacity(0.18)
+            }
+        }
+
+        switch style {
+        case .ultraThinMaterial:
+            return .white.opacity(0.15)
+        case .ultraThickMaterial:
+            return .white.opacity(0.18)
+        case .liquidGlass:
+            return .white.opacity(0.12)
+        }
+    }
+}

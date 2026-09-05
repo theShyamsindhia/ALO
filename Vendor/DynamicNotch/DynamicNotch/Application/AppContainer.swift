@@ -1,0 +1,119 @@
+import Foundation
+
+@MainActor
+final class AppContainer {
+    let powerService = PowerService()
+    let bluetoothViewModel = BluetoothViewModel()
+    let focusViewModel = FocusViewModel()
+    let airDropViewModel = AirDropNotchViewModel()
+    let fileTrayViewModel = FileTrayViewModel()
+    let fileConverterViewModel = FileConverterViewModel()
+    let settingsViewModel: SettingsViewModel
+    let wifiViewModel: WifiViewModel
+    let vpnViewModel: VpnViewModel
+    let homePageViewModel = HomePageViewModel()
+    let localTimerViewModel = LocalTimerViewModel()
+    let calendarViewModel = CalendarViewModel()
+    let screenshotViewModel = ScreenshotViewModel()
+
+    let powerViewModel: PowerViewModel
+    let downloadViewModel: DownloadViewModel
+    let nowPlayingViewModel: NowPlayingViewModel
+    let timerViewModel: TimerViewModel
+    let screenRecordingViewModel: ScreenRecordingViewModel
+    let screenRecordingResultViewModel = ScreenRecordingResultViewModel()
+    let lockScreenManager: LockScreenManager
+    let clockTimerController: any ClockTimerControlling
+    let mailManager: MailManager
+    let messagesManager: MessagesManager
+    let externalDrivesMonitor: ExternalDrivesMonitor
+
+    lazy var hardwareHUDMonitor: HardwareHUDMonitor = {
+        MainActor.assumeIsolated {
+            let monitor = HardwareHUDMonitor()
+            monitor.onEvent = { [weak self] event in
+                self?.notchEventCoordinator.handleHudEvent(event)
+            }
+            monitor.updateConfiguration(
+                interceptVolume: settingsViewModel.hud.isVolumeHUDEnabled,
+                interceptBrightness: settingsViewModel.hud.isBrightnessHUDEnabled
+            )
+            return monitor
+        }
+    }()
+
+    lazy var notchViewModel = NotchViewModel(settings: settingsViewModel.application)
+    lazy var airDropController = NotchAirDropController(
+        airDropViewModel: airDropViewModel,
+        fileTrayViewModel: fileTrayViewModel,
+        fileConverterViewModel: fileConverterViewModel
+    )
+
+    lazy var notchEventCoordinator = NotchEventCoordinator(container: self)
+
+    lazy var lockScreenPanelManager = LockScreenPanelManager(
+        nowPlayingViewModel: nowPlayingViewModel,
+        lockScreenManager: lockScreenManager,
+        settingsViewModel: settingsViewModel
+    )
+
+    lazy var lockScreenLiveActivityWindowManager = LockScreenLiveActivityWindowManager(
+        notchViewModel: notchViewModel,
+        lockScreenManager: lockScreenManager,
+        settingsViewModel: settingsViewModel,
+        airDropViewModel: airDropViewModel,
+        airDropController: airDropController
+    )
+
+    init(isRunningUITests: Bool = ProcessInfo.processInfo.arguments.contains("-ui-testing")) {
+        self.settingsViewModel = SettingsViewModel()
+        self.wifiViewModel = WifiViewModel(settings: settingsViewModel.connectivity)
+        self.vpnViewModel = VpnViewModel(settings: settingsViewModel.connectivity)
+        self.powerViewModel = PowerViewModel(
+            powerService: powerService,
+            batterySettings: settingsViewModel.battery
+        )
+        self.nowPlayingViewModel = NowPlayingViewModel(
+            service: isRunningUITests ?
+                InactiveNowPlayingService() :
+                MediaRemoteNowPlayingService(),
+            audioOutputRouting: isRunningUITests ?
+                InactiveAudioOutputRoutingService() :
+                SystemAudioOutputRoutingService(),
+            lyricsProvider: isRunningUITests ?
+                InactiveLyricsProvider() :
+                LRCLIBLyricsProvider(),
+            sourceFilter: settingsViewModel.mediaAndFiles.nowPlayingSourceFilter
+        )
+        self.downloadViewModel = DownloadViewModel(
+            monitor: isRunningUITests ?
+                InactiveDownloadMonitor() :
+                FolderFileDownloadMonitor()
+        )
+        self.clockTimerController = isRunningUITests ?
+            InactiveClockTimerController() :
+            ClockTimerController()
+        self.timerViewModel = TimerViewModel(
+            monitor: isRunningUITests ?
+                InactiveClockTimerMonitor() :
+                ClockTimerMonitor(),
+            controller: clockTimerController
+        )
+        self.screenRecordingViewModel = ScreenRecordingViewModel(
+            monitor: isRunningUITests ?
+                InactiveScreenRecordingMonitor() :
+                SystemScreenRecordingMonitor()
+        )
+        self.lockScreenManager = LockScreenManager(
+            service: isRunningUITests ?
+                InactiveLockScreenMonitoringService() :
+                DistributedLockScreenMonitoringService(),
+            soundPlayer: isRunningUITests ?
+                InactiveLockScreenSoundPlayer() :
+                LockScreenSoundPlayer()
+        )
+        self.mailManager = MailManager()
+        self.messagesManager = MessagesManager()
+        self.externalDrivesMonitor = ExternalDrivesMonitor()
+    }
+}

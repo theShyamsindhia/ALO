@@ -1,0 +1,134 @@
+import Foundation
+import IOKit.ps
+import Combine
+
+final class PowerService: ObservableObject {
+    @Published private(set) var onACPower: Bool = false
+    @Published private(set) var batteryLevel: Int = 0
+    @Published var isCharging: Bool = false
+    @Published var isLowPowerMode: Bool = false
+    
+    private var runLoopSource: CFRunLoopSource?
+    private let startMonitoring: Bool
+    private var cancellables = Set<AnyCancellable>()
+    private var powerStateChangeHandler: ((_ onACPower: Bool, _ batteryLevel: Int) -> Void)?
+
+    init(startMonitoring: Bool = true) {
+        self.startMonitoring = startMonitoring
+        if startMonitoring {
+            setupPowerNotifications()
+            updatePowerState()
+            updateLowPowerMode()
+            setupLowPowerModeObserver()
+        }
+    }
+    
+    deinit {
+        if let rls = runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), rls, .defaultMode)
+        }
+    }
+    
+    func updatePowerState() {
+        let snapshot = IOPSCopyPowerSourcesInfo().takeRetainedValue()
+        let sources = IOPSCopyPowerSourcesList(snapshot).takeRetainedValue() as Array
+        
+        var acPower = false
+        var levelPercent: Int = 0
+        var charging: Bool = false
+        
+        for ps in sources {
+            if let desc = IOPSGetPowerSourceDescription(snapshot, ps).takeUnretainedValue() as? [String: Any] {
+                if let state = desc[kIOPSPowerSourceStateKey as String] as? String {
+                    acPower = (state == kIOPSACPowerValue)
+                }
+                if let cur = desc[kIOPSCurrentCapacityKey as String] as? Int,
+                   let max = desc[kIOPSMaxCapacityKey as String] as? Int, max > 0 {
+                    levelPercent = Int((Double(cur) / Double(max)) * 100.0)
+                }
+                if let ch = desc[kIOPSIsChargingKey as String] as? Bool {
+                    charging = ch
+                }
+                if let transport = desc[kIOPSTransportTypeKey as String] as? String, transport == kIOPSInternalType {
+                    break
+                }
+            }
+        }
+        self.onACPower = acPower
+        self.batteryLevel = max(0, min(levelPercent, 100))
+        self.isCharging = charging
+        powerStateChangeHandler?(self.onACPower, self.batteryLevel)
+    }
+    
+    private func updateLowPowerMode() {
+        if #available(macOS 12.0, *) {
+            self.isLowPowerMode = ProcessInfo.processInfo.isLowPowerModeEnabled
+        } else {
+            self.isLowPowerMode = false
+        }
+    }
+    
+    private func setupPowerNotifications() {
+        let callback: IOPowerSourceCallbackType = { context in
+            guard let context = context else { return }
+            let instance = Unmanaged<PowerService>.fromOpaque(context).takeUnretainedValue()
+            DispatchQueue.main.async {
+                instance.updatePowerState()
+                instance.updateLowPowerMode()
+            }
+        }
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        if let rls = IOPSNotificationCreateRunLoopSource(callback, context)?.takeRetainedValue() {
+            CFRunLoopAddSource(CFRunLoopGetMain(), rls, .defaultMode)
+            self.runLoopSource = rls
+        }
+    }
+    
+    private func setupLowPowerModeObserver() {
+        if #available(macOS 12.0, *) {
+            NotificationCenter.default.publisher(for: .NSProcessInfoPowerStateDidChange)
+                .receive(on: RunLoop.main)
+                .sink { [weak self] _ in
+                    self?.updateLowPowerMode()
+            }
+                .store(in: &cancellables)
+        }
+    }
+
+    #if DEBUG
+    func applyDebugState(
+        onACPower: Bool,
+        batteryLevel: Int,
+        isCharging: Bool,
+        isLowPowerMode: Bool
+    ) {
+        self.onACPower = onACPower
+        self.batteryLevel = max(0, min(batteryLevel, 100))
+        self.isCharging = isCharging
+        self.isLowPowerMode = isLowPowerMode
+    }
+    #endif
+}
+
+extension PowerService: PowerStateProviding {
+    var onPowerStateChange: ((_ onACPower: Bool, _ batteryLevel: Int) -> Void)? {
+        get { powerStateChangeHandler }
+        set { powerStateChangeHandler = newValue }
+    }
+}
+
+extension PowerService {
+    static func settingsPreview(
+        onACPower: Bool = false,
+        batteryLevel: Int,
+        isCharging: Bool,
+        isLowPowerMode: Bool
+    ) -> PowerService {
+        let service = PowerService(startMonitoring: false)
+        service.onACPower = onACPower
+        service.batteryLevel = max(0, min(batteryLevel, 100))
+        service.isCharging = isCharging
+        service.isLowPowerMode = isLowPowerMode
+        return service
+    }
+}
