@@ -9,6 +9,10 @@ import Foundation
 import Combine
 
 final class BluetoothViewModel: ObservableObject {
+    // Lifecycle stops explicitly; ARC release must not enter an isolated
+    // deinit backdeployment thunk when SwiftUI releases this owner on macOS 15.
+    nonisolated deinit {}
+
     @Published var deviceType: BluetoothAudioDeviceType = .generic
     @Published var event: BluetoothEvent?
     @Published var isConnected: Bool = false

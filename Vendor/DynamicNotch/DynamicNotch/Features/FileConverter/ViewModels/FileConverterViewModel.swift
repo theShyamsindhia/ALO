@@ -12,6 +12,10 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class FileConverterViewModel: ObservableObject {
+    // Lifecycle stops explicitly; ARC release must not enter an isolated
+    // deinit backdeployment thunk when SwiftUI releases this owner on macOS 15.
+    nonisolated deinit {}
+
     @Published private(set) var item: FileConverterItem?
     @Published var selectedFormat: FileConverterOutputFormat = .png {
         didSet {

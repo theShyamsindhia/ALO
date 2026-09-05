@@ -4,6 +4,10 @@ import SwiftUI
 
 @MainActor
 final class NowPlayingViewModel: ObservableObject {
+    // Lifecycle stops explicitly; ARC release must not enter an isolated
+    // deinit backdeployment thunk when SwiftUI releases this owner on macOS 15.
+    nonisolated deinit {}
+
     private static let favoriteTrackKeysStorageKey = "settings.nowPlaying.favoriteTrackKeys"
 
     @Published private(set) var snapshot: NowPlayingSnapshot?

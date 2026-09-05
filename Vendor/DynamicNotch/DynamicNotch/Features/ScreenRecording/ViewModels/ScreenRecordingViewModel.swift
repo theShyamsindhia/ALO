@@ -3,6 +3,10 @@ import Foundation
 
 @MainActor
 final class ScreenRecordingViewModel: ObservableObject {
+    // Lifecycle stops explicitly; ARC release must not enter an isolated
+    // deinit backdeployment thunk when SwiftUI releases this owner on macOS 15.
+    nonisolated deinit {}
+
     @Published private(set) var isRecording = false
     @Published private(set) var formattedDuration: String = "00:00"
     @Published var event: ScreenRecordingEvent?

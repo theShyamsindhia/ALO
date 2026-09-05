@@ -2,6 +2,10 @@ import CoreAudio
 import Foundation
 
 final class SystemAudioOutputRoutingService: AudioOutputRouting {
+    // Lifecycle stops explicitly; ARC release must not enter an isolated
+    // deinit backdeployment thunk when SwiftUI releases this owner on macOS 15.
+    nonisolated deinit {}
+
     private let systemObjectID = AudioObjectID(kAudioObjectSystemObject)
 
     func availableRoutes() -> [AudioOutputRoute] {

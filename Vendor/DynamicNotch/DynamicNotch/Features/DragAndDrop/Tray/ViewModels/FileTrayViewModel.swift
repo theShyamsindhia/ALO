@@ -118,6 +118,10 @@ private struct FileTrayStoredItem: Codable {
 
 @MainActor
 final class FileTrayViewModel: ObservableObject {
+    // Lifecycle stops explicitly; ARC release must not enter an isolated
+    // deinit backdeployment thunk when SwiftUI releases this owner on macOS 15.
+    nonisolated deinit {}
+
     @Published var selectedItemIDs: Set<FileTrayItem.ID> = []
     @Published private(set) var items: [FileTrayItem] = []
 

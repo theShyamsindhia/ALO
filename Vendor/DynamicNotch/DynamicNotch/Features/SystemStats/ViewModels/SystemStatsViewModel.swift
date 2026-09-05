@@ -10,6 +10,10 @@ import Combine
 
 @MainActor
 final class SystemStatsViewModel: ObservableObject {
+    // Lifecycle stops explicitly; ARC release must not enter an isolated
+    // deinit backdeployment thunk when SwiftUI releases this owner on macOS 15.
+    nonisolated deinit {}
+
     @Published var cpuUsage: Double = 0.0
     @Published var memoryUsagePercent: Double = 0.0
     @Published var memoryUsedGB: Double = 0.0

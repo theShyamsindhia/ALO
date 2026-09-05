@@ -32,6 +32,10 @@ struct ClockTimerSnapshot: Equatable {
 
 @MainActor
 final class TimerViewModel: ObservableObject {
+    // Lifecycle stops explicitly; ARC release must not enter an isolated
+    // deinit backdeployment thunk when SwiftUI releases this owner on macOS 15.
+    nonisolated deinit {}
+
     @Published private(set) var snapshot: ClockTimerSnapshot?
     @Published var event: TimerEvent?
     @Published private(set) var formattedTime: String = "0:00"

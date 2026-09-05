@@ -73,6 +73,10 @@ struct PermissionItem: Identifiable {
 
 @MainActor
 final class SettingsPermissionController: NSObject, ObservableObject, CBCentralManagerDelegate {
+    // Lifecycle stops explicitly; ARC release must not enter an isolated
+    // deinit backdeployment thunk when SwiftUI releases this owner on macOS 15.
+    nonisolated deinit {}
+
     @Published private(set) var isAccessibilityTrusted: Bool
     @Published private(set) var bluetoothAuthorization: CBManagerAuthorization
     @Published private(set) var canPostMediaKeyEvents: Bool

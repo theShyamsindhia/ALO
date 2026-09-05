@@ -4,6 +4,10 @@ import Foundation
 
 @MainActor
 final class DownloadViewModel: ObservableObject {
+    // Lifecycle stops explicitly; ARC release must not enter an isolated
+    // deinit backdeployment thunk when SwiftUI releases this owner on macOS 15.
+    nonisolated deinit {}
+
     @Published private(set) var activeDownloads: [DownloadModel] = []
     @Published var event: DownloadEvent?
 

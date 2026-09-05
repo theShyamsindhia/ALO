@@ -8,6 +8,10 @@
 import CoreAudio
 
 final class InactiveAudioOutputRoutingService: AudioOutputRouting {
+    // Lifecycle stops explicitly; ARC release must not enter an isolated
+    // deinit backdeployment thunk when SwiftUI releases this owner on macOS 15.
+    nonisolated deinit {}
+
     func availableRoutes() -> [AudioOutputRoute] { [] }
 
     func currentRoute() -> AudioOutputRoute? { nil }

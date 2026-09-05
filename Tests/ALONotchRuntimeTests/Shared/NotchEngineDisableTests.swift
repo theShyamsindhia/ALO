@@ -4,6 +4,30 @@ import XCTest
 
 @MainActor
 final class NotchEngineDisableTests: XCTestCase {
+    func testNotchViewModelReleasesWithNativeViewFromAutoreleasePool() async {
+        _ = NSApplication.shared
+        let suiteName = "NotchNativeDestructionTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let payload = NativeModelReleasePayload(NotchViewModel(
+            settings: SettingsViewModel(defaults: defaults),
+            screenMetricsProvider: { _ in nil }
+        ))
+        weak var retainedModel = payload.model
+        let released = expectation(description: "Native view drained outside a Swift task")
+        DispatchQueue.main.async {
+            autoreleasepool {
+                let view = NativeModelOwnerView(frame: .zero)
+                view.model = payload.model
+                payload.model = nil
+                withExtendedLifetime(view) {}
+            }
+            released.fulfill()
+        }
+        await fulfillment(of: [released], timeout: 2)
+        XCTAssertNil(retainedModel)
+    }
+
     func testEngineAndCapturedSettingsReleaseWhenDispatchDisposesTransitionBlock() async {
         let suiteName = "NotchEngineDestructionTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -81,4 +105,15 @@ private struct RestorableTestContent: NotchContentProtocol {
         CGSize(width: baseWidth, height: baseHeight)
     }
     func makeView() -> AnyView { AnyView(EmptyView()) }
+}
+
+@MainActor
+private final class NativeModelOwnerView: NSView {
+    var model: NotchViewModel?
+}
+
+// Single transfer to a dispatch callback; only ARC runs outside actor methods.
+nonisolated private final class NativeModelReleasePayload: @unchecked Sendable {
+    var model: NotchViewModel?
+    init(_ model: NotchViewModel) { self.model = model }
 }

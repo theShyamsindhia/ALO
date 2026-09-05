@@ -6,6 +6,10 @@ internal import AppKit
 
 @MainActor
 final class CalendarViewModel: ObservableObject {
+    // Lifecycle stops explicitly; ARC release must not enter an isolated
+    // deinit backdeployment thunk when SwiftUI releases this owner on macOS 15.
+    nonisolated deinit {}
+
     @Published var events: [EKEvent] = []
     @Published var nextEvent: EKEvent? = nil
     @Published var authorizationStatus: EKAuthorizationStatus = EKEventStore.authorizationStatus(for: .event)

@@ -18,6 +18,10 @@ enum WifiEvent: Equatable {
 
 @MainActor
 final class WifiViewModel: ObservableObject {
+    // Lifecycle stops explicitly; ARC release must not enter an isolated
+    // deinit backdeployment thunk when SwiftUI releases this owner on macOS 15.
+    nonisolated deinit {}
+
     @Published var wifiConnected: Bool = false
     @Published var hotspotActive: Bool = false
     @Published var isInternetAvailable: Bool = true

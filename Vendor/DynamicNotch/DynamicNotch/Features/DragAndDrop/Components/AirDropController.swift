@@ -12,6 +12,10 @@ import UniformTypeIdentifiers
 
 @MainActor
 final class NotchAirDropController: NSObject, ObservableObject {
+    // Lifecycle stops explicitly; ARC release must not enter an isolated
+    // deinit backdeployment thunk when SwiftUI releases this owner on macOS 15.
+    nonisolated deinit {}
+
     @Published var isTargeted = false {
         didSet {
             guard oldValue != isTargeted else { return }

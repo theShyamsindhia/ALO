@@ -9,6 +9,10 @@ enum LocalTimerState {
 }
 
 class LocalTimerViewModel: ObservableObject {
+    // Lifecycle stops explicitly; ARC release must not enter an isolated
+    // deinit backdeployment thunk when SwiftUI releases this owner on macOS 15.
+    nonisolated deinit {}
+
     @Published var state: LocalTimerState = .stopped
     @Published var remainingTime: TimeInterval = 0
     

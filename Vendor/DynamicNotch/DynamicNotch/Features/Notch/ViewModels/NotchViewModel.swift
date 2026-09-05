@@ -5,6 +5,11 @@ typealias NotchScreenMetrics = (width: CGFloat, topInset: CGFloat, notchSize: CG
 
 @MainActor
 final class NotchViewModel: ObservableObject {
+    // Native monitor views may release their model during autorelease-pool
+    // draining, outside a Swift task. Stored values and weak callback handles
+    // require no actor cleanup; preserve explicit disable/reset lifecycle work.
+    nonisolated deinit {}
+
     @Published private(set) var notchModel = NotchModel()
     @Published private(set) var swipeStretchProgress: CGFloat = 0
     @Published private(set) var swipeInteraction: SwipeInteraction?

@@ -16,6 +16,10 @@ enum VpnEvent: Equatable {
 
 @MainActor
 final class VpnViewModel: ObservableObject {
+    // Lifecycle stops explicitly; ARC release must not enter an isolated
+    // deinit backdeployment thunk when SwiftUI releases this owner on macOS 15.
+    nonisolated deinit {}
+
     @Published var vpnConnected: Bool = false
     @Published var vpnName: String = ""
     @Published var vpnConnectedAt: Date?

@@ -3,6 +3,10 @@ import Combine
 
 @MainActor
 final class PowerViewModel: ObservableObject {
+    // Lifecycle stops explicitly; ARC release must not enter an isolated
+    // deinit backdeployment thunk when SwiftUI releases this owner on macOS 15.
+    nonisolated deinit {}
+
     @Published var event: PowerEvent?
 
     private let powerStateProvider: any PowerStateProviding
