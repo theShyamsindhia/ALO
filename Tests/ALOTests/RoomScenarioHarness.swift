@@ -2,6 +2,7 @@ import Foundation
 import Network
 import Testing
 @testable import ALO
+@testable import ALONetworking
 @testable import ALOCore
 
 /// Real mesh instances, each with its own disk store. No Bonjour advertising,

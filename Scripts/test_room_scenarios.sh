@@ -11,7 +11,7 @@ fi
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 test_log_dir="$(mktemp -d "${TMPDIR:-/tmp}/alo-room-scenarios.XXXXXX")"
 echo "Scenario logs: $test_log_dir"
-filter='RoomNetworkSimulationTests|RoomStatePendingDependencyTests|mixedTrafficSurvivesListenerRestarts'
+filter='RoomNetworkSimulationTests|RoomStatePendingDependencyTests|mixedTrafficSurvivesListenerRestarts|lateListenerNetworkDelayCannotMasqueradeAsHardwareLatency|lateHardwareCalibrationDoesNotCauseRepeatedCutovers'
 for (( iteration=1; iteration<=iterations; iteration++ )); do
     echo "Scenario pass $iteration/$iterations"
     if ! swift test --filter "$filter" 2>&1 | tee "$test_log_dir/run-$iteration.log"; then

@@ -72,6 +72,7 @@ public final class AutomergeRoomStateSync: RoomStateSync, @unchecked Sendable {
 
     private static let keyPrefix = "event:"
     private let roomID: String
+    private let eventValidator: @Sendable (MeshRoomEvent) -> Bool
     private var document: Document
     private var actorID: ActorId
     private var cachedEventsByID = [String: MeshRoomEvent]()
@@ -87,8 +88,10 @@ public final class AutomergeRoomStateSync: RoomStateSync, @unchecked Sendable {
     public init(
         roomID: String,
         savedDocument: Data? = nil,
-        legacyEvents: [MeshRoomEvent] = []
+        legacyEvents: [MeshRoomEvent] = [],
+        eventValidator: @escaping @Sendable (MeshRoomEvent) -> Bool = { _ in true }
     ) throws {
+        self.eventValidator = eventValidator
         self.roomID = roomID
         if let savedDocument {
             document = try Document(savedDocument)
@@ -113,19 +116,21 @@ public final class AutomergeRoomStateSync: RoomStateSync, @unchecked Sendable {
     public static func recovering(
         roomID: String,
         savedDocument: Data?,
-        legacyEvents: [MeshRoomEvent]
+        legacyEvents: [MeshRoomEvent],
+        eventValidator: @escaping @Sendable (MeshRoomEvent) -> Bool = { _ in true }
     ) -> AutomergeRoomStateSync {
         if let savedDocument,
-           let loaded = try? AutomergeRoomStateSync(roomID: roomID, savedDocument: savedDocument) {
+           let loaded = try? AutomergeRoomStateSync(roomID: roomID, savedDocument: savedDocument, eventValidator: eventValidator) {
             _ = try? loaded.ingest(legacyEvents)
             return loaded
         }
-        let empty = AutomergeRoomStateSync(roomID: roomID, document: Document())
+        let empty = AutomergeRoomStateSync(roomID: roomID, document: Document(), eventValidator: eventValidator)
         _ = try? empty.ingest(legacyEvents)
         return empty
     }
 
-    private init(roomID: String, document: Document) {
+    private init(roomID: String, document: Document, eventValidator: @escaping @Sendable (MeshRoomEvent) -> Bool) {
+        self.eventValidator = eventValidator
         self.roomID = roomID
         self.document = document
         self.actorID = document.actor
@@ -471,6 +476,8 @@ public final class AutomergeRoomStateSync: RoomStateSync, @unchecked Sendable {
 
     private func isValid(_ event: MeshRoomEvent, encodedBytes: Int) -> Bool {
         guard event.roomID == roomID,
+              MeshRoomReplica.hasPlausibleCounters(event),
+              eventValidator(event),
               event.id.utf8.count <= 256,
               encodedBytes <= Self.maximumEventBytes
         else { return false }

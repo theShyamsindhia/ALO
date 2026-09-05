@@ -59,6 +59,7 @@ final class HostSession {
     private var videoStoppedHandler: (Error) -> Void = { _ in }
     func start(
         roomName: String,
+        mediaSecurity: RoomMediaSecurity? = nil,
         participantID: String = UUID().uuidString,
         audioOutput: RoomAudioOutputEngine = RoomAudioOutputEngine(),
         statusHandler: @escaping (String) -> Void,
@@ -83,6 +84,7 @@ final class HostSession {
             self.playbackController = playbackController
             let host = HostServer(
                 roomName: roomName,
+                mediaSecurity: mediaSecurity,
                 statusHandler: statusHandler,
                 receiverCountHandler: receiverCountHandler,
                 playbackRequestHandler: { [weak playbackController] command in
@@ -115,6 +117,7 @@ final class HostSession {
             statusHandler("Broadcasting this Mac · waiting for audio")
             let localReceiver = try Receiver(
                 requestedRoom: roomName,
+                mediaSecurity: mediaSecurity,
                 audioOutput: audioOutput,
                 participantID: participantID,
                 capturesSystemMediaCommands: false,
@@ -273,6 +276,7 @@ final class HostSession {
                 throw error
             }
             let encoder = VideoEncoder { frame in host.acceptVideo(frame) }
+            host.setVideoKeyframeHandler { [weak encoder] in encoder?.requestKeyframe() }
             let capture = ScreenVideoCapture()
             videoEncoder = encoder
             videoCapture = capture

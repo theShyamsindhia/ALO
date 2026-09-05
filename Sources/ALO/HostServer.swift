@@ -21,8 +21,12 @@ final class HostServer {
     private final class Client {
         let control: NWConnection
         let decoder = ControlLineDecoder()
+        var mediaSessionID: UUID?
+        var audioSealer: DatagramSealer?
         var audio: NWConnection?
         var video: NWConnection?
+        var videoQueue = VideoSendQueue()
+        var videoSendToken: UUID?
         var id: String?
         var name: String?
         var volume: Double = 1
@@ -42,6 +46,7 @@ final class HostServer {
     }
 
     private let queue = DispatchQueue(label: "in.werai.host.network", qos: .userInteractive)
+    private let mediaSecurity: RoomMediaSecurity?
     private let roomName: String
     private let statusHandler: ((String) -> Void)?
     private let receiverCountHandler: ((Int) -> Void)?
@@ -68,9 +73,17 @@ final class HostServer {
     // broadcaster's local Receiver starts alone: a later listener must inherit
     // that established timeline instead of retiming and resetting it.
     private var timingEligibleClients: Set<ObjectIdentifier>?
+    private var roomTimingChangeCount: UInt64 = 0
+    private var videoKeyframeHandler: (() -> Void)?
+    private var lastVideoKeyframeRequestNanos: UInt64 = 0
+
+    func setVideoKeyframeHandler(_ handler: (() -> Void)?) {
+        queue.async { [weak self] in self?.videoKeyframeHandler = handler }
+    }
 
     init(
         roomName: String,
+        mediaSecurity: RoomMediaSecurity? = nil,
         statusHandler: ((String) -> Void)? = nil,
         receiverCountHandler: ((Int) -> Void)? = nil,
         advertise: Bool = true,
@@ -80,6 +93,7 @@ final class HostServer {
         playbackRequestHandler: ((RoomMediaCommand) -> Bool)? = nil,
         localParticipantID: String? = nil
     ) {
+        self.mediaSecurity = mediaSecurity
         self.roomName = roomName
         self.statusHandler = statusHandler
         self.receiverCountHandler = receiverCountHandler
@@ -92,7 +106,7 @@ final class HostServer {
     }
 
     func start() throws {
-        let listener = try NWListener(using: LocalNetworkParameters.tcp(), on: .any)
+        let listener = try NWListener(using: mediaSecurity?.tcp() ?? LocalNetworkParameters.tcp(), on: .any)
         if advertise {
             listener.service = NWListener.Service(name: roomName, type: Self.serviceType)
         }
@@ -120,6 +134,8 @@ final class HostServer {
 
     func stop() {
         queue.sync {
+            listener?.stateUpdateHandler = nil
+            listener?.newConnectionHandler = nil
             listener?.cancel()
             listener = nil
             for client in clients.values {
@@ -134,6 +150,7 @@ final class HostServer {
 
     func diagnosticsSnapshot() -> HostTimingDiagnostics {
         queue.sync {
+            let now = MonotonicClock.nowNanos()
             let listeners = clients.values.filter { $0.id != nil && $0.id != localParticipantID }
             let reports = listeners.compactMap(\.syncReport)
             return HostTimingDiagnostics(
@@ -141,7 +158,17 @@ final class HostServer {
                 reportingListenerCount: reports.count,
                 groupBufferMilliseconds: Double(groupPlayoutDelayNanos) / 1_000_000,
                 maximumLatenessMilliseconds: Double(reports.map(\.latenessNanos).max() ?? 0) / 1_000_000,
-                totalResyncCount: reports.reduce(0) { $0 &+ $1.resyncCount }
+                totalResyncCount: reports.reduce(0) { $0 &+ $1.resyncCount },
+                roomTimingChangeCount: roomTimingChangeCount,
+                listeners: listeners.sorted { ($0.id ?? "") < ($1.id ?? "") }.prefix(64).map { client in
+                    HostListenerTimingDiagnostics(
+                        peerID: client.id ?? "unknown",
+                        isTimingEligible: timingEligibleClients?.contains(ObjectIdentifier(client.control)) ?? true,
+                        reportAgeMilliseconds: client.lastSyncReportNanos.map { Double(now >= $0 ? now - $0 : 0) / 1_000_000 },
+                        recommendedBufferMilliseconds: Double(client.recommendedPlayoutDelayNanos) / 1_000_000,
+                        hardwareFloorMilliseconds: Double(client.outputLatencyPlayoutFloorNanos) / 1_000_000
+                    )
+                }
             )
         }
     }
@@ -186,30 +213,78 @@ final class HostServer {
             for packet in packets {
                 let data = packet.encoded()
                 for client in audioClients {
-                    self.sendAudio(data, to: client)
-                }
-            }
-        }
-    }
-
-    func acceptVideo(_ frame: VideoFrame) {
-        let data = frame.encoded()
-        queue.async { [weak self] in
-            guard let self else { return }
-            for connection in self.clients.values.compactMap(\.video) {
-                self.send(data, over: connection, isComplete: true) { error in
-                    if let error {
-                        fputs("Video send failed: \(error)\n", stderr)
+                    if let sealer = client.audioSealer {
+                        if let protected = try? sealer.seal(data) { self.sendAudio(protected, to: client) }
+                    } else if self.mediaSecurity == nil {
+                        self.sendAudio(data, to: client)
                     }
                 }
             }
         }
     }
 
+    func acceptVideo(_ frame: VideoFrame) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            let now = MonotonicClock.nowNanos()
+            for client in self.clients.values where client.video != nil {
+                client.videoQueue.append(frame, nowNanos: now)
+                self.drainVideo(for: client)
+                if client.videoQueue.requiresKeyframe { self.requestVideoKeyframe(nowNanos: now) }
+            }
+        }
+    }
+
+    private func requestVideoKeyframe(nowNanos: UInt64) {
+        guard nowNanos >= lastVideoKeyframeRequestNanos,
+              nowNanos - lastVideoKeyframeRequestNanos >= 250_000_000 else { return }
+        lastVideoKeyframeRequestNanos = nowNanos
+        videoKeyframeHandler?()
+    }
+
+    private func drainVideo(for client: Client) {
+        guard client.videoSendToken == nil, let connection = client.video,
+              let entry = client.videoQueue.takeNext(nowNanos: MonotonicClock.nowNanos()) else { return }
+        let token = UUID()
+        client.videoSendToken = token
+        send(entry.frame.encoded(), over: connection, isComplete: true) { [weak self, weak client] error in
+            guard let self else { return }
+            self.queue.async { [weak self, weak client] in
+                guard let self, let client, client.video === connection,
+                      client.videoSendToken == token else { return }
+                client.videoSendToken = nil
+                if error != nil { self.repairVideo(for: client, failedConnection: connection) }
+                else { self.drainVideo(for: client) }
+            }
+        }
+        queue.asyncAfter(deadline: .now() + 1) { [weak self, weak client] in
+            guard let self, let client, client.video === connection,
+                  client.videoSendToken == token else { return }
+            self.repairVideo(for: client, failedConnection: connection)
+        }
+    }
+
+    private func repairVideo(for client: Client, failedConnection: NWConnection) {
+        guard clients[ObjectIdentifier(client.control)] === client,
+              client.video === failedConnection else { return }
+        failedConnection.cancel()
+        client.videoQueue.reset()
+        client.videoSendToken = nil
+        // This adapter is only the existing legacy media transport. Secure v2
+        // will reopen a receiver-initiated, admitted video subscription instead.
+        let replacement = NWConnection(to: failedConnection.endpoint, using: mediaSecurity?.tcp(video: true) ?? LocalNetworkParameters.tcp())
+        client.video = replacement
+        replacement.start(queue: queue)
+        requestVideoKeyframe(nowNanos: MonotonicClock.nowNanos())
+    }
+
     func setVideoEnabled(_ enabled: Bool) {
         queue.async { [weak self] in
             guard let self else { return }
             self.videoEnabled = enabled
+            if !enabled {
+                for client in self.clients.values { client.videoQueue.reset() }
+            }
             self.broadcast(ControlMessage(type: "media_state", videoEnabled: enabled))
         }
     }
@@ -309,6 +384,10 @@ final class HostServer {
                 for message in client.decoder.append(data) {
                     self.handle(message, for: client)
                 }
+                if client.decoder.isOverflowed {
+                    self.removeClient(identifier)
+                    return
+                }
             }
             if isComplete || error != nil {
                 self.removeClient(identifier)
@@ -321,6 +400,17 @@ final class HostServer {
     private func handle(_ message: ControlMessage, for client: Client) {
         switch message.type {
         case "join":
+            // The publisher chooses a fresh nonce domain inside the PSK TLS channel.
+            // Repeated joins on one connection must never reset its send sequence.
+            guard client.id == nil else { return }
+            if let mediaSecurity {
+                let sessionID = UUID()
+                guard let sealer = try? mediaSecurity.audioSealer(sessionID: sessionID) else {
+                    client.control.cancel(); return
+                }
+                client.mediaSessionID = sessionID
+                client.audioSealer = sealer
+            }
             guard let udpPort = message.udpPort,
                   let videoPort = message.videoPort,
                   let port = NWEndpoint.Port(rawValue: udpPort),
@@ -350,10 +440,12 @@ final class HostServer {
             client.audio = connection
 
             client.video?.cancel()
+            client.videoQueue.reset()
+            client.videoSendToken = nil
             let videoConnection = NWConnection(
                 host: host,
                 port: videoEndpointPort,
-                using: LocalNetworkParameters.tcp()
+                using: mediaSecurity?.tcp(video: true) ?? LocalNetworkParameters.tcp()
             )
             videoConnection.stateUpdateHandler = { state in
                 if case .failed(let error) = state {
@@ -364,6 +456,7 @@ final class HostServer {
             client.video = videoConnection
             if let data = try? ControlMessage(
                 type: "welcome",
+                mediaSessionID: client.mediaSessionID,
                 displayName: client.name,
                 participantID: client.id
             ).encodedLine() {
@@ -704,20 +797,22 @@ final class HostServer {
 
         let next: UInt64
         if desired > groupPlayoutDelayNanos {
-            next = desired
+            next = roomPlaybackIsPlaying && lastAudioCaptureNanos != nil
+                ? RoomTiming.liveIncreasePlayoutDelay(required: desired) : desired
         } else if desired < groupPlayoutDelayNanos, !roomPlaybackIsPlaying {
             // Never move a live timeline backward in small steps. Every such
             // change requires a hard future cutover on all listeners, which can
             // turn one transient jitter spike into repeated audible gaps. A
             // paused room may adopt the lower stable delay before playback
             // resumes on its normal coordinated boundary.
-            next = desired
+            next = RoomTiming.pausedPlayoutDelay(required: desired, current: groupPlayoutDelayNanos)
         } else {
             return
         }
         guard next != groupPlayoutDelayNanos else { return }
 
         groupPlayoutDelayNanos = next
+        roomTimingChangeCount &+= 1
         // Every audible output uses the synchronized Receiver timeline now,
         // including the broadcaster's local return.
         for client in clients.values where client.id != nil {

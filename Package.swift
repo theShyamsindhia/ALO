@@ -5,10 +5,14 @@ import PackageDescription
 let package = Package(
     name: "ALO",
     platforms: [
-        .macOS(.v14)
+        .macOS(.v14),
+        .iOS(.v17)
     ],
     products: [
-        .executable(name: "alo", targets: ["ALO"])
+        .executable(name: "alo", targets: ["ALO"]),
+        .library(name: "ALOCore", targets: ["ALOCore"]),
+        .library(name: "ALONetworking", targets: ["ALONetworking"]),
+        .library(name: "ALOAppleMedia", targets: ["ALOAppleMedia"])
     ],
     dependencies: [
         .package(
@@ -24,9 +28,11 @@ let package = Package(
             ]
         ),
         .target(name: "ALOSharedAudioClient"),
+        .target(name: "ALONetworking", dependencies: ["ALOCore"]),
+        .target(name: "ALOAppleMedia", dependencies: ["ALOCore"]),
         .executableTarget(
             name: "ALO",
-            dependencies: ["ALOCore", "ALOSharedAudioClient"],
+            dependencies: ["ALOCore", "ALONetworking", "ALOAppleMedia", "ALOSharedAudioClient"],
             linkerSettings: [
                 .linkedFramework("Carbon"),
                 .linkedFramework("MediaPlayer"),
@@ -40,7 +46,15 @@ let package = Package(
         ),
         .testTarget(
             name: "ALOTests",
-            dependencies: ["ALOCore", "ALO"]
+            dependencies: ["ALOCore", "ALONetworking", "ALOAppleMedia", "ALO"]
+        ),
+        .testTarget(
+            name: "ALONetworkingTests",
+            dependencies: ["ALONetworking"]
+        ),
+        .testTarget(
+            name: "ALOAppleMediaTests",
+            dependencies: ["ALOAppleMedia"]
         )
     ]
 )

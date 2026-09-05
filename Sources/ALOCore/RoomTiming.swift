@@ -10,15 +10,40 @@ public enum RoomTiming {
         min(max(nanos, defaultPlayoutDelayNanos), maximumPlayoutDelayNanos)
     }
 
+    /// Round up to a 50 ms boundary and reserve another 50 ms when moving an
+    /// audible timeline forward (50–<100 ms extra, capped at the room maximum).
+    /// This cushions small successive latency reports without restarting every
+    /// output for each report; it does not assert a hardware-specific cause.
+    /// This margin is applied only on a real increase, never cumulatively to
+    /// reports already covered by the current shared buffer.
+    public static func liveIncreasePlayoutDelay(required nanos: UInt64) -> UInt64 {
+        let step: UInt64 = 50_000_000
+        let required = clampedPlayoutDelay(nanos)
+        let rounded = ((required + step - 1) / step) * step
+        return min(maximumPlayoutDelayNanos, rounded + step)
+    }
+
+    /// Keep the existing allowance across short pauses. Only a material drop
+    /// reduces it; a return to the default budget removes it completely.
+    public static func pausedPlayoutDelay(required nanos: UInt64, current: UInt64) -> UInt64 {
+        let required = clampedPlayoutDelay(nanos)
+        if required == defaultPlayoutDelayNanos { return required }
+        return min(clampedPlayoutDelay(current), liveIncreasePlayoutDelay(required: required))
+    }
+
     public static func outputLatencyFloor(
         _ outputLatencyNanos: UInt64,
-        roundTripNanos: UInt64? = nil,
+        roundTripNanos _: UInt64? = nil,
         renderSchedulingHeadroomNanos: UInt64 = renderSchedulingHeadroomNanos
     ) -> UInt64 {
+        // This field bypasses network consensus because genuine output latency
+        // must be accommodated by every synchronized output. RTT belongs only
+        // in NetworkJitterEstimator's recommendation; including it here lets a
+        // single late/slow peer repeatedly retime the whole established room.
+        // Retain the argument label for source compatibility with callers.
         let required = 120_000_000
-            &+ (roundTripNanos ?? 0) / 2
             &+ min(outputLatencyNanos, maximumPlayoutDelayNanos)
-            &+ renderSchedulingHeadroomNanos
+            &+ min(renderSchedulingHeadroomNanos, maximumPlayoutDelayNanos)
         let clamped = clampedPlayoutDelay(required)
         return ((clamped + timingStepNanos - 1) / timingStepNanos) * timingStepNanos
     }

@@ -16,6 +16,8 @@ final class NowPlayingMonitor {
     private var notificationObservers = [NSObjectProtocol]()
     private var lastMedia = NowPlayingMedia()
     private var spotifyTrackID: String?
+    private var artworkTask: URLSessionDataTask?
+    private var artworkRequestID: UUID?
     private var artworkCache = [String: Data]()
     private var isRunning = false
 
@@ -55,6 +57,7 @@ final class NowPlayingMonitor {
         notificationObservers.removeAll()
         queue.sync {
             isRunning = false
+            cancelArtworkRequest()
             timer?.cancel()
             timer = nil
         }
@@ -120,6 +123,7 @@ final class NowPlayingMonitor {
             .split(separator: ":")
             .last
             .map(String.init)
+        if spotifyTrackID != trackID { cancelArtworkRequest() }
         spotifyTrackID = trackID
         let media = NowPlayingMedia(
             title: clean(information["Name"] as? String),
@@ -131,7 +135,7 @@ final class NowPlayingMonitor {
         )
         publish(media)
         if let trackID, media.artworkData == nil {
-            fetchSpotifyArtwork(trackID: trackID, media: media)
+            fetchSpotifyArtwork(trackID: trackID)
         }
     }
 
@@ -146,41 +150,53 @@ final class NowPlayingMonitor {
         ))
     }
 
-    private func fetchSpotifyArtwork(trackID: String, media: NowPlayingMedia) {
+    private func cancelArtworkRequest() {
+        artworkTask?.cancel()
+        artworkTask = nil
+        artworkRequestID = nil
+    }
+
+    private func fetchSpotifyArtwork(trackID: String) {
+        guard artworkRequestID == nil else { return }
         var components = URLComponents(string: "https://open.spotify.com/oembed")
-        components?.queryItems = [
-            URLQueryItem(
-                name: "url",
-                value: "https://open.spotify.com/track/\(trackID)"
-            )
-        ]
+        components?.queryItems = [URLQueryItem(name: "url", value: "https://open.spotify.com/track/\(trackID)")]
         guard let url = components?.url else { return }
-        URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
-            guard let self,
-                  let data,
-                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let artworkURLString = object["thumbnail_url"] as? String,
-                  let artworkURL = URL(string: artworkURLString)
-            else { return }
-            URLSession.shared.dataTask(with: artworkURL) { [weak self] data, _, _ in
-                guard let self, let artwork = self.normalizedArtwork(data) else { return }
-                self.queue.async {
-                    guard self.isRunning, self.spotifyTrackID == trackID else { return }
-                    if self.artworkCache.count >= 24, let oldest = self.artworkCache.keys.first {
-                        self.artworkCache.removeValue(forKey: oldest)
-                    }
-                    self.artworkCache[trackID] = artwork
-                    self.publish(NowPlayingMedia(
-                        title: media.title,
-                        artist: media.artist,
-                        album: media.album,
-                        artworkData: artwork,
-                        sourceURL: media.sourceURL,
-                        isPlaying: media.isPlaying
-                    ))
+        let requestID = UUID()
+        artworkRequestID = requestID
+        artworkTask = URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+            self?.queue.async { [weak self] in
+                guard let self, self.isRunning, self.artworkRequestID == requestID else { return }
+                guard let data, data.count <= 65_536,
+                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let urlString = object["thumbnail_url"] as? String,
+                      let artworkURL = URL(string: urlString), artworkURL.scheme == "https" else {
+                    self.cancelArtworkRequest(); return
                 }
-            }.resume()
-        }.resume()
+                self.artworkTask = URLSession.shared.dataTask(with: artworkURL) { [weak self] data, _, _ in
+                    self?.queue.async { [weak self] in
+                        guard let self, self.isRunning, self.artworkRequestID == requestID else { return }
+                        self.cancelArtworkRequest()
+                        guard self.spotifyTrackID == trackID, let artwork = self.normalizedArtwork(data) else { return }
+                        if self.artworkCache.count >= 24, let oldest = self.artworkCache.keys.first {
+                            self.artworkCache.removeValue(forKey: oldest)
+                        }
+                        self.artworkCache[trackID] = artwork
+                        if let updated = Self.applyingSpotifyArtwork(artwork, trackID: trackID, to: self.lastMedia) {
+                            self.publish(updated)
+                        }
+                    }
+                }
+                self.artworkTask?.resume()
+            }
+        }
+        artworkTask?.resume()
+    }
+
+    /// Artwork completion may arrive after a pause or after another player takes over.
+    static func applyingSpotifyArtwork(_ artwork: Data, trackID: String, to media: NowPlayingMedia) -> NowPlayingMedia? {
+        guard media.sourceURL == "https://open.spotify.com/track/\(trackID)" else { return nil }
+        return NowPlayingMedia(title: media.title, artist: media.artist, album: media.album,
+            artworkData: artwork, sourceURL: media.sourceURL, isPlaying: media.isPlaying)
     }
 
     private func publish(_ media: NowPlayingMedia) {

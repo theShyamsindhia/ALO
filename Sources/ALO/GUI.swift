@@ -1414,6 +1414,9 @@ final class ALOViewModel: ObservableObject {
     @Published var queueURL = ""
     @Published var queueNotice: String?
     @Published var videoFrame: CGImage?
+    /// Set only by an admitted, annotation-capable sharing session. Legacy
+    /// broadcasters leave this nil, so no nonfunctional tools are advertised.
+    @Published var annotationScene: AnnotationSceneModel?
     @Published var videoFullscreen = false
     @Published var videoViewerPinned = false
     @Published var videoFullScreenToggle = 0
@@ -1657,7 +1660,8 @@ final class ALOViewModel: ObservableObject {
                 name: room.name,
                 creatorPeerID: room.creatorPeerID,
                 isPrivate: true,
-                accessKey: key
+                accessKey: key,
+                transportPolicy: room.transportPolicy
             )
             try? roomStore.save(unlocked)
             savedRooms = roomStore.load()
@@ -2020,6 +2024,9 @@ final class ALOViewModel: ObservableObject {
             return hasBroadcaster ? .ready : .unavailable("No broadcaster is connected")
         case .syncAllDevices:
             return hasBroadcaster ? .ready : .unavailable("No broadcaster is connected")
+        case .toggleAnnotations:
+            return roomHasVideo && annotationScene?.canAnnotate == true
+                ? .ready : .unavailable("Available when annotations are enabled for this screen share")
         }
     }
 
@@ -2073,6 +2080,10 @@ final class ALOViewModel: ObservableObject {
             syncParticipant(participant)
         case .syncAllDevices:
             syncAllDevices()
+        case .toggleAnnotations:
+            guard let scene = annotationScene else { return }
+            if scene.annotationEnabled { scene.escape() }
+            else { scene.annotationEnabled = true; scene.tool = .pencil }
         }
     }
 
@@ -2819,6 +2830,8 @@ final class ALOViewModel: ObservableObject {
                 if !enabled {
                     self.videoFullscreen = false
                     self.videoFrame = nil
+                    self.annotationScene?.reset()
+                    self.annotationScene = nil
                     if !self.isHost || self.experience == .video {
                         self.experience = .audio
                     }
@@ -2948,6 +2961,8 @@ final class ALOViewModel: ObservableObject {
         queueURL = ""
         queueNotice = nil
         videoFrame = nil
+        annotationScene?.reset()
+        annotationScene = nil
         videoFullscreen = false
         roomHasVideo = false
         requestedVideoBroadcast = false
@@ -4397,10 +4412,7 @@ private struct FloatingRoomView: View {
         ZStack(alignment: .bottom) {
             Palette.video
             if let frame = model.videoFrame {
-                Image(decorative: frame, scale: 1)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                AnnotatedVideoSurface(frame: frame, scene: model.annotationScene)
             } else {
                 VStack(spacing: 10) {
                     ProgressView().controlSize(.small).tint(.white)
@@ -5536,10 +5548,7 @@ private struct FullScreenVideoView: View {
         ZStack {
             Color.black.ignoresSafeArea()
             if let frame = model.videoFrame {
-                Image(decorative: frame, scale: 1)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                AnnotatedVideoSurface(frame: frame, scene: model.annotationScene)
             } else {
                 VStack(spacing: 10) {
                     ProgressView().controlSize(.small).tint(.white)
@@ -5575,7 +5584,10 @@ private struct FullScreenVideoView: View {
         .onDisappear {
             controlVisibility.stop()
         }
-        .onExitCommand(perform: model.exitVideoFullscreen)
+        .onExitCommand {
+            if let scene = model.annotationScene, scene.annotationEnabled { scene.escape() }
+            else { model.exitVideoFullscreen() }
+        }
     }
 
     private var showsVideoControls: Bool {

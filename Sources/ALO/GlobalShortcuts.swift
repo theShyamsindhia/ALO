@@ -13,6 +13,7 @@ struct GlobalShortcutAction: Codable, Hashable, Identifiable, Sendable {
         case stopScreenShare
         case syncMyDevice
         case syncAllDevices
+        case toggleAnnotations
     }
 
     let kind: Kind
@@ -39,6 +40,7 @@ struct GlobalShortcutAction: Codable, Hashable, Identifiable, Sendable {
         Self(.stopScreenShare),
         Self(.syncMyDevice),
         Self(.syncAllDevices),
+        Self(.toggleAnnotations),
     ]
 }
 
@@ -565,6 +567,7 @@ private struct ShortcutMapperView: View {
         case .stopScreenShare: return "Stop screen share"
         case .syncMyDevice: return "Sync my device"
         case .syncAllDevices: return "Sync all devices"
+        case .toggleAnnotations: return "Toggle screen annotations"
         }
     }
 
@@ -577,6 +580,7 @@ private struct ShortcutMapperView: View {
         case .stopScreenShare: return "rectangle.slash"
         case .syncMyDevice: return "arrow.triangle.2.circlepath"
         case .syncAllDevices: return "arrow.triangle.2.circlepath.circle"
+        case .toggleAnnotations: return "pencil.tip.crop.circle"
         }
     }
 }

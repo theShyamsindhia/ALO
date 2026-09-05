@@ -3,6 +3,7 @@ import Network
 import Testing
 import Automerge
 @testable import ALO
+@testable import ALONetworking
 @testable import ALOCore
 
 // Large-history fixtures and live mesh workers should not compete with every

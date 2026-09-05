@@ -343,7 +343,7 @@ struct AudioPacketTests {
         #expect(RoomTiming.outputLatencyFloor(
             220_000_000,
             roundTripNanos: 4_000_000
-        ) == 370_000_000)
+        ) == 365_000_000)
         #expect(unstable.jitterNanos >= 45_000_000)
         #expect(unstable.recommendedPlayoutDelayNanos(roundTripNanos: 20_000_000) > 250_000_000)
         #expect(RoomTiming.clampedPlayoutDelay(1_000_000_000) == 600_000_000)

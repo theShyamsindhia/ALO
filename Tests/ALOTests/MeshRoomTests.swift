@@ -2,6 +2,7 @@ import Foundation
 import Network
 import Testing
 @testable import ALO
+@testable import ALONetworking
 import ALOCore
 
 struct MeshRoomTests {
@@ -393,7 +394,7 @@ struct MeshRoomTests {
         }
         nodeA.connectForTesting(to: .hostPort(host: "127.0.0.1", port: port))
 
-        #expect(waitUntil(timeout: 4) { b.eventCount == events.count })
+        #expect(waitUntil(timeout: 4) { b.eventCount == 1 && b.nowPlayingTitle == "Track 16" })
     }
 
     @Test("A relaunched peer recovers the room's active broadcaster")
@@ -1465,6 +1466,7 @@ private final class MeshProbe: @unchecked Sendable {
     var participantCount: Int { lock.withLock { participants.count } }
     var minimumObservedParticipantCount: Int? { lock.withLock { participantCountHistory.min() } }
     var chatCount: Int { lock.withLock { replica.chatEvents.count } }
+    var nowPlayingTitle: String? { lock.withLock { replica.nowPlaying.title } }
     var eventCount: Int { lock.withLock { replica.events.count } }
     var artworkByteCount: Int? { lock.withLock { replica.nowPlaying.artworkData?.count } }
     var chatTexts: [String?] { lock.withLock { replica.chatEvents.map(\.text) } }

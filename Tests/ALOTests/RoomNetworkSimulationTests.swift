@@ -2,6 +2,7 @@ import Foundation
 import Automerge
 import Testing
 @testable import ALO
+@testable import ALONetworking
 @testable import ALOCore
 
 @Suite("Repeatable room network simulation", .serialized)

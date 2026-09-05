@@ -22,6 +22,8 @@ public enum MonotonicClock {
 }
 
 public final class ClockSynchronizer {
+    private static let maximumPendingProbes = 64
+    private static let probeLifetimeNanos: UInt64 = 30_000_000_000
     private struct Sample {
         let clientMidpointNanos: UInt64
         let roundTripNanos: UInt64
@@ -58,6 +60,15 @@ public final class ClockSynchronizer {
     }
 
     public func makePing(at clientNanos: UInt64) -> ControlMessage {
+        sentAt = sentAt.filter { _, started in
+            clientNanos >= started && clientNanos - started <= Self.probeLifetimeNanos
+        }
+        if sentAt.count >= Self.maximumPendingProbes,
+           let oldest = sentAt.min(by: { lhs, rhs in
+               lhs.value == rhs.value ? lhs.key < rhs.key : lhs.value < rhs.value
+           })?.key {
+            sentAt.removeValue(forKey: oldest)
+        }
         let id = nextID
         nextID &+= 1
         sentAt[id] = clientNanos
@@ -70,7 +81,8 @@ public final class ClockSynchronizer {
               let id = message.id,
               let hostNanos = message.hostNanos,
               let startedAt = sentAt.removeValue(forKey: id),
-              receivedAt >= startedAt
+              receivedAt >= startedAt,
+              receivedAt - startedAt <= Self.probeLifetimeNanos
         else { return false }
 
         let roundTrip = receivedAt - startedAt
@@ -94,7 +106,7 @@ public final class ClockSynchronizer {
             return offsetNanos
         }
         let elapsedSeconds = signedDifference(clientNanos, reference) / 1_000_000_000
-        return Int64(clamping: Int(modelOffsetNanos + modelDriftNanosPerSecond * elapsedSeconds))
+        return clampedOffset(modelOffsetNanos + modelDriftNanosPerSecond * elapsedSeconds)
     }
 
     private func updateModel(referenceNanos: UInt64) {
@@ -110,11 +122,11 @@ public final class ClockSynchronizer {
             .sorted()
         let middle = lowLatencyOffsets.count / 2
         let medianOffset = lowLatencyOffsets.count.isMultiple(of: 2)
-            ? lowLatencyOffsets[middle - 1] + (lowLatencyOffsets[middle] - lowLatencyOffsets[middle - 1]) / 2
-            : lowLatencyOffsets[middle]
+            ? Double(lowLatencyOffsets[middle - 1]) / 2 + Double(lowLatencyOffsets[middle]) / 2
+            : Double(lowLatencyOffsets[middle])
 
         var estimatedDrift = 0.0
-        var estimatedOffset = Double(medianOffset)
+        var estimatedOffset = medianOffset
         if candidates.count >= 6,
            let first = candidates.first,
            let last = candidates.last,
@@ -144,11 +156,19 @@ public final class ClockSynchronizer {
             modelDriftNanosPerSecond = estimatedDrift
         }
         modelReferenceNanos = referenceNanos
-        offsetNanos = Int64(clamping: Int(modelOffsetNanos ?? estimatedOffset))
+        offsetNanos = clampedOffset(modelOffsetNanos ?? estimatedOffset)
         driftPartsPerMillion = modelDriftNanosPerSecond / 1_000
     }
 
     private func signedDifference(_ lhs: UInt64, _ rhs: UInt64) -> Double {
         lhs >= rhs ? Double(lhs - rhs) : -Double(rhs - lhs)
+    }
+
+    private func clampedOffset(_ value: Double) -> Int64 {
+        // Double(Int64.max) rounds up to 2^63. Converting to Int before
+        // clamping therefore traps even for an otherwise valid Int64 sample.
+        if value >= Double(Int64.max) { return .max }
+        if value <= Double(Int64.min) { return .min }
+        return Int64(value)
     }
 }

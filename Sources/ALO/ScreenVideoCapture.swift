@@ -158,11 +158,14 @@ final class ScreenContentPicker: NSObject, SCContentSharingPickerObserver {
 
 final class ScreenVideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     typealias Handler = (_ pixelBuffer: CVPixelBuffer, _ captureTimeNanos: UInt64) -> Void
+    typealias MetadataHandler = (_ metadata: CapturedFrameMetadata) -> Void
     typealias StopHandler = (_ error: Error) -> Void
 
     private let queue = DispatchQueue(label: "in.werai.video.capture", qos: .userInteractive)
     private var stream: SCStream?
     private var handler: Handler?
+    private var metadataHandler: MetadataHandler?
+    private var latestMetadata: CapturedFrameMetadata?
     private var stopHandler: StopHandler?
     private var stopping = false
 
@@ -175,6 +178,7 @@ final class ScreenVideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func start(
         displayID: CGDirectDisplayID,
+        metadata: @escaping MetadataHandler = { _ in },
         handler: @escaping Handler,
         stopped: @escaping StopHandler = { _ in }
     ) async throws {
@@ -205,23 +209,48 @@ final class ScreenVideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
 
         let currentBundleID = Bundle.main.bundleIdentifier
         let excludedApplications = availableApplications.filter {
-            currentBundleID != nil && $0.bundleIdentifier == currentBundleID
+            $0.processID == ProcessInfo.processInfo.processIdentifier
+                || (currentBundleID != nil && $0.bundleIdentifier == currentBundleID)
         }
         let filter = SCContentFilter(
             display: display,
             excludingApplications: excludedApplications,
             exceptingWindows: []
         )
-        try await start(filter: filter, handler: handler, stopped: stopped)
+        try await startPrepared(filter: filter, desktopOverlaySupported: !excludedApplications.isEmpty,
+                                metadata: metadata, handler: handler, stopped: stopped)
     }
 
     func start(
         filter: SCContentFilter,
+        metadata: @escaping MetadataHandler = { _ in },
         handler: @escaping Handler,
         stopped: @escaping StopHandler = { _ in }
     ) async throws {
+        let selection = try await Self.excludingOwnApplication(from: filter)
+        try await startPrepared(filter: selection.filter, desktopOverlaySupported: selection.desktopOverlaySupported,
+                                metadata: metadata, handler: handler, stopped: stopped)
+    }
+
+    private func startPrepared(
+        filter: SCContentFilter,
+        desktopOverlaySupported: Bool,
+        metadata: @escaping MetadataHandler,
+        handler: @escaping Handler,
+        stopped: @escaping StopHandler
+    ) async throws {
         queue.sync {
             self.handler = handler
+            self.metadataHandler = metadata
+            self.latestMetadata = CapturedFrameMetadata(
+                captureTimeNanos: 0,
+                contentRect: .zero,
+                screenRect: filter.contentRect,
+                contentScale: 1,
+                scaleFactor: Double(filter.pointPixelScale),
+                status: .unavailable,
+                desktopOverlaySupported: desktopOverlaySupported
+            )
             self.stopHandler = stopped
             self.stopping = false
         }
@@ -235,6 +264,9 @@ final class ScreenVideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: 30)
         configuration.queueDepth = 5
         configuration.showsCursor = true
+        // Window shadows are outside the selected window's screen rectangle.
+        // Keeping them out makes the captured content and annotation bounds agree.
+        configuration.ignoreShadowsSingleWindow = true
 
         let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
@@ -250,6 +282,43 @@ final class ScreenVideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    /// Picker exclusions affect selection, not the pixels captured from a display.
+    /// Build a filter for exactly that selected display, removing this process so
+    /// every current and future annotation panel stays out of the video stream.
+    /// currentProcess is explicitly consent-free; never request broader discovery
+    /// to turn a picker grant into screen-recording permission.
+    private static func excludingOwnApplication(
+        from filter: SCContentFilter
+    ) async throws -> (filter: SCContentFilter, desktopOverlaySupported: Bool) {
+        // A desktop-independent window stream contains only its selected window.
+        if filter.style == .window { return (filter, true) }
+        guard filter.style == .display else { return (filter, false) }
+        guard #available(macOS 14.4, *) else { return (filter, false) }
+        let content: SCShareableContent
+        do { content = try await SCShareableContent.currentProcess }
+        catch {
+            throw ALOError("Screen sharing could not safely exclude this app from the selected display: \(error.localizedDescription)")
+        }
+        let display: SCDisplay?
+        if #available(macOS 15.2, *) {
+            display = filter.includedDisplays.count == 1 ? filter.includedDisplays.first : nil
+        } else {
+            // Prior to 15.2 the picker does not expose selected display IDs. Only
+            // a unique exact bounds match can preserve the original selection.
+            let matches = content.displays.filter { $0.frame == filter.contentRect }
+            display = matches.count == 1 ? matches.first : nil
+        }
+        guard let display else { return (filter, false) }
+        let ownApplications = content.applications.filter {
+            $0.processID == ProcessInfo.processInfo.processIdentifier
+                || (Bundle.main.bundleIdentifier != nil && $0.bundleIdentifier == Bundle.main.bundleIdentifier)
+        }
+        guard !ownApplications.isEmpty else { return (filter, false) }
+        let excluded = SCContentFilter(display: display, excludingApplications: ownApplications, exceptingWindows: [])
+        if #available(macOS 14.2, *) { excluded.includeMenuBar = filter.includeMenuBar }
+        return (excluded, true)
+    }
+
     static func selectsRequestedDisplay(
         _ requested: CGDirectDisplayID,
         from available: [CGDirectDisplayID]
@@ -263,6 +332,8 @@ final class ScreenVideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             let active = stream
             stream = nil
             handler = nil
+            metadataHandler = nil
+            latestMetadata = nil
             stopHandler = nil
             return active
         }
@@ -274,11 +345,19 @@ final class ScreenVideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
         of outputType: SCStreamOutputType
     ) {
-        guard outputType == .screen,
-              sampleBuffer.isValid,
-              let pixelBuffer = sampleBuffer.imageBuffer
-        else { return }
-        handler?(pixelBuffer, Self.captureTimeNanos(for: sampleBuffer))
+        guard outputType == .screen, sampleBuffer.isValid, !stopping else { return }
+        let timestamp = Self.captureTimeNanos(for: sampleBuffer)
+        let attachments = (CMSampleBufferGetSampleAttachmentsArray(
+            sampleBuffer, createIfNecessary: false
+        ) as? [[SCStreamFrameInfo: Any]])?.first ?? [:]
+        let frameMetadata = Self.frameMetadata(
+            attachments: attachments, captureTimeNanos: timestamp, previous: latestMetadata
+        )
+        latestMetadata = frameMetadata
+        metadataHandler?(frameMetadata)
+        guard frameMetadata.status == .complete || frameMetadata.status == .started,
+              let pixelBuffer = sampleBuffer.imageBuffer else { return }
+        handler?(pixelBuffer, timestamp)
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
@@ -287,10 +366,53 @@ final class ScreenVideoCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let self, !self.stopping else { return }
             let callback = self.stopHandler
             self.handler = nil
+            if var metadata = self.latestMetadata {
+                metadata.status = .stopped
+                self.metadataHandler?(metadata)
+            }
+            self.metadataHandler = nil
+            self.latestMetadata = nil
             self.stopHandler = nil
             self.stopping = true
             callback?(error)
         }
+    }
+
+    /// Kept separate from CMSampleBuffer parsing so resize and unavailable-frame
+    /// transitions can be tested without starting screen capture or requesting access.
+    static func frameMetadata(
+        attachments: [SCStreamFrameInfo: Any],
+        captureTimeNanos: UInt64,
+        previous: CapturedFrameMetadata?
+    ) -> CapturedFrameMetadata {
+        let status: CapturedFrameMetadata.Status
+        switch (attachments[.status] as? Int).flatMap(SCFrameStatus.init(rawValue:)) {
+        case .complete: status = .complete
+        case .idle: status = .idle
+        case .blank: status = .blank
+        case .suspended: status = .suspended
+        case .started: status = .started
+        case .stopped: status = .stopped
+        default: status = .unavailable
+        }
+        return CapturedFrameMetadata(
+            captureTimeNanos: captureTimeNanos,
+            contentRect: attachmentRect(attachments[.contentRect]) ?? previous?.contentRect ?? .zero,
+            screenRect: attachmentRect(attachments[.screenRect]) ?? previous?.screenRect,
+            contentScale: (attachments[.contentScale] as? NSNumber)?.doubleValue ?? previous?.contentScale ?? 1,
+            scaleFactor: (attachments[.scaleFactor] as? NSNumber)?.doubleValue ?? previous?.scaleFactor ?? 1,
+            status: status,
+            desktopOverlaySupported: previous?.desktopOverlaySupported ?? false
+        )
+    }
+
+    private static func attachmentRect(_ value: Any?) -> CGRect? {
+        if let rect = value as? CGRect { return rect }
+        if let value = value as? NSValue { return value.rectValue }
+        if let dictionary = value as? NSDictionary {
+            return CGRect(dictionaryRepresentation: dictionary as CFDictionary)
+        }
+        return nil
     }
 
     private static func captureTimeNanos(for sampleBuffer: CMSampleBuffer) -> UInt64 {

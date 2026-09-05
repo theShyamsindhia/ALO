@@ -1,0 +1,38 @@
+name: Verify Mac tests and iOS app
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mac-tests:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Run tests without installing or signing an app
+        run: swift test --no-parallel
+      - name: Run repeatable room scenarios
+        run: bash Scripts/test_room_scenarios.sh
+
+  ios-app-build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Link the iOS app and shared libraries without signing
+        run: >-
+          xcodebuild -project iOS/ALO.xcodeproj -scheme ALO
+          -configuration Debug -sdk iphonesimulator
+          -destination 'generic/platform=iOS Simulator'
+          -derivedDataPath "$RUNNER_TEMP/alo-ios-app"
+          CODE_SIGNING_ALLOWED=NO build

@@ -1,7 +1,51 @@
 import Testing
+import CoreGraphics
+import ScreenCaptureKit
+import ALOCore
 @testable import ALO
 
 struct ScreenVideoCaptureTests {
+    @Test("Frame metadata uses current screen bounds when a captured window moves or resizes")
+    func frameMetadataResize() {
+        let initial = CapturedFrameMetadata(
+            captureTimeNanos: 1, contentRect: CGRect(x: 0, y: 0, width: 1280, height: 720),
+            screenRect: CGRect(x: 0, y: 0, width: 1920, height: 1080),
+            contentScale: 0.5, scaleFactor: 2, status: .complete
+        )
+        let movedRect = CGRect(x: -1600, y: -800, width: 800, height: 600)
+        let resizedContent = CGRect(x: 0, y: 0, width: 960, height: 720)
+        let frame = ScreenVideoCapture.frameMetadata(
+            attachments: [.status: SCFrameStatus.complete.rawValue,
+                          .screenRect: movedRect.dictionaryRepresentation,
+                          .contentRect: resizedContent.dictionaryRepresentation,
+                          .contentScale: 0.6, .scaleFactor: 2.0],
+            captureTimeNanos: 99, previous: initial
+        )
+        #expect(frame.captureTimeNanos == 99)
+        #expect(frame.screenRect == movedRect)
+        #expect(frame.contentRect == resizedContent)
+        #expect(frame.contentScale == 0.6)
+        #expect(frame.isInteractive)
+    }
+
+    @Test("Suspended frames retain alignment metadata but disable interaction")
+    func suspendedMetadata() {
+        let initial = CapturedFrameMetadata(
+            captureTimeNanos: 1, contentRect: CGRect(x: 0, y: 0, width: 800, height: 600),
+            screenRect: CGRect(x: 40, y: 60, width: 800, height: 600),
+            contentScale: 1, scaleFactor: 1, status: .complete
+        )
+        let frame = ScreenVideoCapture.frameMetadata(
+            attachments: [.status: SCFrameStatus.suspended.rawValue], captureTimeNanos: 2, previous: initial
+        )
+        #expect(frame.status == .suspended)
+        #expect(frame.screenRect == initial.screenRect)
+        #expect(!frame.isInteractive)
+        let unknown = ScreenVideoCapture.frameMetadata(attachments: [:], captureTimeNanos: 3, previous: initial)
+        #expect(unknown.status == .unavailable)
+        #expect(!unknown.isInteractive)
+    }
+
     @Test("Screen picker offers one display or one window")
     @MainActor
     func pickerConfiguration() {

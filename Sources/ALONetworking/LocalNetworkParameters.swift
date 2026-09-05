@@ -1,7 +1,9 @@
 import Network
 
-enum LocalNetworkParameters {
-    static func tcp() -> NWParameters {
+/// Parameters for the existing legacy wire protocol. These deliberately do not
+/// select or fall back from the separate v2 authenticated transport.
+public enum LocalNetworkParameters {
+    public static func tcp() -> NWParameters {
         let tcp = NWProtocolTCP.Options()
         tcp.enableKeepalive = true
         tcp.keepaliveIdle = 5
@@ -12,7 +14,7 @@ enum LocalNetworkParameters {
         return parameters
     }
 
-    static func udp() -> NWParameters {
+    public static func udp() -> NWParameters {
         let parameters = NWParameters.udp
         parameters.includePeerToPeer = true
         return parameters

@@ -1,46 +1,60 @@
 import Foundation
 import Network
+import ALOCore
 
-struct NearbyRoom: Identifiable, Equatable {
-    let id: String
-    let name: String
-    let isPrivate: Bool
-    let peerCount: Int
-    let accessProof: String?
+public struct NearbyRoom: Identifiable, Equatable, Sendable {
+    public let id: String
+    public let name: String
+    public let isPrivate: Bool
+    public let peerCount: Int
+    public let accessProof: String?
+    public let transportPolicy: RoomTransportPolicy
+
+    public init(id: String, name: String, isPrivate: Bool, peerCount: Int, accessProof: String?, transportPolicy: RoomTransportPolicy = .legacyOnly) {
+        self.id = id; self.name = name; self.isPrivate = isPrivate
+        self.peerCount = peerCount; self.accessProof = accessProof
+        self.transportPolicy = transportPolicy
+    }
 }
 
-final class MeshRoomBrowser {
-    static let serviceType = "_werai-mesh._tcp"
+public final class MeshRoomBrowser {
+    public static let serviceType = "_werai-mesh._tcp"
+    public static let secureServiceType = "_alo-peer._tcp"
 
     private let queue = DispatchQueue(label: "in.werai.mesh.browser", qos: .userInitiated)
     private let updateHandler: ([NearbyRoom]) -> Void
     private let errorHandler: (String) -> Void
     private var browser: NWBrowser?
+    private let transportPolicy: RoomTransportPolicy
 
-    init(
+    public init(
         updateHandler: @escaping ([NearbyRoom]) -> Void,
-        errorHandler: @escaping (String) -> Void = { _ in }
+        errorHandler: @escaping (String) -> Void = { _ in },
+        transportPolicy: RoomTransportPolicy = .legacyOnly
     ) {
         self.updateHandler = updateHandler
         self.errorHandler = errorHandler
+        self.transportPolicy = transportPolicy
     }
 
-    func start() {
+    public func start() {
         guard browser == nil else { return }
+        guard transportPolicy != .migrationRequired else { errorHandler("This room requires an explicit transport migration."); return }
+        let parameters = NWParameters(); parameters.includePeerToPeer = true
         let browser = NWBrowser(
-            for: .bonjourWithTXTRecord(type: Self.serviceType, domain: nil),
-            using: LocalNetworkParameters.tcp()
+            for: .bonjourWithTXTRecord(type: transportPolicy == .secureV2 ? Self.secureServiceType : Self.serviceType, domain: nil),
+            using: transportPolicy == .secureV2 ? parameters : LocalNetworkParameters.tcp()
         )
         browser.browseResultsChangedHandler = { [weak self] results, _ in
             var rooms = [String: (name: String, isPrivate: Bool, peers: Int, accessProof: String?)]()
-            for result in results {
+            for result in results.prefix(256) {
                 guard case .bonjour(let record) = result.metadata,
                       let id = record["roomID"],
                       let name = record["roomName"]
                 else { continue }
                 let existing = rooms[id]
                 let isPrivate = record["private"] == "1"
-                let proof = record["accessProof"]
+                let proof = self?.transportPolicy == .secureV2 ? nil : record["accessProof"]
                 if let existing,
                    existing.isPrivate != isPrivate || existing.accessProof != proof {
                     continue
@@ -58,7 +72,8 @@ final class MeshRoomBrowser {
                     name: $0.value.name,
                     isPrivate: $0.value.isPrivate,
                     peerCount: $0.value.peers,
-                    accessProof: $0.value.accessProof
+                    accessProof: $0.value.accessProof,
+                    transportPolicy: self?.transportPolicy ?? .legacyOnly
                 )
             }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending })
         }
@@ -69,12 +84,12 @@ final class MeshRoomBrowser {
         self.browser = browser
     }
 
-    func restart() {
+    public func restart() {
         stop()
         start()
     }
 
-    func stop() {
+    public func stop() {
         browser?.cancel()
         browser = nil
     }

@@ -99,7 +99,9 @@ struct LegacyVoiceDownsampler {
     }
 }
 
-final class MeshControlPlane: @unchecked Sendable {
+/// The shared room, chat, durable-state, and voice-signaling runtime. This
+/// extraction preserves the legacy wire; v2 admission is a separate integration.
+public final class MeshControlPlane: @unchecked Sendable {
     static let identityEnvelopeType = "display_name"
     private struct WalkieMessageKey: Hashable {
         let senderID: String
@@ -140,6 +142,9 @@ final class MeshControlPlane: @unchecked Sendable {
         var roomStateSyncChunkCount: UInt16 = 0
         var roomStateSyncNextChunk: UInt16 = 0
         var roomStateSyncBuffer = Data()
+        var snapshotSendQueue = [MeshEnvelope]()
+        var snapshotSendInFlight = false
+        var snapshotResendRequested = false
         var roomStateSyncSendQueue = [Data]()
         var roomStateSyncSendInFlight = false
         var roomStateSyncReceiveInFlight = false
@@ -147,6 +152,14 @@ final class MeshControlPlane: @unchecked Sendable {
         var roomStateSyncReceiveQueuedBytes = 0
         let localNonce = UUID().uuidString
         var authenticated = false
+        var secureChannel: SecurePeerChannel?
+        var authenticatedPeer: AuthenticatedPeer?
+        var receivedHello = false
+        var remoteReady = false
+        var commitSent = false
+        var lastPayloadNanos: UInt64 = 0
+        var listeningPort: UInt16?
+        var hintExpiresAtNanos: UInt64?
 
         init(
             connection: NWConnection,
@@ -159,8 +172,8 @@ final class MeshControlPlane: @unchecked Sendable {
         }
     }
 
-    let room: RoomConfiguration
-    let nodeID: String
+    public let room: RoomConfiguration
+    public let nodeID: String
     private var displayName: String
     private var deviceIcon: String
     private var deviceColorHex: String
@@ -177,6 +190,28 @@ final class MeshControlPlane: @unchecked Sendable {
     private let appVersion: String
     private let listenerReadyHandler: ((NWEndpoint.Port) -> Void)?
     private let connectionAttemptHandler: () -> Void
+    private let installationIdentity: InstallationIdentity?
+    private let peerPins: (any PeerPinStore)?
+    private let incomingMediaChannelHandler: ((SecurePeerChannel, AuthenticatedPeer) -> Void)?
+    private let eventPolicy: SecureRoomEventPolicy?
+    private let secureCapabilities: PeerCapabilities
+    private let incarnationID = UUID()
+    private var advertises = false
+    private var scanDeadline: DispatchWorkItem?
+    private var scanGeneration: UInt64 = 0
+    private var scanWindowExpiresAtNanos: UInt64?
+    private var secureAdmissions: [UInt64] = []
+    private var pendingCommits: [String: UUID] = [:]
+    private var pendingMediaChannels: [UUID: SecurePeerChannel] = [:]
+    private struct DirectoryEntry {
+        let hint: MeshPeerDirectoryHint
+        let expiresAtNanos: UInt64
+        var lastAttemptNanos: UInt64 = 0
+    }
+    private var peerDirectory: [String: DirectoryEntry] = [:]
+    private var lastDirectoryPublishNanos: UInt64 = 0
+    private let secureStateHandler: (String?, SecurePeerChannelState) -> Void
+    private let listenerStateHandler: (NWListener.State) -> Void
     private var replica: MeshRoomReplica
     private let roomStateSync: any RoomStateSync
     private let roomStatePersistenceHandler: (Data) -> Void
@@ -222,7 +257,9 @@ final class MeshControlPlane: @unchecked Sendable {
     private static let maximumPendingRoomStateSyncMessages = 32
     private static let maximumPendingRoomStateSyncBytes = 16 * 1_024 * 1_024
 
-    init(
+    /// Persistence callbacks return opaque local state. Pass it back through
+    /// initialRoomStateDocument unchanged; secure rooms include locally signed admission grants.
+    public init(
         room: RoomConfiguration,
         nodeID: String,
         displayName: String,
@@ -245,7 +282,13 @@ final class MeshControlPlane: @unchecked Sendable {
         roomStateReceiveCompletedHandler: @escaping ([MeshRoomEvent]) -> Void = { _ in },
         roomStateDowngradeHandler: @escaping (String?) -> Void = { _ in },
         disableRoomStateSyncDuringAuthenticationForTesting: Bool = false,
-        connectionAttemptHandler: @escaping () -> Void = {}
+        connectionAttemptHandler: @escaping () -> Void = {},
+        installationIdentity: InstallationIdentity? = nil,
+        peerPins: (any PeerPinStore)? = nil,
+        secureCapabilities: PeerCapabilities = .desktop,
+        incomingMediaChannelHandler: ((SecurePeerChannel, AuthenticatedPeer) -> Void)? = nil,
+        secureStateHandler: @escaping (String?, SecurePeerChannelState) -> Void = { _, _ in },
+        listenerStateHandler: @escaping (NWListener.State) -> Void = { _ in }
     ) {
         self.room = room
         self.nodeID = nodeID
@@ -264,16 +307,20 @@ final class MeshControlPlane: @unchecked Sendable {
         self.resyncRequestHandler = resyncRequestHandler
         self.walkieTalkieHandler = walkieTalkieHandler
         self.openLineHandler = openLineHandler
+        let eventPolicy = room.transportPolicy == .secureV2
+            ? SecureRoomEventPolicy(roomID: room.id, identity: installationIdentity, capabilities: secureCapabilities) : nil
+        self.eventPolicy = eventPolicy
         let durableState: any RoomStateSync = roomStateSyncOverride
             ?? AutomergeRoomStateSync.recovering(
                 roomID: room.id,
-                savedDocument: initialRoomStateDocument,
-                legacyEvents: initialEvents
+                savedDocument: initialRoomStateDocument.flatMap { eventPolicy?.restoreArchive($0) ?? $0 },
+                legacyEvents: initialEvents,
+                eventValidator: { eventPolicy?.accepts($0) ?? true }
             )
         self.roomStateSync = durableState
         self.roomStateSyncDisabled = false
         let durableEvents = (try? durableState.snapshot().events) ?? []
-        self.replica = MeshRoomReplica(events: initialEvents + durableEvents)
+        self.replica = MeshRoomReplica(events: (initialEvents + durableEvents).filter { eventPolicy?.accepts($0) ?? true })
         self.roomStatePersistenceHandler = roomStatePersistenceHandler
         self.roomStateReceiveCompletedHandler = roomStateReceiveCompletedHandler
         self.roomStateDowngradeHandler = roomStateDowngradeHandler
@@ -281,37 +328,56 @@ final class MeshControlPlane: @unchecked Sendable {
             disableRoomStateSyncDuringAuthenticationForTesting
         self.listenerReadyHandler = listenerReadyHandler
         self.connectionAttemptHandler = connectionAttemptHandler
+        self.installationIdentity = installationIdentity
+        self.peerPins = peerPins
+        self.secureCapabilities = secureCapabilities
+        self.incomingMediaChannelHandler = incomingMediaChannelHandler
+        self.secureStateHandler = secureStateHandler
+        self.listenerStateHandler = listenerStateHandler
         self.replicaHandler = replicaHandler
         self.participantsHandler = participantsHandler
     }
 
-    func start(advertise: Bool = true) throws {
+    public func start(advertise: Bool = true) throws {
+        try room.validateForJoining()
+        if room.transportPolicy == .secureV2 {
+            guard let installationIdentity, peerPins != nil,
+                  UUID(uuidString: nodeID) == installationIdentity.publicIdentity.nodeID,
+                  nodeID == installationIdentity.publicIdentity.nodeID.uuidString,
+                  UUID(uuidString: room.id) != nil else { throw SecureTransportError.invalidCredentials }
+        }
+        let parameters = try transportParameters(expectedPeerID: nil)
+        let listener = try NWListener(using: parameters, on: .any)
         isStopped = false
-        let listener = try NWListener(using: LocalNetworkParameters.tcp(), on: .any)
+        advertises = advertise
+        if room.transportPolicy == .secureV2 { scanWindowExpiresAtNanos = MonotonicClock.nowNanos() + 15_000_000_000 }
         if advertise {
             var txtRecord = [
                 "roomID": room.id,
                 "roomName": String(room.name.prefix(40)),
                 "nodeID": nodeID,
                 "private": room.isPrivate ? "1" : "0",
-                "version": "1",
+                "version": room.transportPolicy == .secureV2 ? "2" : "1",
                 "appVersion": appVersion,
             ]
-            if let accessProof { txtRecord["accessProof"] = accessProof }
+            if room.transportPolicy == .legacyOnly, let accessProof { txtRecord["accessProof"] = accessProof }
             listener.service = NWListener.Service(
                 name: "\(room.id.prefix(8))-\(nodeID.prefix(8))",
-                type: MeshRoomBrowser.serviceType,
+                type: room.transportPolicy == .secureV2 ? MeshRoomBrowser.secureServiceType : MeshRoomBrowser.serviceType,
                 txtRecord: NWTXTRecord(txtRecord)
             )
         }
         listener.newConnectionHandler = { [weak self] in self?.accept($0) }
         listener.stateUpdateHandler = { [weak self] state in
+            self?.listenerStateHandler(state)
             if case .ready = state, let port = listener.port { self?.listenerReadyHandler?(port) }
         }
         listener.start(queue: queue)
         self.listener = listener
 
-        if advertise {
+        if advertise, room.transportPolicy == .secureV2 {
+            startSecureScan()
+        } else if advertise {
             let browser = NWBrowser(
                 for: .bonjourWithTXTRecord(type: MeshRoomBrowser.serviceType, domain: nil),
                 using: LocalNetworkParameters.tcp()
@@ -328,6 +394,84 @@ final class MeshControlPlane: @unchecked Sendable {
 
     func connectForTesting(to endpoint: NWEndpoint, expectedNodeID: String? = nil) {
         queue.async { [weak self] in self?.connect(to: endpoint, expectedNodeID: expectedNodeID) }
+    }
+
+    /// Connects a user-selected/discovered endpoint. Its claimed address remains
+    /// a hint; v2 TLS verifies the expected installation identity before admission.
+    public func connect(to endpoint: NWEndpoint, expectedPeerID: UUID) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            if self.room.transportPolicy == .secureV2 {
+                // A fresh explicit selection owns a new bounded repair window.
+                self.scanWindowExpiresAtNanos = MonotonicClock.nowNanos() + 15_000_000_000
+            }
+            self.connect(to: endpoint, expectedNodeID: expectedPeerID.uuidString)
+        }
+    }
+
+    /// Opens a separate admitted receiver-initiated connection to a current
+    /// direct peer's authenticated listener, never its inbound ephemeral port.
+    /// Completion runs on the mesh queue. On success the caller owns the channel,
+    /// must install payload/state handlers immediately, and cancel it on leaving.
+    public func openMediaChannel(to peerID: UUID, role: ReliableChannelRole,
+        completion: @escaping (Result<(SecurePeerChannel, AuthenticatedPeer), Error>) -> Void) {
+        queue.async { [weak self] in
+            guard let self, !self.isStopped, self.room.transportPolicy == .secureV2,
+                  role == .mediaControl || role == .video,
+                  let identity = self.installationIdentity, let pins = self.peerPins,
+                  let roomID = UUID(uuidString: self.room.id),
+                  let peer = self.peers[peerID.uuidString], peer.authenticated,
+                  peer.authenticatedPeer?.nodeID == peerID,
+                  let host = self.remoteHost(of: peer), let rawPort = peer.listeningPort,
+                  let port = NWEndpoint.Port(rawValue: rawPort) else {
+                completion(.failure(SecurePeerChannelError.notAuthenticated)); return
+            }
+            guard self.pendingMediaChannels.count < 16 else {
+                completion(.failure(SecureTransportError.capacity)); return
+            }
+            do {
+                let connection = NWConnection(host: NWEndpoint.Host(host), port: port,
+                    using: try self.transportParameters(expectedPeerID: peerID))
+                let admission: SecureRoomAdmission = self.room.isPrivate
+                    ? .privateRoom(secret: self.room.secureJoinSecret ?? Data()) : .publicRoom
+                let configuration = try SecurePeerConfiguration(roomID: roomID, incarnationID: self.incarnationID,
+                    admission: admission, offer: ProtocolOffer(wireVersions: [2], stateSyncVersions: [1], capabilities: self.secureCapabilities),
+                    direction: .initiator(role))
+                let channel = SecurePeerChannel(connection: connection, identity: identity, configuration: configuration,
+                    pins: pins, queue: self.queue)
+                let operation = UUID()
+                self.pendingMediaChannels[operation] = channel
+                channel.onState = { [weak self] state in
+                    guard let self else { return }
+                    let error: Error
+                    switch state {
+                    case .failed(let failure): error = failure
+                    case .cancelled: error = SecurePeerChannelError.cancelled
+                    default: return
+                    }
+                    guard self.pendingMediaChannels.removeValue(forKey: operation) != nil else { return }
+                    completion(.failure(error))
+                }
+                channel.onAuthenticated = { [weak self, weak channel] authenticated in
+                    guard let self, let channel,
+                          self.pendingMediaChannels.removeValue(forKey: operation) != nil else { return }
+                    channel.onState = nil; channel.onAuthenticated = nil
+                    guard !self.isStopped, authenticated.nodeID == peerID, authenticated.channelRole == role else {
+                        channel.cancel(); completion(.failure(SecurePeerChannelError.notAuthenticated)); return
+                    }
+                    completion(.success((channel, authenticated)))
+                }
+                channel.start()
+            } catch { completion(.failure(error)) }
+        }
+    }
+
+    func secureConnectionsForTesting() async -> [String: UUID] {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                continuation.resume(returning: self.peers.compactMapValues { $0.authenticatedPeer?.connectionID })
+            }
+        }
     }
 
     func disconnectForTesting(peerID: String) {
@@ -370,10 +514,14 @@ final class MeshControlPlane: @unchecked Sendable {
         }
     }
 
-    func stop(completion: @escaping @Sendable () -> Void = {}) {
+    public func stop(completion: @escaping @Sendable () -> Void = {}) {
         queue.async { [self] in
             isStopped = true
+            for channel in Array(pendingMediaChannels.values) { channel.cancel() }
             browser?.cancel()
+            scanDeadline?.cancel(); scanDeadline = nil
+            scanGeneration &+= 1
+            scanWindowExpiresAtNanos = nil
             listener?.cancel()
             heartbeatTimer?.cancel()
             reconnectWorkItems.values.forEach { $0.cancel() }
@@ -381,17 +529,24 @@ final class MeshControlPlane: @unchecked Sendable {
             roomStatePersistenceWorkItem = nil
             let durableState = roomStateSync
             let persist = roomStatePersistenceHandler
+            let policy = eventPolicy
             roomStateWorkerQueue.async {
                 _ = try? durableState.compactIfNeeded()
-                persist(durableState.save())
+                let document = durableState.save()
+                if let policy {
+                    if let archive = try? policy.archive(document: document) { persist(archive) }
+                } else { persist(document) }
                 completion()
             }
-            links.values.forEach { $0.connection.cancel() }
+            links.values.forEach { cancel($0) }
             browser = nil
             listener = nil
             heartbeatTimer = nil
             links.removeAll()
             peers.removeAll()
+            pendingCommits.removeAll()
+            secureAdmissions.removeAll()
+            peerDirectory.removeAll()
             remoteParticipants.removeAll()
             lastPublishedParticipants.removeAll()
             reconnectWorkItems.removeAll()
@@ -402,7 +557,7 @@ final class MeshControlPlane: @unchecked Sendable {
         }
     }
 
-    func publishChat(_ text: String) {
+    public func publishChat(_ text: String) {
         publish(
             kind: .chat,
             senderID: nodeID,
@@ -412,10 +567,10 @@ final class MeshControlPlane: @unchecked Sendable {
         )
     }
 
-    func publishQueueAdd(_ item: RoomQueueItem) { publish(kind: .queueAdd, queueItem: item) }
-    func publishQueueRemove(_ id: String) { publish(kind: .queueRemove, queueItemID: id) }
+    public func publishQueueAdd(_ item: RoomQueueItem) { publish(kind: .queueAdd, queueItem: item) }
+    public func publishQueueRemove(_ id: String) { publish(kind: .queueRemove, queueItemID: id) }
 
-    func updateIdentity(name: String, icon: String, colorHex: String) {
+    public func updateIdentity(name: String, icon: String, colorHex: String) {
         queue.async { [weak self] in
             guard let self, !isStopped else { return }
             updateIdentityOnQueue(
@@ -427,7 +582,7 @@ final class MeshControlPlane: @unchecked Sendable {
         }
     }
 
-    func updateIdentity(name: String, icon: String, colorHex: String, profileImageData: Data?) {
+    public func updateIdentity(name: String, icon: String, colorHex: String, profileImageData: Data?) {
         queue.async { [weak self] in
             guard let self else { return }
             updateIdentityOnQueue(
@@ -463,7 +618,8 @@ final class MeshControlPlane: @unchecked Sendable {
         ))
     }
 
-    func publishWalkieTalkie(_ message: WalkieTalkieMessage) {
+    public func publishWalkieTalkie(_ message: WalkieTalkieMessage) {
+        guard localPermits(.voice) else { return }
         queue.async { [weak self] in
             guard let self,
                   message.senderID == nodeID,
@@ -486,7 +642,8 @@ final class MeshControlPlane: @unchecked Sendable {
         }
     }
 
-    func publishOpenLine(_ message: OpenLineMessage) {
+    public func publishOpenLine(_ message: OpenLineMessage) {
+        guard localPermits(.voice) else { return }
         queue.async { [weak self] in
             guard let self,
                   message.senderID == nodeID,
@@ -507,13 +664,13 @@ final class MeshControlPlane: @unchecked Sendable {
     }
 
     @discardableResult
-    func publishMediaCommand(
+    public func publishMediaCommand(
         _ command: RoomMediaCommand,
         broadcasterID: String,
         broadcasterEpoch: UInt64
     ) -> Bool {
         queue.sync {
-            guard let current = replica.broadcaster,
+            guard localPermits(.playbackControl), let current = replica.broadcaster,
                   current.nodeID == broadcasterID,
                   current.epoch == broadcasterEpoch,
                   broadcasterID == nodeID || !peers.isEmpty
@@ -544,13 +701,13 @@ final class MeshControlPlane: @unchecked Sendable {
     }
 
     @discardableResult
-    func publishResyncRequest(
+    public func publishResyncRequest(
         targetID: String?,
         broadcasterID: String,
         broadcasterEpoch: UInt64
     ) -> Bool {
         queue.sync {
-            guard let current = replica.broadcaster,
+            guard localPermits(.receiveAudio), let current = replica.broadcaster,
                   current.nodeID == broadcasterID,
                   current.epoch == broadcasterEpoch,
                   broadcasterID == nodeID || !peers.isEmpty
@@ -580,13 +737,13 @@ final class MeshControlPlane: @unchecked Sendable {
         }
     }
 
-    func publishBroadcaster(active: Bool, mediaServiceName: String? = nil) {
+    public func publishBroadcaster(active: Bool, mediaServiceName: String? = nil) {
         queue.async { [weak self] in
             guard let self else { return }
             if active {
                 publishBroadcasterEvent(
                     broadcasterID: nodeID,
-                    epoch: replica.highestBroadcasterEpoch &+ 1,
+                    epoch: replica.highestBroadcasterEpoch + 1,
                     active: true,
                     mediaServiceName: mediaServiceName
                 )
@@ -601,8 +758,8 @@ final class MeshControlPlane: @unchecked Sendable {
         }
     }
 
-    func publishPlayback(_ media: NowPlayingMedia) { publish(kind: .playback, nowPlaying: media) }
-    func publishVideo(_ enabled: Bool, broadcasterID: String, broadcasterEpoch: UInt64) {
+    public func publishPlayback(_ media: NowPlayingMedia) { publish(kind: .playback, nowPlaying: media) }
+    public func publishVideo(_ enabled: Bool, broadcasterID: String, broadcasterEpoch: UInt64) {
         publish(
             kind: .video,
             broadcasterID: broadcasterID,
@@ -628,7 +785,8 @@ final class MeshControlPlane: @unchecked Sendable {
     ) {
         queue.async { [weak self] in
             guard let self, !isStopped else { return }
-            let event = MeshRoomEvent(
+            guard localPermits(SecureRoomEventPolicy.capability(for: kind)) else { return }
+            var event = MeshRoomEvent(
                 roomID: room.id,
                 version: replica.nextVersion(nodeID: nodeID),
                 kind: kind,
@@ -645,6 +803,10 @@ final class MeshControlPlane: @unchecked Sendable {
                 nowPlaying: nowPlaying,
                 videoEnabled: videoEnabled
             )
+            if let eventPolicy {
+                guard let signed = eventPolicy.sign(event) else { return }
+                event = signed
+            }
             _ = replica.merge([event])
             ingestDurableRoomState([event], excluding: nil)
             replicaHandler(replica)
@@ -653,32 +815,46 @@ final class MeshControlPlane: @unchecked Sendable {
     }
 
     private func consider(_ results: Set<NWBrowser.Result>) {
-        for result in results {
+        for result in results.prefix(256) {
             guard case .bonjour(let record) = result.metadata,
                   record["roomID"] == room.id,
                   let remoteID = record["nodeID"],
                   remoteID != nodeID,
-                  nodeID < remoteID,
+                  (room.transportPolicy == .secureV2 || nodeID < remoteID),
                   peers[remoteID] == nil,
                   !links.values.contains(where: { $0.nodeID == remoteID })
             else { continue }
             connect(to: result.endpoint, expectedNodeID: remoteID)
+            if room.transportPolicy == .secureV2 { break }
         }
     }
 
-    private func connect(to endpoint: NWEndpoint, expectedNodeID: String?) {
+    private func connect(to endpoint: NWEndpoint, expectedNodeID: String?, hintExpiresAtNanos: UInt64? = nil) {
+        guard !isStopped else { return }
+        if let hintExpiresAtNanos, MonotonicClock.nowNanos() >= hintExpiresAtNanos { return }
+        if room.transportPolicy == .secureV2 {
+            guard expectedNodeID.map({ UUID(uuidString: $0) != nil }) ?? true,
+                  admitSecureAttempt() else { return }
+            stopSecureScan()
+        }
         connectionAttemptHandler()
-        let connection = NWConnection(to: endpoint, using: LocalNetworkParameters.tcp())
+        let parameters: NWParameters
+        do { parameters = try transportParameters(expectedPeerID: expectedNodeID.flatMap(UUID.init(uuidString:))) }
+        catch { return }
+        let connection = NWConnection(to: endpoint, using: parameters)
         let link = Link(
             connection: connection,
             initiated: true,
             roomStateSyncSession: roomStateSync.makeSession()
         )
         link.nodeID = expectedNodeID
+        link.hintExpiresAtNanos = hintExpiresAtNanos
         register(link)
     }
 
     private func accept(_ connection: NWConnection) {
+        guard !isStopped else { connection.cancel(); return }
+        if room.transportPolicy == .secureV2, !admitSecureAttempt() { connection.cancel(); return }
         register(Link(
             connection: connection,
             initiated: false,
@@ -689,6 +865,10 @@ final class MeshControlPlane: @unchecked Sendable {
     private func register(_ link: Link) {
         let identifier = ObjectIdentifier(link.connection)
         links[identifier] = link
+        if room.transportPolicy == .secureV2 {
+            registerSecure(link)
+            return
+        }
         link.connection.stateUpdateHandler = { [weak self, weak link] state in
             guard let self, let link else { return }
             switch state {
@@ -708,6 +888,223 @@ final class MeshControlPlane: @unchecked Sendable {
         }
     }
 
+    private func transportParameters(expectedPeerID: UUID?) throws -> NWParameters {
+        guard room.transportPolicy != .migrationRequired else { throw RoomSecurityPolicyError.migrationRequired }
+        guard room.transportPolicy == .secureV2 else { return LocalNetworkParameters.tcp() }
+        guard let installationIdentity, let peerPins else { throw SecureTransportError.invalidCredentials }
+        return try SecureNetworkParameters.tcp(identity: installationIdentity, expectedPeerID: expectedPeerID,
+            pins: peerPins, firstContact: .explicitRoomJoin, verificationQueue: queue)
+    }
+
+    private func admitSecureAttempt() -> Bool {
+        let now = MonotonicClock.nowNanos()
+        secureAdmissions.removeAll { now >= $0 && now - $0 >= 1_000_000_000 }
+        guard secureAdmissions.count < 16, links.count < 128,
+              links.values.filter({ !$0.authenticated }).count < 16 else { return false }
+        secureAdmissions.append(now)
+        return true
+    }
+
+    private func registerSecure(_ link: Link) {
+        guard let installationIdentity, let peerPins, let roomID = UUID(uuidString: room.id) else { cancel(link); return }
+        do {
+            let admission: SecureRoomAdmission = room.isPrivate ? .privateRoom(secret: room.secureJoinSecret ?? Data()) : .publicRoom
+            let roles: Set<ReliableChannelRole> = incomingMediaChannelHandler == nil ? [.roomControl] : [.roomControl, .mediaControl, .video]
+            let configuration = try SecurePeerConfiguration(roomID: roomID, incarnationID: incarnationID, admission: admission,
+                offer: ProtocolOffer(wireVersions: [2], stateSyncVersions: [1], capabilities: secureCapabilities),
+                direction: link.initiated ? .initiator(.roomControl) : .responder(allowedChannelRoles: roles))
+            let channel = SecurePeerChannel(connection: link.connection, identity: installationIdentity,
+                                             configuration: configuration, pins: peerPins, queue: queue)
+            link.secureChannel = channel
+            channel.onState = { [weak self, weak link] state in
+                guard let self, let link else { return }
+                self.secureStateHandler(link.nodeID, state)
+                switch state { case .failed, .cancelled: self.remove(link); default: break }
+            }
+            channel.onAuthenticated = { [weak self, weak link, weak channel] peer in
+                guard let self, let link, let channel, !self.isStopped,
+                      self.links[ObjectIdentifier(link.connection)] === link else { return }
+                let peerID = peer.nodeID.uuidString
+                guard peerID != self.nodeID, link.nodeID == nil || link.nodeID == peerID else { self.cancel(link); return }
+                link.authenticatedPeer = peer
+                link.nodeID = peerID
+                link.lastPayloadNanos = MonotonicClock.nowNanos()
+                if peer.channelRole != .roomControl {
+                    guard let handler = self.incomingMediaChannelHandler else { self.cancel(link); return }
+                    self.links.removeValue(forKey: ObjectIdentifier(link.connection))
+                    channel.onState = nil; channel.onPayload = nil
+                    handler(channel, peer)
+                    return
+                }
+                guard self.eventPolicy?.admit(peer, initiated: link.initiated) ?? true else { self.cancel(link); return }
+                // Saved or relayed events wait for independent admission of their author.
+                self.roomStateWorkerQueue.async { [weak self] in
+                    guard let self, let events = try? self.roomStateSync.snapshot().events else { return }
+                    self.queue.async {
+                        guard !self.isStopped else { return }
+                        if !self.replica.merge(self.validRoomEvents(events)).isEmpty { self.replicaHandler(self.replica) }
+                    }
+                }
+                self.send(self.hello(for: link), to: link)
+                self.queue.asyncAfter(deadline: .now() + 6) { [weak self, weak link] in
+                    guard let self, let link, !link.authenticated,
+                          self.links[ObjectIdentifier(link.connection)] === link else { return }
+                    self.cancel(link)
+                }
+            }
+            channel.onPayload = { [weak self, weak link] payload in
+                guard let self, let link, link.authenticatedPeer?.channelRole == .roomControl,
+                      self.links[ObjectIdentifier(link.connection)] === link,
+                      payload.count <= SecurePeerChannel.maximumPayloadBytes else { return }
+                link.lastPayloadNanos = MonotonicClock.nowNanos()
+                for envelope in link.decoder.append(payload) { self.handle(envelope, from: link) }
+                if link.decoder.isOverflowed { self.cancel(link) }
+            }
+            channel.start()
+        } catch { cancel(link); remove(link) }
+    }
+
+    private func cancel(_ link: Link) {
+        if let channel = link.secureChannel { channel.cancel() } else { link.connection.cancel() }
+    }
+
+    private func startSecureScan() {
+        guard advertises, !isStopped, browser == nil, peers.isEmpty,
+              !links.values.contains(where: { !$0.authenticated }),
+              let windowDeadline = scanWindowExpiresAtNanos else { return }
+        let now = MonotonicClock.nowNanos()
+        guard now < windowDeadline else { return }
+        scanGeneration &+= 1
+        let generation = scanGeneration
+        let parameters = NWParameters(); parameters.includePeerToPeer = true
+        let next = NWBrowser(for: .bonjourWithTXTRecord(type: MeshRoomBrowser.secureServiceType, domain: nil), using: parameters)
+        next.browseResultsChangedHandler = { [weak self, weak next] results, _ in
+            guard let self, let next, self.browser === next, self.scanGeneration == generation else { return }
+            self.consider(results)
+        }
+        next.stateUpdateHandler = { [weak self, weak next] state in
+            guard let self, let next, self.browser === next else { return }
+            if case .failed = state { self.stopSecureScan() }
+        }
+        browser = next
+        next.start(queue: queue)
+        let deadline = DispatchWorkItem { [weak self] in
+            guard let self, self.scanGeneration == generation else { return }
+            self.stopSecureScan()
+        }
+        scanDeadline = deadline
+        queue.asyncAfter(deadline: .now() + .nanoseconds(Int(windowDeadline - now)), execute: deadline)
+    }
+
+    private func stopSecureScan() {
+        guard room.transportPolicy == .secureV2 else { return }
+        scanGeneration &+= 1
+        scanDeadline?.cancel(); scanDeadline = nil
+        browser?.cancel(); browser = nil
+    }
+
+    private func remoteHost(of link: Link) -> String? {
+        let endpoints = [link.connection.currentPath?.remoteEndpoint, link.connection.endpoint].compactMap { $0 }
+        for endpoint in endpoints {
+            if case .hostPort(let host, _) = endpoint { return String(describing: host) }
+        }
+        return nil
+    }
+
+    private func directoryHint(for link: Link) -> MeshPeerDirectoryHint? {
+        guard let peer = link.authenticatedPeer, peer.channelRole == .roomControl else { return nil }
+        return MeshPeerDirectoryHint(peerID: peer.nodeID.uuidString, incarnationID: peer.incarnationID.uuidString,
+                                     host: remoteHost(of: link), port: link.listeningPort)
+    }
+
+    private func rememberDirectPeer(_ link: Link) {
+        guard let hint = directoryHint(for: link) else { return }
+        peerDirectory[hint.peerID] = DirectoryEntry(hint: hint, expiresAtNanos: MonotonicClock.nowNanos() + 30_000_000_000)
+    }
+
+    private func publishSecureDirectory(to recipient: Link? = nil) {
+        guard room.transportPolicy == .secureV2 else { return }
+        let now = MonotonicClock.nowNanos()
+        var hints = [MeshPeerDirectoryHint(peerID: nodeID, incarnationID: incarnationID.uuidString,
+                                          host: nil, port: listener?.port?.rawValue)]
+        // Only advertise direct, live authenticated peers. Re-advertising cached
+        // hints would let a forwarding cycle indefinitely extend a dead peer's TTL.
+        for link in peers.values.sorted(by: { ($0.nodeID ?? "") < ($1.nodeID ?? "") }) {
+            guard now < link.lastPayloadNanos || now - link.lastPayloadNanos < broadcasterLeaseNanos,
+                  let hint = directoryHint(for: link) else { continue }
+            hints.append(hint)
+            rememberDirectPeer(link)
+        }
+        let envelope = MeshEnvelope(type: "mesh_peer_directory", meshPeerDirectory: Array(hints.prefix(128)))
+        if let recipient { send(envelope, to: recipient) } else { broadcast(envelope) }
+    }
+
+    private func receiveSecureDirectory(_ hints: [MeshPeerDirectoryHint], from source: Link) {
+        guard hints.count <= 128, let sourcePeer = source.authenticatedPeer else { cancel(source); return }
+        let now = MonotonicClock.nowNanos()
+        expireSecureDirectory(nowNanos: now)
+        for hint in hints {
+            guard let peerID = UUID(uuidString: hint.peerID), peerID.uuidString == hint.peerID, hint.peerID != nodeID,
+                  let incarnation = UUID(uuidString: hint.incarnationID), incarnation.uuidString == hint.incarnationID,
+                  (1...30).contains(hint.validForSeconds), hint.port != 0,
+                  hint.host.map({ !$0.isEmpty && $0.utf8.count <= 255 && $0.rangeOfCharacter(from: .whitespacesAndNewlines) == nil }) ?? true,
+                  peerDirectory[hint.peerID] != nil || peerDirectory.count < 128 else { continue }
+            if peers[hint.peerID] != nil {
+                if let direct = peers[hint.peerID] { rememberDirectPeer(direct) }
+                continue
+            }
+            let host: String?
+            if hint.peerID == sourcePeer.nodeID.uuidString {
+                guard incarnation == sourcePeer.incarnationID else { continue }
+                host = remoteHost(of: source)
+            } else { host = hint.host }
+            let resolved = MeshPeerDirectoryHint(peerID: hint.peerID, incarnationID: hint.incarnationID,
+                                                 host: host, port: hint.port, validForSeconds: hint.validForSeconds)
+            let previous = peerDirectory[hint.peerID]
+            let changed = previous?.hint.incarnationID != resolved.incarnationID || previous?.hint.host != host || previous?.hint.port != hint.port
+            if changed { reconnectAttempts[hint.peerID] = 0 }
+            peerDirectory[hint.peerID] = DirectoryEntry(hint: resolved,
+                expiresAtNanos: now + UInt64(hint.validForSeconds) * 1_000_000_000,
+                lastAttemptNanos: changed ? 0 : previous?.lastAttemptNanos ?? 0)
+        }
+        repairSecureDirectory(nowNanos: now)
+    }
+
+    private func directoryEndpoint(_ hint: MeshPeerDirectoryHint) -> NWEndpoint {
+        if let host = hint.host, let rawPort = hint.port, let port = NWEndpoint.Port(rawValue: rawPort) {
+            return .hostPort(host: NWEndpoint.Host(host), port: port)
+        }
+        return .service(name: "\(room.id.prefix(8))-\(hint.peerID.prefix(8))", type: MeshRoomBrowser.secureServiceType,
+                        domain: "local.", interface: nil)
+    }
+
+    private func repairSecureDirectory(nowNanos now: UInt64) {
+        guard room.transportPolicy == .secureV2, !isStopped else { return }
+        expireSecureDirectory(nowNanos: now)
+        var attempts = 0
+        for id in peerDirectory.keys.sorted() {
+            guard attempts < 2, peers[id] == nil, reconnectWorkItems[id] == nil,
+                  (reconnectAttempts[id] ?? 0) < 4,
+                  !links.values.contains(where: { $0.nodeID == id }),
+                  var entry = peerDirectory[id],
+                  entry.lastAttemptNanos == 0 || (now >= entry.lastAttemptNanos && now - entry.lastAttemptNanos >= 5_000_000_000)
+            else { continue }
+            entry.lastAttemptNanos = now; peerDirectory[id] = entry
+            attempts += 1
+            connect(to: directoryEndpoint(entry.hint), expectedNodeID: id, hintExpiresAtNanos: entry.expiresAtNanos)
+        }
+    }
+
+    private func expireSecureDirectory(nowNanos: UInt64) {
+        for id in peerDirectory.keys where peerDirectory[id]!.expiresAtNanos <= nowNanos {
+            peerDirectory.removeValue(forKey: id)
+            if peers[id] == nil {
+                reconnectWorkItems.removeValue(forKey: id)?.cancel()
+                reconnectAttempts.removeValue(forKey: id)
+            }
+        }
+    }
+
     private func hello(for link: Link, advertiseRoomStateSync: Bool = true) -> MeshEnvelope {
         let publicRoom = RoomConfiguration(
             id: room.id,
@@ -715,7 +1112,8 @@ final class MeshControlPlane: @unchecked Sendable {
             creatorPeerID: room.creatorPeerID,
             isPrivate: room.isPrivate,
             accessKey: nil,
-            joinedAt: room.joinedAt
+            joinedAt: room.joinedAt,
+            transportPolicy: room.transportPolicy
         )
         return MeshEnvelope(
             type: "hello",
@@ -728,7 +1126,8 @@ final class MeshControlPlane: @unchecked Sendable {
             appVersion: appVersion,
             versionVector: replica.versionVector,
             roomStateSyncVersion: advertiseRoomStateSync && !roomStateSyncDisabled ? 1 : nil,
-            authNonce: room.isPrivate ? link.localNonce : nil
+            authNonce: room.isPrivate && room.transportPolicy == .legacyOnly ? link.localNonce : nil,
+            meshListeningPort: room.transportPolicy == .secureV2 ? listener?.port?.rawValue : nil
         )
     }
 
@@ -737,7 +1136,7 @@ final class MeshControlPlane: @unchecked Sendable {
         return Self.makeAccessProof(roomID: room.id, accessKey: key)
     }
 
-    static func makeAccessProof(roomID: String, accessKey: String) -> String {
+    public static func makeAccessProof(roomID: String, accessKey: String) -> String {
         SHA256.hash(data: Data("\(roomID):\(accessKey)".utf8))
             .map { String(format: "%02x", $0) }
             .joined()
@@ -779,9 +1178,34 @@ final class MeshControlPlane: @unchecked Sendable {
     }
 
     private func handle(_ envelope: MeshEnvelope, from link: Link) {
+        if room.transportPolicy == .secureV2 {
+            guard let peer = link.authenticatedPeer, peer.channelRole == .roomControl else { cancel(link); return }
+            switch envelope.type {
+            case "mesh_ready":
+                guard link.receivedHello, envelope.requestID == peer.connectionID.uuidString else { cancel(link); return }
+                link.remoteReady = true
+                scheduleSecureSelection(peerID: peer.nodeID.uuidString)
+                return
+            case "mesh_commit":
+                guard peer.nodeID.uuidString < nodeID, link.receivedHello, link.remoteReady,
+                      envelope.requestID == peer.connectionID.uuidString else { cancel(link); return }
+                send(MeshEnvelope(type: "mesh_commit_ack", requestID: peer.connectionID.uuidString), to: link)
+                completeAuthentication(link, remoteID: peer.nodeID.uuidString)
+                return
+            case "mesh_commit_ack":
+                guard nodeID < peer.nodeID.uuidString, link.commitSent,
+                      pendingCommits[peer.nodeID.uuidString] == peer.connectionID,
+                      envelope.requestID == peer.connectionID.uuidString else { cancel(link); return }
+                completeAuthentication(link, remoteID: peer.nodeID.uuidString)
+                return
+            case "auth": cancel(link); return
+            default: break
+            }
+        }
         if envelope.type == "hello" {
             guard envelope.room?.id == room.id,
                   envelope.room?.isPrivate == room.isPrivate,
+                  envelope.room?.transportPolicy == room.transportPolicy,
                   let remoteID = envelope.nodeID,
                   remoteID.utf8.count <= 128,
                   (envelope.displayName?.utf8.count ?? 0) <= 160,
@@ -791,6 +1215,9 @@ final class MeshControlPlane: @unchecked Sendable {
                 link.connection.cancel()
                 return
             }
+            if room.transportPolicy == .secureV2, remoteID != link.authenticatedPeer?.nodeID.uuidString {
+                cancel(link); return
+            }
             guard link.nodeID == nil || link.nodeID == remoteID else {
                 // The discovered service no longer belongs to the advertised
                 // peer. Do not reconnect forever to the same stale endpoint.
@@ -799,7 +1226,7 @@ final class MeshControlPlane: @unchecked Sendable {
                 return
             }
             let shouldBeInitiated = nodeID < remoteID
-            guard link.initiated == shouldBeInitiated else {
+            guard room.transportPolicy == .secureV2 || link.initiated == shouldBeInitiated else {
                 if link.initiated {
                     link.connection.cancel()
                 } else {
@@ -814,6 +1241,7 @@ final class MeshControlPlane: @unchecked Sendable {
             link.nodeID = remoteID
             link.remoteVersionVector = envelope.versionVector
             link.displayName = envelope.displayName
+            link.listeningPort = envelope.meshListeningPort
             let remoteAppearance = DeviceAppearance.generated(from: remoteID)
             let sanitizedAppearance = DeviceAppearance(
                 icon: envelope.deviceIcon ?? remoteAppearance.icon,
@@ -837,7 +1265,13 @@ final class MeshControlPlane: @unchecked Sendable {
             if disableRoomStateSyncDuringAuthenticationForTesting {
                 roomStateSyncDisabled = true
             }
-            if room.isPrivate {
+            if room.transportPolicy == .secureV2 {
+                link.receivedHello = true
+                if !link.authenticated, let peer = link.authenticatedPeer {
+                    send(MeshEnvelope(type: "mesh_ready", requestID: peer.connectionID.uuidString), to: link)
+                    scheduleSecureSelection(peerID: remoteID)
+                }
+            } else if room.isPrivate {
                 guard let nonce = envelope.authNonce, nonce.count <= 128,
                       let key = room.accessKey else { link.connection.cancel(); return }
                 send(MeshEnvelope(
@@ -871,6 +1305,9 @@ final class MeshControlPlane: @unchecked Sendable {
 
         guard link.authenticated, let remoteID = link.nodeID, peers[remoteID] === link else { return }
         switch envelope.type {
+        case "mesh_peer_directory":
+            guard room.transportPolicy == .secureV2 else { return }
+            receiveSecureDirectory(envelope.meshPeerDirectory ?? [], from: link)
         case "sync":
             merge(Array((envelope.events ?? []).prefix(maximumSyncEvents)), excluding: link)
             if let vector = envelope.versionVector {
@@ -894,6 +1331,7 @@ final class MeshControlPlane: @unchecked Sendable {
                 acceptHeartbeat(originID: originID, generation: generation, sequence: sequence, excluding: link)
             }
         case "media_command":
+            guard permitsTransient(envelope, from: link, capability: .playbackControl) else { return }
             guard let originID = envelope.nodeID,
                   !originID.isEmpty,
                   originID.utf8.count <= 128,
@@ -926,6 +1364,7 @@ final class MeshControlPlane: @unchecked Sendable {
             // keeps controls working briefly while the mesh reconnects.
             if isNew { broadcast(envelope, excluding: link) }
         case "resync_request":
+            guard permitsTransient(envelope, from: link, capability: .receiveAudio) else { return }
             guard let originID = envelope.nodeID,
                   !originID.isEmpty,
                   originID.utf8.count <= 128,
@@ -955,6 +1394,7 @@ final class MeshControlPlane: @unchecked Sendable {
             }
             if isNew { broadcast(envelope, excluding: link) }
         case "room_action_ack":
+            guard permitsTransient(envelope, from: link, capability: .broadcast) else { return }
             guard let ackOriginID = envelope.nodeID,
                   !ackOriginID.isEmpty,
                   ackOriginID.utf8.count <= 128,
@@ -990,6 +1430,7 @@ final class MeshControlPlane: @unchecked Sendable {
             cacheParticipant(from: link, id: remoteID)
             publishParticipants()
         case "walkie_talkie":
+            guard permitsTransient(envelope, from: link, capability: .voice) else { return }
             let hopCount = envelope.walkieTalkieHopCount ?? 0
             guard let message = envelope.walkieTalkie,
                   isValidWalkieTalkie(message),
@@ -1021,6 +1462,7 @@ final class MeshControlPlane: @unchecked Sendable {
                 excluding: link
             )
         case "open_line":
+            guard permitsTransient(envelope, from: link, capability: .voice) else { return }
             let hopCount = envelope.walkieTalkieHopCount ?? 0
             guard let message = envelope.openLine,
                   isValidOpenLine(message),
@@ -1050,6 +1492,31 @@ final class MeshControlPlane: @unchecked Sendable {
         }
     }
 
+    private func scheduleSecureSelection(peerID: String) {
+        guard nodeID < peerID else { return }
+        queue.asyncAfter(deadline: .now() + .milliseconds(20)) { [weak self] in self?.selectSecureLink(peerID: peerID) }
+    }
+
+    private func selectSecureLink(peerID: String) {
+        guard !isStopped, pendingCommits[peerID] == nil else { return }
+        let candidates = links.values.filter {
+            !$0.authenticated && $0.receivedHello && $0.remoteReady && $0.authenticatedPeer?.nodeID.uuidString == peerID
+        }.sorted { ($0.authenticatedPeer?.connectionID.uuidString ?? "") < ($1.authenticatedPeer?.connectionID.uuidString ?? "") }
+        guard let selected = candidates.first, let connectionID = selected.authenticatedPeer?.connectionID else { return }
+        if let existing = peers[peerID] {
+            let now = MonotonicClock.nowNanos()
+            if now < existing.lastPayloadNanos || now - existing.lastPayloadNanos < broadcasterLeaseNanos {
+                // A failed candidate must never displace an active channel. A
+                // half-open channel can be replaced after application liveness expires.
+                queue.asyncAfter(deadline: .now() + .seconds(3)) { [weak self] in self?.selectSecureLink(peerID: peerID) }
+                return
+            }
+        }
+        pendingCommits[peerID] = connectionID
+        selected.commitSent = true
+        send(MeshEnvelope(type: "mesh_commit", requestID: connectionID.uuidString), to: selected)
+    }
+
     private func merge(_ events: [MeshRoomEvent], excluding source: Link) {
         let valid = validRoomEvents(Array(events.prefix(maximumSyncEvents)))
         let inserted = replica.merge(valid)
@@ -1065,9 +1532,21 @@ final class MeshControlPlane: @unchecked Sendable {
         for event in inserted { broadcast(MeshEnvelope(type: "event", event: event), excluding: source) }
     }
 
+    private func localPermits(_ capability: PeerCapabilities) -> Bool {
+        room.transportPolicy != .secureV2 || secureCapabilities.contains(capability)
+    }
+
+    private func permitsTransient(_ envelope: MeshEnvelope, from link: Link, capability: PeerCapabilities) -> Bool {
+        guard room.transportPolicy == .secureV2 else { return true }
+        // Transient commands have no durable signature. Only their admitted
+        // origin may send them; the v2 directory repairs missing direct links.
+        guard let origin = envelope.nodeID, origin == link.nodeID else { return false }
+        return eventPolicy?.permits(author: origin, capability: capability) == true
+    }
+
     private func validRoomEvents(_ events: [MeshRoomEvent]) -> [MeshRoomEvent] {
         events.filter {
-            $0.roomID == room.id && ($0.text?.utf8.count ?? 0) <= 8_192 &&
+            (eventPolicy?.accepts($0) ?? true) && $0.roomID == room.id && MeshRoomReplica.hasPlausibleCounters($0) && ($0.text?.utf8.count ?? 0) <= 8_192 &&
                 (try? MeshEnvelope(type: "event", event: $0).encodedLine().count).map {
                     $0 <= MeshEnvelopeDecoder.maximumLineBytes
                 } == true
@@ -1297,6 +1776,19 @@ final class MeshControlPlane: @unchecked Sendable {
         if let id = disconnectedID, wasCanonical {
             peers.removeValue(forKey: id)
         }
+        if room.transportPolicy == .secureV2 {
+            if wasCanonical, peers.isEmpty, scanWindowExpiresAtNanos == nil {
+                scanWindowExpiresAtNanos = MonotonicClock.nowNanos() + 15_000_000_000
+            }
+            if let id = disconnectedID, let connectionID = link.authenticatedPeer?.connectionID,
+               pendingCommits[id] == connectionID { pendingCommits.removeValue(forKey: id) }
+            guard !isStopped else { return }
+            if let id = disconnectedID { scheduleSecureSelection(peerID: id) }
+            if let id = disconnectedID, peers[id] == nil, link.initiated {
+                scheduleReconnect(to: link.connection.endpoint, peerID: id, hintExpiresAtNanos: link.hintExpiresAtNanos)
+            } else if peers.isEmpty { startSecureScan() }
+            return
+        }
         let canonicalPeerExists = disconnectedID.map { peers[$0] != nil } ?? false
         if Self.shouldReconnectAfterRemoval(
             initiated: link.initiated,
@@ -1317,8 +1809,16 @@ final class MeshControlPlane: @unchecked Sendable {
         initiated && !canonicalPeerExists && remoteID.map { localID < $0 } == true
     }
 
-    private func scheduleReconnect(to endpoint: NWEndpoint, peerID: String) {
+    private func scheduleReconnect(to endpoint: NWEndpoint, peerID: String, hintExpiresAtNanos: UInt64? = nil) {
         guard !isStopped, peers[peerID] == nil else { return }
+        if let hintExpiresAtNanos, MonotonicClock.nowNanos() >= hintExpiresAtNanos {
+            reconnectWorkItems.removeValue(forKey: peerID)?.cancel()
+            reconnectAttempts.removeValue(forKey: peerID)
+            return
+        }
+        if room.transportPolicy == .secureV2, (reconnectAttempts[peerID] ?? 0) >= 4 {
+            startSecureScan(); return
+        }
         reconnectWorkItems.removeValue(forKey: peerID)?.cancel()
         let attempt = min((reconnectAttempts[peerID] ?? 0) + 1, 4)
         reconnectAttempts[peerID] = attempt
@@ -1326,7 +1826,7 @@ final class MeshControlPlane: @unchecked Sendable {
         let work = DispatchWorkItem { [weak self] in
             guard let self, !isStopped, peers[peerID] == nil else { return }
             reconnectWorkItems.removeValue(forKey: peerID)
-            connect(to: endpoint, expectedNodeID: peerID)
+            connect(to: endpoint, expectedNodeID: peerID, hintExpiresAtNanos: hintExpiresAtNanos)
         }
         reconnectWorkItems[peerID] = work
         queue.asyncAfter(deadline: .now() + .milliseconds(delayMillis), execute: work)
@@ -1338,7 +1838,8 @@ final class MeshControlPlane: @unchecked Sendable {
         active: Bool,
         mediaServiceName: String?
     ) {
-        let event = MeshRoomEvent(
+        guard localPermits(.broadcast) else { return }
+        var event = MeshRoomEvent(
             roomID: room.id,
             version: replica.nextVersion(nodeID: nodeID),
             kind: .broadcaster,
@@ -1347,12 +1848,19 @@ final class MeshControlPlane: @unchecked Sendable {
             mediaServiceName: mediaServiceName,
             isBroadcasting: active
         )
+        if let eventPolicy {
+            guard let signed = eventPolicy.sign(event) else { return }
+            event = signed
+        }
         _ = replica.merge([event])
         replicaHandler(replica)
         broadcast(MeshEnvelope(type: "event", event: event))
     }
 
     private func retireExpiredBroadcasterIfNeeded(nowNanos: UInt64) {
+        // v2 liveness is an observation. A timeout cannot author a durable
+        // broadcaster-stop event on somebody else's behalf.
+        guard room.transportPolicy == .legacyOnly else { return }
         guard let current = replica.broadcaster, current.nodeID != nodeID else { return }
         guard let lastSeen = lastSeenNanos[current.nodeID] else {
             lastSeenNanos[current.nodeID] = nowNanos
@@ -1388,6 +1896,13 @@ final class MeshControlPlane: @unchecked Sendable {
             broadcast(MeshEnvelope(type: "heartbeat", nodeID: nodeID, heartbeatSequence: heartbeatSequence, heartbeatGeneration: heartbeatGeneration))
             retireExpiredBroadcasterIfNeeded(nowNanos: now)
             expireDisconnectedParticipantsIfNeeded(nowNanos: now)
+            if room.transportPolicy == .secureV2 {
+                repairSecureDirectory(nowNanos: now)
+                if now >= lastDirectoryPublishNanos, now - lastDirectoryPublishNanos >= 5_000_000_000 {
+                    lastDirectoryPublishNanos = now
+                    publishSecureDirectory()
+                }
+            }
         }
         heartbeatTimer = timer
         timer.resume()
@@ -1416,7 +1931,14 @@ final class MeshControlPlane: @unchecked Sendable {
             return nowNanos >= lastSeen && nowNanos - lastSeen >= participantLeaseNanos
         }
         guard !expired.isEmpty else { return }
-        for id in expired { remoteParticipants.removeValue(forKey: id) }
+        for id in expired {
+            remoteParticipants.removeValue(forKey: id)
+            if room.transportPolicy == .secureV2 {
+                lastSeenNanos.removeValue(forKey: id)
+                latestHeartbeatSequence.removeValue(forKey: id)
+                latestHeartbeatGeneration.removeValue(forKey: id)
+            }
+        }
         publishParticipants()
     }
 
@@ -1526,10 +2048,24 @@ final class MeshControlPlane: @unchecked Sendable {
             // A fresh authenticated link may be replacing an AWDL socket that
             // died only on the initiator's side. Adopt it so a half-open
             // canonical connection cannot reject every recovery attempt.
-            existing.connection.cancel()
+            cancel(existing)
         }
         link.authenticated = true
+        link.hintExpiresAtNanos = nil
         peers[remoteID] = link
+        if room.transportPolicy == .secureV2 {
+            pendingCommits.removeValue(forKey: remoteID)
+            stopSecureScan()
+            scanWindowExpiresAtNanos = nil
+            for candidate in links.values where candidate !== link && candidate.nodeID == remoteID {
+                cancel(candidate)
+            }
+            rememberDirectPeer(link)
+            publishSecureDirectory(to: link)
+            if let hint = directoryHint(for: link) {
+                broadcast(MeshEnvelope(type: "mesh_peer_directory", meshPeerDirectory: [hint]), excluding: link)
+            }
+        }
         if roomStateSyncDisabled, link.roomStateSyncVersion == 1 {
             disableRoomStateSync(
                 for: link,
@@ -1647,11 +2183,33 @@ final class MeshControlPlane: @unchecked Sendable {
         versionVector: [String: UInt64]?,
         to link: Link
     ) {
-        for envelope in Self.synchronizationEnvelopes(
-            events: events,
-            versionVector: versionVector
-        ) {
-            send(envelope, to: link)
+        guard !link.snapshotSendInFlight, link.snapshotSendQueue.isEmpty else {
+            link.snapshotResendRequested = true
+            return
+        }
+        link.snapshotSendQueue = Self.synchronizationEnvelopes(events: events, versionVector: versionVector)
+        drainSnapshot(to: link)
+    }
+
+    private func drainSnapshot(to link: Link) {
+        guard !link.snapshotSendInFlight, links[ObjectIdentifier(link.connection)] === link else { return }
+        guard !link.snapshotSendQueue.isEmpty else {
+            if link.snapshotResendRequested {
+                link.snapshotResendRequested = false
+                sendSync(events: replica.events, versionVector: replica.versionVector, to: link)
+            }
+            return
+        }
+        let envelope = link.snapshotSendQueue.removeFirst()
+        guard let data = try? envelope.encodedLine() else { cancel(link); return }
+        link.snapshotSendInFlight = true
+        sendWire(data, to: link) { [weak self, weak link] error in
+            guard let self, let link else { return }
+            self.queue.async {
+                link.snapshotSendInFlight = false
+                guard error == nil else { self.cancel(link); return }
+                self.drainSnapshot(to: link)
+            }
         }
     }
 
@@ -1860,17 +2418,17 @@ final class MeshControlPlane: @unchecked Sendable {
         else { return }
         let data = link.roomStateSyncSendQueue.removeFirst()
         link.roomStateSyncSendInFlight = true
-        link.connection.send(content: data, completion: .contentProcessed { [weak self, weak link] error in
+        sendWire(data, to: link) { [weak self, weak link] error in
             guard let self, let link else { return }
             self.queue.async {
                 link.roomStateSyncSendInFlight = false
                 guard error == nil else {
-                    link.connection.cancel()
+                    self.cancel(link)
                     return
                 }
                 self.drainRoomStateSync(to: link)
             }
-        })
+        }
     }
 
     private func scheduleRoomStatePersistence(delay: DispatchTimeInterval = .milliseconds(250)) {
@@ -1881,7 +2439,11 @@ final class MeshControlPlane: @unchecked Sendable {
             roomStatePersistenceWorkItem = nil
             roomStateWorkerQueue.async { [weak self] in
                 guard let self else { return }
-                let document = roomStateSync.save()
+                let document: Data
+                if let eventPolicy {
+                    guard let archive = try? eventPolicy.archive(document: roomStateSync.save()) else { return }
+                    document = archive
+                } else { document = roomStateSync.save() }
                 queue.async { [weak self] in
                     guard let self, !isStopped else { return }
                     roomStatePersistenceHandler(document)
@@ -1961,15 +2523,15 @@ final class MeshControlPlane: @unchecked Sendable {
             link.connection.cancel()
             return
         }
-        link.connection.send(content: data, completion: .contentProcessed { [weak self, weak link] _ in
+        sendWire(data, to: link) { [weak self, weak link] _ in
             guard let self, let link else { return }
             self.queue.async {
                 guard self.links[ObjectIdentifier(link.connection)] === link,
                       !link.authenticated
                 else { return }
-                link.connection.cancel()
+                self.cancel(link)
             }
-        })
+        }
     }
 
     private func send(_ envelope: MeshEnvelope, to links: [Link]) {
@@ -2023,21 +2585,36 @@ final class MeshControlPlane: @unchecked Sendable {
               let item = link.realtimeVoiceQueue.popFirst()
         else { return }
         link.realtimeVoiceSendInFlight = true
-        link.connection.send(content: item.data, completion: .contentProcessed { [weak self, weak link] error in
+        sendWire(item.data, to: link) { [weak self, weak link] error in
             guard let self, let link else { return }
             self.queue.async {
                 guard self.links[ObjectIdentifier(link.connection)] === link else { return }
                 link.realtimeVoiceSendInFlight = false
                 if error != nil {
-                    link.connection.cancel()
+                    self.cancel(link)
                 } else {
                     self.drainRealtimeVoice(to: link)
                 }
             }
-        })
+        }
     }
 
     private func send(_ data: Data, to link: Link) {
-        link.connection.send(content: data, completion: .contentProcessed { _ in })
+        sendWire(data, to: link)
+    }
+
+    private func sendWire(_ data: Data, to link: Link, completion: ((Error?) -> Void)? = nil) {
+        if let channel = link.secureChannel {
+            guard data.count <= SecurePeerChannel.maximumPayloadBytes else {
+                completion?(SecurePeerChannelError.oversized); cancel(link); return
+            }
+            channel.send(payload: data) { result in
+                switch result { case .success: completion?(nil); case .failure(let error): completion?(error) }
+            }
+        } else {
+            // A secure room must never reach an unwrapped connection write.
+            guard room.transportPolicy == .legacyOnly else { completion?(SecurePeerChannelError.notAuthenticated); cancel(link); return }
+            link.connection.send(content: data, completion: .contentProcessed { completion?($0) })
+        }
     }
 }

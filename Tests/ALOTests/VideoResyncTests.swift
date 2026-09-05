@@ -52,3 +52,4 @@ struct VideoResyncTests {
         #expect(gate.admission(forCaptureTimeNanos: 1) != nil)
     }
 }
+@testable import ALOAppleMedia
