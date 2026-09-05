@@ -92,6 +92,7 @@ struct HostListenerTimingDiagnostics: Sendable, Equatable {
     var audioSent: UInt64 = 0
     var audioExpiredWait: UInt64 = 0
     var audioExpiredAge: UInt64 = 0
+    var audioAdmissionRejected: UInt64 = 0
     var audioReplaced: UInt64 = 0
     var audioDiscardedBoundary: UInt64 = 0
 }
@@ -164,7 +165,7 @@ struct DiagnosticRoomContext: Sendable, Equatable {
             for (index, listener) in host.listeners.enumerated() {
                 let age = listener.reportAgeMilliseconds.map(Self.milliseconds) ?? "not reported"
                 parts.append("listener \(index + 1): network \(Self.milliseconds(listener.recommendedBufferMilliseconds)), hardware floor \(Self.milliseconds(listener.hardwareFloorMilliseconds)), network vote \(listener.isTimingEligible ? "eligible" : "late join"), report age \(age)")
-                parts.append("audio packets: \(listener.audioSent)/\(listener.audioEnqueued) submitted, wait expired \(listener.audioExpiredWait), capture expired \(listener.audioExpiredAge), congestion replaced \(listener.audioReplaced), transition discarded \(listener.audioDiscardedBoundary)")
+                parts.append("audio packets: \(listener.audioSent)/\(listener.audioEnqueued) submitted, wait expired \(listener.audioExpiredWait), capture expired \(listener.audioExpiredAge), local-send budget rejected \(listener.audioAdmissionRejected), congestion replaced \(listener.audioReplaced), transition discarded \(listener.audioDiscardedBoundary)")
             }
         }
         let ready = hasBroadcaster && (role == .broadcaster || timing?.receiver?.roundTripMilliseconds != nil)

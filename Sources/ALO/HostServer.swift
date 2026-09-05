@@ -16,6 +16,7 @@ final class HostServer {
     private static let maximumPendingAudioPackets = 16
     private static let maximumPendingAudioWaitNanos: UInt64 = 80_000_000
     private static let maximumPendingAudioSpanNanos: UInt64 = 80_000_000
+    private static let maximumAudioCompletionSamples = 8
     private struct PendingAudio {
         let data: Data
         let captureTimeNanos: UInt64
@@ -30,6 +31,7 @@ final class HostServer {
         let sent: UInt64
         let expiredWait: UInt64
         let expiredAge: UInt64
+        let admissionRejected: UInt64
         let replaced: UInt64
         let discardedBoundary: UInt64
     }
@@ -63,6 +65,11 @@ final class HostServer {
         var audioSent: UInt64 = 0
         var audioExpiredWait: UInt64 = 0
         var audioExpiredAge: UInt64 = 0
+        var audioAdmissionRejected: UInt64 = 0
+        // Local contentProcessed durations, not receiver acknowledgments or
+        // measured network delivery. A bounded recent maximum is a conservative
+        // admission estimate; it cannot guarantee a remote playback deadline.
+        var audioCompletionDurations: [UInt64] = []
         var audioReplaced: UInt64 = 0
         var audioDiscardedBoundary: UInt64 = 0
         var lastAudioAgeWarningNanos: UInt64?
@@ -120,6 +127,7 @@ final class HostServer {
         advertise: Bool = true,
         listenerReadyHandler: ((NWEndpoint.Port) -> Void)? = nil,
         outboundSend: OutboundSend? = nil,
+        // Must be thread-safe: read on the owning queue and at send-callback entry.
         audioSendNowNanos: @escaping () -> UInt64 = MonotonicClock.nowNanos,
         audioBackpressurePolicy: AudioBackpressurePolicy = .boundedLatest(maxInFlight: 8),
         playbackRequestHandler: ((RoomMediaCommand) -> Bool)? = nil,
@@ -203,6 +211,7 @@ final class HostServer {
                         hardwareFloorMilliseconds: Double(client.outputLatencyPlayoutFloorNanos) / 1_000_000,
                         audioEnqueued: client.audioEnqueued, audioSent: client.audioSent,
                         audioExpiredWait: client.audioExpiredWait, audioExpiredAge: client.audioExpiredAge,
+                        audioAdmissionRejected: client.audioAdmissionRejected,
                         audioReplaced: client.audioReplaced, audioDiscardedBoundary: client.audioDiscardedBoundary
                     )
                 }
@@ -220,6 +229,7 @@ final class HostServer {
                     inFlight: client.audioSendsInFlight, pending: client.pendingAudio.count,
                     enqueued: client.audioEnqueued, sent: client.audioSent,
                     expiredWait: client.audioExpiredWait, expiredAge: client.audioExpiredAge,
+                    admissionRejected: client.audioAdmissionRejected,
                     replaced: client.audioReplaced, discardedBoundary: client.audioDiscardedBoundary)
             }
         }
@@ -488,6 +498,7 @@ final class HostServer {
             client.name = uniqueName(for: proposedName, client: client)
             client.audio?.cancel()
             client.audioSendsInFlight = 0
+            client.audioCompletionDurations.removeAll()
             discardPendingAudio(for: client)
             client.audioBacklogCongested = false
             let connection = NWConnection(
@@ -1041,10 +1052,28 @@ final class HostServer {
         // expire old audio even if capture has stopped.
         while client.audioSendsInFlight < max(1, maxInFlight), !client.pendingAudio.isEmpty {
             let packet = client.pendingAudio.removeFirst()
+            let submittedAt = audioSendNowNanos()
+            let captureAge = submittedAt >= packet.captureTimeNanos ? submittedAt - packet.captureTimeNanos : 0
+            let schedulingHeadroom = RoomTiming.renderSchedulingHeadroomNanos
+            let admissionBudget = groupPlayoutDelayNanos > schedulingHeadroom
+                ? groupPlayoutDelayNanos - schedulingHeadroom : 0
+            let estimatedLocalCompletion = client.audioCompletionDurations.max() ?? 0
+            // Queue wait alone ignores capture acquisition age and work already
+            // occupying this path. Preserve fresh FIFO packets, but do not admit
+            // one whose observed local service estimate consumes its remaining
+            // room budget. Subtraction avoids overflowing unsigned timestamps.
+            guard captureAge < admissionBudget,
+                  estimatedLocalCompletion < admissionBudget - captureAge else {
+                client.audioAdmissionRejected &+= 1
+                continue
+            }
             client.audioSendsInFlight += 1
             client.audioSent &+= 1
             send(packet.data, over: connection, isComplete: true) { [weak self, weak client] error in
                 guard let self, let client else { return }
+                // Sample at callback entry, before the additional owning-queue
+                // dispatch. The queued admission check separately sees that age.
+                let completedAt = self.audioSendNowNanos()
                 self.queue.async { [weak self, weak client] in
                     guard let self, let client, client.audio === connection,
                           self.clients[ObjectIdentifier(client.control)] === client else { return }
@@ -1056,12 +1085,23 @@ final class HostServer {
                         self.discardPendingAudio(for: client)
                         return
                     }
+                    if completedAt >= submittedAt {
+                        client.audioCompletionDurations.append(completedAt - submittedAt)
+                        if client.audioCompletionDurations.count > Self.maximumAudioCompletionSamples {
+                            client.audioCompletionDurations.removeFirst()
+                        }
+                    }
                     self.drainAudio(for: client, over: connection, maxInFlight: maxInFlight)
                 }
             }
         }
         if client.audioSendsInFlight <= max(1, maxInFlight) / 2, client.pendingAudio.isEmpty {
             client.audioBacklogCongested = false
+        }
+        if client.audioSendsInFlight == 0, client.pendingAudio.isEmpty {
+            // A giant stall must not permanently exclude fresh capture after
+            // recovery. The next bounded burst probes the now-idle path anew.
+            client.audioCompletionDurations.removeAll()
         }
     }
 

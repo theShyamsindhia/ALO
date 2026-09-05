@@ -6,6 +6,47 @@ import ALOCore
 
 @Suite("Bounded audio sender bursts", .serialized)
 struct AudioSenderBurstTests {
+    @Test func observedLocalSendDurationRejectsOldQueuedAudioButAdmitsFreshAudio() throws {
+        let fixture = try AudioBurstFixture()
+        defer { fixture.stop() }
+        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 8 * 240 * 2),
+            captureTimeNanos: fixture.audioNowNanos - 40_000_000)
+        fixture.barrier()
+        fixture.advanceAudioClock(by: 128_000_000)
+        fixture.completeOne()
+        // One successful local completion took128ms; seven sends still occupy
+        // the same path.125ms-old capture cannot fit that observed service plus
+        // the room's scheduling headroom, while fresh capture still can.
+        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 240 * 2),
+            captureTimeNanos: fixture.audioNowNanos - 125_000_000)
+        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 240 * 2),
+            captureTimeNanos: fixture.audioNowNanos)
+        fixture.barrier()
+        fixture.drain()
+        #expect(fixture.probe.sequences == Array(0..<8) + [9])
+        let snapshot = try #require(fixture.host.audioSenderSnapshot().first)
+        #expect(snapshot.admissionRejected == 1 && snapshot.expiredWait == 0 && snapshot.expiredAge == 0)
+        #expect(snapshot.enqueued == snapshot.sent + snapshot.admissionRejected)
+        let diagnostic = try #require(fixture.host.diagnosticsSnapshot().listeners.first)
+        #expect(diagnostic.audioAdmissionRejected == 1)
+    }
+
+    @Test func fullyIdleAfterGiantLocalCompletionStallAllowsFreshProbeBurst() throws {
+        let fixture = try AudioBurstFixture()
+        defer { fixture.stop() }
+        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 8 * 240 * 2),
+            captureTimeNanos: fixture.audioNowNanos)
+        fixture.barrier()
+        fixture.advanceAudioClock(by: 1_000_000_000)
+        fixture.drain()
+        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 12 * 240 * 2),
+            captureTimeNanos: fixture.audioNowNanos)
+        fixture.barrier()
+        fixture.drain()
+        #expect(fixture.probe.sequences == Array(0..<20),
+            "A stale service estimate must not permanently bar fresh audio after the path drains")
+    }
+
     @Test func expiredPendingDoesNotMakeFreshCaptureCongested() throws {
         let fixture = try AudioBurstFixture()
         defer { fixture.stop() }

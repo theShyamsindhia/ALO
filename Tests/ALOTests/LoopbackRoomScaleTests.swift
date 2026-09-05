@@ -440,6 +440,33 @@ struct LoopbackRoomScaleTests {
         #expect(!ledger.snapshot.isComplete, "Failed sends cannot be hidden as intentional expiry")
     }
 
+    @Test("Audio transport instrumentation validates headers without decoding PCM")
+    func audioProbeHeaderValidationAndCost() throws {
+        let encoded = AudioPacket(sequence: 73, frameIndex: 0, captureTimeNanos: 1,
+            samples: [Int16](repeating: 42, count: 480)).encoded()
+        #expect(AudioProbeHeader.sequence(in: encoded) == 73)
+        var prefixed = Data([0, 0, 0])
+        prefixed.append(encoded)
+        #expect(AudioProbeHeader.sequence(in: prefixed.dropFirst(3)) == 73)
+        #expect(AudioProbeHeader.sequence(in: encoded.dropLast()) == nil)
+        for offset in [0, 4, 6, 28, 32] {
+            var invalid = encoded
+            invalid[offset] = 0
+            #expect(AudioProbeHeader.sequence(in: invalid) == nil)
+        }
+        let iterations = 1_600
+        var fullChecksum: UInt32 = 0
+        let fullStart = MonotonicClock.nowNanos()
+        for _ in 0..<iterations { fullChecksum &+= try #require(AudioPacket(data: encoded)).sequence }
+        let fullDuration = MonotonicClock.nowNanos() - fullStart
+        var headerChecksum: UInt32 = 0
+        let headerStart = MonotonicClock.nowNanos()
+        for _ in 0..<iterations { headerChecksum &+= try #require(AudioProbeHeader.sequence(in: encoded)) }
+        let headerDuration = MonotonicClock.nowNanos() - headerStart
+        #expect(headerChecksum == fullChecksum)
+        print("Audio probe for1600 sends: full PCM decode \(fullDuration / 1_000_000)ms, header-only \(headerDuration / 1_000_000)ms")
+    }
+
     @Test("Receiver detects a late timeline and hard-resynchronizes")
     func receiverDetectsAndResynchronizes() throws {
         let player = try SynchronizedPlayer()
@@ -1099,6 +1126,7 @@ struct LoopbackRoomScaleTests {
     func lateListenerCannotRetimeActiveBroadcaster() throws {
         let ready = DispatchSemaphore(value: 0)
         let state = PortState()
+        let captureClock = LoopbackCaptureClock()
         let host = HostServer(
             roomName: "Late-listener timing test \(UUID().uuidString)",
             advertise: false,
@@ -1106,6 +1134,7 @@ struct LoopbackRoomScaleTests {
                 state.set(port)
                 ready.signal()
             },
+            audioSendNowNanos: { captureClock.now },
             localParticipantID: "loopback-peer-109"
         )
         try host.start()
@@ -1125,8 +1154,7 @@ struct LoopbackRoomScaleTests {
             repeating: 0,
             count: Int(AudioPacket.framesPerPacket) * Int(AudioPacket.channelCount)
         )
-        let playbackStart = MonotonicClock.nowNanos()
-        host.acceptAudio(samples: samples, captureTimeNanos: playbackStart)
+        host.acceptAudio(samples: samples, captureTimeNanos: captureClock.now)
         #expect(waitUntil(timeout: 2) { broadcasterOutput.packetCount == 1 })
 
         let lateListener = HeadlessLoopbackPeer(index: 110)
@@ -1138,7 +1166,7 @@ struct LoopbackRoomScaleTests {
 
         host.acceptAudio(
             samples: samples,
-            captureTimeNanos: playbackStart + 20_000_000
+            captureTimeNanos: captureClock.advance(by: 20_000_000)
         )
         #expect(waitUntil(timeout: 2) { lateListener.packetCount >= 1 })
         #expect(lateListener.playoutDelays.last == RoomTiming.defaultPlayoutDelayNanos)
@@ -1156,7 +1184,7 @@ struct LoopbackRoomScaleTests {
         let packetsBeforeRecommendation = lateListener.packetCount
         host.acceptAudio(
             samples: samples,
-            captureTimeNanos: playbackStart + 40_000_000
+            captureTimeNanos: captureClock.advance(by: 20_000_000)
         )
         #expect(waitUntil(timeout: 2) {
             lateListener.packetCount > packetsBeforeRecommendation
@@ -1182,19 +1210,19 @@ struct LoopbackRoomScaleTests {
                 hostReady.signal()
             },
             outboundSend: { connection, data, isComplete, completion in
-                let packet = AudioPacket(data: data)
+                let sequence = AudioProbeHeader.sequence(in: data)
                 let destinationPort: UInt16?
                 if case .hostPort(_, let port) = connection.endpoint {
                     destinationPort = port.rawValue
                 } else { destinationPort = nil }
-                if let packet {
-                    submissions.submitted(port: destinationPort, sequence: packet.sequence)
+                if let sequence {
+                    submissions.submitted(port: destinationPort, sequence: sequence)
                 }
                 let started = MonotonicClock.nowNanos()
                 let measuredCompletion: (NWError?) -> Void = { error in
-                    if let packet {
+                    if let sequence {
                         completionLatencies.record(MonotonicClock.nowNanos() - started)
-                        submissions.completed(port: destinationPort, sequence: packet.sequence, error: error)
+                        submissions.completed(port: destinationPort, sequence: sequence, error: error)
                     }
                     completion(error)
                 }
@@ -1289,7 +1317,7 @@ struct LoopbackRoomScaleTests {
             print("Audio sender drained: \(drainedSenders)")
             for sender in drainedSenders {
                 #expect(sender.enqueued == UInt64(expectedPacketCount))
-                #expect(sender.sent + sender.expiredWait + sender.expiredAge
+                #expect(sender.sent + sender.expiredWait + sender.expiredAge + sender.admissionRejected
                     + sender.replaced + sender.discardedBoundary == sender.enqueued,
                     "Every captured packet must be accounted for at sender quiescence")
                 #expect(sender.sent == UInt64(submitted.submitted[sender.udpPort]?.count ?? 0))
@@ -1796,6 +1824,34 @@ private final class AudioSubmissionLedger: @unchecked Sendable {
             } else {
                 state.successful[port, default: []].insert(sequence)
             }
+        }
+    }
+}
+
+private final class LoopbackCaptureClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = MonotonicClock.nowNanos()
+    var now: UInt64 { lock.withLock { value } }
+    func advance(by nanos: UInt64) -> UInt64 {
+        lock.withLock { value += nanos; return value }
+    }
+}
+
+private enum AudioProbeHeader {
+    /// Inspect only the wire header on the sender queue. Receiver tests still
+    /// decode/validate the complete PCM payload, as the real receiver does.
+    static func sequence(in data: Data) -> UInt32? {
+        guard data.count >= 36 else { return nil }
+        return data.withUnsafeBytes { bytes in
+            guard bytes.loadUnaligned(fromByteOffset: 0, as: UInt32.self).littleEndian == 0x5745_5241,
+                  bytes[4] == 1,
+                  bytes.loadUnaligned(fromByteOffset: 6, as: UInt16.self).littleEndian == AudioPacket.channelCount,
+                  bytes.loadUnaligned(fromByteOffset: 28, as: UInt32.self).littleEndian == AudioPacket.sampleRate
+            else { return nil }
+            let frames = bytes.loadUnaligned(fromByteOffset: 32, as: UInt16.self).littleEndian
+            guard frames > 0, frames <= AudioPacket.framesPerPacket,
+                  data.count == 36 + Int(frames) * Int(AudioPacket.channelCount) * 2 else { return nil }
+            return bytes.loadUnaligned(fromByteOffset: 8, as: UInt32.self).littleEndian
         }
     }
 }
