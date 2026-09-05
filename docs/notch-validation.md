@@ -1,81 +1,78 @@
 # Notch integration validation
 
-The original DynamicNotch feature engine is embedded as `ALONotchRuntime`.
-The ALO master switch, every additional feature, and every home-page selection
-start off. Saved choices survive master-off, but background services stop and
-queued/restorable content is cleared. The runtime is constructed lazily on first
-enable. Settings alone do not grant system permissions.
+The original DynamicNotch engine, activity views and settings are compiled as
+`ALONotchRuntime`. ALO supplies host lifecycle and room playback data/commands.
+The initial custom room-bar wrapper was removed.
 
-## Automated checks
+## Automated verification
 
-Release checkpoint before the visual correction: **255 XCTest feature tests + 757 Swift Testing tests
-in 125 suites = 1,012 passing tests**, with no failures. The latter includes ALO’s
-room, networking, UI layout and newly merged DJ Studio regression tests.
+[macOS 15 / Xcode 26.3 CI on c25a18d](https://github.com/theShyamsindhia/ALO/actions/runs/33998201793)
+passes **276 XCTest + 787 Swift Testing tests in 132 suites (1,063 total)**,
+**7 room-scenario tests**, and the unsigned iOS simulator build. Scenarios cover
+music/voice/chat restarts, interrupted delivery and partition recovery.
 
+The subsequent main merge preserves the updated room-settings interface, lyrics and arena multiplayer.
+Focused merged settings, activation, room-adapter, lyrics and arena checks pass locally.
+Normal optimized development packaging and deep/strict signature verification pass.
+Release tests retain the repository's existing test-entrypoint optimizer workaround;
+packaging retains normal optimization.
 
-- Original and adapted feature tests cover animation, geometry, settings persistence,
-  fake system events, temporary database watchers, cancellation, downloads, and
-  file conversion. Fixtures use temporary data and fake Contacts authorization.
-- Native render tests cover the original settings, local timer, converter and ALO
-  room surfaces. Resource tests require localized labels, images, sounds and the
-  media adapter to resolve from the packaged resource bundle.
-- An idle check enables the master with all features off and asserts no service is
-  running. A final full-suite sample used 0.023 seconds of process CPU over 2 seconds with
-  no increase in peak RSS. This measures the test process and inert feature engine,
-  not whole-app energy use or enabled camera/conversion workloads.
-- Local release testing uses the repository's existing Swift test-entrypoint
-  optimizer workaround. Release packaging retains normal optimization.
+Coverage includes original geometry, motion, settings, fake system events, temporary
+database watchers, conversion, cancellation and default-off lifecycle. The automatic
+activation regression enables the master once and changes feature preferences without
+manually reconciling or restarting the runtime. Base and root settings publishers have
+stable identity so those changes reach observers on older Combine versions.
 
-## Storage and packaging
+Native callback and autorelease regressions cover the macOS 15 isolated-destructor
+backdeployment failures found during CI. ARC-only native-view owners use explicit
+nonisolated destructors; existing substantive shutdown destructors retain their cleanup.
 
-The notch runtime resource bundle is approximately 4.7 MiB. The full reference
-source tree, test fixtures, original onboarding assets, compiler caches and dSYM
-files are not included in the installed app. Lottie and the original updater are
-excluded. Release packaging preserves a separate dSYM and strips debug/local
-symbols from the distributed executable while retaining exports and Swift
-reflection metadata. Original license and provenance notices are packaged.
+## UI and lock-screen states
 
-Lyrics use 128-entry in-memory LRU caches per provider with no HTTP disk cache.
-Artwork caching is limited to 64 images / 8 MiB; screenshot path history is released
-on stop. Tray, temporary sharing and screenshot staging use ALO-specific directories
-and do not share cleanup folders with DynamicNotch. Files intentionally copied into
-the tray and conversion exports are user-owned storage and are retained until removed.
+Main **Settings → Notch** was visually verified in the running development app with
+the master off. The UI control service disconnected during some earlier inspections;
+original-view native renders provide the feature-level visual checks.
 
-Optimized Apple Silicon development package: **37 MiB installed**, including **4.7 MiB notch resources** and approximately **13 MiB ALO icon resources**. The notch resource size excludes compiled feature code. Packaging, deep/strict signature validation and packaged CLI help pass. Main settings → Notch was verified through native accessibility with the master off. The UI control service repeatedly disconnected during further feature-page inspection; native view rendering provides the visual checks below. The test master toggle was restored to off. The final rebuilt development app was reopened and its main Settings → Notch tab visually verified with the master off. No production app was replaced.
+Original player, battery, file tray, non-notch island, settings, timer and converter
+views were rendered and inspected. The lock-screen settings and full artwork/lyrics
+panel use the original views with a temporary defaults domain, fake paused track and
+bundled placeholder art. Preview switches are intentionally enabled only in that
+fixture; defaults for users remain off. No actual lock or network request is required
+by these render tests.
 
-The corrected main-settings and lock-screen local full run passes **270 XCTest + 787 Swift Testing tests in 132 suites (1,057 total)**. Focused state/cleanup checks pass, including cancelled lyrics retry and queued callback invalidation. One earlier secure-UDP validation timeout did not recur in either subsequent full run; timing limits were unchanged.
+Lock-screen tests cover no song, paused progress, missing artwork, missing/failed
+lyrics, unlock cancellation, same-track retry, late results after shutdown, and queued
+callbacks after invalidation. Ended sessions do not retain old artwork. The full-screen
+lock player follows system Now Playing; room media is a separate original-player adapter.
 
-## Hardware and environment limits
+## Storage and lifecycle
 
-Tests with injected services establish lifecycle behavior, not access grants or
-compatibility of private system interfaces on every macOS version. Real camera,
-Bluetooth accessories, global Now Playing, Apple Clock, Mail/Messages, HUD keys,
-Focus, lock screen, physical display changes and multi-Mac playback still need
-validation on the target hardware when those features are enabled.
+The optimized Apple Silicon development app occupies approximately **37 MiB**,
+including **4.7 MiB notch resources** and **13 MiB ALO icon resources**. Resource size
+excludes compiled feature code. Full reference source, compiler caches, dSYM files,
+onboarding assets, Lottie and the upstream updater are excluded from the installed app.
+Symbols remain outside the app; original license and provenance notices are packaged.
 
-The local iOS build is blocked by this machine's Xcode 26.6 installation: its
-IDESimulatorFoundation cannot load a symbol from the installed DVTDownloads
-framework. This is an environment failure before application compilation. The
-repository's CI uses pinned Xcode 26.3 and runs an unsigned iOS simulator build.
+Master, feature and home-page switches start off. The runtime is lazy; master-off stops
+services and clears queued/restorable content while retaining user choices. Camera and
+system-stat sampling are visibility-controlled. An inert-engine test measured 0.023
+seconds of process CPU over 2 seconds with no peak-RSS increase; this is not a whole-app
+energy measurement or a measurement of enabled camera/conversion workloads.
 
-No installed production app is replaced by these checks.
+Lyrics caches are bounded to 128 entries per provider without HTTP disk caching.
+Artwork caching is limited to 64 images / 8 MiB. Screenshot history is released on stop.
+Tray, sharing and screenshot staging use ALO-specific directories. User tray copies and
+conversion exports remain until the user removes them.
 
-Full XCTest discovery on this machine emits Apple Contacts/CoreData initialization
-errors. A debugger trace identified XCTest's `allSubclasses` enumeration loading
-ContactsUI metadata, rather than an application resolver call. Isolated Mail (11)
-and Messages watcher (8) tests pass without these errors and use denied fake resolvers.
+## Validation limits
 
-The final visual correction removes the initial room-bar wrapper. The host uses the
-original panel factory, hosting view, activity layout and hit rectangle. A separate
-Room media opt-in supplies ALO metadata and supported playback commands to the
-original player. Focused corrected-render/adapter/cleanup tests pass (20 XCTest
-and 4 Swift Testing cases). Original player, battery, tray and island PNGs were
-visually inspected; no custom room card remains.
+Injected-service tests do not establish permission grants or compatibility of private
+macOS interfaces on every version. Actual camera, Bluetooth, global media, Apple Clock,
+Mail/Messages, HUD keys, Focus, physical display changes, lock-screen presentation and
+multi-Mac playback require target-hardware checks when enabled. The user's Mac was not
+locked and no production app was replaced.
 
-CI on macOS 15 exposed a Swift isolated-deinitializer backdeployment crash in
-Mail/Messages reader cleanup. Safe empty nonisolated destructors and task-aware
-XCTest fixture lifetimes address it; background-release regressions cover this path.
-
-Original full-screen lock artwork/lyrics and lock settings were rendered by a passing native test using a temporary defaults domain, fake paused track and bundled placeholder art. The settings preview intentionally enables the three options in its fixture; user defaults remain off. The original views and layout are used directly, without an actual lock or network request.
-
-The final ownership audit also passes all **275 runtime XCTest checks plus the runtime-resource Swift test** locally. ARC-only owners used by native views have explicit nonisolated destructors to avoid the observed macOS 15 backdeployment failure; classes with substantive shutdown destructors retain that cleanup. Native dispatched/autorelease and root-replacement regressions exercise the affected ownership paths.
+Local iOS building is blocked by an Xcode 26.6 simulator-framework installation error;
+the pinned CI iOS build passes. Local full XCTest discovery also emits Apple Contacts
+initialization errors; a debugger trace identified XCTest subclass discovery loading
+ContactsUI metadata. Reader fixtures use temporary data and fake denied authorization.
