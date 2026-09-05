@@ -1084,8 +1084,10 @@ final class HostServer {
             let admissionBudget = groupPlayoutDelayNanos > schedulingHeadroom
                 ? groupPlayoutDelayNanos - schedulingHeadroom : 0
             let estimatedLocalCompletion = client.audioCompletionDurations.max() ?? 0
-            let recentCompletionInterval = client.audioCompletionIntervals.isEmpty ? 0
-                : client.audioCompletionIntervals.reduce(0, +) / UInt64(client.audioCompletionIntervals.count)
+            // Completion callbacks may arrive in a burst after a slow service
+            // interval. Averaging those near-zero intervals erases the observed
+            // backlog cost just when delayed capture needs a conservative budget.
+            let recentCompletionInterval = client.audioCompletionIntervals.max() ?? 0
             // An outstanding interval is already at least this long, even
             // before its completion arrives. Otherwise a slowing path keeps
             // admitting against an obsolete fast rate until the next callback.
@@ -1100,7 +1102,7 @@ final class HostServer {
             guard captureAge < admissionBudget,
                   estimatedLocalCompletion < admissionBudget - captureAge,
                   // Early completions understate a growing in-flight backlog.
-                  // Budget its recent average service rate too, without multiplying
+                  // Budget its recent slowest service interval too, without multiplying
                   // timestamps or treating local completion as a remote ACK.
                   completionInterval < (admissionBudget - captureAge)
                     / UInt64(client.audioSendsInFlight + 1) else {
