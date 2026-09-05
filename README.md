@@ -1,6 +1,6 @@
 # ALO
 
-Free, synchronized system audio with optional screen sharing for Macs on the same local network.
+Free, synchronized system audio with optional screen sharing between locally connected Macs.
 
 ALO creates a persistent local group with synchronized 48 kHz stereo audio, optional
 full-screen video sharing, current album artwork, a per-Mac mixer, participant presence, group
@@ -18,7 +18,15 @@ queue state are stored locally.
 
 - macOS 14.2 or newer
 - Built-in, wired, USB, or Bluetooth audio output
-- All Macs on the same Wi-Fi/LAN, with client isolation disabled
+- Macs that can discover and reach each other locally. The same Wi-Fi/LAN is the
+  recommended setup; client isolation or firewall rules can block connections.
+
+ALO enables Apple's peer-to-peer networking for discovery and media/control
+connections where macOS makes those paths available. It does not require an
+internet connection for room traffic. However, 0.14.0 does **not** yet guarantee
+AirDrop-style, router-free operation between Macs on different networks. The
+expanded nearby/iOS transport and shared-annotation integrations are still in
+development and are not included in this Mac release.
 
 ## Run the Mac app
 
@@ -162,9 +170,11 @@ ALO separates room coordination from the high-rate media stream:
 - Every member advertises and discovers the room over Bonjour and maintains direct
   TCP control links to the other members. A deterministic peer-ID rule prevents two
   duplicate links between the same pair of Macs.
-- Chat, queue changes, playback metadata, video state, and broadcaster ownership are
-  immutable room events. Peers deduplicate events, exchange per-peer version vectors,
-  and gossip missing entries until their replicas converge.
+- Durable chat and queue state synchronize through **Automerge**, with a separate
+  sync session for each reliable peer connection. A replacement connection starts
+  with fresh sync knowledge; older peers use the bounded legacy event-sync path.
+- Presence, playback commands, broadcaster ownership, video state, and voice stay
+  on ALO's realtime control plane. Automerge is not the audio clock or media transport.
 - The current broadcaster sends timestamped audio and video directly to all listeners.
   This keeps one shared media timeline without making the room creator a permanent
   server. If the broadcaster leaves, the room stays connected and silent until any
@@ -176,10 +186,14 @@ ALO separates room coordination from the high-rate media stream:
 - Each Mac retains durable queue state and up to 500 chat messages from the last seven
   days. Transient broadcaster ownership is deliberately not restored after relaunch.
 
-Public rooms are discoverable and joinable by devices on the LAN. Private rooms require
-the same room ID and invite key; peers prove possession during the control handshake.
-Private admission prevents an uninvited ALO peer from joining, but room traffic is not
-yet end-to-end encrypted, so use both room types only on a trusted local network.
+Public rooms are discoverable and joinable by devices on reachable local links.
+Private rooms require the same room ID and invite key; peers prove possession during
+the control handshake. Private broadcast media uses shared-key TLS for media control
+and video, plus authenticated, replay-protected audio packets. Update every Mac in a
+private room to a compatible version. This does not provide forward secrecy or the
+future nearby transport's installation-identity model. Room mesh traffic, including
+chat and voice, is not end-to-end encrypted, and public media remains unencrypted:
+use trusted local links for both room types.
 
 ## How synchronization works
 
@@ -198,11 +212,15 @@ yet end-to-end encrypted, so use both room types only on a trusted local network
   current broadcaster, applied to its active system media player, and rebroadcast to the room.
 - Listening Macs publish the room as their active macOS Now Playing session, allowing
   system and accessory transport buttons to use the same broadcaster-authoritative command path.
-- Video follows the same room target and capture timestamps as audio, preserving lip sync.
+- Video follows the audio timeline, with bounded send/decode/presentation queues
+  and fresh-keyframe recovery. Sync diagnostics report audio render drift and screen
+  handoff lateness; stale or missing measurements are not reported as verified sync.
+  These measurements do not replace physical speaker/display lip-sync testing.
 - Audio uses about 1.54 Mb/s per receiving Mac. Video targets about 4 Mb/s at up to
   1280×720 and 30 fps using Apple’s hardware H.264 encoder.
 - Packet loss becomes a short silence rather than delaying every receiver.
-- Room traffic is LAN-only and currently unencrypted. Use it only on a trusted network.
+- Room traffic stays on local network paths, without a cloud media relay. See the
+  private-media protections and remaining mesh-traffic limitations above.
 - Spotify artwork is resolved once per track through Spotify’s public HTTPS artwork
   endpoint; no Spotify account token is used. Other players use macOS Now Playing data
   when the system makes it available.
