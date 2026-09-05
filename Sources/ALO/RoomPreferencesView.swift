@@ -4,6 +4,7 @@ import SwiftUI
 struct RoomPreferencesView: View {
     @ObservedObject var model: ALOViewModel
     @ObservedObject private var lyrics: LyricsController
+    @State private var showsAbout = false
 
     init(model: ALOViewModel) {
         self.model = model
@@ -125,7 +126,13 @@ struct RoomPreferencesView: View {
                     Button("Shortcut Mapper…", action: model.showShortcutMapper)
                     Button("Diagnostics…", action: model.showDiagnostics)
                 }
-                Button("App settings…", action: model.showAppSettings)
+                HStack(spacing: 8) {
+                    Button("App settings…", action: model.showAppSettings)
+                    Button("About ALO…") { showsAbout = true }
+                        .popover(isPresented: $showsAbout, arrowEdge: .trailing) {
+                            AboutALOView(model: model)
+                        }
+                }
 
                 Divider()
 
@@ -216,5 +223,58 @@ struct RoomPreferencesView: View {
             Spacer()
             Text(value.map { String(format: "%.0f ms", $0) } ?? "Measuring…").monospacedDigit()
         }
+    }
+}
+
+private struct AboutALOView: View {
+    @ObservedObject var model: ALOViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 13) {
+                Image(nsImage: NSApp.applicationIconImage)
+                    .resizable()
+                    .interpolation(.high)
+                    .scaledToFit()
+                    .frame(width: 58, height: 58)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("ALO").font(.title2.bold())
+                    Text(versionDescription).foregroundStyle(.secondary)
+                    if let available = model.availableUpdateVersion {
+                        Label("ALO \(available) is available", systemImage: "arrow.down.circle.fill")
+                            .foregroundStyle(.tint)
+                    }
+                }
+            }
+
+            Divider()
+
+            Button(model.availableUpdateVersion == nil ? "Check for Updates" : "Check Again") {
+                model.checkForUpdates()
+            }
+            .disabled(!model.canCheckForUpdates)
+            .help(model.canCheckForUpdates
+                  ? "Check the official ALO GitHub release for a newer signed version"
+                  : "Update checks are available in packaged builds")
+
+            Text(model.canCheckForUpdates
+                 ? "Updates are downloaded from the official ALO GitHub releases and verified before installation."
+                 : "This development build cannot install app updates automatically.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .font(.system(size: 12))
+        .padding(18)
+        .frame(width: 310)
+    }
+
+    private var versionDescription: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+            ?? (model.canCheckForUpdates ? "—" : "Development")
+        guard let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
+              !build.isEmpty else { return "Version \(version)" }
+        return "Version \(version) · Build \(build)"
     }
 }

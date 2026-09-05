@@ -805,7 +805,7 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
         NSApp.mainMenu = mainMenu
     }
 
-    @objc private func checkForUpdates(_ sender: Any?) {
+    @objc func checkForUpdates(_ sender: Any?) {
         updater.checkForUpdates(userInitiated: true)
     }
 
@@ -3093,6 +3093,12 @@ final class ALOViewModel: ObservableObject {
 
     func showAppSettings() {
         (NSApp.delegate as? ALOAppDelegate)?.showSettings(nil)
+    }
+
+    var canCheckForUpdates: Bool { !ALOAppFlavor.isDevelopment }
+
+    func checkForUpdates() {
+        (NSApp.delegate as? ALOAppDelegate)?.checkForUpdates(nil)
     }
 
     func setChatViewportAtLatest(_ id: UUID, _ atLatest: Bool) {
