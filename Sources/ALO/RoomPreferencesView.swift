@@ -130,7 +130,7 @@ struct RoomPreferencesView: View {
                 Divider()
 
                 Toggle(isOn: $lyrics.enabled) {
-                    settingLabel("Show lyrics in chat", help: LyricsController.privacyNotice)
+                    settingLabel("Show lyrics below the player", help: LyricsController.privacyNotice)
                 }
 
                 Divider()

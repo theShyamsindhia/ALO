@@ -67,6 +67,25 @@ struct SecureMeshTests {
         #expect(left.count == 1 && right.count == 1)
     }
 
+    @Test func authenticatedPeersTransferChunkedChatAttachments() async throws {
+        let room = RoomConfiguration.secure(name: "File transfer")
+        let sender = try SecureMeshNode(room: room), receiver = try SecureMeshNode(room: room)
+        defer { sender.stop(); receiver.stop() }
+        try sender.start(); try receiver.start()
+        let port = try await receiver.readyPort()
+        sender.control.connectForTesting(to: .hostPort(host: "127.0.0.1", port: port), expectedNodeID: receiver.id)
+        try await meshEventually { receiver.state.read { $0.participants.count == 2 } }
+
+        let data = Data((0..<(RoomChatAttachmentPacket.chunkBytes * 2 + 37)).map { UInt8($0 % 253) })
+        let attachment = RoomChatAttachment(fileName: "sample.dat", contentType: "application/octet-stream", byteCount: data.count)
+        let payload = try #require(RoomChatAttachmentPayload(attachment: attachment, data: data))
+        sender.control.publishChatAttachment(payload)
+        try await meshEventually {
+            receiver.state.read { $0.chatAttachments[sender.id]?.attachment == attachment }
+        }
+        #expect(receiver.state.read { $0.chatAttachments[sender.id]?.data == data })
+    }
+
     @Test func simultaneousPublicDialsAgreeOnOneConnection() async throws {
         let room = RoomConfiguration.secure(name: "Public mesh", isPrivate: false)
         let a = try SecureMeshNode(room: room), b = try SecureMeshNode(room: room)
@@ -273,6 +292,7 @@ private final class MeshTestState: @unchecked Sendable {
         var mediaChannels: [SecurePeerChannel] = []
         var mediaError: String?
         var payload: Data?
+        var chatAttachments = [String: RoomChatAttachmentPayload]()
         var connectionAttempts = 0
     }
     private let lock = NSLock()
@@ -299,6 +319,9 @@ private final class SecureMeshNode {
             listenerReadyHandler: { port in observation.update { $0.port = port } },
             replicaHandler: { replica in observation.update { $0.replica = replica } },
             participantsHandler: { participants in observation.update { $0.participants = participants } },
+            chatAttachmentHandler: { sender, payload in
+                observation.update { $0.chatAttachments[sender] = payload }
+            },
             disableRoomStateSyncDuringAuthenticationForTesting: disableStateSync,
             connectionAttemptHandler: { observation.update { $0.connectionAttempts += 1 } },
             installationIdentity: identity, peerPins: MemoryPeerPinStore(), secureCapabilities: capabilities, incomingMediaChannelHandler: incomingMediaChannelHandler)

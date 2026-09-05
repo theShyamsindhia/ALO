@@ -1449,6 +1449,7 @@ final class ALOViewModel: ObservableObject {
         didSet { UserDefaults.standard.set(chatNotificationMode.rawValue, forKey: "chatNotificationMode") }
     }
     @Published var draftMessage = ""
+    @Published private(set) var chatAttachmentURLs = [String: URL]()
     @Published var unreadMessageCount = 0
     @Published private(set) var firstUnreadMessageID: UUID?
     @Published private(set) var incomingMessagePreview: RoomMessage?
@@ -1922,6 +1923,9 @@ final class ALOViewModel: ObservableObject {
             mediaStateHandler: mediaStateCallback,
             nowPlayingHandler: nowPlayingCallback,
             chatHandler: chatCallback,
+            chatAttachmentHandler: { [weak self] senderID, payload in
+                self?.receiveChatAttachment(payload, senderID: senderID)
+            },
             queueHandler: queueCallback,
             videoHandler: videoCallback,
             annotationSceneHandler: { [weak self] scene in self?.annotationScene = scene },
@@ -2948,6 +2952,40 @@ final class ALOViewModel: ObservableObject {
         draftMessage = ""
     }
 
+    func sendChatAttachment(_ operation: RoomChatOperation, fileURL: URL) -> Bool {
+        guard phase == .live, let meshSession, let attachment = operation.attachment,
+              operation.kind == .message, operation.encoded != nil else { return false }
+        let accessed = fileURL.startAccessingSecurityScopedResource()
+        defer { if accessed { fileURL.stopAccessingSecurityScopedResource() } }
+        guard let data = try? Data(contentsOf: fileURL, options: [.mappedIfSafe]),
+              let payload = RoomChatAttachmentPayload(attachment: attachment, data: data),
+              let roomID = activeRoomConfiguration?.id,
+              let stored = try? ChatAttachmentStore.save(payload, roomID: roomID) else { return false }
+        let key = chatAttachmentKey(senderID: meshSession.nodeID, attachmentID: attachment.id)
+        chatAttachmentURLs[key] = stored
+        guard sendChatOperation(operation) else {
+            chatAttachmentURLs.removeValue(forKey: key)
+            return false
+        }
+        meshSession.sendChatAttachment(payload)
+        return true
+    }
+
+    func chatAttachmentURL(for message: RoomChatMessage) -> URL? {
+        guard let attachment = message.attachment else { return nil }
+        return chatAttachmentURLs[chatAttachmentKey(senderID: message.senderID, attachmentID: attachment.id)]
+    }
+
+    private func receiveChatAttachment(_ payload: RoomChatAttachmentPayload, senderID: String) {
+        guard let roomID = activeRoomConfiguration?.id,
+              let stored = try? ChatAttachmentStore.save(payload, roomID: roomID) else { return }
+        chatAttachmentURLs[chatAttachmentKey(senderID: senderID, attachmentID: payload.attachment.id)] = stored
+    }
+
+    private func chatAttachmentKey(senderID: String, attachmentID: String) -> String {
+        senderID + "|" + attachmentID
+    }
+
     @discardableResult
     func sendChatOperation(_ operation: RoomChatOperation) -> Bool {
         guard phase == .live, let meshSession, let wire = operation.encoded else { return false }
@@ -3508,6 +3546,7 @@ final class ALOViewModel: ObservableObject {
         globalShortcutTalkTargets.removeAll()
         participants = []
         messages = []
+        chatAttachmentURLs.removeAll()
         chatDocument = RoomChatDocument()
         chatViewportsAtLatest.removeAll()
         unreadMessageCount = 0
@@ -4197,6 +4236,7 @@ struct FloatingRoomView: View {
     }
     @State private var showsRoomInfo = false
     @State private var showsMediaMore = false
+    @State private var showsLyrics = false
 
     private var panelTransition: AnyTransition {
         reduceMotion
@@ -4538,6 +4578,29 @@ struct FloatingRoomView: View {
                             statusLabel(compact: true)
                         }
                     }
+                    if model.lyrics.enabled {
+                        TimelineView(.periodic(from: .now, by: 0.5)) { context in
+                            Button { showsLyrics.toggle() } label: {
+                                LyricsPlayerLine(
+                                    controller: model.lyrics,
+                                    position: model.roomPlaybackPosition(at: context.date)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .help("Show full lyrics")
+                        }
+                        .popover(isPresented: $showsLyrics, arrowEdge: .bottom) {
+                            TimelineView(.periodic(from: .now, by: 0.5)) { context in
+                                LyricsPanel(
+                                    controller: model.lyrics,
+                                    accent: roomAccent,
+                                    position: model.roomPlaybackPosition(at: context.date),
+                                    expandedPresentation: true
+                                )
+                                .frame(width: 320)
+                            }
+                        }
+                    }
                 }
             }
             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
@@ -4679,7 +4742,7 @@ struct FloatingRoomView: View {
                     Text(message.sender)
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Palette.ink)
-                    Text(message.text)
+                    Text(message.previewText)
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(Palette.secondary)
                         .lineLimit(1)
@@ -4704,7 +4767,7 @@ struct FloatingRoomView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(PressScaleButtonStyle())
-        .accessibilityLabel("New message from \(message.sender): \(message.text)")
+        .accessibilityLabel("New message from \(message.sender): \(message.previewText)")
         .help("Open conversation")
     }
 
@@ -4875,12 +4938,6 @@ struct FloatingRoomView: View {
                 }.font(.system(size: 11)).padding(.horizontal, 14).padding(.vertical, 9)
                     .background(.white.opacity(0.035))
             }
-            if !showsGames, model.lyrics.enabled {
-                TimelineView(.periodic(from: .now, by: 0.5)) { context in
-                    LyricsPanel(controller: model.lyrics, accent: roomAccent,
-                                position: model.roomPlaybackPosition(at: context.date))
-                }
-            }
             if showsGames {
                 ArenaPanel(session: model.arena)
                     .onAppear { model.arena.names = Dictionary(uniqueKeysWithValues: model.participants.map { ($0.id, $0.name) }) }
@@ -4898,6 +4955,8 @@ struct FloatingRoomView: View {
                     accent: roomAccent,
                     onLatestVisibilityChanged: model.setChatViewportAtLatest,
                     send: model.sendChatOperation,
+                    sendAttachment: model.sendChatAttachment,
+                    attachmentURL: model.chatAttachmentURL,
                     draft: $model.draftMessage,
                     notificationMode: $model.chatNotificationMode,
                     mentionNames: model.participants.filter { $0.id != model.currentParticipantID }.map(\.name),
