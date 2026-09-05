@@ -41,6 +41,20 @@ private final class SourcePlaybackActivity: @unchecked Sendable {
     func current() -> Bool? { lock.withLock { value } }
 }
 
+/// A stopped capture must not advance the shared DJ history during async tap teardown.
+private final class HostDJCaptureGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var active = true
+    func revoke() { lock.withLock { active = false } }
+    func forward(_ samples: [Int16], captureTimeNanos: UInt64, process: Bool, host: HostServer) {
+        lock.withLock {
+            guard active else { return }
+            let output = process ? DJLiveAudio.shared.process(samples, stage: .broadcast, captureTimeNanos: captureTimeNanos) : samples
+            host.acceptAudio(samples: output, captureTimeNanos: captureTimeNanos)
+        }
+    }
+}
+
 @MainActor
 final class HostSession {
     nonisolated static var synchronizedPlaybackMode: BroadcasterPlaybackMode {
@@ -50,6 +64,7 @@ final class HostSession {
     private var host: HostServer?
     private var localReceiver: Receiver?
     private var audioSource: AudioSource?
+    private var djCaptureGate: HostDJCaptureGate?
     private var videoPicker: ScreenContentPicker?
     private var videoCapture: ScreenVideoCapture?
     private var videoEncoder: VideoEncoder?
@@ -182,8 +197,11 @@ final class HostSession {
         sourcePlaybackIsActive: @escaping @Sendable () -> Bool?,
         audioStoppedHandler: @escaping @Sendable (Error) -> Void
     ) async throws -> (AudioSource, BroadcasterPlaybackMode) {
+        let gate = HostDJCaptureGate()
+        djCaptureGate?.revoke()
+        djCaptureGate = gate
         let handler: AudioSource.AudioHandler = { samples, captureTimeNanos in
-            host.acceptAudio(samples: samples, captureTimeNanos: captureTimeNanos)
+            gate.forward(samples, captureTimeNanos: captureTimeNanos, process: source != .djStudio, host: host)
         }
 
         if source == .djStudio {
@@ -200,6 +218,7 @@ final class HostSession {
             source: source,
             sourcePlaybackIsActive: sourcePlaybackIsActive,
             unexpectedStopHandler: { [weak self] error in
+                gate.revoke()
                 Task { @MainActor [weak self] in
                     // A capture failure is not a user media command. Once the
                     // muting tap is detached, let the source app continue at
@@ -226,6 +245,7 @@ final class HostSession {
     }
 
     func stop() async {
+        djCaptureGate?.revoke(); djCaptureGate = nil
         // Releasing broadcaster ownership must also stop the source application;
         // otherwise a takeover leaves the old Mac playing locally after its
         // capture and room route have been removed.
@@ -383,6 +403,7 @@ final class HostSession {
     }
 
     func stopImmediately() {
+        djCaptureGate?.revoke(); djCaptureGate = nil
         if shouldPauseSourceOnStop { _ = playbackController?.perform(.pause) }
         shouldPauseSourceOnStop = false
         localReceiver?.stop()

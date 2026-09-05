@@ -926,6 +926,7 @@ final class MeshSession {
     func stop() async {
         guard !isStopped else { return }
         isStopped = true
+        DJStudio.endLiveIfCreated()
         endOpenLine()
         endWalkieTalkie()
         secureVoice.stop()
@@ -961,6 +962,7 @@ final class MeshSession {
     func stopImmediately() {
         guard !isStopped else { return }
         isStopped = true
+        DJStudio.endLiveIfCreated()
         endOpenLine()
         endWalkieTalkie()
         secureVoice.stop()
@@ -1009,6 +1011,9 @@ final class MeshSession {
 
     private func transition(to broadcaster: MeshBroadcaster?) {
         guard !isStopped else { return }
+        // A new broadcaster/epoch must never inherit the previous live loop or cue.
+        // Individual renderer cutovers keep their history; ownership changes do not.
+        DJStudio.endLiveIfCreated()
         mediaCommandReady = false
         mediaActionRelay.clear()
         transitionGeneration += 1

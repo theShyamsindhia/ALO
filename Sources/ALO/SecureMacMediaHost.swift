@@ -115,7 +115,9 @@ final class SecureMacMediaHost {
                     sourcePlaybackIsActive: playbackActivity, unexpectedStopHandler: sourceStopped)
             source = tap
             status("Preparing secure synchronized system audio")
-            try await tap.start { samples, captureTimeNanos in ingress.accept(samples, captureTimeNanos: captureTimeNanos) }
+            try await tap.start { samples, captureTimeNanos in
+                ingress.accept(samples, captureTimeNanos: captureTimeNanos, processLiveDJ: audioSourceSelection != .djStudio)
+            }
             guard lifecycle == token, !Task.isCancelled, ingress.isActive else { throw CancellationError() }
             shouldPauseSourceOnStop = audioSourceSelection.usesGlobalPlaybackControls
             status(audioSourceSelection.usesGlobalPlaybackControls
@@ -360,7 +362,7 @@ final class SecureMacMediaHost {
                 self.host = host; local = renderer; return true
             }
         }
-        func accept(_ samples: [Int16], captureTimeNanos: UInt64) {
+        func accept(_ samples: [Int16], captureTimeNanos: UInt64, processLiveDJ: Bool = false) {
             let refresh = lock.withLock { () -> MediaHostSession? in
                 guard owner != nil, let host, playing != false, !samples.isEmpty,
                       samples.count <= 96_000, samples.count.isMultiple(of: 2), captureTimeNanos <= UInt64(Int64.max) else { return nil }
@@ -378,7 +380,10 @@ final class SecureMacMediaHost {
                 expectedNextCapture = end.partialValue
                 // Packetization happens once, before local/remote fan-out. Both
                 // consumers see identical frame indices and capture timestamps.
-                let packets = packetizer.append(samples: samples, captureTimeNanos: captureTimeNanos)
+                // Owner and PCM admission precede DSP. Dedicated DJ sources already
+                // contain the decks/pads and must never receive the live overlay twice.
+                let output = processLiveDJ ? DJLiveAudio.shared.process(samples, stage: .broadcast, captureTimeNanos: captureTimeNanos) : samples
+                let packets = packetizer.append(samples: output, captureTimeNanos: captureTimeNanos)
                 if !packets.isEmpty { timingPolicy.captureStarted(at: captureTimeNanos) }
                 let needsRefresh = timeline.observe(packets)
                 host.submitAudio(packets)

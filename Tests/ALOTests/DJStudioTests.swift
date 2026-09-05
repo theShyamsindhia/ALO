@@ -49,6 +49,39 @@ struct DJStudioTests {
         }
     }
 
+    @Test func liveInputUsesMixerAndPadsWithoutDoubledMonitoring() async throws {
+        let studio = DJStudio()
+        defer { studio.setLiveStage(nil); studio.stopAll(); studio.engine.stop() }
+        let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2))
+        try studio.engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 1024)
+        let output = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1024))
+        studio.setLiveStage(.broadcast)
+        #expect(DJLiveAudio.shared.process([1000, -1000], stage: .broadcast) == [1000, -1000])
+        studio.crossfade = 0
+        studio.master = 1
+        studio.a.gain = 0.5
+        let dry = [Int16](repeating: 10_000, count: 2048)
+        let mixed = DJLiveAudio.shared.process(dry, stage: .broadcast)
+        #expect(abs(Int(mixed[0]) - 5_000) <= 1)
+        #expect(studio.engine.mainMixerNode.outputVolume == 0)
+        studio.a.gain = 0
+        studio.trigger(8)
+        var overlayPeak = 0
+        for _ in 0..<12 {
+            _ = try studio.engine.renderOffline(1024, to: output)
+            let heard = DJLiveAudio.shared.process([Int16](repeating: 0, count: 2048), stage: .broadcast)
+            overlayPeak = max(overlayPeak, heard.map { abs(Int($0)) }.max() ?? 0)
+        }
+        #expect(overlayPeak > 100)
+        studio.stopAll()
+        #expect(DJLiveAudio.shared.snapshot().muted)
+        #expect(DJLiveAudio.shared.process(dry, stage: .broadcast).allSatisfy { $0 == 0 })
+        studio.setLiveStage(nil)
+        #expect(DJLiveAudio.shared.snapshot().bufferedPCMBytes == 0)
+        #expect(studio.engine.mainMixerNode.outputVolume == 1)
+        #expect(DJLiveAudio.shared.process(dry, stage: .broadcast) == dry)
+    }
+
     @Test func deckLoadSeekCueAndReplacement() throws {
         let studio = DJStudio()
         defer { studio.stopAll() }
@@ -175,14 +208,26 @@ extension NativePresentationTests {
                 buffer.floatChannelData![1][frame] = sample
             }
             do { let writer = try AVAudioFile(forWriting: url, settings: format.settings); try writer.write(from: buffer) }
-            try studio.a.load(url)
-            try studio.a.seek(2)
-            try studio.a.toggleBeatLoop()
+            try studio.b.load(url)
+            try studio.b.seek(2)
+            try studio.b.toggleBeatLoop()
+            studio.setLiveStage(.listening)
+            for block in 0..<400 {
+                let samples: [Int16] = (0..<960).flatMap { frame in
+                    let t = Double(block * 960 + frame) / 48_000
+                    let pulse = exp(-t.truncatingRemainder(dividingBy: 0.5) * 12)
+                    let value = Int16(sin(t * 2 * .pi * 110) * pulse * 22_000)
+                    return [value, value]
+                }
+                _ = DJLiveAudio.shared.process(samples, stage: .listening)
+            }
+            try studio.toggleLiveLoop()
+            studio.refreshLive()
             let waveformDeadline = ContinuousClock.now + .seconds(10)
-            while studio.a.waveformLoading && ContinuousClock.now < waveformDeadline {
+            while studio.b.waveformLoading && ContinuousClock.now < waveformDeadline {
                 try await Task.sleep(for: .milliseconds(10))
             }
-            #expect(!studio.a.waveformLoading && studio.a.waveform.count == 256)
+            #expect(!studio.b.waveformLoading && studio.b.waveform.count == 256)
             let window = NSWindow(contentRect: NSRect(x: -2000, y: 0, width: 1040, height: 1020),
                                   styleMask: .borderless, backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false
@@ -190,7 +235,7 @@ extension NativePresentationTests {
             let hosting = NSHostingView(rootView: DJStudioView(model: model, studio: studio)
                 .transaction { $0.disablesAnimations = true })
             window.contentView = hosting
-            defer { window.close(); studio.stopAll() }
+            defer { window.close(); studio.setLiveStage(nil); studio.stopAll() }
             window.orderBack(nil)
             try await Task.sleep(for: .milliseconds(200))
             hosting.layoutSubtreeIfNeeded()
