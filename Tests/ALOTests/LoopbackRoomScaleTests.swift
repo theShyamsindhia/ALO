@@ -412,8 +412,59 @@ struct LoopbackRoomScaleTests {
 
         // Keeping only the newest unsent packet trades concealment for bounded latency.
         #expect(boundedEight.maximumFinalAgeNanos < SynchronizedPlayer.targetLatencyNanos)
+        #expect(boundedEight.maximumPacketAgeNanos < SynchronizedPlayer.targetLatencyNanos)
         #expect(boundedEight.maximumAudibleLatenessNanos < 100_000_000)
+        #expect(boundedEight.minimumPacketsReceived >= 50)
         #expect(boundedEight.minimumPacketsReceived < unboundedEight.minimumPacketsReceived)
+    }
+
+    @Test("Drain completion follows submitted audio, not an expired terminal capture")
+    func expiredTerminalCaptureDoesNotPreventSubmittedAudioDraining() {
+        let ledger = AudioSubmissionLedger()
+        let port: UInt16 = 12_345
+        // The sender expiry regression separately proves capture 8...11 can
+        // expire unsent. Every packet that DID enter the transport must arrive.
+        for sequence: UInt32 in 0..<8 {
+            ledger.submitted(port: port, sequence: sequence)
+            ledger.completed(port: port, sequence: sequence, error: nil)
+        }
+        let submitted = ledger.snapshot
+        #expect(submitted.isComplete)
+        #expect(submitted.matchesReceived([port: Set(0..<8)]))
+        #expect(!submitted.matchesReceived([port: Set(0..<7)]), "Missing submitted audio must fail")
+        #expect(!submitted.matchesReceived([:]), "An empty/disconnected receiver cannot pass")
+        #expect(!AudioSubmissionLedger().snapshot.isComplete, "No audio is not a successful drain")
+        ledger.submitted(port: port, sequence: 12)
+        #expect(!ledger.snapshot.isComplete, "Outstanding transport work must not look drained")
+        ledger.completed(port: port, sequence: 12, error: .posix(.EIO))
+        #expect(!ledger.snapshot.isComplete, "Failed sends cannot be hidden as intentional expiry")
+    }
+
+    @Test("Audio transport instrumentation validates headers without decoding PCM")
+    func audioProbeHeaderValidationAndCost() throws {
+        let encoded = AudioPacket(sequence: 73, frameIndex: 0, captureTimeNanos: 1,
+            samples: [Int16](repeating: 42, count: 480)).encoded()
+        #expect(AudioProbeHeader.sequence(in: encoded) == 73)
+        var prefixed = Data([0, 0, 0])
+        prefixed.append(encoded)
+        #expect(AudioProbeHeader.sequence(in: prefixed.dropFirst(3)) == 73)
+        #expect(AudioProbeHeader.sequence(in: encoded.dropLast()) == nil)
+        for offset in [0, 4, 6, 28, 32] {
+            var invalid = encoded
+            invalid[offset] = 0
+            #expect(AudioProbeHeader.sequence(in: invalid) == nil)
+        }
+        let iterations = 1_600
+        var fullChecksum: UInt32 = 0
+        let fullStart = MonotonicClock.nowNanos()
+        for _ in 0..<iterations { fullChecksum &+= try #require(AudioPacket(data: encoded)).sequence }
+        let fullDuration = MonotonicClock.nowNanos() - fullStart
+        var headerChecksum: UInt32 = 0
+        let headerStart = MonotonicClock.nowNanos()
+        for _ in 0..<iterations { headerChecksum &+= try #require(AudioProbeHeader.sequence(in: encoded)) }
+        let headerDuration = MonotonicClock.nowNanos() - headerStart
+        #expect(headerChecksum == fullChecksum)
+        print("Audio probe for1600 sends: full PCM decode \(fullDuration / 1_000_000)ms, header-only \(headerDuration / 1_000_000)ms")
     }
 
     @Test("Receiver detects a late timeline and hard-resynchronizes")
@@ -1075,6 +1126,7 @@ struct LoopbackRoomScaleTests {
     func lateListenerCannotRetimeActiveBroadcaster() throws {
         let ready = DispatchSemaphore(value: 0)
         let state = PortState()
+        let captureClock = LoopbackCaptureClock()
         let host = HostServer(
             roomName: "Late-listener timing test \(UUID().uuidString)",
             advertise: false,
@@ -1082,6 +1134,7 @@ struct LoopbackRoomScaleTests {
                 state.set(port)
                 ready.signal()
             },
+            audioSendNowNanos: { captureClock.now },
             localParticipantID: "loopback-peer-109"
         )
         try host.start()
@@ -1101,8 +1154,7 @@ struct LoopbackRoomScaleTests {
             repeating: 0,
             count: Int(AudioPacket.framesPerPacket) * Int(AudioPacket.channelCount)
         )
-        let playbackStart = MonotonicClock.nowNanos()
-        host.acceptAudio(samples: samples, captureTimeNanos: playbackStart)
+        host.acceptAudio(samples: samples, captureTimeNanos: captureClock.now)
         #expect(waitUntil(timeout: 2) { broadcasterOutput.packetCount == 1 })
 
         let lateListener = HeadlessLoopbackPeer(index: 110)
@@ -1114,7 +1166,7 @@ struct LoopbackRoomScaleTests {
 
         host.acceptAudio(
             samples: samples,
-            captureTimeNanos: playbackStart + 20_000_000
+            captureTimeNanos: captureClock.advance(by: 20_000_000)
         )
         #expect(waitUntil(timeout: 2) { lateListener.packetCount >= 1 })
         #expect(lateListener.playoutDelays.last == RoomTiming.defaultPlayoutDelayNanos)
@@ -1132,7 +1184,7 @@ struct LoopbackRoomScaleTests {
         let packetsBeforeRecommendation = lateListener.packetCount
         host.acceptAudio(
             samples: samples,
-            captureTimeNanos: playbackStart + 40_000_000
+            captureTimeNanos: captureClock.advance(by: 20_000_000)
         )
         #expect(waitUntil(timeout: 2) {
             lateListener.packetCount > packetsBeforeRecommendation
@@ -1148,6 +1200,8 @@ struct LoopbackRoomScaleTests {
         let hostReady = DispatchSemaphore(value: 0)
         let state = PortState()
         let shaper = linkBitsPerSecond.map(FluidLinkShaper.init(bitsPerSecond:))
+        let completionLatencies = AudioCompletionLatencies()
+        let submissions = AudioSubmissionLedger()
         let host = HostServer(
             roomName: "Loopback test \(UUID().uuidString)",
             advertise: false,
@@ -1155,14 +1209,33 @@ struct LoopbackRoomScaleTests {
                 state.set(port)
                 hostReady.signal()
             },
-            outboundSend: shaper.map { shaper in
-                { connection, data, isComplete, completion in
+            outboundSend: { connection, data, isComplete, completion in
+                let sequence = AudioProbeHeader.sequence(in: data)
+                let destinationPort: UInt16?
+                if case .hostPort(_, let port) = connection.endpoint {
+                    destinationPort = port.rawValue
+                } else { destinationPort = nil }
+                if let sequence {
+                    submissions.submitted(port: destinationPort, sequence: sequence)
+                }
+                let started = MonotonicClock.nowNanos()
+                let measuredCompletion: (NWError?) -> Void = { error in
+                    if let sequence {
+                        completionLatencies.record(MonotonicClock.nowNanos() - started)
+                        submissions.completed(port: destinationPort, sequence: sequence, error: error)
+                    }
+                    completion(error)
+                }
+                if let shaper {
                     shaper.send(
                         data,
                         over: connection,
                         isComplete: isComplete,
-                        completion: completion
+                        completion: measuredCompletion
                     )
+                } else {
+                    connection.send(content: data, contentContext: .defaultMessage,
+                        isComplete: isComplete, completion: .contentProcessed(measuredCompletion))
                 }
             },
             audioBackpressurePolicy: policy
@@ -1218,27 +1291,83 @@ struct LoopbackRoomScaleTests {
                 }
             }
 
-            let receivedEnough = waitUntil(timeout: 5) {
-                peers.allSatisfy { $0.lastSequence == UInt32(expectedPacketCount - 1) }
+            let expectedIDs = Set((0..<peerCount).map { "loopback-peer-\($0)" })
+            let peerPorts = try peers.map { try #require($0.audioPort) }
+            let expectedPorts = Set(peerPorts)
+            try #require(expectedPorts.count == peerCount, "Every receiver must have a distinct live UDP listener")
+            let drainDeadline = Date().addingTimeInterval(5)
+            // The queue barrier follows every capture callback. A bounded sender
+            // may expire the terminal capture without ever submitting it; only
+            // the outbound ledger can say which datagrams the receiver owes us.
+            let senderDrained = waitUntil(timeout: max(0, drainDeadline.timeIntervalSinceNow)) {
+                let senders = host.audioSenderSnapshot()
+                return senders.count == peerCount
+                    && Set(senders.map(\.participantID)) == expectedIDs
+                    && Set(senders.map(\.udpPort)) == expectedPorts
+                    && senders.allSatisfy { $0.inFlight == 0 && $0.pending == 0 }
+                    && submissions.snapshot.isComplete
+            }
+            print("Audio send completion latency: peers=\(peerCount), link=\(linkBitsPerSecond.map(String.init) ?? "unshaped"), policy=\(policy), \(completionLatencies.summary)")
+            guard senderDrained else {
+                print("Audio sender drain timeout: \(host.audioSenderSnapshot()); ledger=\(submissions.snapshot)")
+                throw LoopbackTestError.audioDidNotDrain(peers.map(\.packetCount))
+            }
+            let submitted = submissions.snapshot
+            let drainedSenders = host.audioSenderSnapshot()
+            print("Audio sender drained: \(drainedSenders)")
+            for sender in drainedSenders {
+                #expect(sender.enqueued == UInt64(expectedPacketCount))
+                #expect(sender.sent + sender.expiredWait + sender.expiredAge + sender.admissionRejected
+                    + sender.replaced + sender.discardedBoundary == sender.enqueued,
+                    "Every captured packet must be accounted for at sender quiescence")
+                #expect(sender.sent == UInt64(submitted.submitted[sender.udpPort]?.count ?? 0))
+                #expect(sender.discardedBoundary == 0,
+                    "This steady capture scenario must not hide an accidental timeline reset")
+            }
+            let receivedEnough = waitUntil(timeout: max(0, drainDeadline.timeIntervalSinceNow)) {
+                let received = Dictionary(uniqueKeysWithValues: zip(peerPorts, peers).map {
+                    ($0.0, Set($0.1.snapshot().arrivals.keys))
+                })
+                return submitted.matchesReceived(received)
             }
             guard receivedEnough else {
+                print("Audio receiver drain timeout: submitted=\(submitted); received=\(zip(peerPorts, peers).map { ($0.0, $0.1.snapshot().arrivals.keys.sorted()) })")
                 throw LoopbackTestError.audioDidNotDrain(peers.map(\.packetCount))
             }
 
             let snapshots = peers.map { $0.snapshot() }
-            let commonSequence = snapshots.compactMap(\.lastSequence).min()
-            guard let commonSequence else {
-                throw LoopbackTestError.noAudioReceived
-            }
             let finalArrivals = try snapshots.map { snapshot in
-                guard let arrival = snapshot.arrivals[commonSequence] else {
-                    throw LoopbackTestError.missingCommonPacket(commonSequence)
+                guard let lastSequence = snapshot.lastSequence,
+                      let arrival = snapshot.arrivals[lastSequence] else {
+                    throw LoopbackTestError.noAudioReceived
+                }
+                switch policy {
+                case .unbounded:
+                    #expect(lastSequence == UInt32(expectedPacketCount - 1))
+                case .boundedLatest:
+                    // Permit at most the 16-packet/80ms terminal tail to expire.
+                    // A stopped or intermittently silent sender must still fail.
+                    #expect(lastSequence >= UInt32(expectedPacketCount - 17))
+                    let sourceTimes = snapshot.arrivals.values.map(\.captureNanos).sorted()
+                    let sourceStart = captureAnchorNanos - callbackDurationNanos
+                    let sourceEnd = sourceStart + UInt64(expectedPacketCount) * 5_000_000
+                    let boundaries = [sourceStart] + sourceTimes + [sourceEnd]
+                    let maximumGap = zip(boundaries, boundaries.dropFirst()).map { $1 - $0 }.max() ?? 0
+                    #expect(maximumGap <= 200_000_000, "Bounded sender stopped making source-timeline progress")
                 }
                 return arrival
             }
             let finalAges = finalArrivals.map { $0.arrivedNanos - $0.captureNanos }
+            let maximumPacketAge = snapshots.flatMap { $0.arrivals.values }.map {
+                $0.arrivedNanos - $0.captureNanos
+            }.max() ?? 0
+            print("Audio actual final sequences: \(snapshots.compactMap(\.lastSequence)); maximum packet age: \(maximumPacketAge / 1_000_000)ms")
             let offsets = snapshots.compactMap(\.clockOffsetNanos)
-            let maximumArrivalSkew = (UInt32(0)...commonSequence).compactMap { sequence -> UInt64? in
+            let commonSequences = snapshots.dropFirst().reduce(Set(snapshots[0].arrivals.keys)) {
+                $0.intersection($1.arrivals.keys)
+            }
+            try #require(!commonSequences.isEmpty, "No common packet exists for cross-peer skew measurement")
+            let maximumArrivalSkew = commonSequences.compactMap { sequence -> UInt64? in
                 let arrivalTimes = snapshots.compactMap { $0.arrivals[sequence]?.arrivedNanos }
                 guard arrivalTimes.count == snapshots.count,
                       let first = arrivalTimes.min(),
@@ -1263,6 +1392,7 @@ struct LoopbackRoomScaleTests {
             host.stop()
             return RoomMeasurements(
                 maximumFinalAgeNanos: finalAges.max() ?? 0,
+                maximumPacketAgeNanos: maximumPacketAge,
                 maximumPacketArrivalSkewNanos: maximumArrivalSkew,
                 maximumAudibleLatenessNanos: snapshots.map(\.audibleLatenessNanos).max() ?? 0,
                 clockOffsetSpreadNanos: offsetSpread(offsets),
@@ -1322,6 +1452,7 @@ private final class HeadlessLoopbackPeer {
     }
 
     var packetCount: Int { queue.sync { arrivals.count } }
+    var audioPort: UInt16? { queue.sync { udpListener?.port?.rawValue } }
     var corruptedPacketCount: Int { queue.sync { corruptedPackets } }
     var lastSequence: UInt32? { queue.sync { arrivals.keys.max() } }
     var resyncCommandCount: Int { queue.sync { receivedResyncCommands } }
@@ -1350,7 +1481,14 @@ private final class HeadlessLoopbackPeer {
         self.control = control
         receiveControl(from: control)
         control.stateUpdateHandler = { [weak self] state in
-            guard let self, case .ready = state else { return }
+            guard let self else { return }
+            switch state {
+            case .waiting(let error), .failed(let error):
+                print("Loopback peer \(self.index) control \(state): host=127.0.0.1:\(hostPort), UDP=\(udpPort), video=\(videoPort), error=\(error)")
+                return
+            case .ready: break
+            default: return
+            }
             let join = ControlMessage(
                 type: "join",
                 udpPort: udpPort.rawValue,
@@ -1364,7 +1502,13 @@ private final class HeadlessLoopbackPeer {
     }
 
     func waitUntilJoined(timeout: TimeInterval) -> Bool {
-        joined.wait(timeout: .now() + timeout) == .success
+        let didJoin = joined.wait(timeout: .now() + timeout) == .success
+        if !didJoin {
+            queue.sync {
+                print("Loopback peer \(index) join timed out: control=\(String(describing: control?.state)), endpoint=\(String(describing: control?.endpoint)), UDP=\(String(describing: udpListener?.port)), video=\(String(describing: videoListener?.port))")
+            }
+        }
+        return didJoin
     }
 
     func sendPing() {
@@ -1558,7 +1702,11 @@ private final class HeadlessLoopbackPeer {
 
     private func send(_ message: ControlMessage) {
         guard let data = try? message.encodedLine() else { return }
-        control?.send(content: data, completion: .contentProcessed { _ in })
+        control?.send(content: data, completion: .contentProcessed { [weak self] error in
+            if let self, let error {
+                print("Loopback peer \(self.index) \(message.type) send failed: \(error), endpoint=\(String(describing: self.control?.endpoint))")
+            }
+        })
     }
 }
 
@@ -1640,6 +1788,90 @@ private final class ReceiverRestartObservations: @unchecked Sendable {
     }
 }
 
+private final class AudioSubmissionLedger: @unchecked Sendable {
+    struct Snapshot {
+        var submitted: [UInt16: Set<UInt32>] = [:]
+        var successful: [UInt16: Set<UInt32>] = [:]
+        var failures: [String] = []
+
+        var isComplete: Bool {
+            !submitted.isEmpty && failures.isEmpty && submitted == successful
+        }
+        func matchesReceived(_ received: [UInt16: Set<UInt32>]) -> Bool {
+            isComplete && successful == received
+        }
+    }
+    private let lock = NSLock()
+    private var state = Snapshot()
+    var snapshot: Snapshot { lock.withLock { state } }
+
+    func submitted(port: UInt16?, sequence: UInt32) {
+        lock.withLock {
+            guard let port else {
+                state.failures.append("Audio submitted without a UDP destination port")
+                return
+            }
+            if !state.submitted[port, default: []].insert(sequence).inserted {
+                state.failures.append("Duplicate audio submission on \(port): \(sequence)")
+            }
+        }
+    }
+    func completed(port: UInt16?, sequence: UInt32, error: NWError?) {
+        lock.withLock {
+            guard let port else { return }
+            if let error {
+                state.failures.append("Audio send failed on \(port), sequence \(sequence): \(error)")
+            } else {
+                state.successful[port, default: []].insert(sequence)
+            }
+        }
+    }
+}
+
+private final class LoopbackCaptureClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = MonotonicClock.nowNanos()
+    var now: UInt64 { lock.withLock { value } }
+    func advance(by nanos: UInt64) -> UInt64 {
+        lock.withLock { value += nanos; return value }
+    }
+}
+
+private enum AudioProbeHeader {
+    /// Inspect only the wire header on the sender queue. Receiver tests still
+    /// decode/validate the complete PCM payload, as the real receiver does.
+    static func sequence(in data: Data) -> UInt32? {
+        guard data.count >= 36 else { return nil }
+        return data.withUnsafeBytes { bytes in
+            guard bytes.loadUnaligned(fromByteOffset: 0, as: UInt32.self).littleEndian == 0x5745_5241,
+                  bytes[4] == 1,
+                  bytes.loadUnaligned(fromByteOffset: 6, as: UInt16.self).littleEndian == AudioPacket.channelCount,
+                  bytes.loadUnaligned(fromByteOffset: 28, as: UInt32.self).littleEndian == AudioPacket.sampleRate
+            else { return nil }
+            let frames = bytes.loadUnaligned(fromByteOffset: 32, as: UInt16.self).littleEndian
+            guard frames > 0, frames <= AudioPacket.framesPerPacket,
+                  data.count == 36 + Int(frames) * Int(AudioPacket.channelCount) * 2 else { return nil }
+            return bytes.loadUnaligned(fromByteOffset: 8, as: UInt32.self).littleEndian
+        }
+    }
+}
+
+private final class AudioCompletionLatencies: @unchecked Sendable {
+    private let lock = NSLock()
+    private var nanos: [UInt64] = []
+    func record(_ value: UInt64) {
+        lock.withLock { if nanos.count < 2_000 { nanos.append(value) } }
+    }
+    var summary: String {
+        let values = lock.withLock { nanos.sorted() }
+        guard !values.isEmpty else { return "no completions" }
+        let median = values[(values.count - 1) / 2] / 1_000_000
+        let p95 = values[(values.count - 1) * 95 / 100] / 1_000_000
+        let maximum = (values.last ?? 0) / 1_000_000
+        return "n=\(values.count), p50=\(median)ms, p95=\(p95)ms, max=\(maximum)ms"
+    }
+}
+
 private final class FluidLinkShaper: @unchecked Sendable {
     private let bitsPerSecond: UInt64
     private let lock = NSLock()
@@ -1707,6 +1939,7 @@ private struct PeerSnapshot {
 
 private struct RoomMeasurements {
     let maximumFinalAgeNanos: UInt64
+    let maximumPacketAgeNanos: UInt64
     let maximumPacketArrivalSkewNanos: UInt64
     let maximumAudibleLatenessNanos: UInt64
     let clockOffsetSpreadNanos: UInt64
