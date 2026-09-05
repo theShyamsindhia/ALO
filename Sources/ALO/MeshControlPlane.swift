@@ -133,6 +133,10 @@ final class MeshControlPlane: @unchecked Sendable {
         var roomStateSyncVersion: UInt8?
         var realtimeVoiceQueue = RealtimeVoiceSendQueue()
         var realtimeVoiceSendInFlight = false
+        var arenaSendInFlight = false
+        var arenaSendQueue = ArenaSendQueue()
+        var arenaReceiveWindow: UInt64 = 0
+        var arenaReceiveCount = 0
         var legacyVoiceDownsamplers = [String: LegacyVoiceDownsampler]()
         var remoteVersionVector: [String: UInt64]?
         let roomStateSyncSession: RoomStateSyncSession
@@ -187,6 +191,7 @@ final class MeshControlPlane: @unchecked Sendable {
     private let roomStateSync: any RoomStateSync
     private let roomStatePersistenceHandler: (Data) -> Void
     private let roomStateReceiveCompletedHandler: ([MeshRoomEvent]) -> Void
+    private let arenaHandler: (String, Data) -> Void
     private let roomStateDowngradeHandler: (String?) -> Void
     private let disableRoomStateSyncDuringAuthenticationForTesting: Bool
     private var roomStatePersistenceWorkItem: DispatchWorkItem?
@@ -247,6 +252,7 @@ final class MeshControlPlane: @unchecked Sendable {
         resyncRequestHandler: @escaping (String?, String, UInt64) -> Bool = { _, _, _ in true },
         walkieTalkieHandler: @escaping (WalkieTalkieMessage) -> Void = { _ in },
         openLineHandler: @escaping (OpenLineMessage) -> Void = { _ in },
+        arenaHandler: @escaping (String, Data) -> Void = { _, _ in },
         roomStatePersistenceHandler: @escaping (Data) -> Void = { _ in },
         roomStateSyncOverride: (any RoomStateSync)? = nil,
         roomStateReceiveCompletedHandler: @escaping ([MeshRoomEvent]) -> Void = { _ in },
@@ -273,6 +279,7 @@ final class MeshControlPlane: @unchecked Sendable {
         self.resyncRequestHandler = resyncRequestHandler
         self.walkieTalkieHandler = walkieTalkieHandler
         self.openLineHandler = openLineHandler
+        self.arenaHandler = arenaHandler
         let durableState: any RoomStateSync = roomStateSyncOverride
             ?? AutomergeRoomStateSync.recovering(
                 roomID: room.id,
@@ -425,6 +432,34 @@ final class MeshControlPlane: @unchecked Sendable {
         }
     }
 
+    /// Direct authenticated links only. One in-flight packet, bounded priority lifecycle queue, and one latest frame per peer.
+    func publishArena(_ data: Data, targetID: String?) {
+        guard data.count <= 8192, let packet = try? JSONDecoder().decode(ArenaPacket.self, from: data), packet.isValid else { return }
+        queue.async { [weak self] in
+            guard let self, !self.isStopped,
+                  let wire = try? MeshEnvelope(type: "arena", nodeID: self.nodeID, arenaData: data).encodedLine()
+            else { return }
+            let destinations = targetID.map { id in self.peers[id].map { [$0] } ?? [] } ?? Array(self.peers.values)
+            for link in destinations where link.authenticated {
+                link.arenaSendQueue.enqueue(kind: packet.kind.rawValue, data: wire)
+                self.drainArena(to: link)
+            }
+        }
+    }
+
+    private func drainArena(to link: Link) {
+        guard !link.arenaSendInFlight, let data = link.arenaSendQueue.popFirst() else { return }
+        link.arenaSendInFlight = true
+        link.connection.send(content: data, completion: .contentProcessed { [weak self, weak link] error in
+            guard let self, let link else { return }
+            self.queue.async {
+                link.arenaSendInFlight = false
+                if error != nil { link.arenaSendQueue = ArenaSendQueue(); link.connection.cancel() }
+                else if !self.isStopped { self.drainArena(to: link) }
+            }
+        })
+    }
+
     func publishChat(_ text: String) {
         publish(
             kind: .chat,
@@ -437,6 +472,9 @@ final class MeshControlPlane: @unchecked Sendable {
 
     func publishQueueAdd(_ item: RoomQueueItem) { publish(kind: .queueAdd, queueItem: item) }
     func publishQueueRemove(_ id: String) { publish(kind: .queueRemove, queueItemID: id) }
+    func publishQueueReorder(_ ids: [String]) {
+        publish(kind: .queueReorder, senderID: nodeID, queueOrder: ids)
+    }
 
     func updateIdentity(name: String, icon: String, colorHex: String) {
         queue.async { [weak self] in
@@ -642,6 +680,7 @@ final class MeshControlPlane: @unchecked Sendable {
         sentNanos: UInt64? = nil,
         queueItem: RoomQueueItem? = nil,
         queueItemID: String? = nil,
+        queueOrder: [String]? = nil,
         broadcasterID: String? = nil,
         broadcasterEpoch: UInt64? = nil,
         mediaServiceName: String? = nil,
@@ -651,6 +690,12 @@ final class MeshControlPlane: @unchecked Sendable {
     ) {
         queue.async { [weak self] in
             guard let self, !isStopped else { return }
+            if kind == .queueReorder {
+                guard replica.broadcaster?.nodeID == nodeID,
+                      let queueOrder, queueOrder.count <= 2_000,
+                      Set(queueOrder).count == queueOrder.count,
+                      Set(queueOrder) == Set(replica.queue.map(\.id)) else { return }
+            }
             let event = MeshRoomEvent(
                 roomID: room.id,
                 version: replica.nextVersion(nodeID: nodeID),
@@ -661,6 +706,7 @@ final class MeshControlPlane: @unchecked Sendable {
                 sentNanos: sentNanos,
                 queueItem: queueItem,
                 queueItemID: queueItemID,
+                queueOrder: queueOrder,
                 broadcasterID: broadcasterID,
                 broadcasterEpoch: broadcasterEpoch,
                 mediaServiceName: mediaServiceName,
@@ -668,6 +714,7 @@ final class MeshControlPlane: @unchecked Sendable {
                 nowPlaying: nowPlaying,
                 videoEnabled: videoEnabled
             )
+            guard MeshRoomReplica.hasValidQueueOrder(event) else { return }
             _ = replica.merge([event])
             ingestDurableRoomState([event], excluding: nil)
             replicaHandler(replica)
@@ -894,6 +941,15 @@ final class MeshControlPlane: @unchecked Sendable {
 
         guard link.authenticated, let remoteID = link.nodeID, peers[remoteID] === link else { return }
         switch envelope.type {
+        case "arena":
+            guard envelope.nodeID == remoteID, let data = envelope.arenaData, data.count <= 8192 else { return }
+            let now = MonotonicClock.nowNanos()
+            if now - min(now, link.arenaReceiveWindow) >= 1_000_000_000 {
+                link.arenaReceiveWindow = now; link.arenaReceiveCount = 0
+            }
+            guard link.arenaReceiveCount < 90 else { return }
+            link.arenaReceiveCount += 1
+            arenaHandler(remoteID, data)
         case "room_icon":
             if let icon = envelope.roomIcon { mergeRoomIcon(icon) }
         case "sync":
@@ -1754,7 +1810,7 @@ final class MeshControlPlane: @unchecked Sendable {
 
     private func ingestDurableRoomState(_ events: [MeshRoomEvent], excluding source: Link?) {
         let durable = events.filter {
-            $0.kind == .chat || $0.kind == .queueAdd || $0.kind == .queueRemove
+            $0.kind == .chat || $0.kind == .queueAdd || $0.kind == .queueRemove || $0.kind == .queueReorder
         }
         guard !roomStateSyncDisabled, !durable.isEmpty else { return }
         roomStateWorkerQueue.async { [weak self] in

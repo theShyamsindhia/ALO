@@ -50,6 +50,7 @@ public enum MeshRoomEventKind: String, Codable, Sendable {
     case chat
     case queueAdd
     case queueRemove
+    case queueReorder
     case broadcaster
     case playback
     case video
@@ -66,6 +67,7 @@ public struct MeshRoomEvent: Codable, Sendable, Equatable, Identifiable {
     public let sentNanos: UInt64?
     public let queueItem: RoomQueueItem?
     public let queueItemID: String?
+    public let queueOrder: [String]?
     public let broadcasterID: String?
     public let broadcasterEpoch: UInt64?
     public let mediaServiceName: String?
@@ -84,6 +86,7 @@ public struct MeshRoomEvent: Codable, Sendable, Equatable, Identifiable {
         sentNanos: UInt64? = nil,
         queueItem: RoomQueueItem? = nil,
         queueItemID: String? = nil,
+        queueOrder: [String]? = nil,
         broadcasterID: String? = nil,
         broadcasterEpoch: UInt64? = nil,
         mediaServiceName: String? = nil,
@@ -101,6 +104,7 @@ public struct MeshRoomEvent: Codable, Sendable, Equatable, Identifiable {
         self.sentNanos = sentNanos
         self.queueItem = queueItem
         self.queueItemID = queueItemID
+        self.queueOrder = queueOrder
         self.broadcasterID = broadcasterID
         self.broadcasterEpoch = broadcasterEpoch
         self.mediaServiceName = mediaServiceName
@@ -108,6 +112,58 @@ public struct MeshRoomEvent: Codable, Sendable, Equatable, Identifiable {
         self.nowPlaying = nowPlaying
         self.videoEnabled = videoEnabled
     }
+    // A valid, harmless queue tombstone is understood by older room-state
+    // validators. An invalid queueAdd would reject their entire Automerge sync.
+    private static let queueOrderMarker = "alo:queue-order:v1"
+    private enum CodingKeys: String, CodingKey {
+        case id, roomID, version, kind, senderID, sender, text, sentNanos, queueItem, queueItemID, queueOrder, broadcasterID, broadcasterEpoch, mediaServiceName, isBroadcasting, nowPlaying, videoEnabled
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(String.self, forKey: .id)
+        roomID = try values.decode(String.self, forKey: .roomID)
+        version = try values.decode(MeshVersion.self, forKey: .version)
+        senderID = try values.decodeIfPresent(String.self, forKey: .senderID)
+        sender = try values.decodeIfPresent(String.self, forKey: .sender)
+        text = try values.decodeIfPresent(String.self, forKey: .text)
+        sentNanos = try values.decodeIfPresent(UInt64.self, forKey: .sentNanos)
+        queueItem = try values.decodeIfPresent(RoomQueueItem.self, forKey: .queueItem)
+        let wireQueueItemID = try values.decodeIfPresent(String.self, forKey: .queueItemID)
+        queueOrder = try values.decodeIfPresent([String].self, forKey: .queueOrder)
+        broadcasterID = try values.decodeIfPresent(String.self, forKey: .broadcasterID)
+        broadcasterEpoch = try values.decodeIfPresent(UInt64.self, forKey: .broadcasterEpoch)
+        mediaServiceName = try values.decodeIfPresent(String.self, forKey: .mediaServiceName)
+        isBroadcasting = try values.decodeIfPresent(Bool.self, forKey: .isBroadcasting)
+        nowPlaying = try values.decodeIfPresent(NowPlayingMedia.self, forKey: .nowPlaying)
+        videoEnabled = try values.decodeIfPresent(Bool.self, forKey: .videoEnabled)
+        let wireKind = try values.decode(MeshRoomEventKind.self, forKey: .kind)
+        let isOrder = wireKind == .queueRemove && wireQueueItemID == Self.queueOrderMarker && queueOrder != nil
+        kind = isOrder ? .queueReorder : wireKind
+        queueItemID = isOrder ? nil : wireQueueItemID
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(id, forKey: .id)
+        try values.encode(roomID, forKey: .roomID)
+        try values.encode(version, forKey: .version)
+        try values.encode(kind == .queueReorder ? MeshRoomEventKind.queueRemove : kind, forKey: .kind)
+        try values.encodeIfPresent(senderID, forKey: .senderID)
+        try values.encodeIfPresent(sender, forKey: .sender)
+        try values.encodeIfPresent(text, forKey: .text)
+        try values.encodeIfPresent(sentNanos, forKey: .sentNanos)
+        try values.encodeIfPresent(queueItem, forKey: .queueItem)
+        try values.encodeIfPresent(kind == .queueReorder ? Self.queueOrderMarker : queueItemID, forKey: .queueItemID)
+        try values.encodeIfPresent(queueOrder, forKey: .queueOrder)
+        try values.encodeIfPresent(broadcasterID, forKey: .broadcasterID)
+        try values.encodeIfPresent(broadcasterEpoch, forKey: .broadcasterEpoch)
+        try values.encodeIfPresent(mediaServiceName, forKey: .mediaServiceName)
+        try values.encodeIfPresent(isBroadcasting, forKey: .isBroadcasting)
+        try values.encodeIfPresent(nowPlaying, forKey: .nowPlaying)
+        try values.encodeIfPresent(videoEnabled, forKey: .videoEnabled)
+    }
+
 }
 
 public struct MeshBroadcaster: Sendable, Equatable {
@@ -135,6 +191,15 @@ public struct MeshRoomReplica: Sendable, Equatable {
         return event.version.counter <= ceiling && (event.broadcasterEpoch ?? 0) <= ceiling
     }
 
+    public static func hasValidQueueOrder(_ event: MeshRoomEvent) -> Bool {
+        guard event.kind == .queueReorder else { return true }
+        guard let order = event.queueOrder, order.count <= 2_000,
+              Set(order).count == order.count,
+              event.senderID == event.version.nodeID else { return false }
+        return order.allSatisfy { !$0.isEmpty && $0.utf8.count <= 256 }
+            && order.reduce(0) { $0 + $1.utf8.count } <= 90_000
+    }
+
     public private(set) var eventsByID = [String: MeshRoomEvent]()
     public private(set) var logicalClock: UInt64 = 0
 
@@ -145,7 +210,7 @@ public struct MeshRoomReplica: Sendable, Equatable {
     @discardableResult
     public mutating func merge(_ events: [MeshRoomEvent]) -> [MeshRoomEvent] {
         var inserted = [MeshRoomEvent]()
-        for event in events where eventsByID[event.id] == nil && Self.hasPlausibleCounters(event) {
+        for event in events where eventsByID[event.id] == nil && Self.hasPlausibleCounters(event) && Self.hasValidQueueOrder(event) {
             eventsByID[event.id] = event
             logicalClock = max(logicalClock, event.version.counter)
             inserted.append(event)
@@ -164,6 +229,7 @@ public struct MeshRoomReplica: Sendable, Equatable {
         }
         retained += queueByItem.values.sorted { $0.version == $1.version ? $0.id < $1.id : $0.version < $1.version }
             .suffix(Self.maximumQueueEvents)
+        if let order = ordered.last(where: { $0.kind == .queueReorder }) { retained.append(order) }
         if let playback = ordered.last(where: { $0.kind == .playback }) { retained.append(playback) }
         // A claim can race its video state. Keep the latest state for recent scopes.
         var videoByScope = [String: MeshRoomEvent]()
@@ -214,12 +280,19 @@ public struct MeshRoomReplica: Sendable, Equatable {
 
     public var queue: [RoomQueueItem] {
         let removed = Set(events.lazy.filter { $0.kind == .queueRemove }.compactMap(\.queueItemID))
-        return events.compactMap { event in
+        let items = events.compactMap { event -> RoomQueueItem? in
             guard event.kind == .queueAdd, let item = event.queueItem, !removed.contains(item.id) else {
                 return nil
             }
             return item
         }
+        guard let order = latest(.queueReorder)?.queueOrder else { return items }
+        let positions = Dictionary(order.enumerated().map { ($0.element, $0.offset) }, uniquingKeysWith: { first, _ in first })
+        return items.enumerated().sorted { lhs, rhs in
+            let left = positions[lhs.element.id] ?? (order.count + lhs.offset)
+            let right = positions[rhs.element.id] ?? (order.count + rhs.offset)
+            return left < right
+        }.map(\.element)
     }
 
     public var broadcaster: MeshBroadcaster? {
@@ -318,6 +391,7 @@ public struct MeshEnvelope: Codable, Sendable {
     public let walkieTalkieRelayTargetIDs: [String]?
     public let walkieTalkie: WalkieTalkieMessage?
     public let openLine: OpenLineMessage?
+    public let arenaData: Data?
 
     public init(
         type: String,
@@ -351,7 +425,8 @@ public struct MeshEnvelope: Codable, Sendable {
         walkieTalkieHopCount: UInt8? = nil,
         walkieTalkieRelayTargetIDs: [String]? = nil,
         walkieTalkie: WalkieTalkieMessage? = nil,
-        openLine: OpenLineMessage? = nil
+        openLine: OpenLineMessage? = nil,
+        arenaData: Data? = nil
     ) {
         self.type = type
         self.roomIcon = roomIcon
@@ -385,6 +460,7 @@ public struct MeshEnvelope: Codable, Sendable {
         self.walkieTalkieRelayTargetIDs = walkieTalkieRelayTargetIDs
         self.walkieTalkie = walkieTalkie
         self.openLine = openLine
+        self.arenaData = arenaData
     }
 
     public func encodedLine() throws -> Data {

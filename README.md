@@ -201,17 +201,22 @@ ALO separates room coordination from the high-rate media stream:
   replicas settle on the same source. A later take-over supersedes the prior claim.
 - Queue removals are replicated as tombstones, so an old add event cannot resurrect a
   removed item after a temporarily disconnected peer returns.
-- Each Mac retains durable queue state and up to 500 chat messages from the last seven
-  days. Transient broadcaster ownership is deliberately not restored after relaunch.
+- Each Mac retains durable queue state and up to 500 chat events, including edits
+  and reactions. This count-based cache is not a permanent archive. Transient broadcaster ownership is deliberately not restored after relaunch.
 
-Public rooms are discoverable and joinable by devices on reachable local links.
-Private rooms require the same room ID and invite key; peers prove possession during
-the control handshake. Private broadcast media uses shared-key TLS for media control
-and video, plus authenticated, replay-protected audio packets. Update every Mac in a
-private room to a compatible version. This does not provide forward secrecy or the
-future nearby transport's installation-identity model. Room mesh traffic, including
-chat and voice, is not end-to-end encrypted, and public media remains unencrypted:
-use trusted local links for both room types.
+Public rooms are discoverable and joinable on reachable local links. Private rooms
+require the same room ID and invite key, proved during the control handshake.
+Private broadcast media uses room-key TLS for media control and video, and AES-GCM
+with replay protection for audio datagrams. These protections do not provide forward
+secrecy or the future nearby transport's installation-identity model. Room coordination
+(chat, queue, presence, activities, and Talk/Open Line voice) still uses unencrypted
+TCP even in private rooms; public media is also unencrypted. Use trusted local links.
+See the [channel-by-channel audit](docs/room-privacy.md).
+
+Per-person **Voice on this Mac** levels persist independently of media volume. Room
+settings include optional music ducking during incoming speech and local microphone
+routing details. Status dots in People show per-device state; hover for details.
+
 
 ## How synchronization works
 
@@ -237,8 +242,8 @@ use trusted local links for both room types.
 - Audio uses about 1.54 Mb/s per receiving Mac. Video targets about 4 Mb/s at up to
   1280×720 and 30 fps using Apple’s hardware H.264 encoder.
 - Packet loss becomes a short silence rather than delaying every receiver.
-- Room traffic stays on local network paths, without a cloud media relay. See the
-  private-media protections and remaining mesh-traffic limitations above.
+- Room traffic stays on local network paths without a cloud media relay. Encryption
+  varies by channel; see [room privacy](docs/room-privacy.md).
 - Spotify artwork is resolved once per track through Spotify’s public HTTPS artwork
   endpoint; no Spotify account token is used. Other players use macOS Now Playing data
   when the system makes it available.

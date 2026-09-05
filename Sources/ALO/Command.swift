@@ -15,6 +15,14 @@ struct ALOError: LocalizedError {
 enum ALOCommand {
     static func main() async {
         do {
+            #if DEBUG
+            if Bundle.main.object(forInfoDictionaryKey: "ALORoomPreview") as? Bool == true {
+                RoomPresentationPreview.run(); return
+            }
+            #endif
+            if Bundle.main.object(forInfoDictionaryKey: "ALOActivityPreview") as? Bool == true {
+                ArenaStandalone.run(); return
+            }
             let arguments = Array(CommandLine.arguments.dropFirst())
             guard let command = arguments.first, !command.hasPrefix("-psn") else {
                 GUIApplication.run()
@@ -22,6 +30,9 @@ enum ALOCommand {
             }
 
             switch command {
+            case "arena":
+                ArenaStandalone.run()
+
             case "host":
                 let roomName = arguments.dropFirst().first ?? Host.current().localizedName ?? "ALO Room"
                 try await runHost(roomName: roomName)
@@ -171,7 +182,7 @@ enum ALOCommand {
             nowPlayingHandler: { media in
                 report("media \(media.isPlaying == false ? "paused" : "playing-or-unknown")")
             },
-            chatHandler: { _, _, _, _ in },
+            chatHandler: { _, _, _, _, _ in },
             queueHandler: { _ in },
             videoHandler: { _ in },
             peerVersionHandler: { report("peer-version \($0)") },
@@ -226,6 +237,7 @@ enum ALOCommand {
         ALO — free, synchronized Mac-to-Mac screen and audio over local Wi-Fi
 
         Usage:
+          alo arena               Open standalone Rift Arena practice
           alo host [room-name]     Stream this Mac's screen and system audio
           alo join [room-name]     Find and play a room on the local network
           alo room [id-or-name] [--broadcast|--take-over]

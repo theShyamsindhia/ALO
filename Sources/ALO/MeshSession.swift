@@ -26,7 +26,7 @@ final class MeshSession {
     private let mediaStateHandler: (Bool) -> Void
     private let nowPlayingHandler: (NowPlayingMedia) -> Void
     private let queueHandler: ([RoomQueueItem]) -> Void
-    private let chatHandler: (String, String, String, UInt64) -> Void
+    private let chatHandler: (String, String, String, UInt64, MeshVersion) -> Void
     private let videoHandler: (CGImage) -> Void
     private let replicaPersistenceHandler: (MeshRoomReplica) -> Void
     private let errorHandler: (Error) -> Void
@@ -202,11 +202,12 @@ final class MeshSession {
         participantsHandler: @escaping ([RoomParticipant]) -> Void,
         mediaStateHandler: @escaping (Bool) -> Void,
         nowPlayingHandler: @escaping (NowPlayingMedia) -> Void,
-        chatHandler: @escaping (String, String, String, UInt64) -> Void,
+        chatHandler: @escaping (String, String, String, UInt64, MeshVersion) -> Void,
         queueHandler: @escaping ([RoomQueueItem]) -> Void,
         videoHandler: @escaping (CGImage) -> Void,
         peerVersionHandler: @escaping (String) -> Void = { _ in },
         roomIconHandler: @escaping (RoomIcon) -> Void = { _ in },
+        arenaHandler: @escaping (String, Data) -> Void = { _, _ in },
         errorHandler: @escaping (Error) -> Void = { _ in },
         walkieTalkieStateHandler: @escaping (String, String, Bool, Double) -> Void = { _, _, _, _ in },
         walkieTalkieTransmissionEndedHandler: @escaping (Error) -> Void = { _ in },
@@ -287,6 +288,9 @@ final class MeshSession {
             openLineHandler: { message in
                 DispatchQueue.main.async { relay.openLine(message) }
             },
+            arenaHandler: { sender, data in
+                DispatchQueue.main.async { arenaHandler(sender, data) }
+            },
             roomStatePersistenceHandler: roomStatePersistenceHandler
         )
         relay.replica = { [weak self] in self?.apply($0) }
@@ -331,6 +335,8 @@ final class MeshSession {
         control.publishBroadcaster(active: false)
     }
 
+    func sendArena(_ data: Data, targetID: String?) { control.publishArena(data, targetID: targetID) }
+
     func sendChat(_ text: String) { control.publishChat(text) }
     func addQueueItem(_ item: RoomQueueItem) {
         control.publishQueueAdd(RoomQueueItem(
@@ -344,6 +350,7 @@ final class MeshSession {
         ))
     }
     func removeQueueItem(_ id: String) { control.publishQueueRemove(id) }
+    func reorderQueue(_ ids: [String]) { control.publishQueueReorder(ids) }
     func updateIdentity(name: String, icon: String, colorHex: String) {
         updateIdentity(name: name, icon: icon, colorHex: colorHex, profileImageData: profileImageData)
     }
@@ -714,8 +721,29 @@ final class MeshSession {
         // source return and its direct-source fallback independently.
         receiver?.setLocalPlaybackMuted(incomingAudioMuteRouting.incomingMediaMuted)
     }
+    private var musicDuckingEnabled = false
+    private var appliedMusicDucking = false
+
+    func setMusicDuckingEnabled(_ enabled: Bool) {
+        musicDuckingEnabled = enabled
+        updateMusicDucking()
+    }
+
+    private func updateMusicDucking() {
+        let ducked = musicDuckingEnabled && !incomingVoiceMuted && !activeIncomingVoiceSessions.isEmpty
+        guard ducked != appliedMusicDucking else { return }
+        appliedMusicDucking = ducked
+        receiver?.setMusicDucked(ducked)
+        hostSession?.setMusicDucked(ducked)
+    }
+
+    func setVoiceVolume(_ volume: Double, for participantID: String) {
+        walkieTalkiePlayer.setParticipantVolume(volume, for: participantID)
+    }
+
     func setIncomingWalkieTalkieMuted(_ muted: Bool) {
         incomingVoiceMuted = muted
+        updateMusicDucking()
         walkieTalkiePlayer.setMuted(incomingAudioMuteRouting.voicePlaybackMuted)
     }
 
@@ -735,6 +763,7 @@ final class MeshSession {
             activeIncomingVoiceSessions.removeValue(forKey: sessionID)
             incomingVoiceSessionLevels.removeValue(forKey: sessionID)
         }
+        updateMusicDucking()
         let senderIsActive = activeIncomingVoiceSessions.values.contains(senderID)
         let currentLevel = incomingVoiceLevel(for: senderID)
         if senderWasActive != senderIsActive || abs(previousLevel - currentLevel) >= 0.001 {
@@ -814,7 +843,7 @@ final class MeshSession {
         replicaPersistenceHandler(next)
         for event in next.chatEvents where !oldChatIDs.contains(event.id) {
             if let sender = event.sender, let text = event.text {
-                chatHandler(event.senderID ?? event.version.nodeID, sender, text, event.sentNanos ?? 0)
+                chatHandler(event.senderID ?? event.version.nodeID, sender, text, event.sentNanos ?? 0, event.version)
             }
         }
         queueHandler(next.queue)
@@ -933,6 +962,7 @@ final class MeshSession {
                         }
                     )
                     let routing = incomingAudioMuteRouting
+                    host.setMusicDucked(appliedMusicDucking)
                     host.setParticipantLevel(
                         id: nodeID,
                         volume: localVolume,
@@ -964,6 +994,14 @@ final class MeshSession {
                             }
                             if status == .playing { self?.statusHandler("Listening in sync") }
                             if status == .silent { self?.statusHandler("Connected · waiting for audio") }
+                            if status == .searching {
+                                DispatchQueue.main.async { self?.mediaCommandReady = false }
+                                self?.statusHandler("Reconnecting to room audio")
+                            }
+                            if case .failed(let reason) = status {
+                                DispatchQueue.main.async { self?.mediaCommandReady = false }
+                                self?.statusHandler("Reconnecting · audio connection failed: \(reason)")
+                            }
                         },
                         identityHandler: { _, _ in },
                         participantsHandler: { _ in },
@@ -981,6 +1019,7 @@ final class MeshSession {
                         muted: routing.publishedParticipantMediaMuted
                     )
                     receiver.setLocalPlaybackMuted(routing.incomingMediaMuted)
+                    receiver.setMusicDucked(appliedMusicDucking)
                     guard generation == transitionGeneration,
                           replica.broadcaster == broadcaster else {
                         receiver.stop()

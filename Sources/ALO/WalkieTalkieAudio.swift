@@ -773,6 +773,7 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
     private var configurationRecoveryPending = false
     private var deferredRecoveryMessages = [WalkieTalkieMessage]()
     private var muted = false
+    private var participantVolumes = [String: Double]()
 
     static func makePlaybackBuffer(
         fromPCM16Mono data: Data,
@@ -833,6 +834,18 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
             guard let self else { return }
             self.muted = muted
             if muted { self.stopAllOnQueue() }
+        }
+    }
+
+    func setParticipantVolume(_ volume: Double, for senderID: String) {
+        guard volume.isFinite else { return }
+        queue.async { [weak self] in
+            guard let self else { return }
+            let level = VoiceLevelStore.clamp(volume)
+            self.participantVolumes[senderID] = level
+            for session in self.sessions.values where session.senderID == senderID {
+                session.player.volume = Float(level)
+            }
         }
     }
 
@@ -898,6 +911,7 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
             }
         }
         let player = AVAudioPlayerNode()
+        player.volume = Float(participantVolumes[message.senderID] ?? 1)
         guard let format = AVAudioFormat(
             standardFormatWithSampleRate: sampleRate,
             channels: 1
