@@ -74,7 +74,17 @@ final class SecureMacPlaybackTimeline {
     private var stopped = false
     private var reportedActivity = false
     private var repairedTarget: RepairTarget?
+    /// Uncommitted future PCM is a separate, fixed-size proposal hold.
     static let maximumBufferedPackets = 128
+    /// Native played-back completions can lag the audible deadline. Allow one
+    /// maximum-delay timeline plus 100 ms of bounded callback/reorder slack;
+    /// this is accounting headroom, never extra playout latency.
+    static let hardwareCompletionSlackNanos: UInt64 = 100_000_000
+    static let maximumScheduledPackets: Int = {
+        let packetDuration = UInt64(AudioPacket.framesPerPacket) * 1_000_000_000 / UInt64(AudioPacket.sampleRate)
+        let duration = RoomTiming.maximumPlayoutDelayNanos + hardwareCompletionSlackNanos
+        return Int((duration + packetDuration - 1) / packetDuration)
+    }()
 
     convenience init(audioOutput: RoomAudioOutputEngine, playbackActivity: @escaping (Bool) -> Void = { _ in }) throws {
         try self.init(makePlayer: { activity in
@@ -321,7 +331,7 @@ final class SecureMacPlaybackTimeline {
 
     private func deliver(_ packet: AudioPacket, to track: Track) {
         guard let floor = track.floor, packet.captureTimeNanos >= floor.capture, packet.frameIndex >= floor.frame,
-              track.player.pendingPlaybackPacketCount + track.player.outstandingPlaybackBufferCount < Self.maximumBufferedPackets,
+              track.player.pendingPlaybackPacketCount + track.player.outstandingPlaybackBufferCount < Self.maximumScheduledPackets,
               let end = captureEnd(packet) else { return }
         track.captureEnd = max(track.captureEnd ?? 0, end)
         if track.firstAudibleTime == nil, let offset = track.player.clockOffsetNanos {

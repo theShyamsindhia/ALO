@@ -242,6 +242,7 @@ public final class iOSAudioSessionCoordinator {
             let actualFormat = input.outputFormat(forBus: 0)
             let generation = lifecycle.generation
             let output = BoundedMediaEventBridge<VoicePCMChunk>(maximumEvents: 8, maximumBytes: 7_680,
+                droppable: { _ in true },
                 schedule: { DispatchQueue.main.async(execute: $0) }, receive: { [weak self] chunks in
                     MainActor.assumeIsolated {
                     guard let self, self.lifecycle.generation == generation, self.lifecycle.isMicrophoneActive else { return }

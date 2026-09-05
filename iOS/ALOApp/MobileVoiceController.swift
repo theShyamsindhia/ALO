@@ -86,6 +86,7 @@ import ALONetworking
         self.mesh = mesh; self.localID = localID; localName = name
         line = OpenLineSessionState(localID: localID.uuidString)
         let bridge = BoundedMediaEventBridge<Event>(maximumEvents: 128, maximumBytes: 122_880,
+            droppable: { event in if case .pcm = event { return true }; return false },
             schedule: { DispatchQueue.main.async(execute: $0) }, receive: { [weak self] events in
                 MainActor.assumeIsolated {
                     guard let self, self.generation == token else { return }

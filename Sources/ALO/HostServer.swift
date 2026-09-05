@@ -1084,8 +1084,15 @@ final class HostServer {
             let admissionBudget = groupPlayoutDelayNanos > schedulingHeadroom
                 ? groupPlayoutDelayNanos - schedulingHeadroom : 0
             let estimatedLocalCompletion = client.audioCompletionDurations.max() ?? 0
-            let completionInterval = client.audioCompletionIntervals.isEmpty ? 0
+            let recentCompletionInterval = client.audioCompletionIntervals.isEmpty ? 0
                 : client.audioCompletionIntervals.reduce(0, +) / UInt64(client.audioCompletionIntervals.count)
+            // An outstanding interval is already at least this long, even
+            // before its completion arrives. Otherwise a slowing path keeps
+            // admitting against an obsolete fast rate until the next callback.
+            let unfinishedCompletionInterval = client.audioSendsInFlight > 0
+                ? client.lastAudioCompletionNanos.map { submittedAt >= $0 ? submittedAt - $0 : 0 } ?? 0
+                : 0
+            let completionInterval = max(recentCompletionInterval, unfinishedCompletionInterval)
             // Queue wait alone ignores capture acquisition age and work already
             // occupying this path. Preserve fresh FIFO packets, but do not admit
             // one whose observed local service estimate consumes its remaining

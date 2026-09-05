@@ -6,6 +6,32 @@ import ALOCore
 
 @Suite("Bounded audio sender bursts", .serialized)
 struct AudioSenderBurstTests {
+    @Test func unfinishedCompletionIntervalBudgetsOutstandingAudio() throws {
+        let fixture = try AudioBurstFixture()
+        defer { fixture.stop() }
+        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 8 * 240 * 2),
+            captureTimeNanos: fixture.audioNowNanos - 40_000_000)
+        fixture.barrier()
+        fixture.advanceAudioClock(by: 16_000_000)
+        fixture.completeOne()
+        fixture.advanceAudioClock(by: 16_000_000)
+        fixture.completeOne()
+        // Six sends remain. Their previously observed completion interval was
+        // 16ms, but the next interval is already 24ms with no completion. It
+        // cannot still be budgeted as 16ms merely because it has not finished.
+        fixture.advanceAudioClock(by: 24_000_000)
+        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 240 * 2),
+            captureTimeNanos: fixture.audioNowNanos - 100_000_000)
+        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 240 * 2),
+            captureTimeNanos: fixture.audioNowNanos)
+        fixture.barrier()
+        fixture.drain()
+        // Old capture has 125ms left before render headroom; seven slots at
+        // the already-observed 24ms interval require 168ms. Fresh PCM fits.
+        #expect(fixture.probe.sequences == Array(0..<8) + [9])
+        #expect(fixture.host.audioSenderSnapshot().first?.admissionRejected == 1)
+    }
+
     @Test func completionRateBudgetsPacketsStillInFlight() throws {
         let fixture = try AudioBurstFixture()
         defer { fixture.stop() }

@@ -76,6 +76,42 @@ struct SecureMacPlaybackTimelineTests {
         try rig.output.commit(id: id)
     }
 
+    @Test("Maximum room delay retains callback slack beyond its scheduled PCM depth")
+    func maximumDelayAllowsBoundedHardwareCompletionSlack() throws {
+        let rig = try Rig()
+        try start(rig, delay: RoomTiming.maximumPlayoutDelayNanos)
+        // At 600 ms, 120 five-millisecond buffers can legitimately await
+        // dataPlayedBack. Another 50 ms of callbacks/reordering is not overload.
+        rig.players[0].outstandingPlaybackBufferCount = 120
+        rig.players[0].pendingPlaybackPacketCount = 10
+        let fresh = packet()
+        rig.output.accept(fresh)
+        #expect(rig.players[0].packets.map(\.frameIndex) == [fresh.frameIndex])
+        #expect(rig.players[0].outstandingPlaybackBufferCount == 121)
+        #expect(SecureMacPlaybackTimeline.maximumBufferedPackets == 128,
+            "The proposal hold bound is independent and must remain unchanged")
+    }
+
+    @Test("Hardware scheduling remains bounded and resumes admission after a completion")
+    func hardwareCompletionSlackHasAnExactBound() throws {
+        let rig = try Rig()
+        try start(rig, delay: RoomTiming.maximumPlayoutDelayNanos)
+        let maximum = SecureMacPlaybackTimeline.maximumScheduledPackets
+        #expect(maximum == 140, "600 ms timeline plus 100 ms slack at five milliseconds per packet")
+        rig.players[0].pendingPlaybackPacketCount = 10
+        rig.players[0].outstandingPlaybackBufferCount = maximum - 11
+        rig.output.accept(packet())
+        #expect(rig.players[0].packets.count == 1)
+        #expect(rig.players[0].pendingPlaybackPacketCount + rig.players[0].outstandingPlaybackBufferCount == maximum)
+        let next = packet(240, capture: 1_005_000_000)
+        rig.output.accept(next)
+        #expect(rig.players[0].packets.count == 1, "Missing callbacks cannot grow the native backlog without bound")
+        rig.players[0].outstandingPlaybackBufferCount -= 1
+        rig.output.accept(next)
+        #expect(rig.players[0].packets.map(\.frameIndex) == [0, 240])
+        #expect(rig.players[0].pendingPlaybackPacketCount + rig.players[0].outstandingPlaybackBufferCount == maximum)
+    }
+
     @Test("A queued host cutover cannot survive pause and resume before its executor drains")
     func hostQueuedCutoverIsInvalidatedByPauseResume() throws {
         let rig = try Rig()

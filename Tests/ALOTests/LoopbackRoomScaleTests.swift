@@ -1421,13 +1421,15 @@ struct LoopbackRoomScaleTests {
                     destinationPort = port.rawValue
                 } else { destinationPort = nil }
                 if let sequence {
-                    submissions.submitted(port: destinationPort, sequence: sequence)
+                    submissions.submitted(port: destinationPort, sequence: sequence,
+                        atNanos: MonotonicClock.nowNanos())
                 }
                 let started = MonotonicClock.nowNanos()
                 let measuredCompletion: (NWError?) -> Void = { error in
                     if let sequence {
                         completionLatencies.record(MonotonicClock.nowNanos() - started)
-                        submissions.completed(port: destinationPort, sequence: sequence, error: error)
+                        submissions.completed(port: destinationPort, sequence: sequence, error: error,
+                            atNanos: MonotonicClock.nowNanos())
                     }
                     completion(error)
                 }
@@ -1436,7 +1438,12 @@ struct LoopbackRoomScaleTests {
                         data,
                         over: connection,
                         isComplete: isComplete,
-                        completion: measuredCompletion
+                        completion: measuredCompletion,
+                        timing: { serializationWait, dispatchLateness in
+                            guard let sequence else { return }
+                            submissions.shaped(port: destinationPort, sequence: sequence,
+                                serializationWaitNanos: serializationWait, dispatchLatenessNanos: dispatchLateness)
+                        }
                     )
                 } else {
                     connection.send(content: data, contentContext: .defaultMessage,
@@ -1599,6 +1606,28 @@ struct LoopbackRoomScaleTests {
                 arrival.receiveEntryNanos.map { $0 - arrival.captureNanos }
             }.max() ?? 0
             print("Audio actual final sequences: \(snapshots.compactMap(\.lastSequence)); maximum packet age: \(maximumPacketAge / 1_000_000)ms")
+            // Attribute the actual worst packet, not the usually fresher terminal
+            // packet. This is diagnostics only: preserve post-decode measurement
+            // and the original deadline assertion without trimming any receipt.
+            let worstPacket = zip(peerPorts, snapshots).flatMap { port, snapshot in
+                snapshot.arrivals.map { (port: port, sequence: $0.key, arrival: $0.value) }
+            }.max { lhs, rhs in
+                lhs.arrival.arrivedNanos - lhs.arrival.captureNanos
+                    < rhs.arrival.arrivedNanos - rhs.arrival.captureNanos
+            }
+            if let worstPacket {
+                let arrival = worstPacket.arrival
+                let trace = submissions.trace(port: worstPacket.port, sequence: worstPacket.sequence)
+                let admissionAge = trace?.admittedAtNanos.map { $0 >= arrival.captureNanos ? $0 - arrival.captureNanos : 0 }
+                let sendDuration = trace.flatMap { trace -> UInt64? in
+                    guard let admitted = trace.admittedAtNanos, let completed = trace.completedAtNanos,
+                          completed >= admitted else { return nil }
+                    return completed - admitted
+                }
+                let receiveAge = arrival.receiveEntryNanos.map { $0 - arrival.captureNanos }
+                let decodeWork = arrival.receiveEntryNanos.map { arrival.arrivedNanos - $0 }
+                print("Worst audio packet: port=\(worstPacket.port), sequence=\(worstPacket.sequence), admissionAge=\(String(describing: admissionAge))ns, localCompletion=\(String(describing: sendDuration))ns, shapedWait=\(String(describing: trace?.serializationWaitNanos))ns, shaperDispatchLate=\(String(describing: trace?.dispatchLatenessNanos))ns, receiveEntryAge=\(String(describing: receiveAge))ns, PCMWork=\(String(describing: decodeWork))ns, postDecodeAge=\(arrival.arrivedNanos - arrival.captureNanos)ns")
+            }
             let offsets = snapshots.compactMap(\.clockOffsetNanos)
             let commonSequences = snapshots.dropFirst().reduce(Set(snapshots[0].arrivals.keys)) {
                 $0.intersection($1.arrivals.keys)
@@ -2080,6 +2109,16 @@ private final class ReceiverRestartObservations: @unchecked Sendable {
 }
 
 private final class AudioSubmissionLedger: @unchecked Sendable {
+    struct Trace {
+        var admittedAtNanos: UInt64?
+        var completedAtNanos: UInt64?
+        var serializationWaitNanos: UInt64?
+        var dispatchLatenessNanos: UInt64?
+    }
+    private struct TraceKey: Hashable {
+        let port: UInt16
+        let sequence: UInt32
+    }
     struct Snapshot {
         var submitted: [UInt16: Set<UInt32>] = [:]
         var successful: [UInt16: Set<UInt32>] = [:]
@@ -2094,9 +2133,12 @@ private final class AudioSubmissionLedger: @unchecked Sendable {
     }
     private let lock = NSLock()
     private var state = Snapshot()
+    // The live room fixture offers at most 200 packets to each of eight peers.
+    // Keep timestamps bounded and format only after all receive work has drained.
+    private var traces: [TraceKey: Trace] = [:]
     var snapshot: Snapshot { lock.withLock { state } }
 
-    func submitted(port: UInt16?, sequence: UInt32) {
+    func submitted(port: UInt16?, sequence: UInt32, atNanos: UInt64? = nil) {
         lock.withLock {
             guard let port else {
                 state.failures.append("Audio submitted without a UDP destination port")
@@ -2105,9 +2147,12 @@ private final class AudioSubmissionLedger: @unchecked Sendable {
             if !state.submitted[port, default: []].insert(sequence).inserted {
                 state.failures.append("Duplicate audio submission on \(port): \(sequence)")
             }
+            if let atNanos, traces.count < 1_600 {
+                traces[TraceKey(port: port, sequence: sequence)] = Trace(admittedAtNanos: atNanos)
+            }
         }
     }
-    func completed(port: UInt16?, sequence: UInt32, error: NWError?) {
+    func completed(port: UInt16?, sequence: UInt32, error: NWError?, atNanos: UInt64? = nil) {
         lock.withLock {
             guard let port else { return }
             if let error {
@@ -2115,7 +2160,19 @@ private final class AudioSubmissionLedger: @unchecked Sendable {
             } else {
                 state.successful[port, default: []].insert(sequence)
             }
+            traces[TraceKey(port: port, sequence: sequence)]?.completedAtNanos = atNanos
         }
+    }
+    func shaped(port: UInt16?, sequence: UInt32, serializationWaitNanos: UInt64, dispatchLatenessNanos: UInt64) {
+        lock.withLock {
+            guard let port else { return }
+            let key = TraceKey(port: port, sequence: sequence)
+            traces[key]?.serializationWaitNanos = serializationWaitNanos
+            traces[key]?.dispatchLatenessNanos = dispatchLatenessNanos
+        }
+    }
+    func trace(port: UInt16, sequence: UInt32) -> Trace? {
+        lock.withLock { traces[TraceKey(port: port, sequence: sequence)] }
     }
 }
 
@@ -2408,7 +2465,8 @@ private final class FluidLinkShaper: @unchecked Sendable {
         _ data: Data,
         over connection: NWConnection,
         isComplete: Bool,
-        completion: @escaping (NWError?) -> Void
+        completion: @escaping (NWError?) -> Void,
+        timing: @escaping (UInt64, UInt64) -> Void = { _, _ in }
     ) {
         let now = DispatchTime.now().uptimeNanoseconds
         let transmissionNanos = max(1, UInt64(data.count) * 8 * 1_000_000_000 / bitsPerSecond)
@@ -2420,7 +2478,9 @@ private final class FluidLinkShaper: @unchecked Sendable {
 
         deliveryQueue.asyncAfter(deadline: DispatchTime(uptimeNanoseconds: deliversAt)) {
             let executedAt = DispatchTime.now().uptimeNanoseconds
-            self.dispatchLatencies.record(executedAt > deliversAt ? executedAt - deliversAt : 0)
+            let lateness = executedAt > deliversAt ? executedAt - deliversAt : 0
+            self.dispatchLatencies.record(lateness)
+            timing(deliversAt - now, lateness)
             connection.send(
                 content: data,
                 contentContext: .defaultMessage,
