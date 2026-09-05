@@ -727,23 +727,31 @@ struct LoopbackRoomScaleTests {
 
     @Test("Listener re-anchors after sustained post-spike drift")
     func listenerReanchorsAfterSustainedPostSpikeDrift() {
-        var recovery = PlaybackDriftRecovery()
-        let delayed = SynchronizedPlayer.hardResyncThresholdNanos + 30_000_000
+        var recovery = LocalAudioSyncPolicy()
+        let delayed = LocalAudioSyncPolicy.thresholdNanos + 5_000_000
 
-        for _ in 0..<(PlaybackDriftRecovery.minimumSampleCount - 1) {
-            let shouldResynchronize = recovery.shouldResynchronize(latenessNanos: delayed)
+        for tick in 0..<20 {
+            let shouldResynchronize = recovery.shouldRealign(driftNanos: delayed, now: UInt64(tick) * 50_000_000)
             #expect(!shouldResynchronize)
         }
-        let sustainedSevereDrift = recovery.shouldResynchronize(latenessNanos: delayed)
+        let sustainedSevereDrift = recovery.shouldRealign(driftNanos: delayed, now: 1_000_000_000)
         #expect(sustainedSevereDrift)
 
         // A single delayed observation after recovery must not cause a resync loop.
-        let postRecoveryDelay = recovery.shouldResynchronize(latenessNanos: delayed)
-        let recoveredCheck = recovery.shouldResynchronize(latenessNanos: 2_000_000)
-        let newDelay = recovery.shouldResynchronize(latenessNanos: delayed)
+        let postRecoveryDelay = recovery.shouldRealign(driftNanos: delayed, now: 1_050_000_000)
+        let recoveredCheck = recovery.shouldRealign(driftNanos: 2_000_000, now: 1_100_000_000)
+        let newDelay = recovery.shouldRealign(driftNanos: delayed, now: 1_150_000_000)
         #expect(!postRecoveryDelay)
         #expect(!recoveredCheck)
         #expect(!newDelay)
+        // Actual shipping policy requires another uninterrupted second AFTER
+        // its eight-second cooldown, not nine invocation-count samples.
+        for tick in 24..<200 {
+            let triggered = recovery.shouldRealign(driftNanos: delayed, now: UInt64(tick) * 50_000_000)
+            #expect(!triggered)
+        }
+        let nextSustained = recovery.shouldRealign(driftNanos: delayed, now: 10_000_000_000)
+        #expect(nextSustained)
     }
 
     @Test("One busy listener cannot retime a three-device room")

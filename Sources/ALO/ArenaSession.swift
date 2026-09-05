@@ -186,7 +186,7 @@ final class ArenaSession: ObservableObject {
         previousTime = ProcessInfo.processInfo.systemUptime
         let interval = playing && !paused ? ArenaSimulation.step : 0.25
         let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.update() }
+            MainActor.assumeIsolated { self?.update(at: ProcessInfo.processInfo.systemUptime) }
         }
         timer.tolerance = playing ? 0.002 : 0.05
         RunLoop.main.add(timer, forMode: .common)
@@ -471,8 +471,9 @@ final class ArenaSession: ObservableObject {
         notice = "A disconnected player's fighter is now controlled by a bot."
         refreshSlots(); sendRoster(); advertise(); startIfReady()
     }
-    private func update() {
-        let now = ProcessInfo.processInfo.systemUptime
+    /// The timer supplies monotonic time; tests can exercise a coalesced callback
+    /// without depending on wall-clock sleeps or the main run loop's cadence.
+    func update(at now: TimeInterval) {
         let elapsed = min(0.1, max(0, now - previousTime)); previousTime = now; tickCount += 1
         if now - lastAdvertise >= 1 {
             lastAdvertise = now
@@ -526,6 +527,10 @@ final class ArenaSession: ObservableObject {
         reportedRound = round
         if reportedResultKeys.count >= 2048 { reportedResultKeys.removeAll() }
         reportedResultKeys.insert(resultKey)
+        // A coalesced timer may not reach the periodic three-tick state send.
+        // Publish the terminal snapshot once when the result is first known,
+        // before a local result observer can leave or begin another round.
+        if mode == .host { sendRoster() }
         onMatchFinished?(ArenaMatchResult(sessionID: sessionID, round: round, participantIDs: ids, playerNames: playerNames, winner: winner, botSlots: botSlots))
     }
     func openExpanded() {

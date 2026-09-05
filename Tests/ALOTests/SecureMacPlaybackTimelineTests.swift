@@ -21,6 +21,9 @@ struct SecureMacPlaybackTimelineTests {
         var ducking: Double = 1
         var playing = true
         var pauseCalls = 0
+        var automaticSyncEnabled = true
+        var activePlayoutDelayNanos: UInt64 { latencyChanges.last ?? RoomTiming.defaultPlayoutDelayNanos }
+        var automaticSyncState: String { automaticSyncEnabled ? "Watching local audio timing" : "Automatic drift realignment off" }
         let activity: (Bool) -> Void
         init(activity: @escaping (Bool) -> Void) { self.activity = activity }
         func accept(_ packet: AudioPacket) {
@@ -28,6 +31,7 @@ struct SecureMacPlaybackTimelineTests {
         }
         func maintainSync() {}
         func setTargetLatencyNanos(_ nanos: UInt64) { latencyChanges.append(nanos) }
+        func setAutomaticSyncEnabled(_ enabled: Bool) { automaticSyncEnabled = enabled }
         func setLevel(volume: Double, muted: Bool) { self.volume = volume; self.muted = muted }
         func setDuckingGain(_ gain: Double) { ducking = gain }
         func setRoomPlayback(playing: Bool) {
@@ -74,6 +78,49 @@ struct SecureMacPlaybackTimelineTests {
         let id = UUID()
         try rig.output.prepare(id: id, anchor: anchor(delay: delay), clockOffsetNanos: 0)
         try rig.output.commit(id: id)
+    }
+
+    @Test func automaticSyncPreferenceSurvivesSuccessorAndReachesBothCutoverTracks() throws {
+        let rig = try Rig()
+        rig.output.setAutomaticSyncEnabled(false)
+        try start(rig)
+        #expect(!rig.players[0].automaticSyncEnabled)
+        let next = UUID()
+        try rig.output.prepare(id: next, anchor: anchor(capture: 1_200_000_000, frame: 9_600, delay: 400_000_000), clockOffsetNanos: 0)
+        #expect(rig.players.count == 2)
+        #expect(!rig.players[1].automaticSyncEnabled)
+        try rig.output.commit(id: next)
+        rig.output.setAutomaticSyncEnabled(true)
+        #expect(rig.players.allSatisfy { $0.automaticSyncEnabled })
+        rig.output.setAutomaticSyncEnabled(false)
+        #expect(rig.players.allSatisfy { !$0.automaticSyncEnabled })
+    }
+
+    @Test func diagnosticsDescribeAudiblePredecessorBeforeFutureCutover() throws {
+        let rig = try Rig()
+        try start(rig)
+        let next = UUID()
+        try rig.output.prepare(id: next, anchor: anchor(capture: 1_200_000_000, frame: 9_600, delay: 400_000_000), clockOffsetNanos: 0)
+        try rig.output.commit(id: next)
+        rig.players[0].automaticSyncEnabled = false
+        #expect(rig.output.activePlayoutDelayNanos == 250_000_000)
+        #expect(rig.output.automaticSyncState == "Automatic drift realignment off")
+        rig.now = 1_600_000_000
+        #expect(rig.output.activePlayoutDelayNanos == 400_000_000)
+        #expect(rig.output.automaticSyncState == "Watching local audio timing")
+    }
+
+    @Test func secureHostDiagnosticsExposeRealPlaybackBufferAndAutomaticSyncState() async throws {
+        let rig = try Rig()
+        try start(rig, delay: 400_000_000)
+        rig.players[0].automaticSyncEnabled = false
+        let queue = DispatchQueue(label: "alo.test.host-sync-diagnostics")
+        let renderer = SecureMacMediaHost.LocalRenderer(player: rig.output, timeline: CapturedMediaTimeline(),
+            epoch: 4, queue: queue, nowNanos: { rig.now })
+        let result = try #require(await renderer.diagnostics())
+        #expect(result.activePlayoutBufferMilliseconds == 400)
+        #expect(result.automaticSyncState == "Automatic drift realignment off")
+        renderer.stop(); queue.sync {}
     }
 
     @Test("Maximum room delay retains callback slack beyond its scheduled PCM depth")

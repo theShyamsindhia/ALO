@@ -1109,6 +1109,17 @@ final class HostServer {
                   // timestamps or treating local completion as a remote ACK.
                   completionInterval < (admissionBudget - captureAge)
                     / UInt64(client.audioSendsInFlight + 1) else {
+                // A busy path is not a permanent rejection of fresh capture.
+                // Keep it in the existing bounded FIFO until a completion frees
+                // capacity, even if capture ends before another callback arrives.
+                // Already-old capture cannot consume this recovery window;
+                // the same 80ms freshness/wait bounds still expire it. Every
+                // retry must pass the unchanged delivery-budget checks above.
+                if client.audioSendsInFlight > 0,
+                   captureAge < Self.maximumPendingAudioSpanNanos {
+                    client.pendingAudio.insert(packet, at: 0)
+                    break
+                }
                 client.audioAdmissionRejected &+= 1
                 continue
             }

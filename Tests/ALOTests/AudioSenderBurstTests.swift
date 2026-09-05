@@ -6,6 +6,44 @@ import ALOCore
 
 @Suite("Bounded audio sender bursts", .serialized)
 struct AudioSenderBurstTests {
+    @Test func freshTerminalCaptureWaitsForOutstandingSendsInsteadOfDisappearing() throws {
+        let fixture = try AudioBurstFixture()
+        defer { fixture.stop() }
+        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 8 * 240 * 2),
+            captureTimeNanos: fixture.audioNowNanos)
+        fixture.barrier()
+        fixture.advanceAudioClock(by: 16_000_000)
+        fixture.completeOne()
+        fixture.advanceAudioClock(by: 100_000_000)
+        // Capture ends here while seven local sends remain. This fresh terminal
+        // packet cannot enter the busy path yet, but must get a chance when the
+        // already-submitted burst completes inside its unchanged deadline.
+        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 240 * 2),
+            captureTimeNanos: fixture.audioNowNanos)
+        fixture.barrier()
+        #expect(fixture.probe.sequences == Array(0..<8))
+        fixture.drain()
+        #expect(fixture.probe.sequences == Array(0..<9))
+    }
+
+    @Test func deferredTerminalCaptureStillExpiresDuringAContinuedStall() throws {
+        let fixture = try AudioBurstFixture()
+        defer { fixture.stop() }
+        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 8 * 240 * 2),
+            captureTimeNanos: fixture.audioNowNanos)
+        fixture.barrier()
+        fixture.advanceAudioClock(by: 16_000_000)
+        fixture.completeOne()
+        fixture.advanceAudioClock(by: 100_000_000)
+        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 240 * 2),
+            captureTimeNanos: fixture.audioNowNanos)
+        fixture.barrier()
+        fixture.advanceAudioClock(by: 80_000_000)
+        fixture.drain()
+        #expect(fixture.probe.sequences == Array(0..<8))
+        #expect(fixture.host.audioSenderSnapshot().first?.expiredWait == 1)
+    }
+
     @Test func unfinishedCompletionIntervalBudgetsOutstandingAudio() throws {
         let fixture = try AudioBurstFixture()
         defer { fixture.stop() }

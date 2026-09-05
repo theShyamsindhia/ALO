@@ -12,9 +12,12 @@ protocol SecureMacPlaybackTrack: AnyObject {
     var outputHardwareFormatForDiagnostics: AudioOutputHardwareFormat? { get }
     var outstandingPlaybackBufferCount: Int { get }
     var pendingPlaybackPacketCount: Int { get }
+    var activePlayoutDelayNanos: UInt64 { get }
+    var automaticSyncState: String { get }
     func accept(_ packet: AudioPacket)
     func maintainSync()
     func setTargetLatencyNanos(_ nanos: UInt64)
+    func setAutomaticSyncEnabled(_ enabled: Bool)
     func setLevel(volume: Double, muted: Bool)
     func setDuckingGain(_ gain: Double)
     func setRoomPlayback(playing: Bool)
@@ -71,6 +74,7 @@ final class SecureMacPlaybackTimeline {
     private var muted = false
     private var duckingGain: Double = 1
     private var playing = true
+    private var automaticSyncEnabled = true
     private var stopped = false
     private var reportedActivity = false
     private var repairedTarget: RepairTarget?
@@ -107,6 +111,21 @@ final class SecureMacPlaybackTimeline {
     var committedAnchor: MediaStreamAnchor? { active.anchor }
     var targetLatencyNanos: UInt64 { active.delay }
     var trackCount: Int { stopped ? 0 : 1 + (cutover == nil && proposed?.successor == nil ? 0 : 1) }
+
+    func setAutomaticSyncEnabled(_ enabled: Bool) {
+        automaticSyncEnabled = enabled
+        active.player.setAutomaticSyncEnabled(enabled)
+        proposed?.successor?.player.setAutomaticSyncEnabled(enabled)
+        cutover?.predecessor.player.setAutomaticSyncEnabled(enabled)
+    }
+    /// A committed successor is not audible until its future boundary. Keep
+    /// preference diagnostics on the same track as the current timing report.
+    private var reportingPlayer: any SecureMacPlaybackTrack {
+        if let cutover, nowNanos() < cutover.renderBoundary { return cutover.predecessor.player }
+        return active.player
+    }
+    var activePlayoutDelayNanos: UInt64 { reportingPlayer.activePlayoutDelayNanos }
+    var automaticSyncState: String { reportingPlayer.automaticSyncState }
 
     var clockOffsetNanos: Int64? {
         get { latestOffset }
@@ -303,8 +322,7 @@ final class SecureMacPlaybackTimeline {
     }
 
     func syncReport() -> PlaybackSyncReport {
-        if let cutover, nowNanos() < cutover.renderBoundary { return cutover.predecessor.player.syncReport() }
-        return active.player.syncReport()
+        reportingPlayer.syncReport()
     }
 
     func stop() {
@@ -326,6 +344,7 @@ final class SecureMacPlaybackTimeline {
         }
         player.setLevel(volume: volume, muted: muted)
         player.setDuckingGain(duckingGain)
+        player.setAutomaticSyncEnabled(automaticSyncEnabled)
         return Track(id: id, player: player)
     }
 

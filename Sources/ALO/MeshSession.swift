@@ -822,6 +822,8 @@ final class MeshSession {
         automaticSyncEnabled = enabled
         receiver?.setAutomaticSyncEnabled(enabled)
         hostSession?.setAutomaticSyncEnabled(enabled)
+        secureReceiver?.setAutomaticSyncEnabled(enabled)
+        secureHost?.setAutomaticSyncEnabled(enabled)
     }
 
     private var musicDuckingEnabled = false
@@ -1032,6 +1034,7 @@ final class MeshSession {
                     if room.transportPolicy == .secureV2 {
                         let host = SecureMacMediaHost()
                         secureHost = host
+                        host.setAutomaticSyncEnabled(automaticSyncEnabled)
                         secureMediaAdmission.update { [weak host] channel, peer in
                             guard let host else { channel.cancel(); return }
                             host.admit(channel: channel, peer: peer)
@@ -1199,6 +1202,7 @@ final class MeshSession {
                                 }
                             }, annotations: annotations, videoHandler: videoHandler)
                         secureReceiver = secure
+                        secure.setAutomaticSyncEnabled(automaticSyncEnabled)
                         let routing = incomingAudioMuteRouting
                         secure.setLevel(volume: localVolume, muted: routing.localMediaPlaybackMuted)
                         secure.setMusicDucked(appliedMusicDucking)

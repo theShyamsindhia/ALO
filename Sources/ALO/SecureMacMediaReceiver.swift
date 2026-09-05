@@ -120,6 +120,9 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
     func setLevel(volume: Double, muted: Bool) {
         queue.async { self.player.setLevel(volume: volume, muted: muted) }
     }
+    func setAutomaticSyncEnabled(_ enabled: Bool) {
+        queue.async { self.player.setAutomaticSyncEnabled(enabled) }
+    }
     func setMusicDucked(_ ducked: Bool) {
         queue.async { self.player.setDuckingGain(ducked ? 0.3 : 1) }
     }
@@ -174,7 +177,9 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
                 currentDriftMilliseconds: report.driftNanos.map { Double($0) / 1_000_000 },
                 driftMeasurementAgeMilliseconds: report.driftSampleAgeNanos.map { Double($0) / 1_000_000 },
                 video: screenTiming.presentationSnapshot(videoDecoder.presentationTimingSnapshot),
-                videoEnabled: screenTiming.videoEnabled)
+                videoEnabled: screenTiming.videoEnabled,
+                activePlayoutBufferMilliseconds: Double(player.activePlayoutDelayNanos) / 1_000_000,
+                automaticSyncState: player.automaticSyncState)
         }
     }
 

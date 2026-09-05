@@ -18,6 +18,7 @@ final class SecureMacMediaHost {
     private var playbackController: SystemPlaybackController?
     private var lifecycle = UUID()
     private var started = false
+    private var automaticSyncEnabled = true
     private var shouldPauseSourceOnStop = false
     private var cleanup: Task<Void, Never>?
     private var videoPicker: ScreenContentPicker?
@@ -68,6 +69,7 @@ final class SecureMacMediaHost {
             guard host.localPeerID == peerID else { host.stop(); throw SecureTransportError.invalidCredentials }
             let renderer = try LocalRenderer(audioOutput: audioOutput, timeline: ingress.timeline,
                 epoch: owner.epoch, timing: { floor in ingress.receiveLocalFloor(floor) })
+            renderer.setAutomaticSyncEnabled(automaticSyncEnabled)
             guard ingress.install(host: host, renderer: renderer) else {
                 host.stop(); renderer.stop(); throw CancellationError()
             }
@@ -158,6 +160,11 @@ final class SecureMacMediaHost {
     }
 
     func setLevel(volume: Double, muted: Bool) { ingress.renderer?.setLevel(volume: volume, muted: muted) }
+    func setAutomaticSyncEnabled(_ enabled: Bool) {
+        // Preserve pre-start changes while authenticated host setup is awaiting.
+        automaticSyncEnabled = enabled
+        ingress.renderer?.setAutomaticSyncEnabled(enabled)
+    }
     func setMusicDucked(_ ducked: Bool) { ingress.renderer?.setMusicDucked(ducked) }
     func sampleTimingDiagnostics() async -> SessionTimingDiagnostics? {
         guard let renderer = ingress.renderer else { return nil }
@@ -530,6 +537,9 @@ final class SecureMacMediaHost {
         func setLevel(volume: Double, muted: Bool) {
             queue.async { self.player.setLevel(volume: volume, muted: muted) }
         }
+        func setAutomaticSyncEnabled(_ enabled: Bool) {
+            queue.async { self.player.setAutomaticSyncEnabled(enabled) }
+        }
         func setMusicDucked(_ ducked: Bool) {
             queue.async { self.player.setDuckingGain(ducked ? 0.3 : 1) }
         }
@@ -606,7 +616,9 @@ final class SecureMacMediaHost {
                         latenessMilliseconds: Double(report.latenessNanos) / 1_000_000,
                         latePacketCount: report.latePacketCount, resyncCount: report.resyncCount,
                         currentDriftMilliseconds: report.driftNanos.map { Double($0) / 1_000_000 },
-                        driftMeasurementAgeMilliseconds: report.driftSampleAgeNanos.map { Double($0) / 1_000_000 }))
+                        driftMeasurementAgeMilliseconds: report.driftSampleAgeNanos.map { Double($0) / 1_000_000 },
+                        activePlayoutBufferMilliseconds: Double(self.player.activePlayoutDelayNanos) / 1_000_000,
+                        automaticSyncState: self.player.automaticSyncState))
                 }
             }
         }

@@ -405,13 +405,14 @@ struct ClientPlaybackReliabilityTests {
 
     @Test("Moderate Bluetooth clock jitter never cuts playback")
     func moderateOutputJitterUsesContinuousCorrection() {
-        var recovery = PlaybackDriftRecovery()
+        var recovery = LocalAudioSyncPolicy()
         let jitterPattern: [UInt64] = [
             24_000_000, 27_000_000, 21_000_000, 31_000_000, 23_000_000,
         ]
-        for index in 0..<21 {
+        for index in 0..<240 {
             let lateness = jitterPattern[index % jitterPattern.count]
-            let shouldResynchronize = recovery.shouldResynchronize(latenessNanos: lateness)
+            let shouldResynchronize = recovery.shouldRealign(driftNanos: lateness,
+                now: UInt64(index) * 50_000_000)
             #expect(!shouldResynchronize)
         }
     }
