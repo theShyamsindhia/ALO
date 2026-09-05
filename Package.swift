@@ -33,6 +33,7 @@ let package = Package(
         .executableTarget(
             name: "ALO",
             dependencies: ["ALOCore", "ALONetworking", "ALOAppleMedia", "ALOSharedAudioClient"],
+            resources: [.copy("Resources/AppIcons")],
             linkerSettings: [
                 .linkedFramework("Carbon"),
                 .linkedFramework("MediaPlayer"),

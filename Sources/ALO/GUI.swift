@@ -465,6 +465,7 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     private var fullScreenVideoController: FullScreenVideoWindowController?
     private var statusMenuController: ALOStatusMenuController?
     private var diagnosticsController: DiagnosticsWindowController?
+    private var settingsController: AppSettingsWindowController?
     private var shortcutManager: GlobalShortcutManager?
     private var shortcutMapperController: ShortcutMapperWindowController?
     private var phaseObserver: AnyCancellable?
@@ -481,6 +482,7 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         installTerminationSignalHandlers()
         installMainMenu()
+        AppIconPreferences.shared.applySavedIcon()
         RoomMentionNotifier.shared.prepare { [weak self] in
             self?.model.showChatInFloatingBar()
         }
@@ -762,6 +764,12 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
             keyEquivalent: ""
         )
         appMenu.addItem(.separator())
+        let settingsItem = appMenu.addItem(
+            withTitle: "Settings…",
+            action: #selector(showSettings(_:)),
+            keyEquivalent: ","
+        )
+        settingsItem.target = self
         let updateItem = appMenu.addItem(
             withTitle: "Check for Updates…",
             action: #selector(checkForUpdates(_:)),
@@ -778,7 +786,7 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
         let shortcutsItem = appMenu.addItem(
             withTitle: "Shortcut Mapper…",
             action: #selector(showShortcutMapper(_:)),
-            keyEquivalent: ","
+            keyEquivalent: ""
         )
         shortcutsItem.keyEquivalentModifierMask = [.command]
         shortcutsItem.target = self
@@ -806,6 +814,13 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
             diagnosticsController = DiagnosticsWindowController(model: model)
         }
         diagnosticsController?.show()
+    }
+
+    @objc func showSettings(_ sender: Any?) {
+        if settingsController == nil {
+            settingsController = AppSettingsWindowController()
+        }
+        settingsController?.show()
     }
 
     @objc func showShortcutMapper(_ sender: Any?) {
@@ -6107,6 +6122,9 @@ struct WalkieTalkieBar: View {
             }
             Button("Diagnostics…") {
                 (NSApp.delegate as? ALOAppDelegate)?.showDiagnostics(nil)
+            }
+            Button("Settings…") {
+                (NSApp.delegate as? ALOAppDelegate)?.showSettings(nil)
             }
         } label: {
             Image(systemName: "slider.horizontal.3")
