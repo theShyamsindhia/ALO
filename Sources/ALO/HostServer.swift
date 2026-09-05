@@ -406,7 +406,8 @@ final class HostServer {
                 sourceURL: media.sourceURL,
                 isPlaying: media.isPlaying ?? self.roomPlaybackIsPlaying,
                 elapsedTime: media.elapsedTime,
-                duration: media.duration
+                duration: media.duration,
+                playbackControlsAvailable: media.playbackControlsAvailable
             )
             if presentedMedia != self.nowPlaying {
                 self.nowPlaying = presentedMedia
@@ -769,7 +770,8 @@ final class HostServer {
             sourceURL: nowPlaying.sourceURL,
             isPlaying: requestedState,
             elapsedTime: nowPlaying.elapsedTime,
-            duration: nowPlaying.duration
+            duration: nowPlaying.duration,
+            playbackControlsAvailable: nowPlaying.playbackControlsAvailable
         )
         broadcast(ControlMessage(type: "now_playing", nowPlaying: nowPlaying))
         broadcast(ControlMessage(type: "room_playback", isPlaying: requestedState))

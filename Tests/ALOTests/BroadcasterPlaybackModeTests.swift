@@ -1,4 +1,6 @@
 import Foundation
+import CoreAudio
+import CoreAudioTypes
 import Testing
 @testable import ALO
 import ALOCore
@@ -18,12 +20,31 @@ struct BroadcasterPlaybackModeTests {
             ? broadcasterAudibleDelayNanos - listenerAudibleDelayNanos
             : listenerAudibleDelayNanos - broadcasterAudibleDelayNanos
 
-        #expect(tap.muteBehavior == .mutedWhenTapped)
+        #expect(tap.muteBehavior == CATapMuteBehavior.mutedWhenTapped)
         #expect(!mode.mutesSynchronizedReceiver)
         #expect(
             startupOffsetNanos <= 20_000_000,
             "The production broadcaster path starts \(startupOffsetNanos / 1_000_000) ms away from buffered listeners."
         )
+    }
+
+    @Test("A scoped app tap includes only the selected Core Audio processes")
+    @available(macOS 14.2, *)
+    func scopedApplicationTap() {
+        let tap = SystemAudioTapCapture.tapDescription(
+            including: [AudioObjectID(71), AudioObjectID(72)],
+            name: "Music"
+        )
+
+        #expect(tap.processes == [71, 72])
+        #expect(!tap.isExclusive)
+        #expect(tap.isMixdown)
+        #expect(tap.muteBehavior == .mutedWhenTapped)
+        #expect(tap.name.contains("Music"))
+        #expect(SystemAudioSource.allSystemAudio.usesGlobalPlaybackControls)
+        #expect(!SystemAudioSource.application(
+            bundleIdentifier: "com.example.music", name: "Music"
+        ).usesGlobalPlaybackControls)
     }
 
     @Test("Direct source remains the safe fallback while the tap is unavailable")

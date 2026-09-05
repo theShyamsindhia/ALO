@@ -200,7 +200,7 @@ struct RoomChatPanel: View {
                 Picker("Show a snippet while chat is collapsed", selection: $notificationMode) {
                     ForEach(ChatNotificationMode.allCases, id: \.self) { mode in Text(mode.label).tag(mode) }
                 }
-                Text("Shows an incoming-message snippet in the compact room bar when chat is collapsed. No macOS notifications are sent.")
+                Text("Controls snippets in the compact room bar. Direct mentions also notify you when ALO is in the background, if macOS notifications are allowed.")
             }
             Divider()
             Button("History", systemImage: "info.circle") { showsHistory = true }

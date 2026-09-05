@@ -26,6 +26,22 @@ struct LyricsTests {
         #expect(try LyricsProvider.select([one, two], for: exact).plain == "Synthetic second line")
     }
 
+    @Test func durationSelectsTheMatchingVersionAndPrefersSyncedLyrics() throws {
+        let timed = LyricsTrack(media: .init(title: "Sample", artist: "Artist", duration: 181))!
+        let live = LyricsRecord(trackName: "Sample", artistName: "Artist", albumName: "Live", duration: 245,
+                                instrumental: false, plainLyrics: "Live", syncedLyrics: nil)
+        let studio = LyricsRecord(trackName: "Sample", artistName: "Artist", albumName: "Studio", duration: 181.3,
+                                  instrumental: false, plainLyrics: "Studio", syncedLyrics: "[00:01.00]Studio")
+        #expect(try LyricsProvider.select([live, studio], for: timed).plain == "Studio")
+
+        let untimed = LyricsTrack(media: .init(title: "Other", artist: "Artist"))!
+        let plain = LyricsRecord(trackName: "Other", artistName: "Artist", instrumental: false,
+                                 plainLyrics: "Plain", syncedLyrics: nil)
+        let synced = LyricsRecord(trackName: "Other", artistName: "Artist", instrumental: false,
+                                  plainLyrics: "Synced", syncedLyrics: "[00:01.00]Synced")
+        #expect(try LyricsProvider.select([plain, synced], for: untimed).plain == "Synced")
+    }
+
     @Test func timestampsRequireTrustworthyPosition() {
         let lines = LyricsProvider.parse("[00:01.00][00:03.50]Sample line\n[00:05.00]Next sample\n[offset:500]\n[00:99.00]Invalid")
         #expect(lines.map(\.seconds) == [0.5, 3, 4.5])
