@@ -27,12 +27,15 @@ struct ReceiverVideoLifecycleTests {
         let port = try #require(listener.port)
         for iteration in 0..<3 {
             let sender = NWConnection(host: "127.0.0.1", port: port, using: LocalNetworkParameters.tcp())
+            sender.stateUpdateHandler = { [weak probe] state in
+                probe?.lock.withLock { probe?.states.append("iteration \(iteration): \(state)") }
+            }
             probe.lock.withLock { probe.senders.append(sender) }; sender.start(queue: queue)
             // Force TCP's initial outbound write; the incomplete header never
             // produces a media frame or starts audio/video playback.
             sender.send(content: Data([0]), completion: .contentProcessed { _ in })
             let connected = try await wait { receiver.videoConnectionCountForTesting == 1 }
-            #expect(connected, "TCP state \(sender.state), accepted \(probe.lock.withLock { probe.accepted.count }), tracked \(receiver.videoConnectionCountForTesting)")
+            #expect(connected, "Iteration \(iteration), TCP state \(sender.state), accepted \(probe.lock.withLock { probe.accepted.count }), tracked \(receiver.videoConnectionCountForTesting), states \(probe.lock.withLock { probe.states })")
             guard connected else { return }
             let accepted = try #require(probe.lock.withLock { probe.accepted.last })
             if iteration == 1 { receiver.advanceTransportEpochForTesting() }
@@ -44,6 +47,13 @@ struct ReceiverVideoLifecycleTests {
             guard retired else { return }
             #expect(accepted.stateUpdateHandler == nil)
             sender.cancel()
+            // Retirement of the accepted side is not completion of the client
+            // cancellation. Finish both before constructing its replacement.
+            #expect(try await wait {
+                if case .cancelled = sender.state, case .cancelled = accepted.state { return true }
+                return false
+            }, "Both sides must reach terminal state before the next connection")
+            sender.stateUpdateHandler = nil
         }
     }
 
@@ -60,4 +70,5 @@ private final class ReceiverVideoLifecycleProbe: @unchecked Sendable {
     let lock = NSLock()
     var senders: [NWConnection] = []
     var accepted: [NWConnection] = []
+    var states: [String] = []
 }

@@ -1482,7 +1482,10 @@ struct LoopbackRoomScaleTests {
             let captureWakeDelays = AudioCompletionLatencies()
             // Match both production capture backends rather than inheriting the
             // Swift Testing worker's priority. This does not suppress OS stalls.
-            let source = StrictCaptureSource(oversleepNanos: UInt64(schedulerOversleep * 1_000_000_000))
+            let source = StrictCaptureSource(
+                oversleepNanos: UInt64(schedulerOversleep * 1_000_000_000),
+                chunkCount: expectedPacketCount / packetsPerCallback,
+                chunkDurationNanos: callbackDurationNanos)
             defer { source.cancel() }
             let capturePeers = peers
             source.start { sample in
@@ -2163,6 +2166,8 @@ private final class StrictCaptureSource: @unchecked Sendable {
     private let resultLock = NSLock()
     private var result: Result?
     private let oversleepNanos: UInt64
+    private let chunkCount: Int
+    private let chunkDurationNanos: UInt64
     private var timer: DispatchSourceTimer?
     private var onCapture: ((Sample) -> Void)?
     private var anchor: UInt64 = 0
@@ -2172,8 +2177,11 @@ private final class StrictCaptureSource: @unchecked Sendable {
     private var started = false
     private var finished = false
 
-    init(oversleepNanos: UInt64) {
+    init(oversleepNanos: UInt64, chunkCount: Int = 50, chunkDurationNanos: UInt64 = 20_000_000) {
+        precondition(chunkCount > 0 && chunkDurationNanos > 0)
         self.oversleepNanos = oversleepNanos
+        self.chunkCount = chunkCount
+        self.chunkDurationNanos = chunkDurationNanos
         queue.setSpecific(key: queueKey, value: 1)
     }
 
@@ -2192,6 +2200,7 @@ private final class StrictCaptureSource: @unchecked Sendable {
     }
 
     func wait(timeout: DispatchTime) -> Result? {
+        if let completed = resultLock.withLock({ result }) { return completed }
         guard done.wait(timeout: timeout) == .success else { return nil }
         return resultLock.withLock { result }
     }
@@ -2211,9 +2220,9 @@ private final class StrictCaptureSource: @unchecked Sendable {
             return // Early delivery must not consume the deliberate 35ms wait.
         }
         awaitingWake = nil
-        while !finished, samples.count < 50 {
+        while !finished, samples.count < chunkCount {
             let index = samples.count
-            let deadline = anchor + UInt64(index) * 20_000_000
+            let deadline = anchor + UInt64(index) * chunkDurationNanos
             let now = MonotonicClock.nowNanos()
             if now < deadline {
                 let wake = deadline + oversleepNanos

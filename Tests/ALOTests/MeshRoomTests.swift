@@ -459,7 +459,16 @@ struct MeshRoomTests {
         }
         nodeA.connectForTesting(to: .hostPort(host: "127.0.0.1", port: port))
 
-        #expect(waitUntil(timeout: 4) { b.eventCount == 1 && b.nowPlayingTitle == "Track 16" })
+        // Keep the same four-second total budget, but distinguish failed peer
+        // admission from an admitted connection that fails to transfer history.
+        let deadline = Date().addingTimeInterval(4)
+        let admitted = waitUntil(timeout: max(0, deadline.timeIntervalSinceNow)) {
+            a.participantCount == 2 && b.participantCount == 2
+        }
+        try #require(admitted, "History transfer never admitted both peers: A=\(a.participantCount), B=\(b.participantCount), B events=\(b.eventCount), title=\(b.nowPlayingTitle ?? "none")")
+        #expect(waitUntil(timeout: max(0, deadline.timeIntervalSinceNow)) {
+            b.eventCount == 1 && b.nowPlayingTitle == "Track 16"
+        }, "Admitted history transfer stalled: B events=\(b.eventCount), title=\(b.nowPlayingTitle ?? "none")")
     }
 
     @Test("A relaunched peer recovers the room's active broadcaster")
