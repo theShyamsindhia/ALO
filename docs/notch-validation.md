@@ -43,6 +43,8 @@ the tray and conversion exports are user-owned storage and are retained until re
 
 Final package measurement and CI results are recorded after verification.
 
+The corrected main-settings and lock-screen local full run passes **270 XCTest + 787 Swift Testing tests in 132 suites (1,057 total)**. Focused state/cleanup checks pass, including cancelled lyrics retry and queued callback invalidation. One earlier secure-UDP validation timeout did not recur in either subsequent full run; timing limits were unchanged.
+
 ## Hardware and environment limits
 
 Tests with injected services establish lifecycle behavior, not access grants or

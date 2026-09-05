@@ -71,7 +71,7 @@ At the initial room-only checkpoint, no production app was replaced and no branc
 ## Lock-screen states and main settings follow-up
 
 - [x] Add a Notch tab to ALO main settings, hosting the same original feature settings.
-- [ ] Expose original expanded lock-screen artwork option explicitly.
-- [ ] Clear ended-track artwork and guard teardown against queued callbacks.
-- [ ] Test no-track, paused, missing artwork/lyrics, unlock and disable states.
+- [x] Expose original expanded lock-screen artwork option explicitly.
+- [x] Clear ended-track artwork and guard teardown against queued callbacks.
+- [x] Test no-track, paused, missing artwork/lyrics, unlock and disable states.
 - [ ] Verify corrected package and macOS 15 cleanup compatibility before main push.

@@ -4,6 +4,33 @@ import XCTest
 
 @MainActor
 final class NotchEngineDisableTests: XCTestCase {
+    func testEngineAndCapturedSettingsReleaseWhenDispatchDisposesTransitionBlock() async {
+        let suiteName = "NotchEngineDestructionTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        weak var retainedEngine: NotchEngine?
+        weak var retainedSettings: SettingsViewModel?
+        do {
+            let settings = SettingsViewModel(defaults: defaults)
+            let engine = NotchEngine(
+                animations: { .preset(settings.notchAnimationPreset) },
+                hideDelay: 0.01,
+                queueDelay: 0
+            )
+            retainedEngine = engine
+            retainedSettings = settings
+            engine.send(.showLiveActivity(RestorableTestContent()))
+            // Leave the original transition block owning the only strong
+            // reference, exactly as in the macOS 15 crash report.
+        }
+        let deadline = Date().addingTimeInterval(2)
+        while retainedEngine != nil && Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertNil(retainedEngine)
+        XCTAssertNil(retainedSettings)
+    }
+
     func testMasterHidePreventsRestoringPreviouslyDismissedFeature() async throws {
         let engine = NotchEngine(animations: { .default }, hideDelay: 0, queueDelay: 0)
         engine.send(.showLiveActivity(RestorableTestContent()))

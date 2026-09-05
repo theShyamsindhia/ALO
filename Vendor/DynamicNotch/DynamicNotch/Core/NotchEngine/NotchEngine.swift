@@ -8,6 +8,12 @@ private enum RestorableDismissedContent {
 
 @MainActor
 final class NotchEngine: ObservableObject {
+    // Delayed transition blocks can own the last engine reference. Destruction
+    // only releases stored values/closures; event and timer cleanup already runs
+    // in the actor-isolated disable path. Avoid the macOS 15 isolated-deinit
+    // backdeployment trampoline when Dispatch disposes such a block.
+    nonisolated deinit {}
+
     @Published private(set) var notchModel = NotchModel()
     @Published private(set) var showNotch = false
     @Published private(set) var cachedStrokeColor: Color = .clear
