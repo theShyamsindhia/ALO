@@ -18,14 +18,28 @@ struct RoomChatPanel: View {
     @State private var showsSearch = false
     @State private var showsHistory = false
     @State private var sendFailed = false
+    @State private var sendError = "There is no active room connection. Your draft has been kept."
+    @State private var selectedSuggestion = 0
+    @State private var dismissedMentionDraft: String?
+    @State private var chosenMentionIDs = Set<String>()
     @Binding var draft: String
     @Binding var notificationMode: ChatNotificationMode
     let mentionNames: [String]
     @State private var replyTo: UUID?
     @State private var editing: UUID?
     @FocusState private var focused: Bool
+    @FocusState private var searchFocused: Bool
     var avatar: ((String, String, CGFloat) -> AnyView)? = nil
+    var mentionMembers: [RoomMentionMember] = []
 
+    private var mentionToken: RoomMentionCompletion.Token? {
+        guard focused, dismissedMentionDraft != draft else { return nil }
+        return RoomMentionCompletion.token(in: draft, selection: NSRange(location: draft.utf16.count, length: 0))
+    }
+    private var mentionSuggestions: [RoomMentionMember] {
+        guard let token = mentionToken else { return [] }
+        return Array(RoomMentionCompletion.suggestions(for: token, members: mentionMembers).prefix(6))
+    }
     private var filtered: [RoomChatMessage] {
         messages.filter { (!onlyPins || $0.pinned) && (query.isEmpty || (!$0.deleted && ($0.text.localizedCaseInsensitiveContains(query) || $0.sender.localizedCaseInsensitiveContains(query)))) }
     }
@@ -37,9 +51,10 @@ struct RoomChatPanel: View {
             HStack(spacing: 8) {
                 if showsSearch {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    TextField("Search messages", text: $query).textFieldStyle(.plain)
+                    TextField("Search messages", text: $query).textFieldStyle(.plain).focused($searchFocused)
+                        .onKeyPress(keys: [.escape], phases: .down) { _ in closeSearch(); return .handled }
                         .accessibilityLabel("Search room history")
-                    Button { query = ""; showsSearch = false } label: { Image(systemName: "xmark") }
+                    Button(action: closeSearch) { Image(systemName: "xmark") }
                         .buttonStyle(.plain).help("Close search").accessibilityLabel("Close search")
                 } else if onlyPins {
                     Label("Pinned messages", systemImage: "pin.fill").foregroundStyle(.secondary)
@@ -78,23 +93,35 @@ struct RoomChatPanel: View {
                     Button { editing = nil; replyTo = nil; draft = "" } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain).help("Cancel")
                 }.font(.caption).padding(.horizontal, 14).padding(.top, 8)
             }
+            if !mentionSuggestions.isEmpty { mentionPicker }
             HStack(alignment: .center, spacing: 8) {
-                messageAvatar(id: currentParticipantID ?? "", name: "You", size: 26)
+                messageAvatar(id: currentParticipantID ?? "", name: "You", size: 22)
                     .accessibilityHidden(true)
                 TextField("Message \(roomTitle)", text: $draft, axis: .vertical)
                     .lineLimit(1...3).textFieldStyle(.plain).focused($focused)
                     .onSubmit(submit)
                     .onKeyPress(keys: [.return], phases: .down) { press in
                         guard !press.modifiers.contains(.shift) else { return .ignored }
-                        submit(); return .handled
+                        if !mentionSuggestions.isEmpty { chooseSuggestion() } else { submit() }
+                        return .handled
+                    }
+                    .onKeyPress(keys: [.upArrow, .downArrow, .tab, .escape], phases: .down) { press in
+                        guard !mentionSuggestions.isEmpty else { return .ignored }
+                        switch press.key {
+                        case .upArrow: selectedSuggestion = (selectedSuggestion + mentionSuggestions.count - 1) % mentionSuggestions.count
+                        case .downArrow: selectedSuggestion = (selectedSuggestion + 1) % mentionSuggestions.count
+                        case .tab: chooseSuggestion()
+                        default: dismissedMentionDraft = draft
+                        }
+                        return .handled
                     }
                 if draft.count > 600 { Text("\(draft.count)/700").font(.caption2).foregroundStyle(draft.count > 700 ? .red : .secondary) }
                 Button(action: submit) {
                     Image(systemName: editing == nil ? "arrow.up.circle.fill" : "checkmark.circle.fill")
-                        .font(.system(size: 25)).foregroundStyle(accent)
+                        .font(.system(size: 22)).foregroundStyle(accent)
                 }.buttonStyle(.plain).disabled(!validDraft).help(editing == nil ? "Send message" : "Save edit")
-            }.font(.system(size: 12)).padding(12)
-                .background(.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 14)).padding(.horizontal, 10).padding(.vertical, 10)
+            }.font(.system(size: 12)).padding(.horizontal, 10).padding(.vertical, 7)
+                .background(.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 12)).padding(.horizontal, 10).padding(.vertical, 6)
 
         }
         .dropDestination(for: URL.self) { urls, _ in
@@ -106,27 +133,74 @@ struct RoomChatPanel: View {
         .alert("Message not sent", isPresented: $sendFailed) {
             Button("OK", role: .cancel) { }
         } message: {
-            Text("There is no active room connection. Your draft has been kept.")
+            Text(sendError)
         }
-        .onChange(of: isPresented) { _, visible in if visible { focused = true } }
+        .onChange(of: draft) { _, value in
+            selectedSuggestion = 0
+            if value.isEmpty { chosenMentionIDs = [] }
+        }
+        .onKeyPress(keys: ["k"], phases: .down) { press in
+            guard isPresented, press.modifiers == .command else { return .ignored }
+            openSearch(); return .handled
+        }
+        .onChange(of: isPresented) { _, visible in if visible { focused = !showsSearch; searchFocused = showsSearch } }
     }
+
+    private var mentionPicker: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            ForEach(Array(mentionSuggestions.enumerated()), id: \.element.id) { index, member in
+                Button { insertMention(member) } label: {
+                    HStack(spacing: 8) {
+                        messageAvatar(id: member.id, name: member.name, size: 22)
+                        Text(member.name).lineLimit(1)
+                        Spacer()
+                        if index == selectedSuggestion { Text("↵").foregroundStyle(.secondary) }
+                    }.font(.system(size: 11)).padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(index == selectedSuggestion ? accent.opacity(0.15) : .clear, in: RoundedRectangle(cornerRadius: 7))
+                }.buttonStyle(.plain).accessibilityLabel("Mention \(member.name)")
+            }
+        }.padding(4).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+            .padding(.horizontal, 10).padding(.top, 5)
+    }
+    private func chooseSuggestion() {
+        guard mentionSuggestions.indices.contains(selectedSuggestion) else { return }
+        insertMention(mentionSuggestions[selectedSuggestion])
+    }
+    private func insertMention(_ member: RoomMentionMember) {
+        if let token = mentionToken, let inserted = RoomMentionCompletion.inserting(member, at: token, in: draft) {
+            draft = inserted.text
+        } else {
+            let proposed = draft + (draft.isEmpty || draft.hasSuffix(" ") ? "" : " ") + "@" + member.name + " "
+            guard proposed.count <= RoomChatOperation.maximumTextLength else { return }
+            draft = proposed
+        }
+        chosenMentionIDs.insert(member.id); dismissedMentionDraft = draft; focused = true
+    }
+    private func openSearch() {
+        guard isPresented else { return }
+        onlyPins = false; showsSearch = true; focused = false
+        DispatchQueue.main.async { searchFocused = true }
+    }
+    private func closeSearch() { query = ""; showsSearch = false; searchFocused = false; focused = true }
 
     private var chatMenu: some View {
         Menu {
-            Button("Search messages", systemImage: "magnifyingglass") { onlyPins = false; showsSearch = true }
+            Button("Search messages", systemImage: "magnifyingglass", action: openSearch)
+                .keyboardShortcut("k", modifiers: .command).disabled(!isPresented)
             Button(onlyPins ? "Show all messages" : "Pinned messages", systemImage: "pin") {
                 onlyPins.toggle(); query = ""; showsSearch = false
             }
             Menu("Mention a member") {
-                if mentionNames.isEmpty { Text("No other room members") }
-                ForEach(Array(Set(mentionNames)).sorted(), id: \.self) { name in
-                    Button(name) { draft += (draft.isEmpty || draft.hasSuffix(" ") ? "" : " ") + "@" + name + " "; focused = true }
+                if mentionMembers.isEmpty { Text("No other room members") }
+                ForEach(mentionMembers) { member in
+                    Button(member.name) { insertMention(member) }
                 }
             }
-            Menu("Message previews") {
-                Picker("Message previews", selection: $notificationMode) {
+            Menu("Collapsed chat previews") {
+                Picker("Show a snippet while chat is collapsed", selection: $notificationMode) {
                     ForEach(ChatNotificationMode.allCases, id: \.self) { mode in Text(mode.label).tag(mode) }
                 }
+                Text("Shows an incoming-message snippet in the compact room bar when chat is collapsed. No macOS notifications are sent.")
             }
             Divider()
             Button("History", systemImage: "info.circle") { showsHistory = true }
@@ -141,7 +215,7 @@ struct RoomChatPanel: View {
                 Text("Room history").font(.headline)
                 Text("Up to 500 chat events are retained. Edits and reactions count toward this limit; older messages may disappear.")
                 Text("Pins do not bypass retention. All members need an updated app for replies, reactions and edits.")
-                Text("Message preview preferences apply across rooms. Unread counts remain visible when previews are muted.")
+                Text("Collapsed chat previews show incoming snippets in the compact room bar. This setting applies across rooms; unread counts remain visible when muted.")
                     .foregroundStyle(.secondary)
             }.font(.system(size: 11)).fixedSize(horizontal: false, vertical: true)
                 .padding(16).frame(width: 280)
@@ -221,7 +295,7 @@ struct RoomChatPanel: View {
                     Menu("React") { ForEach(RoomChatOperation.emoji, id: \.self) { emoji in Button(emoji) { react(emoji, to: message) } } }
                     Button(message.pinned ? "Unpin for room" : "Pin for room", systemImage: "pin") { _ = send(.init(kind: .pin, target: message.id, enabled: !message.pinned)) }
                     if own {
-                        Button("Edit", systemImage: "pencil") { editing = message.id; replyTo = nil; draft = message.text; focused = true }
+                        Button("Edit", systemImage: "pencil") { editing = message.id; replyTo = nil; draft = message.text; chosenMentionIDs = Set(message.mentionedParticipantIDs ?? []); focused = true }
                         Button("Delete message", systemImage: "trash", role: .destructive) { _ = send(.init(kind: .delete, target: message.id)) }
                     }
                 }
@@ -236,9 +310,16 @@ struct RoomChatPanel: View {
     }
     private func submit() {
         guard validDraft else { return }
-        let operation = RoomChatOperation(kind: editing == nil ? .message : .edit, target: editing ?? replyTo, text: draft.trimmingCharacters(in: .whitespacesAndNewlines))
-        guard operation.encoded != nil else { return }
-        guard send(operation) else { sendFailed = true; return }
-        draft = ""; editing = nil; replyTo = nil; focused = true
+        let ids = mentionMembers.filter { member in
+            guard RoomChatPresentation.containsMention(of: member.name, in: draft) else { return false }
+            return chosenMentionIDs.contains(member.id) || mentionMembers.filter { $0.name.caseInsensitiveCompare(member.name) == .orderedSame }.count == 1
+        }.map(\.id)
+        let operation = RoomChatOperation(kind: editing == nil ? .message : .edit, target: editing ?? replyTo, text: draft.trimmingCharacters(in: .whitespacesAndNewlines), mentionedParticipantIDs: Array(Set(ids)).sorted())
+        guard operation.encoded != nil else {
+            sendError = ids.count > 8 ? "Use at most eight mentions in one message. Your draft has been kept." : "This message is too large to send with its mentions. Shorten it and try again."
+            sendFailed = true; return
+        }
+        guard send(operation) else { sendError = "There is no active room connection. Your draft has been kept."; sendFailed = true; return }
+        draft = ""; editing = nil; replyTo = nil; chosenMentionIDs = []; focused = true
     }
 }

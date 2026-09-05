@@ -3215,7 +3215,7 @@ final class ALOViewModel: ObservableObject {
                         self.firstUnreadMessageID = receivedMessage.id
                     }
                     self.unreadMessageCount += 1
-                    if self.floatingSection == .collapsed, self.chatNotificationMode.shouldPreview(text: receivedMessage.text, displayName: self.currentUserName) {
+                    if self.floatingSection == .collapsed, self.chatNotificationMode.shouldPreview(text: receivedMessage.text, displayName: self.currentUserName, participantID: self.currentParticipantID, mentionedParticipantIDs: receivedMessage.mentionedParticipantIDs) {
                         self.presentIncomingMessagePreview(receivedMessage)
                     }
                 }
@@ -4130,11 +4130,18 @@ struct FloatingRoomView: View {
                     .transition(.opacity)
             }
 
-            roomBar
-            if presentation == .floating, model.floatingNavigationVisible {
-                WalkieTalkieBar(model: model, showsCloseButton: false, embeddedFloating: true,
-                               onRoomSettings: { showsRoomInfo = true })
-                    .frame(height: navigationHeight)
+            VStack(spacing: 0) {
+                roomBar
+                if presentation == .floating, model.floatingNavigationVisible {
+                    WalkieTalkieBar(model: model, showsCloseButton: false, embeddedFloating: true,
+                                   onRoomSettings: { showsRoomInfo = true })
+                        .frame(height: navigationHeight)
+                }
+            }
+            .background {
+                if presentation == .floating {
+                    ArtworkHeaderBackground(palette: model.roomArtworkPalette)
+                }
             }
         }
         .frame(width: width, height: height, alignment: .bottom)
@@ -4282,7 +4289,11 @@ struct FloatingRoomView: View {
                 menuBarArtworkBackdrop
             }
         }
-        .background(ArtworkHeaderBackground(palette: model.roomArtworkPalette))
+        .background {
+            if presentation == .menuBar {
+                ArtworkHeaderBackground(palette: model.roomArtworkPalette)
+            }
+        }
         .clipped()
     }
 
@@ -4671,7 +4682,8 @@ struct FloatingRoomView: View {
                     draft: $model.draftMessage,
                     notificationMode: $model.chatNotificationMode,
                     mentionNames: model.participants.filter { $0.id != model.currentParticipantID }.map(\.name),
-                    avatar: { id, name, size in AnyView(identityAvatar(id: id, name: name, size: size)) }
+                    avatar: { id, name, size in AnyView(identityAvatar(id: id, name: name, size: size)) },
+                    mentionMembers: model.participants.filter { $0.id != model.currentParticipantID }.map { RoomMentionMember(id: $0.id, name: $0.name) }
                 )
             }
         }
@@ -5661,11 +5673,12 @@ struct WalkieTalkieBar: View {
             minHeight: FloatingMetrics.walkieBarHeight,
             maxHeight: FloatingMetrics.walkieBarHeight
         )
-        .background(embeddedFloating ? Palette.opaqueSurface.opacity(0.72) : Color.black)
+        .background(embeddedFloating ? Color.clear : Color.black)
         .overlay(alignment: .top) {
             Rectangle()
-                .fill(Palette.glassHighlight.opacity(0.72))
+                .fill(Palette.glassHighlight.opacity(embeddedFloating ? 0.22 : 0.72))
                 .frame(height: 1)
+                .padding(.horizontal, embeddedFloating ? 12 : 0)
         }
     }
 
@@ -5750,12 +5763,16 @@ struct WalkieTalkieBar: View {
         .padding(.horizontal, 4)
         .frame(maxWidth: .infinity)
         .frame(height: 40)
-        .background(Palette.messageSurface.opacity(0.76))
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Palette.glassHighlight.opacity(0.62), lineWidth: 1)
-        )
+        .background {
+            if !embeddedFloating {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Palette.messageSurface.opacity(0.76))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(Palette.glassHighlight.opacity(0.62), lineWidth: 1)
+                    }
+            }
+        }
     }
 
     private var actionDock: some View {
@@ -5802,12 +5819,14 @@ struct WalkieTalkieBar: View {
         .padding(3)
         .frame(height: 40)
         .background {
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Palette.messageSurface.opacity(0.76))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .stroke(Palette.glassHighlight.opacity(0.62), lineWidth: 1)
-                )
+            if !embeddedFloating {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Palette.messageSurface.opacity(0.76))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(Palette.glassHighlight.opacity(0.62), lineWidth: 1)
+                    )
+            }
         }
     }
 
