@@ -417,7 +417,7 @@ sudo /usr/bin/killall coreaudiod
 
 ## License
 
-MIT. No paid service, account, server, or third-party runtime dependency.
+ALO source is MIT licensed; imported DynamicNotch code is GPL-3.0 and includes its own dependency notices. See [third-party provenance](Vendor/README.md). No paid service, account, or server is required.
 
 ## Optional notch presentation
 
@@ -440,3 +440,6 @@ as `ALONotchRuntime`; ALO supplies the lifecycle and window adapters. The standa
 updater, onboarding and donation animations are excluded. Resources and third-party
 licenses are included in packaged builds. See [the feature inventory](docs/dynamic-notch-features.md),
 [validation](docs/notch-validation.md), and [provenance/license](Vendor/README.md).
+### DJ Studio
+
+Open **People → grid icon** for two song decks, a waveform scrubber, beat and manual-region loopers, a 16-pad launchpad, saved keyboard mappings, and room-song controls. See the [DJ Studio guide](docs/dj-studio.md), or click **Guide** in the studio.

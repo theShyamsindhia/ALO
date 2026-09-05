@@ -466,6 +466,7 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     private var fullScreenVideoController: FullScreenVideoWindowController?
     private var statusMenuController: ALOStatusMenuController?
     private var diagnosticsController: DiagnosticsWindowController?
+    private var settingsController: AppSettingsWindowController?
     private var shortcutManager: GlobalShortcutManager?
     private var shortcutMapperController: ShortcutMapperWindowController?
     private var phaseObserver: AnyCancellable?
@@ -483,6 +484,7 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
         installTerminationSignalHandlers()
         installMainMenu()
         notchController = ALONotchWindowController(model: model)
+        AppIconPreferences.shared.applySavedIcon()
         RoomMentionNotifier.shared.prepare { [weak self] in
             self?.model.showChatInFloatingBar()
         }
@@ -764,6 +766,12 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
             keyEquivalent: ""
         )
         appMenu.addItem(.separator())
+        let settingsItem = appMenu.addItem(
+            withTitle: "Settings…",
+            action: #selector(showSettings(_:)),
+            keyEquivalent: ","
+        )
+        settingsItem.target = self
         let updateItem = appMenu.addItem(
             withTitle: "Check for Updates…",
             action: #selector(checkForUpdates(_:)),
@@ -780,7 +788,7 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
         let shortcutsItem = appMenu.addItem(
             withTitle: "Shortcut Mapper…",
             action: #selector(showShortcutMapper(_:)),
-            keyEquivalent: ","
+            keyEquivalent: ""
         )
         shortcutsItem.keyEquivalentModifierMask = [.command]
         shortcutsItem.target = self
@@ -814,6 +822,13 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
             diagnosticsController = DiagnosticsWindowController(model: model)
         }
         diagnosticsController?.show()
+    }
+
+    @objc func showSettings(_ sender: Any?) {
+        if settingsController == nil {
+            settingsController = AppSettingsWindowController()
+        }
+        settingsController?.show()
     }
 
     @objc func showShortcutMapper(_ sender: Any?) {
@@ -2879,6 +2894,17 @@ final class ALOViewModel: ObservableObject {
         floatingSection = .chat
     }
 
+    func stopDJBroadcast() {
+        guard DJStudio.isSharingIfCreated, isHost else { return }
+        meshSession?.stopBroadcasting()
+    }
+
+    func startDJBroadcast() {
+        guard phase == .live, !hasBroadcaster, !mediaSwitchBusy else { return }
+        stopLocalNowPlayingMonitor()
+        meshSession?.beginBroadcasting(audioSourceSelection: .djStudio)
+    }
+
     func showPeopleInFloatingBar() {
         dismissIncomingMessagePreview()
         showFloatingBar()
@@ -3086,6 +3112,7 @@ final class ALOViewModel: ObservableObject {
     }
 
     func stop() {
+        DJStudio.stopIfCreated()
         arena.disconnect()
         isLeavingRoom = true
         stopLiveSyncMonitoring()
@@ -3160,6 +3187,7 @@ final class ALOViewModel: ObservableObject {
     }
 
     func stopImmediately() {
+        DJStudio.stopIfCreated()
         arena.disconnect()
         isLeavingRoom = true
         stopLiveSyncMonitoring()
@@ -4257,7 +4285,8 @@ struct FloatingRoomView: View {
                         Spacer()
                         Text("People").font(.system(size: 13, weight: .semibold))
                         Spacer()
-                        Button { showsRoomInfo = true } label: { Image(systemName: "slider.horizontal.3") }
+                        Button { DJStudioWindowController.shared.show(model: model) } label: { Image(systemName: "square.grid.3x3.fill") }
+                            .help("Open DJ Studio").accessibilityLabel("Open DJ Studio")
                     }.buttonStyle(.plain).font(.system(size: 11)).padding(14)
                     peopleMixer
                 }
@@ -4373,6 +4402,13 @@ struct FloatingRoomView: View {
 
             }
 
+            roomBarButton(
+                icon: "rectangle.on.rectangle",
+                active: model.roomHasVideo || model.mediaSwitchBusy,
+                disabled: !model.canSelectVideo,
+                help: videoMenuTitle
+            ) { model.toggleVideoFromFloatingBar() }
+
             Button { showsMediaMore.toggle() } label: {
                 Image(systemName: "ellipsis")
                     .font(.system(size: 15, weight: .semibold))
@@ -4416,13 +4452,6 @@ struct FloatingRoomView: View {
                             .frame(maxWidth: .infinity, alignment: .leading).padding(8)
                     }
                     .disabled(!model.hasBroadcaster || model.currentParticipantID == nil || model.mediaSwitchBusy)
-                    Button {
-                        showsMediaMore = false
-                        model.toggleVideoFromFloatingBar()
-                    } label: {
-                        Label(videoMenuTitle, systemImage: "rectangle.on.rectangle")
-                            .frame(maxWidth: .infinity, alignment: .leading).padding(8)
-                    }.disabled(!model.canSelectVideo)
                     Button {
                         showsMediaMore = false
                         model.showQueue()
@@ -6122,6 +6151,9 @@ struct WalkieTalkieBar: View {
             }
             Button("Diagnostics…") {
                 (NSApp.delegate as? ALOAppDelegate)?.showDiagnostics(nil)
+            }
+            Button("Settings…") {
+                (NSApp.delegate as? ALOAppDelegate)?.showSettings(nil)
             }
         } label: {
             Image(systemName: "slider.horizontal.3")

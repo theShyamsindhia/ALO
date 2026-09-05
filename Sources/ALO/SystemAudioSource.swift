@@ -7,11 +7,13 @@ import Foundation
 /// stale PID can never redirect capture to another process.
 enum SystemAudioSource: Equatable, Sendable {
     case allSystemAudio
+    case djStudio
     case application(bundleIdentifier: String, name: String)
 
     var title: String {
         switch self {
         case .allSystemAudio: return "All system audio"
+        case .djStudio: return "DJ Studio"
         case .application(_, let name): return name
         }
     }

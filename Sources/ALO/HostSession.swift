@@ -110,7 +110,7 @@ final class HostSession {
             } else {
                 host.setNowPlaying(NowPlayingMedia(
                     title: audioSourceSelection.title,
-                    artist: "Shared app audio",
+                    artist: audioSourceSelection == .djStudio ? "Live DJ mix" : "Shared app audio",
                     playbackControlsAvailable: false
                 ))
             }
@@ -184,6 +184,12 @@ final class HostSession {
     ) async throws -> (AudioSource, BroadcasterPlaybackMode) {
         let handler: AudioSource.AudioHandler = { samples, captureTimeNanos in
             host.acceptAudio(samples: samples, captureTimeNanos: captureTimeNanos)
+        }
+
+        if source == .djStudio {
+            let mix = DJMixAudioSource(unexpectedStopHandler: audioStoppedHandler)
+            try await mix.start(audioHandler: handler)
+            return (mix, .synchronizedReceiver)
         }
 
         guard #available(macOS 14.2, *) else {

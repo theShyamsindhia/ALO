@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape" width="1254" height="1254" viewBox="0 0 1254 1254">
+<title>ALO — alo-layered</title>
+<desc>Editable vector reconstruction of the approved blue and coral render; not the pixel-exact master.</desc>
+<defs>
+  <linearGradient id="blue" x1="0" y1="0" x2=".5" y2="1" gradientUnits="objectBoundingBox"><stop stop-color="#229aff"/><stop offset=".45" stop-color="#306aff"/><stop offset="1" stop-color="#3622ce"/></linearGradient>
+  <linearGradient id="coral" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#ff8580"/><stop offset=".55" stop-color="#ff6976"/><stop offset="1" stop-color="#d73c64"/></linearGradient>
+  <linearGradient id="pearl" x1="0" y1="1" x2="1" y2="0"><stop stop-color="#dedfff"/><stop offset=".48" stop-color="#faf7fa"/><stop offset="1" stop-color="#fce5e6"/></linearGradient>
+  <filter id="shadow" x="-25%" y="-25%" width="150%" height="170%"><feDropShadow dx="0" dy="15" stdDeviation="13" flood-opacity=".2"/></filter>
+  <filter id="letterShadow" x="-25%" y="-25%" width="150%" height="160%"><feDropShadow dx="0" dy="8" stdDeviation="6" flood-color="#251963" flood-opacity=".25"/></filter>
+</defs>
+<g id="background" inkscape:groupmode="layer" inkscape:label="01 Pearl icon tile"><path d="M 405,156 H 850 C 1006,156 1080,230 1080,386 V 826 C 1080,982 1006,1055 850,1055 H 405 C 249,1055 175,982 175,826 V 386 C 175,230 249,156 405,156 Z" fill="url(#pearl)" stroke="#f9f8fa" stroke-width="6" filter="url(#shadow)"/></g>
+<g id="accent" inkscape:groupmode="layer" inkscape:label="02 Coral terminal"><path d="M 891,701 C 957,702 1008,657 1024,594" fill="none" stroke="url(#coral)" stroke-width="46" stroke-linecap="round" filter="url(#letterShadow)"/></g>
+<g id="lettering" inkscape:groupmode="layer" inkscape:label="03 Blue alo lettering" fill="none" stroke="url(#blue)" stroke-width="51" stroke-linecap="round" stroke-linejoin="round" filter="url(#letterShadow)">
+<path d="M 456,624 C 420,585 348,588 306,616 C 262,645 248,701 278,745 C 307,788 368,795 411,757 C 448,725 451,665 462,603 C 449,652 440,709 463,740 C 504,798 570,716 604,658 C 648,584 699,474 680,416 C 663,365 620,376 596,413 C 559,470 557,571 573,651 C 586,716 615,762 649,757 C 684,752 694,722 701,690"/>
+<path d="M 891,684 C 882,632 843,602 794,603 C 738,603 697,643 697,695 C 697,747 737,780 790,780 C 849,780 891,740 891,684 Z"/>
+</g>
+</svg>
+

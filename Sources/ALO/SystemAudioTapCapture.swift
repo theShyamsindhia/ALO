@@ -261,6 +261,8 @@ final class SystemAudioTapCapture: AudioSource, @unchecked Sendable {
 
         let description: CATapDescription
         switch source {
+        case .djStudio:
+            throw ALOError("DJ Studio uses its dedicated mixer audio source.")
         case .allSystemAudio:
             description = Self.tapDescription(excluding: ownProcessID)
         case .application:
