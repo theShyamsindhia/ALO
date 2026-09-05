@@ -15,6 +15,8 @@ struct LyricsTests {
         #expect(parts.queryItems?.first(where: { $0.name == "track_name" })?.value == "Track & title")
         #expect(!request.url!.absoluteString.contains("private"))
         #expect(LyricsTrack(media: .init(title: "Track")) == nil)
+        #expect(LyricsTrack(media: .init(title: "Safari", artist: "Shared app audio",
+                                        playbackControlsAvailable: false)) == nil)
     }
 
     @Test func matchingDoesNotGuessBetweenVersions() throws {

@@ -233,6 +233,18 @@ struct ClientPlaybackReliabilityTests {
             metadataIsPlaying: false,
             streamIsActive: false
         ) == false)
+        #expect(RoomRemoteCommandCenter.commandsAvailable(
+            isRunning: true,
+            media: .init(title: "Song", playbackControlsAvailable: true)
+        ))
+        #expect(!RoomRemoteCommandCenter.commandsAvailable(
+            isRunning: true,
+            media: .init(title: "Safari", playbackControlsAvailable: false)
+        ))
+        #expect(!RoomRemoteCommandCenter.commandsAvailable(
+            isRunning: false,
+            media: .init(title: "Song", playbackControlsAvailable: true)
+        ))
         #expect(HostServer.playbackIntentIsCurrent(
             setAtNanos: 1_000_000_000,
             nowNanos: 2_500_000_000

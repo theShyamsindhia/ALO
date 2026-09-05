@@ -38,6 +38,7 @@ final class RoomRemoteCommandCenter {
         register(center.togglePlayPauseCommand, command: .togglePlayPause)
         register(center.nextTrackCommand, command: .nextTrack)
         register(center.previousTrackCommand, command: .previousTrack)
+        refreshCommandAvailability()
         publishNowPlaying()
     }
 
@@ -108,11 +109,13 @@ final class RoomRemoteCommandCenter {
 
     private func handle(_ command: RoomMediaCommand) -> MPRemoteCommandHandlerStatus {
         lock.lock()
+        let commandsAvailable = Self.commandsAvailable(isRunning: isRunning, media: media)
         guard isRunning else {
             lock.unlock()
             return .noSuchContent
         }
         lock.unlock()
+        guard commandsAvailable else { return .commandFailed }
         guard Self.ownershipLock.withLock({ Self.activeOwnerID == ownerID }) else {
             return .noSuchContent
         }
@@ -133,6 +136,10 @@ final class RoomRemoteCommandCenter {
 
     static func effectivePlaybackState(metadataIsPlaying: Bool?, streamIsActive: Bool) -> Bool? {
         metadataIsPlaying ?? (streamIsActive ? true : nil)
+    }
+
+    static func commandsAvailable(isRunning: Bool, media: NowPlayingMedia) -> Bool {
+        isRunning && media.playbackControlsAvailable != false
     }
 
     private static func replacingPlaybackState(
@@ -179,7 +186,7 @@ final class RoomRemoteCommandCenter {
 
     private func refreshCommandAvailability() {
         lock.lock()
-        let enabled = isRunning && media.playbackControlsAvailable != false
+        let enabled = Self.commandsAvailable(isRunning: isRunning, media: media)
         let commands = targets.map(\.command)
         lock.unlock()
         guard Self.ownershipLock.withLock({ Self.activeOwnerID == ownerID }) else { return }

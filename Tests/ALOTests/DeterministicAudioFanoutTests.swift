@@ -14,6 +14,8 @@ struct DeterministicAudioFanoutTests {
             policy: .boundedLatest(maxInFlight: 8), oversleep: 0,
             callbackQuantumNanos: 25_000_000)
         #expect(room.maximumAge < SynchronizedPlayer.targetLatencyNanos)
+        // Full-suite runs measured a 57-packet minimum with batched callbacks;
+        // retain the established 50-packet live CI contract as the invariant.
         #expect(room.minimumPackets >= 50,
             "Batched callbacks must retain the same strict per-listener floor as the live timing gate")
     }
@@ -25,6 +27,8 @@ struct DeterministicAudioFanoutTests {
         #expect(room.maximumAge < SynchronizedPlayer.targetLatencyNanos)
         let existingCounts = room.packetCountsByParticipant
             .filter { $0.key != "virtual-peer-7" }.map(\.value)
+        // Under the full parallel suite the established-peer minimum measured
+        // 59. The release contract is the same strict 50-packet live CI floor.
         #expect(existingCounts.min() ?? 0 >= 50,
             "A late listener must not reduce established listeners below the strict CI floor")
     }

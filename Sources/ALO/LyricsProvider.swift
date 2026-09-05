@@ -7,6 +7,7 @@ struct LyricsTrack: Hashable, Sendable {
     let album: String?
     let duration: TimeInterval?
     init?(media: NowPlayingMedia) {
+        guard media.playbackControlsAvailable != false else { return nil }
         guard let title = media.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty,
               let artist = media.artist?.trimmingCharacters(in: .whitespacesAndNewlines), !artist.isEmpty,
               title.count <= 300, artist.count <= 300 else { return nil }
