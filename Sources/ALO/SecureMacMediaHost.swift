@@ -90,7 +90,7 @@ final class SecureMacMediaHost {
                 ingress.setPlaying(nil)
                 nowPlaying(NowPlayingMedia(
                     title: audioSourceSelection.title,
-                    artist: "Shared app audio",
+                    artist: audioSourceSelection == .djStudio ? "Live DJ mix" : "Shared app audio",
                     playbackControlsAvailable: false
                 ))
             }
@@ -100,18 +100,19 @@ final class SecureMacMediaHost {
             } else {
                 playbackActivity = { nil }
             }
-            let tap = SystemAudioTapCapture(source: audioSourceSelection,
-                sourcePlaybackIsActive: playbackActivity,
-                unexpectedStopHandler: { [weak self] error in
-                    // Revoke subscriptions immediately, before an actor hop.
-                    ingress.revoke()
-                    Task { @MainActor [weak self] in
-                        guard let self, self.lifecycle == token else { return }
-                        self.shouldPauseSourceOnStop = false
-                        await self.stop()
-                        stopped(error)
-                    }
-                })
+            let sourceStopped: @Sendable (Error) -> Void = { [weak self] error in
+                ingress.revoke()
+                Task { @MainActor [weak self] in
+                    guard let self, self.lifecycle == token else { return }
+                    self.shouldPauseSourceOnStop = false
+                    await self.stop()
+                    stopped(error)
+                }
+            }
+            let tap: AudioSource = audioSourceSelection == .djStudio
+                ? DJMixAudioSource(unexpectedStopHandler: sourceStopped)
+                : SystemAudioTapCapture(source: audioSourceSelection,
+                    sourcePlaybackIsActive: playbackActivity, unexpectedStopHandler: sourceStopped)
             source = tap
             status("Preparing secure synchronized system audio")
             try await tap.start { samples, captureTimeNanos in ingress.accept(samples, captureTimeNanos: captureTimeNanos) }

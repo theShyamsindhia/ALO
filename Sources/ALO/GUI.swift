@@ -2870,6 +2870,17 @@ final class ALOViewModel: ObservableObject {
         floatingSection = .chat
     }
 
+    func stopDJBroadcast() {
+        guard DJStudio.isSharingIfCreated, isHost else { return }
+        meshSession?.stopBroadcasting()
+    }
+
+    func startDJBroadcast() {
+        guard phase == .live, !hasBroadcaster, !mediaSwitchBusy else { return }
+        stopLocalNowPlayingMonitor()
+        meshSession?.beginBroadcasting(audioSourceSelection: .djStudio)
+    }
+
     func showPeopleInFloatingBar() {
         dismissIncomingMessagePreview()
         showFloatingBar()
@@ -3077,6 +3088,7 @@ final class ALOViewModel: ObservableObject {
     }
 
     func stop() {
+        DJStudio.stopIfCreated()
         arena.disconnect()
         isLeavingRoom = true
         stopLiveSyncMonitoring()
@@ -3151,6 +3163,7 @@ final class ALOViewModel: ObservableObject {
     }
 
     func stopImmediately() {
+        DJStudio.stopIfCreated()
         arena.disconnect()
         isLeavingRoom = true
         stopLiveSyncMonitoring()
@@ -4247,7 +4260,8 @@ struct FloatingRoomView: View {
                         Spacer()
                         Text("People").font(.system(size: 13, weight: .semibold))
                         Spacer()
-                        Button { showsRoomInfo = true } label: { Image(systemName: "slider.horizontal.3") }
+                        Button { DJStudioWindowController.shared.show(model: model) } label: { Image(systemName: "square.grid.3x3.fill") }
+                            .help("Open DJ Studio").accessibilityLabel("Open DJ Studio")
                     }.buttonStyle(.plain).font(.system(size: 11)).padding(14)
                     peopleMixer
                 }

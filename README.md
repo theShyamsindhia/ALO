@@ -418,3 +418,7 @@ sudo /usr/bin/killall coreaudiod
 ## License
 
 MIT. No paid service, account, server, or third-party runtime dependency.
+
+### DJ Studio
+
+Open **People → grid icon** for two song decks, a waveform scrubber, beat and manual-region loopers, a 16-pad launchpad, saved keyboard mappings, and room-song controls. See the [DJ Studio guide](docs/dj-studio.md), or click **Guide** in the studio.
