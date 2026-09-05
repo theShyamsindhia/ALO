@@ -2921,7 +2921,7 @@ final class ALOViewModel: ObservableObject {
         }
     }
 
-    private var nowPlayingCallback: (NowPlayingMedia) -> Void {
+    var nowPlayingCallback: (NowPlayingMedia) -> Void {
         { [weak self] media in
             let artworkPalette = ArtworkTheme.palette(from: media.artworkData)
             DispatchQueue.main.async {
@@ -3659,12 +3659,12 @@ struct ALOView: View {
     }
 }
 
-private enum RoomControlsPresentation {
+enum RoomControlsPresentation {
     case floating
     case menuBar
 }
 
-private struct FloatingRoomView: View {
+struct FloatingRoomView: View {
     @ObservedObject var model: ALOViewModel
     var presentation: RoomControlsPresentation = .floating
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -3858,6 +3858,7 @@ private struct FloatingRoomView: View {
                 menuBarArtworkBackdrop
             }
         }
+        .background(ArtworkHeaderBackground(palette: model.roomArtworkPalette))
         .clipped()
     }
 
@@ -5846,6 +5847,33 @@ private struct AmbientBackground: View {
                 .offset(x: 390, y: -260)
         }
         .ignoresSafeArea()
+    }
+}
+
+struct ArtworkHeaderBackground: View {
+    let palette: ArtworkPalette?
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    var body: some View {
+        ZStack {
+            if let palette {
+                // Carry every sampled hue through the whole header, rather
+                // than fading one accent into a mostly neutral surface.
+                LinearGradient(colors: palette.hexes.map(Color.deviceIdentity),
+                               startPoint: .topLeading, endPoint: .bottomTrailing)
+                if colorScheme == .dark {
+                    Color.black.opacity(contrast == .increased ? 0.72 : 0.62)
+                } else {
+                    Color.white.opacity(contrast == .increased ? 0.90 : 0.68)
+                }
+            } else {
+                Palette.opaqueSurface
+            }
+            StaticGrain().blendMode(.softLight).opacity(0.12)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 
