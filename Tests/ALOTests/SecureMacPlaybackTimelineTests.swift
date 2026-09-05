@@ -76,6 +76,73 @@ struct SecureMacPlaybackTimelineTests {
         try rig.output.commit(id: id)
     }
 
+    @Test("A queued host cutover cannot survive pause and resume before its executor drains")
+    func hostQueuedCutoverIsInvalidatedByPauseResume() throws {
+        let rig = try Rig()
+        try start(rig)
+        rig.output.accept(packet())
+        let source = CapturedMediaTimeline()
+        source.observe([packet()])
+        let change = try #require(source.schedulePlayoutDelay(400_000_000, now: rig.now))
+        let queue = DispatchQueue(label: "alo.test.host-paused-stage")
+        let renderer = SecureMacMediaHost.LocalRenderer(player: rig.output, timeline: source,
+            epoch: 4, queue: queue, nowNanos: { rig.now })
+        queue.suspend()
+        renderer.stage(change, authorizeCommit: { commit in try commit(); return true }) { accepted in
+            if accepted { source.announce(change) }
+        }
+        // Both transitions happen before the staged work can run. The source
+        // discards its unannounced reservation and resumes at the old delay.
+        source.setPlaying(false); renderer.setPlaying(false)
+        source.setPlaying(true); renderer.setPlaying(true)
+        queue.resume()
+        queue.sync {}
+        #expect(source.playoutDelayNanos == 250_000_000)
+        #expect(rig.output.targetLatencyNanos == source.playoutDelayNanos)
+
+        let resumed = packet(240, capture: 1_005_000_000)
+        rig.now = resumed.captureTimeNanos
+        source.observe([resumed]); renderer.append([resumed])
+        queue.sync { renderer.drain() }
+        #expect(rig.players[0].pauseCalls == 1, "A rapid resume must not erase the actual pause")
+        #expect(rig.output.trackCount == 1)
+        #expect(rig.output.committedAnchor?.captureTimeNanos == resumed.captureTimeNanos)
+        #expect(rig.output.targetLatencyNanos == source.playoutDelayNanos)
+        renderer.stop()
+        queue.sync {}
+    }
+
+    @Test("A host stage rejected after preparation cannot commit or reset healthy PCM")
+    func hostPreparedStageRequiresCurrentAuthority() throws {
+        let rig = try Rig()
+        try start(rig)
+        rig.output.accept(packet())
+        let source = CapturedMediaTimeline()
+        source.observe([packet()])
+        let change = try #require(source.schedulePlayoutDelay(400_000_000, now: rig.now))
+        let queue = DispatchQueue(label: "alo.test.host-revoked-stage")
+        let renderer = SecureMacMediaHost.LocalRenderer(player: rig.output, timeline: source,
+            epoch: 4, queue: queue, nowNanos: { rig.now })
+        renderer.stage(change, authorizeCommit: { _ in
+            #expect(rig.players.count == 2, "Native preparation precedes the authority transaction")
+            // Models an ingress generation revoked while native preparation
+            // ran; the real stage must not invoke commit after rejection.
+            return false
+        }, completion: { accepted in
+            #expect(!accepted)
+            source.cancelUnannounced(change)
+        })
+        queue.sync {}
+        #expect(rig.output.targetLatencyNanos == 250_000_000)
+        #expect(rig.output.trackCount == 1)
+        #expect(rig.players[0].pauseCalls == 0 && rig.players[0].stops == 0)
+        #expect(rig.players[0].outstandingPlaybackBufferCount == 1)
+        #expect(rig.players[1].stops == 1)
+        #expect(source.requestedPlayoutDelayNanos == 250_000_000)
+        renderer.stop()
+        queue.sync {}
+    }
+
     @Test("A new subscription UUID and generation do not reset the same-epoch timeline")
     func ticketRenewalPreservesQueuedPCMAndOriginalFloor() throws {
         let rig = try Rig()

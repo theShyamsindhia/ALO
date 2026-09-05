@@ -277,6 +277,7 @@ final class SecureMacMediaHost {
         private var localFloor = RoomTiming.defaultPlayoutDelayNanos
         private var mediaPeers: [UUID: UUID] = [:]
         private var roomTimingChangeCount: UInt64 = 0
+        private var playbackGeneration = UUID()
         func noteMediaPeer(_ credentials: AuthenticatedChannelCredentials) {
             lock.withLock { mediaPeers[credentials.connectionID] = credentials.remotePeerID }
         }
@@ -363,6 +364,7 @@ final class SecureMacMediaHost {
             guard let value else { return }
             let host = lock.withLock { () -> MediaHostSession? in
                 guard owner != nil, playing != value else { return nil }
+                playbackGeneration = UUID()
                 playing = value; expectedNextCapture = nil; packetizer.discardPendingSamples()
                 timeline.setPlaying(value); local?.setPlaying(value)
                 return self.host
@@ -381,7 +383,7 @@ final class SecureMacMediaHost {
             updateTiming(now: MonotonicClock.nowNanos())
         }
         private func updateTiming(now: UInt64) {
-            let work = lock.withLock { () -> (LocalRenderer, MediaHostSession, CapturedMediaTimeline.PlayoutCutover?)? in
+            let work = lock.withLock { () -> (LocalRenderer, MediaHostSession, CapturedMediaTimeline.PlayoutCutover?, UUID)? in
                 guard owner != nil, let host, let local else { return nil }
                 let current = timeline.requestedPlayoutDelayNanos
                 let desired = timingPolicy.desiredDelay(now: now, current: current,
@@ -392,24 +394,35 @@ final class SecureMacMediaHost {
                 guard cutover != nil || (timeline.requestedPlayoutDelayNanos == timeline.playoutDelayNanos
                     && timeline.playoutDelayNanos != current) else { return nil }
                 if cutover == nil { roomTimingChangeCount &+= 1 }
-                return (local, host, cutover)
+                return (local, host, cutover, playbackGeneration)
             }
-            guard let (local, host, cutover) = work else { return }
+            guard let (local, host, cutover, generation) = work else { return }
             guard let cutover else { host.refreshTimeline(); return }
-            local.stage(cutover) { [weak self, weak host] accepted in
-                guard let self, let host else { return }
-                let announce = self.lock.withLock { () -> Bool in
-                    guard accepted, self.owner != nil, self.host === host else {
-                        self.timeline.cancelUnannounced(cutover); return false
-                    }
+            local.stage(cutover, authorizeCommit: { [weak self, weak host] commit in
+                guard let self, let host else { return false }
+                return try self.lock.withLock {
+                    guard self.owner != nil, self.host === host,
+                          self.playbackGeneration == generation else { return false }
+                    // Preparation creates the native track outside this lock.
+                    // Its bounded commit and publication form one transaction:
+                    // pause/resume cannot revoke the reservation between them.
+                    try commit()
                     guard self.timeline.announce(cutover) else { return false }
                     self.roomTimingChangeCount &+= 1
                     self.preview?.stagePlayoutAnchor(captureTimeNanos: cutover.captureTimeNanos,
                         delayNanos: cutover.playoutDelayNanos)
                     return true
                 }
-                if announce { host.refreshTimeline() }
-            }
+            }, completion: { [weak self, weak host] accepted in
+                guard let self, let host else { return }
+                if accepted { host.refreshTimeline() }
+                else {
+                    self.lock.withLock {
+                        guard self.playbackGeneration == generation else { return }
+                        self.timeline.cancelUnannounced(cutover)
+                    }
+                }
+            })
         }
         func requestKeyframe(_ minimum: UInt64?) { lock.withLock { keyframe }?(minimum) }
         func configureVideo(encoder: VideoEncoder?, decoder: VideoDecoder?, generation: UUID? = nil) {
@@ -450,8 +463,9 @@ final class SecureMacMediaHost {
         }
     }
 
-    private final class LocalRenderer: @unchecked Sendable {
-        private let queue = DispatchQueue(label: "alo.secure-host.local-playback", qos: .userInteractive)
+    final class LocalRenderer: @unchecked Sendable {
+        private let queue: DispatchQueue
+        private let nowNanos: () -> UInt64
         private let lock = NSLock()
         private let player: SecureMacPlaybackTimeline
         private let timeline: CapturedMediaTimeline
@@ -460,6 +474,8 @@ final class SecureMacMediaHost {
         private var lastTimingReport: UInt64 = 0
         private var pending: [AudioPacket] = []
         private var stopped = false, playing = true
+        private var playbackGeneration = UUID()
+        private var pausePending = false
         private var timer: DispatchSourceTimer?
         /// Read only before start(), while the creating executor owns the player.
         var initialOutputFloor: UInt64 {
@@ -469,8 +485,19 @@ final class SecureMacMediaHost {
         init(audioOutput: RoomAudioOutputEngine, timeline: CapturedMediaTimeline, epoch: UInt64,
              timing: @escaping (UInt64) -> Void) throws {
             player = try SecureMacPlaybackTimeline(audioOutput: audioOutput)
+            queue = DispatchQueue(label: "alo.secure-host.local-playback", qos: .userInteractive)
+            nowNanos = MonotonicClock.nowNanos
             self.timeline = timeline
             self.timing = timing
+            stream = .init(sessionID: UUID(), broadcasterEpoch: epoch, generation: 1)
+        }
+        /// Scheduling seam: the same runtime drain and stage paths can run with
+        /// a fake native track and a controlled serial executor, without hardware.
+        init(player: SecureMacPlaybackTimeline, timeline: CapturedMediaTimeline, epoch: UInt64,
+             queue: DispatchQueue, nowNanos: @escaping () -> UInt64,
+             timing: @escaping (UInt64) -> Void = { _ in }) {
+            self.player = player; self.timeline = timeline; self.queue = queue
+            self.nowNanos = nowNanos; self.timing = timing
             stream = .init(sessionID: UUID(), broadcasterEpoch: epoch, generation: 1)
         }
         func start() {
@@ -493,7 +520,12 @@ final class SecureMacMediaHost {
             }
         }
         func setPlaying(_ value: Bool) {
-            lock.withLock { playing = value; if !value { pending.removeAll() } }
+            lock.withLock {
+                guard playing != value else { return }
+                playbackGeneration = UUID()
+                playing = value
+                if !value { pending.removeAll(); pausePending = true }
+            }
         }
         func setLevel(volume: Double, muted: Bool) {
             queue.async { self.player.setLevel(volume: volume, muted: muted) }
@@ -501,28 +533,37 @@ final class SecureMacMediaHost {
         func setMusicDucked(_ ducked: Bool) {
             queue.async { self.player.setDuckingGain(ducked ? 0.3 : 1) }
         }
-        func stage(_ change: CapturedMediaTimeline.PlayoutCutover, completion: @escaping (Bool) -> Void) {
+        func stage(_ change: CapturedMediaTimeline.PlayoutCutover,
+                   authorizeCommit: @escaping (_ commit: () throws -> Void) throws -> Bool,
+                   completion: @escaping (Bool) -> Void) {
+            let generation = lock.withLock { playbackGeneration }
             queue.async {
-                guard !self.lock.withLock({ self.stopped }) else { completion(false); return }
+                guard self.lock.withLock({ !self.stopped && self.playing && !self.pausePending
+                    && self.playbackGeneration == generation }) else { completion(false); return }
                 let id = UUID()
                 let anchor = MediaStreamAnchor(stream: self.stream, captureTimeNanos: change.captureTimeNanos,
                     frameIndex: change.frameIndex, hostPlaybackTimeNanos: change.captureTimeNanos + change.playoutDelayNanos,
-                    issuedAtHostNanos: MonotonicClock.nowNanos())
+                    issuedAtHostNanos: self.nowNanos())
                 do {
                     try self.player.prepare(id: id, anchor: anchor, clockOffsetNanos: 0)
-                    try self.player.commit(id: id)
-                    completion(true)
+                    let accepted = try authorizeCommit { try self.player.commit(id: id) }
+                    if !accepted { self.player.cancelPreparation(id: id) }
+                    completion(accepted)
                 } catch { self.player.cancelPreparation(id: id); completion(false) }
             }
         }
-        private func drain() {
-            let batch = lock.withLock { () -> ([AudioPacket], Bool, Bool) in
+        func drain() {
+            let batch = lock.withLock { () -> ([AudioPacket], Bool, Bool, Bool) in
                 let batch = pending; pending.removeAll(keepingCapacity: true)
-                return (batch, playing, stopped)
+                let paused = pausePending; pausePending = false
+                return (batch, playing, stopped, paused)
             }
             guard !batch.2 else { return }
+            // A false→true update between drains must still invalidate the old
+            // PCM and anchor before admitting the resumed capture reference.
+            if batch.3 { player.setRoomPlayback(playing: false) }
             player.setRoomPlayback(playing: batch.1)
-            let now = MonotonicClock.nowNanos()
+            let now = nowNanos()
             if batch.1, !batch.0.isEmpty, player.committedAnchor?.state != .running,
                let anchor = timeline.anchor(for: stream, issuedAtHostNanos: now) {
                 let id = UUID()
