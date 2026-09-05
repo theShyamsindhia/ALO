@@ -444,12 +444,60 @@ struct LoopbackRoomScaleTests {
             // cumulative current-thread CPU, not wall-clock dates or a pass gate.
             print("Timer-only source \(phase) samples [scheduledNs,returnedNs,cpuNs,waitCalls,lastMachStatus,clockStatus]: \(samples.map { "[\($0.scheduledNanos),\($0.returnedNanos),\($0.cpuNanos),\($0.waitCalls),\($0.lastWaitStatus),\($0.clockStatus)]" }.joined(separator: ","))")
         }
+        func strictControl(_ phase: String) throws {
+            let activity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
+                reason: "Measure strict timer-only source scheduling")
+            defer { ProcessInfo.processInfo.endActivity(activity) }
+            let source = StrictCaptureSource(oversleepNanos: 0)
+            defer { source.cancel() }
+            source.start { _ in }
+            let result = try #require(source.wait(timeout: .now() + 5))
+            #expect(!result.cancelled && result.samples.count == 50)
+            let wake = AudioCompletionLatencies()
+            result.samples.forEach { wake.record($0.wokeAt - $0.deadline) }
+            print("Strict timer-only source \(phase): wake [\(wake.summary)]")
+        }
         try control("before")
+        try strictControl("before")
         let loaded = try runRoom(peerCount: 8, linkBitsPerSecond: nil, policy: .unbounded,
             schedulerOversleep: 0, deferredPCM: false)
         #expect(loaded.minimumPacketsReceived >= 190)
         print("Timer-only comparison loaded capture age [\(loaded.captureCallbackAgeSummary)] (includes the normal 20ms captured chunk)")
         try control("after")
+        try strictControl("after")
+    }
+
+    @Test("Strict capture keeps every nominal chunk and the requested wake injection", arguments: [UInt64(0), 35_000_000])
+    func strictCapturePreservesCadence(oversleepNanos: UInt64) throws {
+        let source = StrictCaptureSource(oversleepNanos: oversleepNanos)
+        defer { source.cancel() }
+        source.start { _ in }
+        let result = try #require(source.wait(timeout: .now() + 5))
+        #expect(!result.cancelled)
+        #expect(result.samples.map(\.index) == Array(0..<50))
+        #expect(result.samples.map(\.deadline) == (0..<50).map { result.anchor + UInt64($0) * 20_000_000 })
+        #expect(result.samples.allSatisfy { $0.wokeAt >= $0.deadline })
+        try #require(!result.waits.isEmpty)
+        #expect(result.waits.allSatisfy { $0.wakeDeadline - $0.nominalDeadline == oversleepNanos })
+        for wait in result.waits {
+            #expect(result.samples[wait.index].wokeAt >= wait.wakeDeadline,
+                "An early timer delivery must not erase the deliberate wake delay")
+        }
+    }
+
+    @Test("Strict source cancellation releases its timer and prevents future chunks")
+    func strictCaptureCancellationIsBounded() throws {
+        weak var released: StrictCaptureSource?
+        do {
+            let source = StrictCaptureSource(oversleepNanos: 35_000_000)
+            released = source
+            source.start { [weak source] _ in source?.cancel() }
+            let result = try #require(source.wait(timeout: .now() + 1))
+            #expect(result.cancelled && result.samples.count == 1)
+            source.cancel() // Queue barrier, including the in-progress callback.
+        }
+        #expect(released == nil)
     }
 
     @Test("Observational A/B separates colocated receiver PCM work from capture scheduling")
@@ -1434,36 +1482,21 @@ struct LoopbackRoomScaleTests {
             let captureWakeDelays = AudioCompletionLatencies()
             // Match both production capture backends rather than inheriting the
             // Swift Testing worker's priority. This does not suppress OS stalls.
-            let sourceQueue = DispatchQueue(label: "in.werai.tests.fanout-capture", qos: .userInteractive)
-            let sourceTimeline = CaptureTimeline()
-            let sourceFinished = DispatchSemaphore(value: 0)
+            let source = StrictCaptureSource(oversleepNanos: UInt64(schedulerOversleep * 1_000_000_000))
+            defer { source.cancel() }
             let capturePeers = peers
-            sourceQueue.async {
-                let captureAnchorNanos = sourceTimeline.start()
-                defer { sourceFinished.signal() }
-                for callbackIndex in 0..<(expectedPacketCount / packetsPerCallback) {
-                    let callbackDeadlineNanos = captureAnchorNanos + UInt64(callbackIndex) * callbackDurationNanos
-                    let now = MonotonicClock.nowNanos()
-                    if now < callbackDeadlineNanos {
-                        // Preserve monotonic source deadlines without Foundation
-                        // relative-sleep coalescing; keep the injected late wake.
-                        let wakeDeadline = callbackDeadlineNanos + UInt64(schedulerOversleep * 1_000_000_000)
-                        while MonotonicClock.nowNanos() < wakeDeadline {
-                            _ = mach_wait_until(MonotonicClock.nanosToTicks(wakeDeadline))
-                        }
-                    }
-                    let wokeAt = MonotonicClock.nowNanos()
-                    captureWakeDelays.record(wokeAt > callbackDeadlineNanos ? wokeAt - callbackDeadlineNanos : 0)
-                    let captureTimeNanos = callbackDeadlineNanos - callbackDurationNanos
-                    captureCallbackAges.record(MonotonicClock.nowNanos() - captureTimeNanos)
-                    host.acceptAudio(samples: samples, captureTimeNanos: captureTimeNanos)
-                    if callbackIndex.isMultiple(of: 5) {
-                        capturePeers.forEach { $0.sendPing() }
-                    }
+            source.start { sample in
+                captureWakeDelays.record(sample.wokeAt - sample.deadline)
+                let captureTimeNanos = sample.deadline - callbackDurationNanos
+                captureCallbackAges.record(MonotonicClock.nowNanos() - captureTimeNanos)
+                host.acceptAudio(samples: samples, captureTimeNanos: captureTimeNanos)
+                if sample.index.isMultiple(of: 5) {
+                    capturePeers.forEach { $0.sendPing() }
                 }
             }
-            sourceFinished.wait()
-            let captureAnchorNanos = sourceTimeline.anchorNanos
+            let sourceResult = try #require(source.wait(timeout: .now() + 5), "Capture source did not complete")
+            try #require(!sourceResult.cancelled && sourceResult.samples.count == expectedPacketCount / packetsPerCallback)
+            let captureAnchorNanos = sourceResult.anchor
             print("Capture wake delay: peers=\(peerCount), policy=\(policy), injected=\(schedulerOversleep * 1_000)ms, \(captureWakeDelays.summary)")
 
             let expectedIDs = Set((0..<peerCount).map { "loopback-peer-\($0)" })
@@ -2103,13 +2136,113 @@ private final class TimerOnlyCaptureProbe: @unchecked Sendable {
     }
 }
 
-private final class CaptureTimeline: @unchecked Sendable {
-    private let lock = NSLock()
-    private var anchor: UInt64 = 0
-    var anchorNanos: UInt64 { lock.withLock { anchor } }
-    func start() -> UInt64 {
-        lock.withLock { anchor = MonotonicClock.nowNanos(); return anchor }
+/// A headless source needs a strict wake request: QoS and mach_wait_until alone
+/// admitted >100ms wake delays in CI's no-network control. This is still
+/// best-effort scheduling, not a real-time guarantee. Only the wait mechanism
+/// changes: all 50 nominal 20ms chunks and deliberate delayed wakes are retained.
+private final class StrictCaptureSource: @unchecked Sendable {
+    struct Sample {
+        let index: Int
+        let deadline: UInt64
+        let wokeAt: UInt64
     }
+    struct Wait {
+        let index: Int
+        let nominalDeadline: UInt64
+        let wakeDeadline: UInt64
+    }
+    struct Result {
+        let anchor: UInt64
+        let samples: [Sample]
+        let waits: [Wait]
+        let cancelled: Bool
+    }
+    private let queue = DispatchQueue(label: "in.werai.tests.fanout-capture", qos: .userInteractive)
+    private let queueKey = DispatchSpecificKey<UInt8>()
+    private let done = DispatchSemaphore(value: 0)
+    private let resultLock = NSLock()
+    private var result: Result?
+    private let oversleepNanos: UInt64
+    private var timer: DispatchSourceTimer?
+    private var onCapture: ((Sample) -> Void)?
+    private var anchor: UInt64 = 0
+    private var samples: [Sample] = []
+    private var waits: [Wait] = []
+    private var awaitingWake: UInt64?
+    private var started = false
+    private var finished = false
+
+    init(oversleepNanos: UInt64) {
+        self.oversleepNanos = oversleepNanos
+        queue.setSpecific(key: queueKey, value: 1)
+    }
+
+    func start(onCapture: @escaping (Sample) -> Void) {
+        queue.async {
+            guard !self.started, !self.finished else { return }
+            self.started = true
+            self.onCapture = onCapture
+            self.anchor = MonotonicClock.nowNanos()
+            let timer = DispatchSource.makeTimerSource(flags: [.strict], queue: self.queue)
+            self.timer = timer
+            timer.setEventHandler { [weak self] in self?.fire() }
+            timer.schedule(deadline: DispatchTime(uptimeNanoseconds: self.anchor), leeway: .nanoseconds(0))
+            timer.resume()
+        }
+    }
+
+    func wait(timeout: DispatchTime) -> Result? {
+        guard done.wait(timeout: timeout) == .success else { return nil }
+        return resultLock.withLock { result }
+    }
+
+    func cancel() {
+        if DispatchQueue.getSpecific(key: queueKey) != nil {
+            finish(cancelled: true)
+        } else {
+            queue.sync { finish(cancelled: true) }
+        }
+    }
+
+    private func fire() {
+        guard !finished else { return }
+        if let awaitingWake, MonotonicClock.nowNanos() < awaitingWake {
+            timer?.schedule(deadline: DispatchTime(uptimeNanoseconds: awaitingWake), leeway: .nanoseconds(0))
+            return // Early delivery must not consume the deliberate 35ms wait.
+        }
+        awaitingWake = nil
+        while !finished, samples.count < 50 {
+            let index = samples.count
+            let deadline = anchor + UInt64(index) * 20_000_000
+            let now = MonotonicClock.nowNanos()
+            if now < deadline {
+                let wake = deadline + oversleepNanos
+                awaitingWake = wake
+                waits.append(Wait(index: index, nominalDeadline: deadline, wakeDeadline: wake))
+                timer?.schedule(deadline: DispatchTime(uptimeNanoseconds: wake), leeway: .nanoseconds(0))
+                return
+            }
+            let sample = Sample(index: index, deadline: deadline, wokeAt: now)
+            samples.append(sample)
+            onCapture?(sample)
+        }
+        if !finished { finish(cancelled: false) }
+    }
+
+    private func finish(cancelled: Bool) {
+        guard !finished else { return }
+        finished = true
+        timer?.setEventHandler {}
+        timer?.cancel()
+        timer = nil
+        onCapture = nil
+        resultLock.withLock {
+            result = Result(anchor: anchor, samples: samples, waits: waits, cancelled: cancelled)
+        }
+        done.signal()
+    }
+
+    deinit { timer?.cancel() }
 }
 
 /// At most 200 full datagrams per peer. Header admission is provisional: the
