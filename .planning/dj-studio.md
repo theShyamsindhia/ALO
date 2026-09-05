@@ -83,3 +83,5 @@ A physical two-Mac listening test and output-device hot-swap have not been perfo
 - Native live-deck screenshot rendered with synthetic test audio and visually checked; final preview is `dist/previews/dj-studio.png` (not included in the app).
 - Main executable measured 26,155,904 bytes, with ~19 MiB existing icon resources. No new dependencies or bundled audio.
 - Physical two-Mac listening and device hot-swap remain untested. Live processing advances with incoming media packets, and pauses when the source sends none.
+
+- Integrated upstream through `b14ea56` (room attachments, lyrics and settings consolidation); merged Debug integration run passed 76 tests in 14 suites (40.237 seconds). No conflicts or dropped DJ entry point.
