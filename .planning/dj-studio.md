@@ -74,7 +74,7 @@ A physical two-Mac listening test and output-device hot-swap have not been perfo
 - [x] Show whole-room versus this-Mac scope; route existing keys to the live deck.
 - [x] Document use and bounded RAM/no disk storage.
 - [x] Verify actual DSP, transport lifecycle, overlay, native UI and final screenshot.
-- [ ] Integrate latest main, push authorized changes, and show the resulting image.
+- [x] Integrate latest main, push authorized changes, and render the resulting image for delivery.
 
 ### Live extension validation
 - Targeted Debug run: 27 tests in 8 suites passed.
@@ -85,3 +85,5 @@ A physical two-Mac listening test and output-device hot-swap have not been perfo
 - Physical two-Mac listening and device hot-swap remain untested. Live processing advances with incoming media packets, and pauses when the source sends none.
 
 - Integrated upstream through `b14ea56` (room attachments, lyrics and settings consolidation); merged Debug integration run passed 76 tests in 14 suites (40.237 seconds). No conflicts or dropped DJ entry point.
+
+- Main delivery verified: `8b4b14e` pushed successfully, preserving upstream `b14ea56`. Preview: `dist/previews/dj-studio.png`.
