@@ -12,20 +12,20 @@ final class StoredDefaultTests: XCTestCase {
     private var testDefaults: UserDefaults!
     private var suiteName: String!
 
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
+        try await super.setUp()
         suiteName = "DynamicNotch.Tests.StoredDefault.\(UUID().uuidString)"
         testDefaults = UserDefaults(suiteName: suiteName)!
     }
 
-    override func tearDown() {
+    override func tearDown() async throws {
         testDefaults.removePersistentDomain(forName: suiteName)
         testDefaults = nil
         suiteName = nil
-        super.tearDown()
+        try await super.tearDown()
     }
 
-    func testCalendarSettingsStoreDefaults() {
+    func testCalendarSettingsStoreDefaults() async {
         let store = CalendarSettingsStore(defaults: testDefaults)
 
         XCTAssertFalse(store.isCalendarLiveActivityEnabled)
@@ -39,7 +39,7 @@ final class StoredDefaultTests: XCTestCase {
         XCTAssertFalse(store.isSoundAlertEnabled)
     }
 
-    func testCalendarSettingsStorePersistsChanges() {
+    func testCalendarSettingsStorePersistsChanges() async {
         let store = CalendarSettingsStore(defaults: testDefaults)
 
         store.daysToShow = 14
@@ -60,7 +60,7 @@ final class StoredDefaultTests: XCTestCase {
         XCTAssertEqual(freshStore.timeDisplayFormat, .relative)
     }
 
-    func testLockScreenFeatureSettingsStoreDefaults() {
+    func testLockScreenFeatureSettingsStoreDefaults() async {
         let store = LockScreenFeatureSettingsStore(defaults: testDefaults)
 
         XCTAssertFalse(store.isLockScreenLiveActivityEnabled)
@@ -72,7 +72,7 @@ final class StoredDefaultTests: XCTestCase {
         XCTAssertEqual(store.mediaPanelVerticalOffset, 0.0)
     }
 
-    func testLockScreenFeatureSettingsStorePersistsChanges() {
+    func testLockScreenFeatureSettingsStorePersistsChanges() async {
         let store = LockScreenFeatureSettingsStore(defaults: testDefaults)
 
         store.isLockScreenLiveActivityEnabled = false
@@ -87,7 +87,7 @@ final class StoredDefaultTests: XCTestCase {
         )
     }
 
-    func testObjectWillChangeFiresOnPropertyUpdate() {
+    func testObjectWillChangeFiresOnPropertyUpdate() async {
         let store = CalendarSettingsStore(defaults: testDefaults)
         var changeCount = 0
         var cancellables = Set<AnyCancellable>()
@@ -103,7 +103,7 @@ final class StoredDefaultTests: XCTestCase {
         XCTAssertEqual(changeCount, 2)
     }
 
-    func testCustomUserDefaultsIsolation() {
+    func testCustomUserDefaultsIsolation() async {
         let suite1 = "DynamicNotch.Tests.Isolation1.\(UUID().uuidString)"
         let suite2 = "DynamicNotch.Tests.Isolation2.\(UUID().uuidString)"
         let defaults1 = UserDefaults(suiteName: suite1)!
@@ -120,7 +120,7 @@ final class StoredDefaultTests: XCTestCase {
         defaults2.removePersistentDomain(forName: suite2)
     }
 
-    func testHUDSettingsStoreDefaultsAndClamping() {
+    func testHUDSettingsStoreDefaultsAndClamping() async {
         let store = HUDSettingsStore(defaults: testDefaults)
 
         XCTAssertFalse(store.isBrightnessHUDEnabled)
@@ -136,7 +136,7 @@ final class StoredDefaultTests: XCTestCase {
         XCTAssertEqual(testDefaults.string(forKey: GeneralSettingsStorage.Keys.hudStyle), HudStyle.minimal.rawValue)
     }
 
-    func testBatterySettingsStoreDefaultsAndClamping() {
+    func testBatterySettingsStoreDefaultsAndClamping() async {
         let store = BatterySettingsStore(defaults: testDefaults)
 
         XCTAssertFalse(store.isChargerTemporaryActivityEnabled)
@@ -153,7 +153,7 @@ final class StoredDefaultTests: XCTestCase {
         XCTAssertEqual(store.fullPowerNotificationThreshold, 100)
     }
 
-    func testApplicationSettingsStoreDefaultsAndClamping() {
+    func testApplicationSettingsStoreDefaultsAndClamping() async {
         let store = ApplicationSettingsStore(defaults: testDefaults)
 
         XCTAssertFalse(store.isDockIconVisible)

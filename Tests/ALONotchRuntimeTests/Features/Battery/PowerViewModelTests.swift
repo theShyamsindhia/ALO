@@ -25,7 +25,7 @@ final class PowerViewModelTests: XCTestCase {
         return (viewModel, provider, settings)
     }
 
-    func testConnectingChargerEmitsChargerEvent() {
+    func testConnectingChargerEmitsChargerEvent() async {
         let (viewModel, provider, _) = makeViewModel(onACPower: false, batteryLevel: 50)
         XCTAssertNil(viewModel.event)
 
@@ -33,7 +33,7 @@ final class PowerViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.event, .charger)
     }
 
-    func testDisconnectingChargerDoesNotEmitChargerEvent() {
+    func testDisconnectingChargerDoesNotEmitChargerEvent() async {
         let (viewModel, provider, _) = makeViewModel(onACPower: true, batteryLevel: 50)
         XCTAssertNil(viewModel.event)
 
@@ -41,7 +41,7 @@ final class PowerViewModelTests: XCTestCase {
         XCTAssertNil(viewModel.event)
     }
 
-    func testDroppingBelowLowPowerThresholdEmitsLowPowerEvent() {
+    func testDroppingBelowLowPowerThresholdEmitsLowPowerEvent() async {
         let (viewModel, provider, _) = makeViewModel(onACPower: false, batteryLevel: 25, lowPowerThreshold: 20)
         XCTAssertNil(viewModel.event)
 
@@ -49,7 +49,7 @@ final class PowerViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.event, .lowPower)
     }
 
-    func testBatteryReachingExactLowPowerThresholdEmitsLowPowerEvent() {
+    func testBatteryReachingExactLowPowerThresholdEmitsLowPowerEvent() async {
         let (viewModel, provider, _) = makeViewModel(onACPower: false, batteryLevel: 21, lowPowerThreshold: 20)
         XCTAssertNil(viewModel.event)
 
@@ -57,7 +57,7 @@ final class PowerViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.event, .lowPower)
     }
 
-    func testStayingBelowLowPowerThresholdDoesNotEmitDuplicateEvent() {
+    func testStayingBelowLowPowerThresholdDoesNotEmitDuplicateEvent() async {
         let (viewModel, provider, _) = makeViewModel(onACPower: false, batteryLevel: 25, lowPowerThreshold: 20)
         provider.batteryLevel = 19
         XCTAssertEqual(viewModel.event, .lowPower)
@@ -67,7 +67,7 @@ final class PowerViewModelTests: XCTestCase {
         XCTAssertNil(viewModel.event)
     }
 
-    func testRisingAboveFullPowerThresholdEmitsFullPowerEvent() {
+    func testRisingAboveFullPowerThresholdEmitsFullPowerEvent() async {
         let (viewModel, provider, _) = makeViewModel(onACPower: true, batteryLevel: 75, fullPowerThreshold: 80)
         XCTAssertNil(viewModel.event)
 
@@ -75,7 +75,7 @@ final class PowerViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.event, .fullPower)
     }
 
-    func testStayingAboveFullPowerThresholdDoesNotEmitDuplicateEvent() {
+    func testStayingAboveFullPowerThresholdDoesNotEmitDuplicateEvent() async {
         let (viewModel, provider, _) = makeViewModel(onACPower: true, batteryLevel: 75, fullPowerThreshold: 80)
         provider.batteryLevel = 80
         XCTAssertEqual(viewModel.event, .fullPower)
@@ -85,7 +85,7 @@ final class PowerViewModelTests: XCTestCase {
         XCTAssertNil(viewModel.event)
     }
 
-    func testUpdatingLowPowerThresholdDynamicallyAffectsEventTrigger() {
+    func testUpdatingLowPowerThresholdDynamicallyAffectsEventTrigger() async {
         let (viewModel, provider, settings) = makeViewModel(onACPower: false, batteryLevel: 35, lowPowerThreshold: 20)
 
         // Change threshold to 30
@@ -96,7 +96,7 @@ final class PowerViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.event, .lowPower)
     }
 
-    func testUpdatingFullPowerThresholdDynamicallyAffectsEventTrigger() {
+    func testUpdatingFullPowerThresholdDynamicallyAffectsEventTrigger() async {
         let (viewModel, provider, settings) = makeViewModel(onACPower: true, batteryLevel: 82, fullPowerThreshold: 85)
 
         // Change threshold to 90

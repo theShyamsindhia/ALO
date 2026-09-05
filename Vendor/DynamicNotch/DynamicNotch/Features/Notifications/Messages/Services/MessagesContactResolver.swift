@@ -10,6 +10,10 @@ protocol MessagesContactStoring {
 
 final class SystemMessagesContactStore: MessagesContactStoring {
 
+    // ARC cleanup owns no UI/executor work. Avoid the isolated-deinit
+    // backdeployment thunk when released by a synchronous macOS 15 callback.
+    nonisolated deinit {}
+
     private var storedContactStore: CNContactStore?
     private let initializationLock = NSLock()
 
@@ -52,6 +56,7 @@ final class SystemMessagesContactStore: MessagesContactStoring {
 }
 
 final class MessagesContactResolver {
+    nonisolated deinit {}
     static let shared = MessagesContactResolver()
 
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "DynamicNotch", category: "MessagesContactResolver")

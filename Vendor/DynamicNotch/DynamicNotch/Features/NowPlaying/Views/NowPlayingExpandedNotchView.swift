@@ -77,7 +77,7 @@ struct NowPlayingExpandedNotchView: View {
                 progress: displayedProgress,
                 displayedElapsedTime: displayedElapsedTime,
                 duration: snapshot.duration,
-                isInteractive: snapshot.duration > 0,
+                isInteractive: snapshot.duration > 0 && nowPlayingViewModel.canSend(.seek(0)),
                 tintGradient: {
                     switch appearance.progressTintStyle {
                     case .default:
@@ -189,6 +189,7 @@ struct NowPlayingExpandedNotchView: View {
                 ) {
                     nowPlayingViewModel.previousTrack()
                 }
+                .disabled(!nowPlayingViewModel.canSend(.previousTrack))
 
                 PlayerControlButton(
                     systemImage: snapshot.isPlaying ? "pause.fill" : "play.fill",
@@ -199,6 +200,7 @@ struct NowPlayingExpandedNotchView: View {
                 ) {
                     nowPlayingViewModel.togglePlayPause()
                 }
+                .disabled(!nowPlayingViewModel.canSend(.togglePlayPause))
 
                 PlayerControlButton(
                     systemImage: "forward.fill",
@@ -209,6 +211,7 @@ struct NowPlayingExpandedNotchView: View {
                 ) {
                     nowPlayingViewModel.nextTrack()
                 }
+                .disabled(!nowPlayingViewModel.canSend(.nextTrack))
             }
 
             HStack {

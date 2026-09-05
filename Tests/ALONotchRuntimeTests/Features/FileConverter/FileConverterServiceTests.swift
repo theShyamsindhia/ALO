@@ -10,26 +10,26 @@ final class FileConverterServiceTests: XCTestCase {
     private var service: FileConverterService!
     private var tempDirectory: URL!
 
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
+        try await super.setUp()
         service = FileConverterService.shared
         tempDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("FileConverterServiceTests-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
     }
 
-    override func tearDown() {
+    override func tearDown() async throws {
         if let tempDirectory {
             try? FileManager.default.removeItem(at: tempDirectory)
         }
         service = nil
         tempDirectory = nil
-        super.tearDown()
+        try await super.tearDown()
     }
 
     // MARK: - Media Kind Detection
 
-    func testMediaKindDetectionForImages() {
+    func testMediaKindDetectionForImages() async {
         let pngURL = URL(fileURLWithPath: "/tmp/sample.png")
         let jpgURL = URL(fileURLWithPath: "/tmp/sample.jpg")
         let heicURL = URL(fileURLWithPath: "/tmp/sample.heic")
@@ -41,7 +41,7 @@ final class FileConverterServiceTests: XCTestCase {
         XCTAssertEqual(service.mediaKind(for: webpURL, isDirectory: false), .image)
     }
 
-    func testMediaKindDetectionForVideos() {
+    func testMediaKindDetectionForVideos() async {
         let mp4URL = URL(fileURLWithPath: "/tmp/video.mp4")
         let movURL = URL(fileURLWithPath: "/tmp/video.mov")
         let mkvURL = URL(fileURLWithPath: "/tmp/video.mkv")
@@ -51,7 +51,7 @@ final class FileConverterServiceTests: XCTestCase {
         XCTAssertEqual(service.mediaKind(for: mkvURL, isDirectory: false), .video)
     }
 
-    func testMediaKindDetectionForAudio() {
+    func testMediaKindDetectionForAudio() async {
         let mp3URL = URL(fileURLWithPath: "/tmp/audio.mp3")
         let m4aURL = URL(fileURLWithPath: "/tmp/audio.m4a")
         let wavURL = URL(fileURLWithPath: "/tmp/audio.wav")
@@ -63,7 +63,7 @@ final class FileConverterServiceTests: XCTestCase {
         XCTAssertEqual(service.mediaKind(for: flacURL, isDirectory: false), .audio)
     }
 
-    func testMediaKindDetectionForArchives() {
+    func testMediaKindDetectionForArchives() async {
         let zipURL = URL(fileURLWithPath: "/tmp/archive.zip")
         let tarURL = URL(fileURLWithPath: "/tmp/archive.tar")
         let gzURL = URL(fileURLWithPath: "/tmp/archive.gz")
@@ -73,14 +73,14 @@ final class FileConverterServiceTests: XCTestCase {
         XCTAssertEqual(service.mediaKind(for: gzURL, isDirectory: false), .archive)
     }
 
-    func testMediaKindDetectionForDirectory() {
+    func testMediaKindDetectionForDirectory() async {
         let folderURL = URL(fileURLWithPath: "/tmp/MyFolder")
         XCTAssertEqual(service.mediaKind(for: folderURL, isDirectory: true), .generic)
     }
 
     // MARK: - Output Formats
 
-    func testAvailableFormatsForDirectoryExcludesGzip() {
+    func testAvailableFormatsForDirectoryExcludesGzip() async {
         let formats = FileConverterOutputFormat.formats(for: .generic, isDirectory: true)
         XCTAssertTrue(formats.contains(.zip))
         XCTAssertTrue(formats.contains(.tar))
@@ -88,12 +88,12 @@ final class FileConverterServiceTests: XCTestCase {
         XCTAssertFalse(formats.contains(.gzip), "Gzip should not be available for directories")
     }
 
-    func testAvailableFormatsForFileIncludesGzip() {
+    func testAvailableFormatsForFileIncludesGzip() async {
         let formats = FileConverterOutputFormat.formats(for: .generic, isDirectory: false)
         XCTAssertTrue(formats.contains(.gzip), "Gzip should be available for single files")
     }
 
-    func testDefaultFormatDiffersFromCurrentFileExtension() {
+    func testDefaultFormatDiffersFromCurrentFileExtension() async {
         let imageItem = FileConverterItem(
             url: URL(fileURLWithPath: "/tmp/sample.png"),
             mediaKind: .image,
@@ -105,7 +105,7 @@ final class FileConverterServiceTests: XCTestCase {
 
     // MARK: - URL Resolution
 
-    func testPreparedOutputURLCreatesUniqueNameWhenFileExists() throws {
+    func testPreparedOutputURLCreatesUniqueNameWhenFileExists() async throws {
         let sourceFile = tempDirectory.appendingPathComponent("image.png")
         try "fake-image".write(to: sourceFile, atomically: true, encoding: .utf8)
 
@@ -124,7 +124,7 @@ final class FileConverterServiceTests: XCTestCase {
         XCTAssertTrue(resolvedURL.lastPathComponent.contains("-1.jpg"))
     }
 
-    func testPreparedOutputURLThrowsErrorWhenTargetMatchesSource() {
+    func testPreparedOutputURLThrowsErrorWhenTargetMatchesSource() async {
         let sourceFile = tempDirectory.appendingPathComponent("document.pdf")
 
         var options = FileConverterConversionOptions()

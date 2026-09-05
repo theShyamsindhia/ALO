@@ -4,78 +4,83 @@ import XCTest
 
 final class MessagesDatabaseWatcherTests: XCTestCase {
 
-    func testStartMonitoringPostsNotificationForNewMessage() throws {
+    func testStartMonitoringPostsNotificationForNewMessage() async throws {
         let database = try makeWatcherDatabase()
+        defer { withExtendedLifetime(database) {} }
         let reader = MessagesDatabaseReader(databaseURL: database.url, contactResolver: MessagesContactResolver(contactStore: DeniedMessagesContactStore()))
         let watcher = MessagesDatabaseWatcher(reader: reader)
         let messageExpectation = expectationForMessage(rowID: 2)
 
-        startAndSettle(watcher)
+        await startAndSettle(watcher)
 
         try insertCurrentMessage(rowID: 2, text: "New message", into: database)
 
-        wait(for: [messageExpectation], timeout: 3)
+        await fulfillment(of: [messageExpectation], timeout: 3)
 
-        stopAndSettle(watcher)
+        await stopAndSettle(watcher)
     }
 
-    func testStartMonitoringDoesNotReplayExistingMessage() throws {
+    func testStartMonitoringDoesNotReplayExistingMessage() async throws {
         let database = try makeWatcherDatabase()
+        defer { withExtendedLifetime(database) {} }
         let reader = MessagesDatabaseReader(databaseURL: database.url, contactResolver: MessagesContactResolver(contactStore: DeniedMessagesContactStore()))
         let watcher = MessagesDatabaseWatcher(reader: reader)
         let messageExpectation = expectationForMessage(rowID: 1)
 
         messageExpectation.isInverted = true
 
-        startAndSettle(watcher)
+        await startAndSettle(watcher)
 
-        wait(for: [messageExpectation], timeout: 1)
+        await fulfillment(of: [messageExpectation], timeout: 1)
 
-        stopAndSettle(watcher)
+        await stopAndSettle(watcher)
     }
 
-    func testStopMonitoringPreventsNewMessageNotification() throws {
+    func testStopMonitoringPreventsNewMessageNotification() async throws {
         let database = try makeWatcherDatabase()
+        defer { withExtendedLifetime(database) {} }
         let reader = MessagesDatabaseReader(databaseURL: database.url, contactResolver: MessagesContactResolver(contactStore: DeniedMessagesContactStore()))
         let watcher = MessagesDatabaseWatcher(reader: reader)
         let messageExpectation = expectationForMessage(rowID: 2)
 
         messageExpectation.isInverted = true
 
-        startAndSettle(watcher)
-        stopAndSettle(watcher)
+        await startAndSettle(watcher)
+        await stopAndSettle(watcher)
 
         try insertCurrentMessage(rowID: 2, text: "Message after stop", into: database)
 
-        wait(for: [messageExpectation], timeout: 1)
+        await fulfillment(of: [messageExpectation], timeout: 1)
     }
 
-    func testMonitoringPostsEveryMessageFromSingleDatabaseRead() throws {
+    func testMonitoringPostsEveryMessageFromSingleDatabaseRead() async throws {
         let database = try makeWatcherDatabase()
+        defer { withExtendedLifetime(database) {} }
         let reader = MessagesDatabaseReader(databaseURL: database.url, contactResolver: MessagesContactResolver(contactStore: DeniedMessagesContactStore()))
         let watcher = MessagesDatabaseWatcher(reader: reader)
         let firstMessageExpectation = expectationForMessage(rowID: 2)
         let secondMessageExpectation = expectationForMessage(rowID: 3)
 
-        startAndSettle(watcher)
+        await startAndSettle(watcher)
 
         try insertCurrentMessage(rowID: 2, text: "First message", into: database)
         try insertCurrentMessage(rowID: 3, text: "Second message", into: database)
 
-        wait(for: [firstMessageExpectation, secondMessageExpectation], timeout: 3)
+        await fulfillment(of: [firstMessageExpectation, secondMessageExpectation], timeout: 3)
 
-        stopAndSettle(watcher)
+        await stopAndSettle(watcher)
     }
 
-    func testMonitoringIgnoresMessageReceivedBeforeMonitoringStarted() throws {
+    func testMonitoringIgnoresMessageReceivedBeforeMonitoringStarted() async throws {
         let database = try makeWatcherDatabase()
+        defer { withExtendedLifetime(database) {} }
         let reader = MessagesDatabaseReader(databaseURL: database.url, contactResolver: MessagesContactResolver(contactStore: DeniedMessagesContactStore()))
         let watcher = MessagesDatabaseWatcher(reader: reader)
         let messageExpectation = expectationForMessage(rowID: 2)
 
         messageExpectation.isInverted = true
 
-        startAndSettle(watcher)
+        await startAndSettle(watcher)
 
         try database.insertMessage(
             rowID: 2,
@@ -84,13 +89,14 @@ final class MessagesDatabaseWatcherTests: XCTestCase {
             date: Date().addingTimeInterval(-60).timeIntervalSinceReferenceDate
         )
 
-        wait(for: [messageExpectation], timeout: 1)
+        await fulfillment(of: [messageExpectation], timeout: 1)
 
-        stopAndSettle(watcher)
+        await stopAndSettle(watcher)
     }
 
-    func testMonitoringWaitsForAttachmentFileBeforePostingMessage() throws {
+    func testMonitoringWaitsForAttachmentFileBeforePostingMessage() async throws {
         let database = try makeWatcherDatabase()
+        defer { withExtendedLifetime(database) {} }
         let reader = MessagesDatabaseReader(databaseURL: database.url, contactResolver: MessagesContactResolver(contactStore: DeniedMessagesContactStore()))
         let watcher = MessagesDatabaseWatcher(reader: reader)
         let attachmentURL = database.url.deletingLastPathComponent().appendingPathComponent("attachment.bin")
@@ -98,7 +104,7 @@ final class MessagesDatabaseWatcherTests: XCTestCase {
 
         prematureExpectation.isInverted = true
 
-        startAndSettle(watcher)
+        await startAndSettle(watcher)
 
         try database.insertAttachment(
             rowID: 100,
@@ -117,7 +123,7 @@ final class MessagesDatabaseWatcherTests: XCTestCase {
             date: Date().timeIntervalSinceReferenceDate
         )
 
-        wait(for: [prematureExpectation], timeout: 0.4)
+        await fulfillment(of: [prematureExpectation], timeout: 0.4)
 
         let readyExpectation = expectation(forNotification: .messagesDatabaseDidReceiveMessage, object: nil) { notification in
             guard let message = notification.object as? MessagesMessage else { return false }
@@ -129,13 +135,14 @@ final class MessagesDatabaseWatcherTests: XCTestCase {
 
         _ = try database.createFile(named: "attachment.bin", data: Data([0]))
 
-        wait(for: [readyExpectation], timeout: 3)
+        await fulfillment(of: [readyExpectation], timeout: 3)
 
-        stopAndSettle(watcher)
+        await stopAndSettle(watcher)
     }
 
-    func testStopMonitoringCancelsPendingAttachmentRefresh() throws {
+    func testStopMonitoringCancelsPendingAttachmentRefresh() async throws {
         let database = try makeWatcherDatabase()
+        defer { withExtendedLifetime(database) {} }
         let reader = MessagesDatabaseReader(databaseURL: database.url, contactResolver: MessagesContactResolver(contactStore: DeniedMessagesContactStore()))
         let watcher = MessagesDatabaseWatcher(reader: reader)
         let attachmentURL = database.url.deletingLastPathComponent().appendingPathComponent("attachment.bin")
@@ -143,7 +150,7 @@ final class MessagesDatabaseWatcherTests: XCTestCase {
 
         prematureExpectation.isInverted = true
 
-        startAndSettle(watcher)
+        await startAndSettle(watcher)
 
         try database.insertAttachment(
             rowID: 100,
@@ -162,40 +169,42 @@ final class MessagesDatabaseWatcherTests: XCTestCase {
             date: Date().timeIntervalSinceReferenceDate
         )
 
-        wait(for: [prematureExpectation], timeout: 0.4)
+        await fulfillment(of: [prematureExpectation], timeout: 0.4)
 
         let notificationAfterStopExpectation = expectationForMessage(rowID: 2)
 
         notificationAfterStopExpectation.isInverted = true
 
-        stopAndSettle(watcher)
+        await stopAndSettle(watcher)
 
         _ = try database.createFile(named: "attachment.bin", data: Data([0]))
 
-        wait(for: [notificationAfterStopExpectation], timeout: 1)
+        await fulfillment(of: [notificationAfterStopExpectation], timeout: 1)
     }
 
-    func testMonitoringCanStartAgainAfterStopping() throws {
+    func testMonitoringCanStartAgainAfterStopping() async throws {
         let database = try makeWatcherDatabase()
+        defer { withExtendedLifetime(database) {} }
         let reader = MessagesDatabaseReader(databaseURL: database.url, contactResolver: MessagesContactResolver(contactStore: DeniedMessagesContactStore()))
         let watcher = MessagesDatabaseWatcher(reader: reader)
 
-        startAndSettle(watcher)
-        stopAndSettle(watcher)
+        await startAndSettle(watcher)
+        await stopAndSettle(watcher)
 
         let messageExpectation = expectationForMessage(rowID: 2)
 
-        startAndSettle(watcher)
+        await startAndSettle(watcher)
 
         try insertCurrentMessage(rowID: 2, text: "Message after restart", into: database)
 
-        wait(for: [messageExpectation], timeout: 3)
+        await fulfillment(of: [messageExpectation], timeout: 3)
 
-        stopAndSettle(watcher)
+        await stopAndSettle(watcher)
     }
 
     private func makeWatcherDatabase() throws -> MessagesTestDatabase {
         let database = try MessagesTestDatabase(usesWAL: true)
+        defer { withExtendedLifetime(database) {} }
 
         try database.createSchema()
 
@@ -226,13 +235,13 @@ final class MessagesDatabaseWatcherTests: XCTestCase {
         }
     }
 
-    private func startAndSettle(_ watcher: MessagesDatabaseWatcher) {
+    private func startAndSettle(_ watcher: MessagesDatabaseWatcher) async {
         watcher.startMonitoring()
-        Thread.sleep(forTimeInterval: 0.5)
+        try? await Task.sleep(for: .milliseconds(500))
     }
 
-    private func stopAndSettle(_ watcher: MessagesDatabaseWatcher) {
+    private func stopAndSettle(_ watcher: MessagesDatabaseWatcher) async {
         watcher.stopMonitoring()
-        Thread.sleep(forTimeInterval: 0.3)
+        try? await Task.sleep(for: .milliseconds(300))
     }
 }

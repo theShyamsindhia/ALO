@@ -2,7 +2,7 @@ import XCTest
 @testable import ALONotchRuntime
 
 final class SettingsSelectionHistoryTests: XCTestCase {
-    func testRecordAppendsSelectionToHistory() {
+    func testRecordAppendsSelectionToHistory() async {
         var history = SettingsRootViewModel.SelectionHistory(initialSelection: .general)
 
         history.record(.wifi)
@@ -12,7 +12,7 @@ final class SettingsSelectionHistoryTests: XCTestCase {
         XCTAssertFalse(history.canGoForward)
     }
 
-    func testRecordAfterGoingBackDropsForwardHistory() {
+    func testRecordAfterGoingBackDropsForwardHistory() async {
         var history = SettingsRootViewModel.SelectionHistory(initialSelection: .general)
         history.record(.wifi)
         history.record(.battery)
@@ -25,7 +25,7 @@ final class SettingsSelectionHistoryTests: XCTestCase {
         XCTAssertNil(history.goForward())
     }
 
-    func testRecordSameSelectionDoesNotDuplicateHistory() {
+    func testRecordSameSelectionDoesNotDuplicateHistory() async {
         var history = SettingsRootViewModel.SelectionHistory(initialSelection: .general)
 
         history.record(.general)
@@ -35,7 +35,7 @@ final class SettingsSelectionHistoryTests: XCTestCase {
         XCTAssertNil(history.goBack())
     }
 
-    func testBackAndForwardMoveAcrossRecordedSelections() {
+    func testBackAndForwardMoveAcrossRecordedSelections() async {
         var history = SettingsRootViewModel.SelectionHistory(initialSelection: .general)
         history.record(.wifi)
         history.record(.battery)

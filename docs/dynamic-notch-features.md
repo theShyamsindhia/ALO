@@ -1,6 +1,8 @@
 # DynamicNotch source inventory and integration map
 
-The original repository supplied at `/Users/zex/Desktop/Files/Refrence Repo/DynamicNotch-main/` was imported under `Vendor/DynamicNotch/` (unchanged import retained in commit `a6d26f7`). The compiled selection of original geometry, animation, transition and window-layout files is under `Sources/ALO/DynamicNotch/`. ALO's integration supplies its own room/media content and settings around that selection.
+The original repository supplied at `/Users/zex/Desktop/Files/Refrence Repo/DynamicNotch-main/` was imported under `Vendor/DynamicNotch/` (unchanged import retained in commit `a6d26f7`). Original geometry, animation, transitions, window hosting and activity views are
+compiled once from the vendor tree through `ALONotchRuntime`. ALO supplies metadata,
+commands and master lifecycle. The initial large room-bar wrapper was removed.
 
 **These feature modules are now compiled into ALO through `ALONotchRuntime`. All additional feature switches and home pages start disabled. Enable the notch first, then choose features in ALO Notch Settings. System integrations require their corresponding macOS permissions; presence in the settings does not grant access.**
 
@@ -76,7 +78,7 @@ validated on the actual target system when those features are enabled.
 
 ## Activation and lifecycle
 
-Use **ALO → Notch Settings…** or **Talk settings → Notch → Feature settings…**.
+Use **ALO → Notch Settings…** or **Room settings → Interface → Notch → Feature settings…**.
 The master switch starts no individual feature by default. All home pages must also
 be selected explicitly. Feature toggles start/stop their services; master-off stops
 all services and clears queued/restorable activity content without erasing choices.

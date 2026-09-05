@@ -5,7 +5,7 @@ import XCTest
 @MainActor
 final class MessagesContactResolverTests: XCTestCase {
 
-    func testSenderReturnsEmptyFallbackWithoutReadingContactStore() {
+    func testSenderReturnsEmptyFallbackWithoutReadingContactStore() async {
         let store = FakeMessagesContactStore(contact: makeContact(givenName: "Tim"))
         let resolver = MessagesContactResolver(contactStore: store)
 
@@ -18,7 +18,7 @@ final class MessagesContactResolverTests: XCTestCase {
         XCTAssertTrue(store.requestedIdentifiers.isEmpty)
     }
 
-    func testSenderReturnsFallbackWhenContactsAccessIsNotAuthorized() {
+    func testSenderReturnsFallbackWhenContactsAccessIsNotAuthorized() async {
         let store = FakeMessagesContactStore(authorizationStatus: .denied, contact: makeContact(givenName: "Tim"))
         let resolver = MessagesContactResolver(contactStore: store)
 
@@ -31,7 +31,7 @@ final class MessagesContactResolverTests: XCTestCase {
         XCTAssertTrue(store.requestedIdentifiers.isEmpty)
     }
 
-    func testSenderUsesContactNameAndAvatar() {
+    func testSenderUsesContactNameAndAvatar() async {
         let avatarData = Data([1, 2, 3])
         let contact = makeContact(givenName: "Tim", avatarData: avatarData)
         let store = FakeMessagesContactStore(contact: contact)
@@ -46,7 +46,7 @@ final class MessagesContactResolverTests: XCTestCase {
         XCTAssertEqual(store.requestedIdentifiers, ["+123456789"])
     }
 
-    func testSenderUsesOrganizationWhenContactNameIsEmpty() {
+    func testSenderUsesOrganizationWhenContactNameIsEmpty() async {
         let contact = makeContact(organizationName: "  Apple  ")
         let store = FakeMessagesContactStore(contact: contact)
         let resolver = MessagesContactResolver(contactStore: store)
@@ -57,7 +57,7 @@ final class MessagesContactResolverTests: XCTestCase {
         XCTAssertTrue(sender.isKnownContact)
     }
 
-    func testSenderUsesIdentifierWhenKnownContactHasNoName() {
+    func testSenderUsesIdentifierWhenKnownContactHasNoName() async {
         let store = FakeMessagesContactStore(contact: makeContact())
         let resolver = MessagesContactResolver(contactStore: store)
 
@@ -67,7 +67,7 @@ final class MessagesContactResolverTests: XCTestCase {
         XCTAssertTrue(sender.isKnownContact)
     }
 
-    func testSenderReturnsUnknownFallbackWhenContactIsNotFound() {
+    func testSenderReturnsUnknownFallbackWhenContactIsNotFound() async {
         let store = FakeMessagesContactStore(contact: nil)
         let resolver = MessagesContactResolver(contactStore: store)
 
@@ -81,7 +81,7 @@ final class MessagesContactResolverTests: XCTestCase {
         XCTAssertEqual(store.requestedIdentifiers, ["+123456789"])
     }
 
-    func testSenderReturnsFallbackWhenContactLookupFails() {
+    func testSenderReturnsFallbackWhenContactLookupFails() async {
         let store = FakeMessagesContactStore(result: .failure(MessagesContactStoreError.lookupFailed))
         let resolver = MessagesContactResolver(contactStore: store)
 
@@ -94,7 +94,7 @@ final class MessagesContactResolverTests: XCTestCase {
         XCTAssertFalse(sender.isKnownContact)
     }
 
-    func testSenderCachesResolvedContactCaseInsensitively() {
+    func testSenderCachesResolvedContactCaseInsensitively() async {
         let store = FakeMessagesContactStore(contact: makeContact(givenName: "Tim"))
         let resolver = MessagesContactResolver(contactStore: store)
 
@@ -105,7 +105,7 @@ final class MessagesContactResolverTests: XCTestCase {
         XCTAssertEqual(store.requestedIdentifiers, ["USER@example.com"])
     }
 
-    func testUnknownFallbackIsNotCached() {
+    func testUnknownFallbackIsNotCached() async {
         let store = FakeMessagesContactStore(contact: nil)
         let resolver = MessagesContactResolver(contactStore: store)
 
@@ -121,7 +121,7 @@ final class MessagesContactResolverTests: XCTestCase {
         XCTAssertEqual(store.requestedIdentifiers, ["+123456789", "+123456789"])
     }
 
-    func testSenderCanResolveContactAfterAuthorizationChanges() {
+    func testSenderCanResolveContactAfterAuthorizationChanges() async {
         let store = FakeMessagesContactStore(authorizationStatus: .denied, contact: makeContact(givenName: "Tim"))
         let resolver = MessagesContactResolver(contactStore: store)
 

@@ -3,7 +3,7 @@ import XCTest
 
 @MainActor
 final class ScreenRecordingViewModelIntegrationTests: XCTestCase {
-    func testStartMonitoringStartsUnderlyingMonitorOnlyOnce() {
+    func testStartMonitoringStartsUnderlyingMonitorOnlyOnce() async {
         let monitor = FakeScreenRecordingMonitor()
         let viewModel = ScreenRecordingViewModel(monitor: monitor)
         TestLifetime.retain(viewModel)
@@ -14,7 +14,7 @@ final class ScreenRecordingViewModelIntegrationTests: XCTestCase {
         XCTAssertEqual(monitor.startCalls, 1)
     }
 
-    func testPublishingRecordingStateEmitsStartedAndStoppedEvents() {
+    func testPublishingRecordingStateEmitsStartedAndStoppedEvents() async {
         let monitor = FakeScreenRecordingMonitor()
         let viewModel = ScreenRecordingViewModel(monitor: monitor)
         TestLifetime.retain(viewModel)
@@ -31,7 +31,7 @@ final class ScreenRecordingViewModelIntegrationTests: XCTestCase {
         XCTAssertEqual(viewModel.event, .stopped)
     }
 
-    func testStopMonitoringClearsRecordingState() {
+    func testStopMonitoringClearsRecordingState() async {
         let monitor = FakeScreenRecordingMonitor()
         let viewModel = ScreenRecordingViewModel(monitor: monitor)
         TestLifetime.retain(viewModel)

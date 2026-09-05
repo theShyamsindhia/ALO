@@ -3,7 +3,7 @@ import XCTest
 
 final class MailManagerTests: XCTestCase {
 
-    func testStartMonitoringForwardsReceivedMessage() throws {
+    func testStartMonitoringForwardsReceivedMessage() async throws {
         let database = try makeTestDatabase()
         let reader = MailDatabaseReader(databaseURL: database.url, contactResolver: MessagesContactResolver(contactStore: DeniedMessagesContactStore()))
         let manager = MailManager(reader: reader)
@@ -22,8 +22,7 @@ final class MailManagerTests: XCTestCase {
 
         NotificationCenter.default.post(name: .mailDatabaseDidReceiveMessage, object: expectedMessage)
 
-        wait(
-            for: [messageExpectation],
+        await fulfillment(of: [messageExpectation],
             timeout: 1
         )
 
@@ -32,7 +31,7 @@ final class MailManagerTests: XCTestCase {
         manager.stopMonitoring()
     }
 
-    func testStopMonitoringStopsForwardingReceivedMessages() throws {
+    func testStopMonitoringStopsForwardingReceivedMessages() async throws {
         let database = try makeTestDatabase()
         let reader = MailDatabaseReader(databaseURL: database.url, contactResolver: MessagesContactResolver(contactStore: DeniedMessagesContactStore()))
         let manager = MailManager(reader: reader)
@@ -49,8 +48,7 @@ final class MailManagerTests: XCTestCase {
 
         NotificationCenter.default.post(name: .mailDatabaseDidReceiveMessage, object: makeMessage(rowID: 2))
 
-        wait(
-            for: [messageExpectation],
+        await fulfillment(of: [messageExpectation],
             timeout: 0.5
         )
     }

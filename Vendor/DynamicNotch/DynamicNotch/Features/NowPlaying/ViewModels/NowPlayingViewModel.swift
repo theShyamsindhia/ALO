@@ -139,7 +139,12 @@ final class NowPlayingViewModel: ObservableObject {
         refreshVisibleSnapshotForCurrentSourceFilter()
     }
 
+    func canSend(_ command: NowPlayingCommand) -> Bool {
+        (service as? any NowPlayingCommandAvailabilityProviding)?.canSend(command) ?? true
+    }
+
     func togglePlayPause() {
+        guard canSend(.togglePlayPause) else { return }
         guard let snapshot else {
             service.send(.togglePlayPause)
             return
@@ -153,6 +158,7 @@ final class NowPlayingViewModel: ObservableObject {
     }
 
     func play() {
+        guard canSend(.play) else { return }
         recentPlaybackToggleTargetIsPlaying = true
         recentPlaybackToggleDate = Date()
         if let snapshot, !snapshot.isPlaying {
@@ -163,6 +169,7 @@ final class NowPlayingViewModel: ObservableObject {
     }
 
     func pause() {
+        guard canSend(.pause) else { return }
         recentPlaybackToggleTargetIsPlaying = false
         recentPlaybackToggleDate = Date()
         if let snapshot, snapshot.isPlaying {
@@ -173,14 +180,17 @@ final class NowPlayingViewModel: ObservableObject {
     }
 
     func nextTrack() {
+        guard canSend(.nextTrack) else { return }
         service.send(.nextTrack)
     }
 
     func previousTrack() {
+        guard canSend(.previousTrack) else { return }
         service.send(.previousTrack)
     }
 
     func seek(to elapsedTime: TimeInterval) {
+        guard canSend(.seek(elapsedTime)) else { return }
         guard let snapshot, snapshot.duration > 0 else { return }
 
         let clampedElapsedTime = min(max(elapsedTime, 0), snapshot.duration)

@@ -1,35 +1,84 @@
 import AppKit
 import Combine
 import SwiftUI
+import ALOCore
 import ALONotchRuntime
 
-/// Lazy ownership keeps the full feature engine out of disabled startup.
+/// Supplies room metadata and commands to the original player, without
+/// modifying its layout or waking global media monitors for room playback.
 @MainActor
 final class ALONotchFeatureBridge: ObservableObject {
     static let shared = ALONotchFeatureBridge()
     @Published private(set) var runtime: EmbeddedNotchRuntime?
-    @Published var prefersRoom = false
+    private weak var model: ALOViewModel?
     private var observations = Set<AnyCancellable>()
+    private var roomObservations = Set<AnyCancellable>()
     private var settingsWindow: NSWindow?
 
-    var showingActivities: Bool { runtime?.isEnabled == true && runtime?.activityActive == true && !prefersRoom }
+    func configure(model: ALOViewModel) {
+        guard self.model !== model else { return }
+        self.model = model
+        roomObservations.removeAll()
+        let changes: [AnyPublisher<Void, Never>] = [
+            model.$nowPlaying.map { _ in () }.eraseToAnyPublisher(),
+            model.$phase.map { _ in () }.eraseToAnyPublisher(),
+            model.$audioIsRendering.map { _ in () }.eraseToAnyPublisher(),
+            model.$statusText.map { _ in () }.eraseToAnyPublisher(),
+            model.$roomName.map { _ in () }.eraseToAnyPublisher()
+        ]
+        Publishers.MergeMany(changes)
+            .debounce(for: .milliseconds(30), scheduler: RunLoop.main)
+            .sink { [weak self] _ in self?.updateRoomPlayback() }
+            .store(in: &roomObservations)
+        updateRoomPlayback()
+    }
 
     func setEnabled(_ enabled: Bool) {
         if enabled && runtime == nil {
             let runtime = EmbeddedNotchRuntime()
             runtime.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &observations)
-            runtime.$activityActive.removeDuplicates().dropFirst()
-                .sink { [weak self] active in if active { self?.prefersRoom = false } }
-                .store(in: &observations)
             self.runtime = runtime
         }
+        guard runtime?.isEnabled != enabled else { return }
         runtime?.setEnabled(enabled)
+        updateRoomPlayback()
+    }
+
+    private func updateRoomPlayback() {
+        guard let runtime, runtime.isEnabled else { return }
+        let snapshot = model.flatMap { model in
+            Self.roomSnapshot(media: model.nowPlaying, isLive: model.phase == .live,
+                audioIsRendering: model.audioIsRendering, roomName: model.roomName,
+                isPlaying: model.roomIsPlaying, position: model.roomPlaybackPosition(at: Date()),
+                canControl: model.canControlRoomPlayback)
+        }
+        runtime.updateRoomPlayback(snapshot) { [weak self] command in
+            guard let model = self?.model else { return }
+            switch command {
+            case .togglePlayback: model.toggleRoomPlayback()
+            case .next: model.playNextRoomTrack()
+            case .previous: model.sendRoomMediaCommand(.previousTrack)
+            case .openSource: model.showFloatingBar()
+            case .seek: break // Room transport does not advertise seek support.
+            }
+        }
+    }
+
+    static func roomSnapshot(media: NowPlayingMedia, isLive: Bool, audioIsRendering: Bool,
+                             roomName: String, isPlaying: Bool, position: TimeInterval?,
+                             canControl: Bool) -> RoomPlaybackSnapshot? {
+        guard isLive, !media.isEmpty || audioIsRendering else { return nil }
+        let duration = position != nil && media.duration?.isFinite == true ? max(0, media.duration ?? 0) : 0
+        return RoomPlaybackSnapshot(title: media.title ?? "Room audio",
+            artist: media.artist ?? roomName, album: media.album ?? "", artworkData: media.artworkData,
+            isPlaying: isPlaying, elapsed: position ?? 0, duration: duration,
+            canTogglePlayback: canControl, canSkipNext: canControl, canSkipPrevious: canControl,
+            canSeek: false)
     }
 
     func openActivities() {
         guard ALONotchPreferences.shared.enabled else { return }
         setEnabled(true)
-        prefersRoom = false
         runtime?.openHomePage()
     }
 
@@ -67,40 +116,5 @@ private struct ALONotchFeatureSettings: View {
         }.frame(width: 760, height: 638)
             .onAppear { features.setEnabled(preferences.enabled) }
             .onChange(of: preferences.enabled) { _, enabled in features.setEnabled(enabled) }
-    }
-}
-
-struct ALONotchHostView: View {
-    @ObservedObject var model: ALOViewModel
-    @ObservedObject var preferences: ALONotchPreferences
-    @ObservedObject var state: ALONotchPresentation
-    @ObservedObject var features: ALONotchFeatureBridge
-
-    var body: some View {
-        Group {
-            if features.showingActivities, let runtime = features.runtime {
-                runtime.contentView
-                    .overlay(alignment: .top) {
-                        HStack(spacing: 16) {
-                            Button("Room controls") { features.prefersRoom = true }
-                            Button("Notch settings…") { features.showSettings() }
-                        }
-                        .font(.caption).buttonStyle(.plain)
-                        .padding(.horizontal, 14).padding(.vertical, 7)
-                        .background(.regularMaterial, in: Capsule())
-                        .padding(.top, runtime.hitTestSize.height + 24)
-                    }
-            } else {
-                ALONotchView(model: model, preferences: preferences, state: state)
-                    .overlay(alignment: .top) {
-                        if let runtime = features.runtime {
-                            runtime.dragDestinationView
-                                .frame(width: state.expanded ? 592 : state.compactWidth,
-                                       height: state.expanded ? min(state.availableHeight - (preferences.island ? state.safeTop + 6 : 0), model.floatingPanelHeight + 87 + state.safeTop + 36) : state.safeTop + 8)
-                                .padding(.top, preferences.island ? state.safeTop + 6 : 0)
-                        }
-                    }
-            }
-        }
     }
 }

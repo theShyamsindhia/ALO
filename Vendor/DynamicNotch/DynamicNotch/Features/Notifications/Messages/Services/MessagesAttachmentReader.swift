@@ -6,6 +6,9 @@ import UniformTypeIdentifiers
 
 final class MessagesAttachmentReader {
 
+    // This helper owns only a value-type logger, with no executor-bound work.
+    nonisolated deinit {}
+
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "DynamicNotch", category: "MessagesAttachmentReader")
 
     func attachments(for messageID: Int64, database: OpaquePointer) -> [MessagesAttachment] {

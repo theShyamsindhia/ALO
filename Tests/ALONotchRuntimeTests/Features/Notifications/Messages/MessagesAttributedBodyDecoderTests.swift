@@ -6,13 +6,13 @@ final class MessagesAttributedBodyDecoderTests: XCTestCase {
 
     private let decoder = MessagesAttributedBodyDecoder()
 
-    func testDecodeReturnsNormalizedPlainText() {
+    func testDecodeReturnsNormalizedPlainText() async {
         let text = decoder.decode(text: "\n  Hello\u{FFFC}  \n", attributedBody: nil)
 
         XCTAssertEqual(text, "Hello")
     }
 
-    func testDecodePrefersPlainTextOverAttributedBody() throws {
+    func testDecodePrefersPlainTextOverAttributedBody() async throws {
         let attributedBody = try keyedArchive("Archived message")
 
         let text = decoder.decode(text: "Plain message", attributedBody: attributedBody)
@@ -20,7 +20,7 @@ final class MessagesAttributedBodyDecoderTests: XCTestCase {
         XCTAssertEqual(text, "Plain message")
     }
 
-    func testDecodeReturnsKeyedArchiveTextWhenPlainTextIsMissing() throws {
+    func testDecodeReturnsKeyedArchiveTextWhenPlainTextIsMissing() async throws {
         let attributedBody = try keyedArchive("Archived message")
 
         let text = decoder.decode(text: nil, attributedBody: attributedBody)
@@ -28,7 +28,7 @@ final class MessagesAttributedBodyDecoderTests: XCTestCase {
         XCTAssertEqual(text, "Archived message")
     }
 
-    func testDecodeReturnsKeyedArchiveTextWhenPlainTextIsEmpty() throws {
+    func testDecodeReturnsKeyedArchiveTextWhenPlainTextIsEmpty() async throws {
         let attributedBody = try keyedArchive("Archived message")
 
         let text = decoder.decode(text: " \n ", attributedBody: attributedBody)
@@ -36,7 +36,7 @@ final class MessagesAttributedBodyDecoderTests: XCTestCase {
         XCTAssertEqual(text, "Archived message")
     }
 
-    func testDecodeNormalizesKeyedArchiveText() throws {
+    func testDecodeNormalizesKeyedArchiveText() async throws {
         let attributedBody = try keyedArchive("\n  Archived\u{FFFC} message  \n")
 
         let text = decoder.decode(text: nil, attributedBody: attributedBody)
@@ -44,7 +44,7 @@ final class MessagesAttributedBodyDecoderTests: XCTestCase {
         XCTAssertEqual(text, "Archived message")
     }
 
-    func testDecodeReturnsTypedStreamText() {
+    func testDecodeReturnsTypedStreamText() async {
         let attributedBody = typedStream("Typed stream message")
 
         let text = decoder.decode(text: nil, attributedBody: attributedBody)
@@ -52,7 +52,7 @@ final class MessagesAttributedBodyDecoderTests: XCTestCase {
         XCTAssertEqual(text, "Typed stream message")
     }
 
-    func testDecodeReturnsUnicodeTypedStreamText() {
+    func testDecodeReturnsUnicodeTypedStreamText() async {
         let attributedBody = typedStream("Привет 👋🏻 Как дела?")
 
         let text = decoder.decode(text: nil, attributedBody: attributedBody)
@@ -60,7 +60,7 @@ final class MessagesAttributedBodyDecoderTests: XCTestCase {
         XCTAssertEqual(text, "Привет 👋🏻 Как дела?")
     }
 
-    func testDecodeReturnsMutableTypedStreamText() {
+    func testDecodeReturnsMutableTypedStreamText() async {
         let attributedBody = typedStream("Mutable string message", className: "NSMutableString")
 
         let text = decoder.decode(text: nil, attributedBody: attributedBody)
@@ -68,7 +68,7 @@ final class MessagesAttributedBodyDecoderTests: XCTestCase {
         XCTAssertEqual(text, "Mutable string message")
     }
 
-    func testDecodeReturnsLongTypedStreamText() {
+    func testDecodeReturnsLongTypedStreamText() async {
         let expectedText = Array(repeating: "Long message.", count: 30).joined(separator: " ")
         let attributedBody = typedStream(expectedText)
 
@@ -77,7 +77,7 @@ final class MessagesAttributedBodyDecoderTests: XCTestCase {
         XCTAssertEqual(text, expectedText)
     }
 
-    func testDecodeFallsBackWhenPlainTextContainsOnlyObjectReplacementCharacter() {
+    func testDecodeFallsBackWhenPlainTextContainsOnlyObjectReplacementCharacter() async {
         let attributedBody = typedStream("Attachment caption")
 
         let text = decoder.decode(text: "\u{FFFC}", attributedBody: attributedBody)
@@ -85,19 +85,19 @@ final class MessagesAttributedBodyDecoderTests: XCTestCase {
         XCTAssertEqual(text, "Attachment caption")
     }
 
-    func testDecodeReturnsNilWhenBothValuesAreMissing() {
+    func testDecodeReturnsNilWhenBothValuesAreMissing() async {
         let text = decoder.decode(text: nil, attributedBody: nil)
 
         XCTAssertNil(text)
     }
 
-    func testDecodeReturnsNilWhenBothValuesAreEmpty() {
+    func testDecodeReturnsNilWhenBothValuesAreEmpty() async {
         let text = decoder.decode(text: " \n \u{FFFC} ", attributedBody: Data())
 
         XCTAssertNil(text)
     }
 
-    func testDecodeReturnsNilForUnknownAttributedBody() {
+    func testDecodeReturnsNilForUnknownAttributedBody() async {
         let attributedBody = Data("Unknown binary value".utf8)
 
         let text = decoder.decode(text: nil, attributedBody: attributedBody)
@@ -105,7 +105,7 @@ final class MessagesAttributedBodyDecoderTests: XCTestCase {
         XCTAssertNil(text)
     }
 
-    func testDecodeReturnsNilForTypedStreamWithoutString() {
+    func testDecodeReturnsNilForTypedStreamWithoutString() async {
         let attributedBody = Data("streamtyped".utf8)
 
         let text = decoder.decode(text: nil, attributedBody: attributedBody)
@@ -113,7 +113,7 @@ final class MessagesAttributedBodyDecoderTests: XCTestCase {
         XCTAssertNil(text)
     }
 
-    func testDecodeReturnsNilForTruncatedTypedStreamPayload() {
+    func testDecodeReturnsNilForTruncatedTypedStreamPayload() async {
         var bytes = Array("streamtyped".utf8)
 
         bytes.append(0)
@@ -127,7 +127,7 @@ final class MessagesAttributedBodyDecoderTests: XCTestCase {
         XCTAssertNil(text)
     }
 
-    func testDecodeReturnsNilForInvalidTypedStreamUTF8() {
+    func testDecodeReturnsNilForInvalidTypedStreamUTF8() async {
         var bytes = Array("streamtyped".utf8)
 
         bytes.append(0)

@@ -45,7 +45,7 @@ final class RuntimePresentationTests: XCTestCase {
         XCTAssertEqual(CNContactStore.authorizationStatus(for: .contacts), contactsAuthorization)
     }
 
-    func testPackagedLocalizationImagesSoundsAndMediaAdapterResolve() throws {
+    func testPackagedLocalizationImagesSoundsAndMediaAdapterResolve() async throws {
         let bundle = NotchResources.bundle
         for key in ["settings.title", "settings.battery.charging.title", "settings.homePage.liveActivity.title", "settings.fileConverter.activity.title"] {
             let label = L10n.string(key, locale: Locale(identifier: "en"))

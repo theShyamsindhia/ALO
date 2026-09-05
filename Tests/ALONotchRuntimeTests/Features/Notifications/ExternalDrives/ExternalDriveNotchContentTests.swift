@@ -3,7 +3,7 @@ import XCTest
 
 final class ExternalDriveNotchContentTests: XCTestCase {
 
-    func testIDUsesRegistryID() {
+    func testIDUsesRegistryID() async {
         let drive = ExternalDriveModel(
             id: "/Volumes/TestDrive",
             name: "Test Drive",
@@ -25,7 +25,7 @@ final class ExternalDriveNotchContentTests: XCTestCase {
         XCTAssertEqual(content.id, NotchContentRegistry.Notifications.externalDrive.id)
     }
 
-    func testSizeCalculations() {
+    func testSizeCalculations() async {
         let drive = ExternalDriveModel(
             id: "/Volumes/TestDrive",
             name: "Test Drive",
@@ -49,7 +49,7 @@ final class ExternalDriveNotchContentTests: XCTestCase {
         XCTAssertEqual(size.height, 100)
     }
 
-    func testDynamicIslandSizeCalculations() {
+    func testDynamicIslandSizeCalculations() async {
         let drive = ExternalDriveModel(
             id: "/Volumes/TestDrive",
             name: "Test Drive",
@@ -73,7 +73,7 @@ final class ExternalDriveNotchContentTests: XCTestCase {
         XCTAssertEqual(size.height, 100)
     }
 
-    func testCornerRadius() {
+    func testCornerRadius() async {
         let drive = ExternalDriveModel(
             id: "/Volumes/TestDrive",
             name: "Test Drive",
@@ -97,7 +97,7 @@ final class ExternalDriveNotchContentTests: XCTestCase {
         XCTAssertEqual(radii.bottom, 38)
     }
 
-    func testFormattedCapacity() {
+    func testFormattedCapacity() async {
         let driveWithCapacity = ExternalDriveModel(
             id: "/Volumes/TestDrive",
             name: "Test Drive",

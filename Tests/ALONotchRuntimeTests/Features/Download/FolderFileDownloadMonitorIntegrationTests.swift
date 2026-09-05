@@ -2,7 +2,7 @@ import XCTest
 @testable import ALONotchRuntime
 
 final class FolderFileDownloadMonitorIntegrationTests: XCTestCase {
-    func testSafariStyleDownloadPackagePublishesActiveTransfer() {
+    func testSafariStyleDownloadPackagePublishesActiveTransfer() async {
         let tempDirectory = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: tempDirectory) }
 
@@ -28,11 +28,11 @@ final class FolderFileDownloadMonitorIntegrationTests: XCTestCase {
             contents: Data(repeating: 0xA, count: 32_768)
         )
 
-        wait(for: [expectation], timeout: 3.0)
+        await fulfillment(of: [expectation], timeout: 3.0)
         monitor.stopMonitoring()
     }
 
-    func testEventDrivenTemporaryDownloadDetection() {
+    func testEventDrivenTemporaryDownloadDetection() async {
         let tempDirectory = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: tempDirectory) }
 
@@ -54,7 +54,7 @@ final class FolderFileDownloadMonitorIntegrationTests: XCTestCase {
             contents: Data(repeating: 0xB, count: 16_384)
         )
 
-        wait(for: [expectation], timeout: 3.0)
+        await fulfillment(of: [expectation], timeout: 3.0)
         monitor.stopMonitoring()
     }
 }

@@ -9,3 +9,9 @@ protocol NowPlayingMonitoring: AnyObject {
 protocol NowPlayingDetailPollingConfigurable: AnyObject {
     func setDetailPollingEnabled(_ isEnabled: Bool)
 }
+
+/// Optional command capabilities for embedded sources; system services preserve
+/// their original behavior when this protocol is not implemented.
+protocol NowPlayingCommandAvailabilityProviding: AnyObject {
+    func canSend(_ command: NowPlayingCommand) -> Bool
+}

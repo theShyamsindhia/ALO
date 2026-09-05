@@ -4,7 +4,7 @@ import XCTest
 @MainActor
 final class MessagesNotchContentTests: XCTestCase {
 
-    func testPresentationConfigurationUsesMessagesRegistryAndKeepsContainerTapDisabled() {
+    func testPresentationConfigurationUsesMessagesRegistryAndKeepsContainerTapDisabled() async {
         let content = makeContent(messages: [makeTextMessage(rowID: 1)])
 
         XCTAssertEqual(content.id, NotchContentRegistry.Notifications.messages.id)
@@ -15,7 +15,7 @@ final class MessagesNotchContentTests: XCTestCase {
         XCTAssertNil(content.windowLink)
     }
 
-    func testCornerRadiiMatchMessagesDesign() {
+    func testCornerRadiiMatchMessagesDesign() async {
         let singleContent = makeContent(messages: [makeTextMessage(rowID: 1)])
         let cornerRadius = singleContent.cornerRadius(baseRadius: 15)
 
@@ -30,11 +30,11 @@ final class MessagesNotchContentTests: XCTestCase {
         XCTAssertEqual(multipleContent.dynamicIslandCornerRadius(baseHeight: 40), 8)
     }
 
-    func testDynamicIslandBottomPaddingMatchesDesign() {
+    func testDynamicIslandBottomPaddingMatchesDesign() async {
         XCTAssertEqual(MessagesNotchContent.dynamicIslandBottomPadding, 12)
     }
 
-    func testRowHeightClassifiesTextPreviewsAndPlayableAudio() {
+    func testRowHeightClassifiesTextPreviewsAndPlayableAudio() async {
         let textMessage = makeTextMessage(rowID: 1)
         let imageMessage = makeImageMessage(rowID: 2)
         let videoMessage = makeVideoMessage(rowID: 3)
@@ -48,21 +48,21 @@ final class MessagesNotchContentTests: XCTestCase {
         XCTAssertEqual(MessagesNotchContent.rowHeight(for: audioMessage), MessagesNotchContent.audioRowHeight)
     }
 
-    func testAudioWithoutFileIsNotTreatedAsPlayable() {
+    func testAudioWithoutFileIsNotTreatedAsPlayable() async {
         let message = makeAudioMessage(rowID: 1, fileURL: nil)
 
         XCTAssertFalse(MessagesNotchContent.hasPlayableAudio(in: message))
         XCTAssertEqual(MessagesNotchContent.rowHeight(for: message), MessagesNotchContent.regularRowHeight)
     }
 
-    func testAttachmentPreviewClassificationExcludesAudio() {
+    func testAttachmentPreviewClassificationExcludesAudio() async {
         XCTAssertTrue(MessagesNotchContent.hasAttachmentPreview(in: makeImageMessage(rowID: 1)))
         XCTAssertTrue(MessagesNotchContent.hasAttachmentPreview(in: makeVideoMessage(rowID: 2)))
         XCTAssertTrue(MessagesNotchContent.hasAttachmentPreview(in: makeFileMessage(rowID: 3)))
         XCTAssertFalse(MessagesNotchContent.hasAttachmentPreview(in: makeAudioMessage(rowID: 4)))
     }
 
-    func testStandardSizeUsesCompactHeightForShortText() {
+    func testStandardSizeUsesCompactHeightForShortText() async {
         let content = makeContent(messages: [makeTextMessage(rowID: 1)])
 
         let size = content.size(baseWidth: 200, baseHeight: 40)
@@ -70,7 +70,7 @@ final class MessagesNotchContentTests: XCTestCase {
         XCTAssertEqual(size, CGSize(width: 360, height: 100))
     }
 
-    func testStandardSizeAddsHeightForMultilineText() {
+    func testStandardSizeAddsHeightForMultilineText() async {
         let message = makeTextMessage(rowID: 1, text: "First line\nSecond line")
         let content = makeContent(messages: [message])
 
@@ -79,7 +79,7 @@ final class MessagesNotchContentTests: XCTestCase {
         XCTAssertEqual(size, CGSize(width: 360, height: 115))
     }
 
-    func testStandardSizeAddsHeightForAttachmentPreview() {
+    func testStandardSizeAddsHeightForAttachmentPreview() async {
         let content = makeContent(messages: [makeImageMessage(rowID: 1)])
 
         let size = content.size(baseWidth: 200, baseHeight: 40)
@@ -87,7 +87,7 @@ final class MessagesNotchContentTests: XCTestCase {
         XCTAssertEqual(size, CGSize(width: 360, height: 110))
     }
 
-    func testStandardSizeAddsHeightForPlayableAudio() {
+    func testStandardSizeAddsHeightForPlayableAudio() async {
         let content = makeContent(messages: [makeAudioMessage(rowID: 1)])
 
         let size = content.size(baseWidth: 200, baseHeight: 40)
@@ -95,7 +95,7 @@ final class MessagesNotchContentTests: XCTestCase {
         XCTAssertEqual(size, CGSize(width: 360, height: 120))
     }
 
-    func testDynamicIslandSizesUseContentSpecificWidthsAndHeights() {
+    func testDynamicIslandSizesUseContentSpecificWidthsAndHeights() async {
         let textContent = makeContent(messages: [makeTextMessage(rowID: 1)])
         let imageContent = makeContent(messages: [makeImageMessage(rowID: 2)])
         let audioContent = makeContent(messages: [makeAudioMessage(rowID: 3)])
@@ -116,7 +116,7 @@ final class MessagesNotchContentTests: XCTestCase {
         )
     }
 
-    func testQueueAddsBothRowsSpacingAndBottomPadding() {
+    func testQueueAddsBothRowsSpacingAndBottomPadding() async {
         let content = makeContent(
             messages: [
                 makeTextMessage(rowID: 1),
@@ -129,7 +129,7 @@ final class MessagesNotchContentTests: XCTestCase {
         XCTAssertEqual(size, CGSize(width: 360, height: 165))
     }
 
-    func testQueuePreservesTopClearanceForMultilineFirstMessage() {
+    func testQueuePreservesTopClearanceForMultilineFirstMessage() async {
         let content = makeContent(
             messages: [
                 makeTextMessage(rowID: 1, text: "First line\nSecond line"),
@@ -142,7 +142,7 @@ final class MessagesNotchContentTests: XCTestCase {
         XCTAssertEqual(size, CGSize(width: 360, height: 175))
     }
 
-    func testOnlyLastTwoMessagesAffectQueueSize() {
+    func testOnlyLastTwoMessagesAffectQueueSize() async {
         let content = makeContent(
             messages: [
                 makeAudioMessage(rowID: 1),
@@ -158,7 +158,7 @@ final class MessagesNotchContentTests: XCTestCase {
         XCTAssertEqual(dynamicIslandSize, CGSize(width: 410, height: 176))
     }
 
-    func testEmptyContentUsesSafeFallbackSize() {
+    func testEmptyContentUsesSafeFallbackSize() async {
         let content = makeContent(messages: [])
 
         let standardSize = content.size(baseWidth: 200, baseHeight: 40)

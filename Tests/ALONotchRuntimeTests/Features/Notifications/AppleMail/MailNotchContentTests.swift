@@ -3,7 +3,7 @@ import XCTest
 
 final class MailNotchContentTests: XCTestCase {
 
-    func testIDUsesRegistryID() {
+    func testIDUsesRegistryID() async {
         let message = makeTestMailMessage(
             rowID: 123,
             messageIDHeader: "",
@@ -21,7 +21,7 @@ final class MailNotchContentTests: XCTestCase {
         XCTAssertEqual(content.id, NotchContentRegistry.Notifications.messages.id)
     }
     
-    func testSizeUsesExpandedHeightWhenSummaryExists() {
+    func testSizeUsesExpandedHeightWhenSummaryExists() async {
         let message = makeTestMailMessage(
             rowID: 1,
             messageIDHeader: "",
@@ -45,7 +45,7 @@ final class MailNotchContentTests: XCTestCase {
         XCTAssertEqual(size.height, 115)
     }
 
-    func testSizeUsesCompactHeightWhenSummaryIsMissing() {
+    func testSizeUsesCompactHeightWhenSummaryIsMissing() async {
         let message = makeTestMailMessage(
             rowID: 2,
             messageIDHeader: "",
@@ -69,7 +69,7 @@ final class MailNotchContentTests: XCTestCase {
         XCTAssertEqual(size.height, 100)
     }
 
-    func testDynamicIslandSizeWhenSummaryExists() {
+    func testDynamicIslandSizeWhenSummaryExists() async {
         let message = makeTestMailMessage(
             rowID: 3,
             messageIDHeader: "",
@@ -93,7 +93,7 @@ final class MailNotchContentTests: XCTestCase {
         XCTAssertEqual(size.height, 112)
     }
 
-    func testDynamicIslandSizeWhenSummaryIsMissing() {
+    func testDynamicIslandSizeWhenSummaryIsMissing() async {
         let message = makeTestMailMessage(
             rowID: 4,
             messageIDHeader: "",

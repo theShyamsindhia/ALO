@@ -5,7 +5,7 @@ import CoreAudio
 
 @MainActor
 final class NowPlayingViewModelIntegrationTests: XCTestCase {
-    func testExplicitStopIgnoresLateMediaAndAllowsRestart() {
+    func testExplicitStopIgnoresLateMediaAndAllowsRestart() async {
         let service = FakeNowPlayingService()
         let viewModel = makeIsolatedViewModel(service: service)
         TestLifetime.retain(viewModel)
@@ -27,7 +27,7 @@ final class NowPlayingViewModelIntegrationTests: XCTestCase {
         viewModel.stopMonitoring()
     }
 
-    func testPublishesStartedAndStoppedEventsWhenSessionLifecycleChanges() {
+    func testPublishesStartedAndStoppedEventsWhenSessionLifecycleChanges() async {
         let service = FakeNowPlayingService()
         let viewModel = makeIsolatedViewModel(service: service)
         TestLifetime.retain(viewModel)
@@ -49,14 +49,14 @@ final class NowPlayingViewModelIntegrationTests: XCTestCase {
         XCTAssertEqual(viewModel.event, .started)
         XCTAssertTrue(viewModel.hasActiveSession)
 
-        RunLoop.main.run(until: Date().addingTimeInterval(0.8))
+        try? await Task.sleep(for: .milliseconds(800))
 
         XCTAssertNil(viewModel.snapshot)
         XCTAssertEqual(viewModel.event, .stopped)
         XCTAssertFalse(viewModel.hasActiveSession)
     }
 
-    func testPlaybackControlsSendCommandsToService() {
+    func testPlaybackControlsSendCommandsToService() async {
         let service = FakeNowPlayingService()
         let viewModel = makeIsolatedViewModel(service: service)
         TestLifetime.retain(viewModel)
@@ -72,7 +72,7 @@ final class NowPlayingViewModelIntegrationTests: XCTestCase {
         )
     }
 
-    func testOpenPlaybackSourceDelegatesToSourceOpener() {
+    func testOpenPlaybackSourceDelegatesToSourceOpener() async {
         let service = FakeNowPlayingService()
         let source = NowPlayingPlaybackSource(
             bundleIdentifier: "com.spotify.client",
@@ -94,7 +94,7 @@ final class NowPlayingViewModelIntegrationTests: XCTestCase {
         XCTAssertTrue(viewModel.canOpenPlaybackSource)
     }
 
-    func testOpenPlaybackSourceDoesNothingWithoutSource() {
+    func testOpenPlaybackSourceDoesNothingWithoutSource() async {
         let service = FakeNowPlayingService()
         let sourceOpener = FakePlaybackSourceOpener()
         let viewModel = makeIsolatedViewModel(
@@ -111,7 +111,7 @@ final class NowPlayingViewModelIntegrationTests: XCTestCase {
         XCTAssertFalse(viewModel.canOpenPlaybackSource)
     }
 
-    func testTogglePlayPauseUpdatesCurrentSnapshotImmediately() {
+    func testTogglePlayPauseUpdatesCurrentSnapshotImmediately() async {
         let service = FakeNowPlayingService()
         let viewModel = makeIsolatedViewModel(service: service)
         TestLifetime.retain(viewModel)
@@ -126,7 +126,7 @@ final class NowPlayingViewModelIntegrationTests: XCTestCase {
         XCTAssertFalse(viewModel.snapshot?.isPlaying ?? true)
     }
 
-    func testTogglePlayPauseSendsExplicitPlayWhenPaused() {
+    func testTogglePlayPauseSendsExplicitPlayWhenPaused() async {
         let service = FakeNowPlayingService()
         let viewModel = makeIsolatedViewModel(service: service)
         TestLifetime.retain(viewModel)
@@ -141,7 +141,7 @@ final class NowPlayingViewModelIntegrationTests: XCTestCase {
         XCTAssertTrue(viewModel.snapshot?.isPlaying ?? false)
     }
 
-    func testPlaybackStateChangesPublishPlaybackStateEvent() {
+    func testPlaybackStateChangesPublishPlaybackStateEvent() async {
         let service = FakeNowPlayingService()
         let viewModel = makeIsolatedViewModel(service: service)
         TestLifetime.retain(viewModel)
@@ -157,7 +157,7 @@ final class NowPlayingViewModelIntegrationTests: XCTestCase {
         XCTAssertEqual(viewModel.event, .playbackStateChanged(isPlaying: true))
     }
 
-    func testSeekUpdatesCurrentSnapshotImmediately() {
+    func testSeekUpdatesCurrentSnapshotImmediately() async {
         let service = FakeNowPlayingService()
         let viewModel = makeIsolatedViewModel(service: service)
         TestLifetime.retain(viewModel)
@@ -173,7 +173,7 @@ final class NowPlayingViewModelIntegrationTests: XCTestCase {
         XCTAssertEqual(viewModel.snapshot?.playbackRate, 1)
     }
 
-    func testSeekIgnoresStaleServiceSnapshotsDuringGracePeriod() {
+    func testSeekIgnoresStaleServiceSnapshotsDuringGracePeriod() async {
         let service = FakeNowPlayingService()
         let viewModel = makeIsolatedViewModel(service: service)
         TestLifetime.retain(viewModel)
@@ -191,7 +191,7 @@ final class NowPlayingViewModelIntegrationTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(viewModel.snapshot?.elapsedTime ?? 0, 119.5)
     }
 
-    func testTogglePlayPauseIgnoresStaleServiceSnapshotsDuringGracePeriod() {
+    func testTogglePlayPauseIgnoresStaleServiceSnapshotsDuringGracePeriod() async {
         let service = FakeNowPlayingService()
         let viewModel = makeIsolatedViewModel(service: service)
         TestLifetime.retain(viewModel)
@@ -211,7 +211,7 @@ final class NowPlayingViewModelIntegrationTests: XCTestCase {
         XCTAssertFalse(viewModel.snapshot?.isPlaying ?? true)
     }
 
-    func testSourceFilterRetainsLastValidSnapshotWhenUnallowedSourceEmitsSnapshot() {
+    func testSourceFilterRetainsLastValidSnapshotWhenUnallowedSourceEmitsSnapshot() async {
         let service = FakeNowPlayingService()
         let viewModel = makeIsolatedViewModel(service: service, sourceFilter: .appleMusic)
         TestLifetime.retain(viewModel)
@@ -234,7 +234,7 @@ final class NowPlayingViewModelIntegrationTests: XCTestCase {
         XCTAssertEqual(viewModel.snapshot?.title, "Apple Music Track")
     }
 
-    func testAdvancedPlaybackControlsUpdateSnapshotAndSendCommands() {
+    func testAdvancedPlaybackControlsUpdateSnapshotAndSendCommands() async {
         let service = FakeNowPlayingService()
         let viewModel = makeIsolatedViewModel(service: service)
         TestLifetime.retain(viewModel)
@@ -262,7 +262,7 @@ final class NowPlayingViewModelIntegrationTests: XCTestCase {
         XCTAssertEqual(viewModel.snapshot?.volume, 1)
     }
 
-    func testRemoteFavoriteSendsFavoriteCommandWhenSourceSupportsIt() {
+    func testRemoteFavoriteSendsFavoriteCommandWhenSourceSupportsIt() async {
         let service = FakeNowPlayingService()
         let viewModel = makeIsolatedViewModel(service: service)
         TestLifetime.retain(viewModel)
@@ -282,7 +282,7 @@ final class NowPlayingViewModelIntegrationTests: XCTestCase {
         XCTAssertEqual(viewModel.snapshot?.isFavorite, true)
     }
 
-    func testArtworkPaletteUpdatesFromArtworkData() {
+    func testArtworkPaletteUpdatesFromArtworkData() async {
         let service = FakeNowPlayingService()
         let viewModel = makeIsolatedViewModel(service: service)
         TestLifetime.retain(viewModel)
@@ -300,7 +300,7 @@ final class NowPlayingViewModelIntegrationTests: XCTestCase {
         XCTAssertNotEqual(viewModel.artworkPalette, .fallback)
     }
 
-    func testArtworkPersistsWhileActiveSnapshotTemporarilyLosesArtwork() {
+    func testArtworkPersistsWhileActiveSnapshotTemporarilyLosesArtwork() async {
         let service = FakeNowPlayingService()
         let viewModel = makeIsolatedViewModel(service: service)
         TestLifetime.retain(viewModel)
@@ -316,7 +316,7 @@ final class NowPlayingViewModelIntegrationTests: XCTestCase {
         XCTAssertNotEqual(viewModel.artworkPalette, .fallback)
     }
 
-    func testArtworkClearsWhenSessionStops() {
+    func testArtworkClearsWhenSessionStops() async {
         let service = FakeNowPlayingService()
         let viewModel = makeIsolatedViewModel(service: service)
         TestLifetime.retain(viewModel)
@@ -331,7 +331,7 @@ final class NowPlayingViewModelIntegrationTests: XCTestCase {
         XCTAssertNotNil(viewModel.artworkImage)
         XCTAssertNotEqual(viewModel.artworkPalette, .fallback)
 
-        RunLoop.main.run(until: Date().addingTimeInterval(0.8))
+        try? await Task.sleep(for: .milliseconds(800))
 
         XCTAssertNil(viewModel.artworkImage)
         XCTAssertEqual(viewModel.artworkPalette, .fallback)
@@ -379,7 +379,7 @@ final class NowPlayingViewModelIntegrationTests: XCTestCase {
         XCTAssertNotEqual(viewModel.artworkPalette, .fallback)
     }
 
-    func testAudioOutputRoutesLoadFromRoutingService() {
+    func testAudioOutputRoutesLoadFromRoutingService() async {
         let service = FakeNowPlayingService()
         let audioOutputRouting = FakeAudioOutputRoutingService(
             routes: [
@@ -407,7 +407,7 @@ final class NowPlayingViewModelIntegrationTests: XCTestCase {
         XCTAssertEqual(viewModel.currentAudioOutputRoute?.name, "MacBook Pro Speakers")
     }
 
-    func testSwitchAudioOutputDelegatesToRoutingServiceAndRefreshesCurrentRoute() {
+    func testSwitchAudioOutputDelegatesToRoutingServiceAndRefreshesCurrentRoute() async {
         let service = FakeNowPlayingService()
         let audioOutputRouting = FakeAudioOutputRoutingService(
             routes: [
@@ -439,7 +439,7 @@ final class NowPlayingViewModelIntegrationTests: XCTestCase {
         XCTAssertEqual(viewModel.audioOutputRoutes.first(where: { $0.id == 2 })?.isCurrent, true)
     }
 
-    func testDetailPollingIsEnabledOnlyWhileDetailedPresentationIsActive() {
+    func testDetailPollingIsEnabledOnlyWhileDetailedPresentationIsActive() async {
         let service = FakeNowPlayingService()
         let viewModel = makeIsolatedViewModel(service: service)
         TestLifetime.retain(viewModel)
@@ -454,7 +454,7 @@ final class NowPlayingViewModelIntegrationTests: XCTestCase {
         XCTAssertEqual(service.detailPollingStates, [true, false])
     }
 
-    func testClearingPresentationActivityStateDisablesDetailPolling() {
+    func testClearingPresentationActivityStateDisablesDetailPolling() async {
         let service = FakeNowPlayingService()
         let viewModel = makeIsolatedViewModel(service: service)
         TestLifetime.retain(viewModel)
@@ -466,7 +466,7 @@ final class NowPlayingViewModelIntegrationTests: XCTestCase {
         XCTAssertEqual(service.detailPollingStates, [true, false])
     }
 
-    func testFavoriteStatePersistsForTrackIdentity() {
+    func testFavoriteStatePersistsForTrackIdentity() async {
         let service = FakeNowPlayingService()
         let favoritesStore = makeFavoriteStore(named: #function)
         let viewModel = makeIsolatedViewModel(

@@ -32,19 +32,19 @@ final class BluetoothViewModelTests: XCTestCase {
     private var mockService: MockBluetoothService!
     private var viewModel: BluetoothViewModel!
 
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
+        try await super.setUp()
         mockService = MockBluetoothService()
         viewModel = BluetoothViewModel(bluetoothService: mockService)
     }
 
-    override func tearDown() {
+    override func tearDown() async throws {
         viewModel = nil
         mockService = nil
-        super.tearDown()
+        try await super.tearDown()
     }
 
-    func testInitialState() {
+    func testInitialState() async {
         XCTAssertFalse(viewModel.isConnected)
         XCTAssertEqual(viewModel.deviceName, "Unknown")
         XCTAssertNil(viewModel.batteryLevel)

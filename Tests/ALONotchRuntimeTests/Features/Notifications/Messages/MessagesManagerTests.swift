@@ -4,7 +4,7 @@ import XCTest
 @MainActor
 final class MessagesManagerTests: XCTestCase {
 
-    func testManagerDoesNotForwardMessageBeforeMonitoringStarts() throws {
+    func testManagerDoesNotForwardMessageBeforeMonitoringStarts() async throws {
         let context = try makeContext()
         let expectedMessage = makeMessage()
         var receivedMessage: MessagesMessage?
@@ -18,7 +18,7 @@ final class MessagesManagerTests: XCTestCase {
         XCTAssertNil(receivedMessage)
     }
 
-    func testStartMonitoringForwardsReceivedMessage() throws {
+    func testStartMonitoringForwardsReceivedMessage() async throws {
         let context = try makeContext()
         let expectedMessage = makeMessage()
         var receivedMessage: MessagesMessage?
@@ -37,7 +37,7 @@ final class MessagesManagerTests: XCTestCase {
         XCTAssertEqual(receivedMessage, expectedMessage)
     }
 
-    func testStartMonitoringDoesNotCreateDuplicateObservers() throws {
+    func testStartMonitoringDoesNotCreateDuplicateObservers() async throws {
         let context = try makeContext()
         var receivedMessageCount = 0
 
@@ -56,7 +56,7 @@ final class MessagesManagerTests: XCTestCase {
         XCTAssertEqual(receivedMessageCount, 1)
     }
 
-    func testStopMonitoringStopsForwardingMessages() throws {
+    func testStopMonitoringStopsForwardingMessages() async throws {
         let context = try makeContext()
         var receivedMessage: MessagesMessage?
 
@@ -71,7 +71,7 @@ final class MessagesManagerTests: XCTestCase {
         XCTAssertNil(receivedMessage)
     }
 
-    func testMonitoringCanStartAgainAfterStopping() throws {
+    func testMonitoringCanStartAgainAfterStopping() async throws {
         let context = try makeContext()
         let expectedMessage = makeMessage(rowID: 2)
         var receivedMessage: MessagesMessage?
@@ -92,7 +92,7 @@ final class MessagesManagerTests: XCTestCase {
         XCTAssertEqual(receivedMessage, expectedMessage)
     }
 
-    func testInvalidNotificationObjectIsIgnored() throws {
+    func testInvalidNotificationObjectIsIgnored() async throws {
         let context = try makeContext()
         var receivedMessageCount = 0
 

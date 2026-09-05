@@ -3,7 +3,7 @@ import XCTest
 
 final class MailDatabaseReaderTests: XCTestCase {
 
-    func testLatestRowIDReturnsHighestNonDeletedMessageRowID() throws {
+    func testLatestRowIDReturnsHighestNonDeletedMessageRowID() async throws {
         let database = try MailTestDatabase()
 
         try database.createMessagesOnlySchema()
@@ -18,7 +18,7 @@ final class MailDatabaseReaderTests: XCTestCase {
         XCTAssertEqual(rowID, 42)
     }
 
-    func testLatestRowIDReturnsZeroWhenMessagesTableIsEmpty() throws {
+    func testLatestRowIDReturnsZeroWhenMessagesTableIsEmpty() async throws {
         let database = try MailTestDatabase()
 
         try database.createMessagesOnlySchema()
@@ -30,7 +30,7 @@ final class MailDatabaseReaderTests: XCTestCase {
         XCTAssertEqual(rowID, 0)
     }
 
-    func testMessagesReturnsOnlyNewInboxMessages() throws {
+    func testMessagesReturnsOnlyNewInboxMessages() async throws {
         let database = try makeMessagesDatabase()
         let reader = MailDatabaseReader(databaseURL: database.url, contactResolver: MessagesContactResolver(contactStore: DeniedMessagesContactStore()))
 
@@ -40,7 +40,7 @@ final class MailDatabaseReaderTests: XCTestCase {
         XCTAssertEqual(messages.map(\.rowID), [10, 20])
     }
 
-    func testMessageByRowIDReturnsInboxMessage() throws {
+    func testMessageByRowIDReturnsInboxMessage() async throws {
         let database = try makeMessagesDatabase()
         let reader = MailDatabaseReader(databaseURL: database.url, contactResolver: MessagesContactResolver(contactStore: DeniedMessagesContactStore()))
 
@@ -54,7 +54,7 @@ final class MailDatabaseReaderTests: XCTestCase {
         XCTAssertEqual(message?.messageIDHeader, "<message@example.com>")
     }
 
-    func testMessageByRowIDDoesNotReturnDeletedMessage() throws {
+    func testMessageByRowIDDoesNotReturnDeletedMessage() async throws {
         let database = try makeMessagesDatabase()
         let reader = MailDatabaseReader(databaseURL: database.url, contactResolver: MessagesContactResolver(contactStore: DeniedMessagesContactStore()))
 

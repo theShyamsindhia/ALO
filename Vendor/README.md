@@ -9,9 +9,10 @@ The full feature source is now compiled as the separate `ALONotchRuntime` SwiftP
 target. Adaptations in place add opt-in defaults, service lifecycle control, isolated
 settings storage, packaged resource lookup, and ALO window embedding. Original
 copyright headers remain intact. The standalone entrypoint, onboarding, updater,
-and donation animation code are excluded from ALO. The original nine primitives in
-`Sources/ALO/DynamicNotch/` still drive ALO room motion; their copy hashes remain in
-`DynamicNotch-import.json`.
+and donation animation code are excluded from ALO. The nine initially copied primitives are now compiled from this original tree
+alongside the full engine; duplicate copies in the ALO target were removed. Their
+initial import hashes remain in `DynamicNotch-import.json`. Room playback adapts
+metadata and commands to the original player rather than embedding ALO's room bar.
 
 The upstream code is GNU GPL v3; see `DynamicNotch/LICENSE`. The ALO MIT license does
 not replace those terms. Packaged builds include the GPL text, MediaRemoteAdapter's

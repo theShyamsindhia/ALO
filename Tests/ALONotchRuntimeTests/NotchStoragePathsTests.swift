@@ -2,7 +2,7 @@ import XCTest
 @testable import ALONotchRuntime
 
 final class NotchStoragePathsTests: XCTestCase {
-    func testGeneratedStorageIsOwnedByHostNotUpstreamApp() {
+    func testGeneratedStorageIsOwnedByHostNotUpstreamApp() async {
         for path in [NotchStoragePaths.fileTray, NotchStoragePaths.screenshots, NotchStoragePaths.airDrop] {
             XCTAssertTrue(path.pathComponents.contains(NotchStoragePaths.hostIdentifier))
             XCTAssertTrue(path.pathComponents.contains("Notch"))

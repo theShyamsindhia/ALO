@@ -2,7 +2,7 @@ import XCTest
 @testable import ALONotchRuntime
 
 final class NotchScreenSelectionTests: XCTestCase {
-    func testMainPrefersPrimaryDisplayIdentifier() {
+    func testMainPrefersPrimaryDisplayIdentifier() async {
         let selectedDisplayID = NotchScreenSelection.preferredDisplayID(
             for: NotchScreenSelectionPreferences(
                 displayLocation: .main,
@@ -19,7 +19,7 @@ final class NotchScreenSelectionTests: XCTestCase {
         XCTAssertEqual(selectedDisplayID, 42)
     }
 
-    func testMainFallsBackToFirstDisplayWhenPrimaryIdentifierIsMissing() {
+    func testMainFallsBackToFirstDisplayWhenPrimaryIdentifierIsMissing() async {
         let selectedDisplayID = NotchScreenSelection.preferredDisplayID(
             for: NotchScreenSelectionPreferences(
                 displayLocation: .main,
@@ -36,7 +36,7 @@ final class NotchScreenSelectionTests: XCTestCase {
         XCTAssertEqual(selectedDisplayID, 11)
     }
 
-    func testBuiltInPrefersBuiltInDisplayIdentifier() {
+    func testBuiltInPrefersBuiltInDisplayIdentifier() async {
         let selectedDisplayID = NotchScreenSelection.preferredDisplayID(
             for: NotchScreenSelectionPreferences(
                 displayLocation: .builtIn,
@@ -53,7 +53,7 @@ final class NotchScreenSelectionTests: XCTestCase {
         XCTAssertEqual(selectedDisplayID, 11)
     }
 
-    func testBuiltInReturnsNilWhenBuiltInDisplayIsUnavailable() {
+    func testBuiltInReturnsNilWhenBuiltInDisplayIsUnavailable() async {
         let selectedDisplayID = NotchScreenSelection.preferredDisplayID(
             for: NotchScreenSelectionPreferences(
                 displayLocation: .builtIn,
@@ -69,7 +69,7 @@ final class NotchScreenSelectionTests: XCTestCase {
         XCTAssertNil(selectedDisplayID)
     }
 
-    func testSpecificDisplayPrefersStoredDisplayIdentifier() {
+    func testSpecificDisplayPrefersStoredDisplayIdentifier() async {
         let selectedDisplayID = NotchScreenSelection.preferredDisplayID(
             for: NotchScreenSelectionPreferences(
                 displayLocation: .specific,
@@ -86,7 +86,7 @@ final class NotchScreenSelectionTests: XCTestCase {
         XCTAssertEqual(selectedDisplayID, 42)
     }
 
-    func testSpecificDisplayReturnsNilWhenStoredDisplayIsUnavailableAndAutoSwitchDisabled() {
+    func testSpecificDisplayReturnsNilWhenStoredDisplayIsUnavailableAndAutoSwitchDisabled() async {
         let selectedDisplayID = NotchScreenSelection.preferredDisplayID(
             for: NotchScreenSelectionPreferences(
                 displayLocation: .specific,
@@ -102,7 +102,7 @@ final class NotchScreenSelectionTests: XCTestCase {
         XCTAssertNil(selectedDisplayID)
     }
 
-    func testSpecificDisplayFallsBackToPrimaryDisplayWhenStoredDisplayIsUnavailableAndAutoSwitchEnabled() {
+    func testSpecificDisplayFallsBackToPrimaryDisplayWhenStoredDisplayIsUnavailableAndAutoSwitchEnabled() async {
         let selectedDisplayID = NotchScreenSelection.preferredDisplayID(
             for: NotchScreenSelectionPreferences(
                 displayLocation: .specific,

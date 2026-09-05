@@ -6,12 +6,28 @@ import SwiftUI
 /// DynamicNotch feature views, event engine, gestures, and settings in that panel.
 @MainActor
 public final class EmbeddedNotchRuntime: ObservableObject {
+    static weak var activeInstance: EmbeddedNotchRuntime?
+    @Published public var roomMediaEnabled = false {
+        didSet {
+            UserDefaults.aloNotch.set(roomMediaEnabled, forKey: "alo.roomMedia.enabled")
+            reconcileRoomPlayback()
+        }
+    }
     @Published public private(set) var isEnabled = false
     @Published public private(set) var activityActive = false
     @Published public private(set) var presentationSize: CGSize = .zero
     @Published public private(set) var hitTestSize: CGSize = .zero
     @Published public private(set) var displayRevision: UInt = 0
     @Published public private(set) var isLocked = false
+
+    private var roomPlaybackSnapshot: RoomPlaybackSnapshot?
+    private var roomPlaybackCommand: @MainActor (RoomPlaybackCommand) -> Void = { _ in }
+    private var roomService: RoomPlaybackService?
+    private var roomViewModel: NowPlayingViewModel?
+    private var roomContentVisible = false
+    public var interactiveScreenRect: CGRect? { delegate.activeNotchScreenRect }
+    public var canvasSize: CGSize { OverlayWindowLayout.appCanvasSize }
+    public var windowYOffset: CGFloat { 1 }
 
     private let delegate: AppDelegate
     private let activation: FeatureActivation
@@ -32,6 +48,8 @@ public final class EmbeddedNotchRuntime: ObservableObject {
         self.delegate = delegate
         self.activation = FeatureActivation(container: delegate.container)
         AppDelegate.embeddedInstance = delegate
+        self.roomMediaEnabled = UserDefaults.aloNotch.bool(forKey: "alo.roomMedia.enabled")
+        Self.activeInstance = self
         delegate.notchViewModel.$notchModel
             .receive(on: RunLoop.main)
             .sink { [weak self] model in
@@ -97,15 +115,32 @@ public final class EmbeddedNotchRuntime: ObservableObject {
             delegate.observeOutsideClickDismissal()
             delegate.notchViewModel.updateDimensions()
             activation.setEnabled(true)
+            reconcileRoomPlayback()
             activityActive = delegate.notchViewModel.displayedContent != nil
         } else {
             activation.setEnabled(false)
+            reconcileRoomPlayback()
             delegate.stopOutsideClickMonitoring()
             delegate.cancellables.removeAll()
             delegate.airDropController.resetTargetState()
             SettingsWindowController.shared.close()
             activityActive = false
         }
+    }
+
+    public func makeHostPanel() -> NSPanel {
+        let panel = OverlayPanelFactory.makePanel(frame: .zero, level: OverlayWindowLevel.interactiveNotch)
+        SkyLightOperator.shared.delegateWindow(panel, to: .notchSurface)
+        delegate.hostWindow = panel
+        return panel
+    }
+
+    public func makeHostView() -> NSView {
+        NotchHostingView(rootView: contentView)
+    }
+
+    public func hostFrame(on screen: NSScreen) -> NSRect {
+        OverlayWindowLayout.topAnchoredFrame(on: screen, size: OverlayWindowLayout.appCanvasSize)
     }
 
     public func attachHostWindow(_ window: NSWindow) {
@@ -168,13 +203,57 @@ public final class EmbeddedNotchRuntime: ObservableObject {
 
     public var settingsView: AnyView {
         guard isEnabled else { return AnyView(EmptyView()) }
-        return AnyView(SettingsRootView(container: delegate.container).defaultAppStorage(.aloNotch))
+        return AnyView(VStack(spacing: 0) {
+            Toggle("Room media", isOn: Binding(get: { self.roomMediaEnabled }, set: { self.roomMediaEnabled = $0 }))
+                .toggleStyle(.switch)
+                .help("Show this room’s player in the notch.")
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Divider()
+            SettingsRootView(container: delegate.container)
+        }.defaultAppStorage(.aloNotch))
     }
 
     public func showSettings() {
         guard isEnabled else { return }
         SettingsWindowController.shared.setupDependencies(appDelegate: delegate)
         SettingsWindowController.shared.showWindow()
+    }
+
+    public func updateRoomPlayback(_ snapshot: RoomPlaybackSnapshot?, onCommand: @escaping @MainActor (RoomPlaybackCommand) -> Void) {
+        roomPlaybackSnapshot = snapshot
+        roomPlaybackCommand = onCommand
+        reconcileRoomPlayback()
+    }
+
+    private func reconcileRoomPlayback() {
+        guard isEnabled, roomMediaEnabled, let snapshot = roomPlaybackSnapshot else {
+            roomViewModel?.stopMonitoring()
+            roomService?.update(nil)
+            if roomContentVisible {
+                delegate.notchViewModel.send(.hideLiveActivity(id: RoomNowPlayingNotchContent.activityID))
+                roomContentVisible = false
+            }
+            return
+        }
+        if roomService == nil {
+            let service = RoomPlaybackService()
+            roomService = service
+            roomViewModel = NowPlayingViewModel(service: service,
+                audioOutputRouting: SystemAudioOutputRoutingService(),
+                lyricsProvider: InactiveLyricsProvider(), playbackSourceOpener: service)
+        }
+        guard let service = roomService, let viewModel = roomViewModel else { return }
+        service.onCommand = roomPlaybackCommand
+        service.update(snapshot)
+        viewModel.startMonitoring()
+        if !roomContentVisible {
+            let content = NowPlayingNotchContent(nowPlayingViewModel: viewModel,
+                settings: delegate.settingsViewModel.mediaAndFiles,
+                applicationSettings: delegate.settingsViewModel.application)
+            delegate.notchViewModel.send(.showLiveActivity(RoomNowPlayingNotchContent(original: content)))
+            roomContentVisible = true
+        }
     }
 
     public func openHomePage() {

@@ -9,7 +9,7 @@ import XCTest
 @testable import ALONotchRuntime
 
 final class VPNStatusFetcherTests: XCTestCase {
-    func testParseLastStatusChangeTime() {
+    func testParseLastStatusChangeTime() async {
         let scutilOutput = """
 Connected
 Extended Status <dictionary> {
@@ -40,7 +40,7 @@ Extended Status <dictionary> {
         XCTAssertEqual(parsedComponents.second, 14)
     }
     
-    func testParseLastStatusChangeTimeInvalid() {
+    func testParseLastStatusChangeTimeInvalid() async {
         let invalidOutput = "LastStatusChangeTime : invalid-date-string"
         XCTAssertNil(VPNStatusFetcher.parseLastStatusChangeTime(from: invalidOutput))
         
@@ -48,7 +48,7 @@ Extended Status <dictionary> {
         XCTAssertNil(VPNStatusFetcher.parseLastStatusChangeTime(from: missingOutput))
     }
     
-    func testParseVPNList() {
+    func testParseVPNList() async {
         let sampleList = """
 Available network connection services in the current set (*=enabled):
 * (Connected)      6E1290F7-08DA-4CBB-9C2B-B76A589F563D VPN (com.urban-vpn.mac) "Urban VPN Desktop"              [VPN:com.urban-vpn.mac]

@@ -3,7 +3,7 @@ import XCTest
 
 @MainActor
 final class VpnViewModelIntegrationTests: XCTestCase {
-    func testExplicitStartAndStopControlMonitoring() {
+    func testExplicitStartAndStopControlMonitoring() async {
         let monitor = FakeWifiMonitor()
         let viewModel = makeViewModel(monitor: monitor, startMonitoring: false)
         XCTAssertEqual(monitor.startCalls, 0)
@@ -15,7 +15,7 @@ final class VpnViewModelIntegrationTests: XCTestCase {
         XCTAssertFalse(viewModel.isMonitoring)
     }
 
-    func testVPNConnectionStateProducesVpnEvent() {
+    func testVPNConnectionStateProducesVpnEvent() async {
         let monitor = FakeWifiMonitor()
         let viewModel = makeViewModel(monitor: monitor)
 
@@ -29,7 +29,7 @@ final class VpnViewModelIntegrationTests: XCTestCase {
         XCTAssertTrue(viewModel.vpnConnected)
     }
 
-    func testVPNConnectionStartDateTracksTunnelLifecycle() {
+    func testVPNConnectionStartDateTracksTunnelLifecycle() async {
         let monitor = FakeWifiMonitor()
         let viewModel = makeViewModel(monitor: monitor)
 
@@ -48,7 +48,7 @@ final class VpnViewModelIntegrationTests: XCTestCase {
         XCTAssertNil(viewModel.vpnConnectedAt)
     }
 
-    func testVPNDisconnectionStateProducesVpnEvent() {
+    func testVPNDisconnectionStateProducesVpnEvent() async {
         let monitor = FakeWifiMonitor()
         let viewModel = makeViewModel(monitor: monitor)
 

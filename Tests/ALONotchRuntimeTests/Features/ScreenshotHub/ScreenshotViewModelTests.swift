@@ -13,24 +13,24 @@ final class ScreenshotViewModelTests: XCTestCase {
     private var viewModel: ScreenshotViewModel!
     private var tempDirectory: URL!
 
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
+        try await super.setUp()
         tempDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("ScreenshotViewModelTests-\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
         viewModel = ScreenshotViewModel()
     }
 
-    override func tearDown() {
+    override func tearDown() async throws {
         if let tempDirectory {
             try? FileManager.default.removeItem(at: tempDirectory)
         }
         viewModel = nil
         tempDirectory = nil
-        super.tearDown()
+        try await super.tearDown()
     }
 
-    func testInitialState() {
+    func testInitialState() async {
         XCTAssertNil(viewModel.activeScreenshot)
         XCTAssertFalse(viewModel.isDropped)
         XCTAssertFalse(viewModel.isDeleted)
@@ -38,7 +38,7 @@ final class ScreenshotViewModelTests: XCTestCase {
         XCTAssertFalse(viewModel.isCopied)
     }
 
-    func testProcessNewScreenshotSetsActiveScreenshotAndNotifiesListener() {
+    func testProcessNewScreenshotSetsActiveScreenshotAndNotifiesListener() async {
         let expectation = expectation(description: "onScreenshotReady called")
         var receivedScreenshot: ScreenshotModel?
 
@@ -53,7 +53,7 @@ final class ScreenshotViewModelTests: XCTestCase {
 
         viewModel.processNewScreenshot(image: dummyImage, fileURL: sampleFile, fileName: "test-screenshot.png")
 
-        wait(for: [expectation], timeout: 2.0)
+        await fulfillment(of: [expectation], timeout: 2.0)
 
         XCTAssertNotNil(viewModel.activeScreenshot)
         XCTAssertEqual(receivedScreenshot?.fileName, "test-screenshot.png")
@@ -61,7 +61,7 @@ final class ScreenshotViewModelTests: XCTestCase {
         XCTAssertFalse(viewModel.isDeleted)
     }
 
-    func testDismissInvokesCallback() {
+    func testDismissInvokesCallback() async {
         let expectation = expectation(description: "onScreenshotDismissed called")
 
         viewModel.onScreenshotDismissed = {
@@ -70,16 +70,16 @@ final class ScreenshotViewModelTests: XCTestCase {
 
         viewModel.dismiss()
 
-        wait(for: [expectation], timeout: 1.0)
+        await fulfillment(of: [expectation], timeout: 1.0)
     }
 
-    func testMarkAsDropped() {
+    func testMarkAsDropped() async {
         XCTAssertFalse(viewModel.isDropped)
         viewModel.markAsDropped()
         XCTAssertTrue(viewModel.isDropped)
     }
 
-    func testDeleteScreenshotSetsFlagAndInvokesDismiss() {
+    func testDeleteScreenshotSetsFlagAndInvokesDismiss() async {
         let expectation = expectation(description: "onScreenshotDismissed called on delete")
 
         viewModel.onScreenshotDismissed = {
@@ -88,7 +88,7 @@ final class ScreenshotViewModelTests: XCTestCase {
 
         viewModel.deleteScreenshot()
 
-        wait(for: [expectation], timeout: 1.0)
+        await fulfillment(of: [expectation], timeout: 1.0)
         XCTAssertTrue(viewModel.isDeleted)
     }
 }

@@ -53,7 +53,7 @@ final class NotchTimerEventsHandlerTests: XCTestCase {
         XCTAssertNil(liveActivityID)
     }
 
-    func testSystemTimerHasWindowLinkAndLocalTimerDoesNot() {
+    func testSystemTimerHasWindowLinkAndLocalTimerDoesNot() async {
         let context = makeContext()
         let systemContent = TimerNotchContent(source: .system(context.timerViewModel))
         let localContent = TimerNotchContent(source: .local(LocalTimerViewModel()))
@@ -131,7 +131,7 @@ final class NotchTimerEventsHandlerTests: XCTestCase {
         XCTAssertNil(restoredContent)
     }
 
-    func testLocalTimerRestartRestartsCountdown() {
+    func testLocalTimerRestartRestartsCountdown() async {
         let localTimerViewModel = LocalTimerViewModel()
         localTimerViewModel.start(hours: 0, minutes: 1, seconds: 30)
         XCTAssertEqual(localTimerViewModel.totalTime, 90)
@@ -146,7 +146,7 @@ final class NotchTimerEventsHandlerTests: XCTestCase {
         XCTAssertGreaterThan(localTimerViewModel.remainingTime, 85)
     }
 
-    func testTimerSoundResolution() {
+    func testTimerSoundResolution() async {
         XCTAssertEqual(TimerSound.resolved("radar"), .radar)
         XCTAssertEqual(TimerSound.resolved("invalid_name"), .radar)
         XCTAssertEqual(TimerSound.resolved(nil), .radar)

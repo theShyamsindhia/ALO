@@ -3,7 +3,7 @@ import XCTest
 
 @MainActor
 final class BoundedCacheTests: XCTestCase {
-    func testRecentLyricsSurviveWhileOldestEntryIsEvicted() {
+    func testRecentLyricsSurviveWhileOldestEntryIsEvicted() async {
         var cache = BoundedCache<String, String>(capacity: 2)
         cache["first"] = "first lyrics"
         cache["second"] = "second lyrics"
@@ -15,7 +15,7 @@ final class BoundedCacheTests: XCTestCase {
         XCTAssertEqual(cache["third"], "third lyrics")
     }
 
-    func testReplacementAndRemovalDoNotConsumeExtraCapacity() {
+    func testReplacementAndRemovalDoNotConsumeExtraCapacity() async {
         var cache = BoundedCache<String, String>(capacity: 2)
         cache["track"] = "old"
         cache["track"] = "updated"

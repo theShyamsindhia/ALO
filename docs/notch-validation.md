@@ -8,7 +8,7 @@ enable. Settings alone do not grant system permissions.
 
 ## Automated checks
 
-Final local release suite: **255 XCTest feature tests + 757 Swift Testing tests
+Release checkpoint before the visual correction: **255 XCTest feature tests + 757 Swift Testing tests
 in 125 suites = 1,012 passing tests**, with no failures. The latter includes ALO’s
 room, networking, UI layout and newly merged DJ Studio regression tests.
 
@@ -62,3 +62,14 @@ Full XCTest discovery on this machine emits Apple Contacts/CoreData initializati
 errors. A debugger trace identified XCTest's `allSubclasses` enumeration loading
 ContactsUI metadata, rather than an application resolver call. Isolated Mail (11)
 and Messages watcher (8) tests pass without these errors and use denied fake resolvers.
+
+The final visual correction removes the initial room-bar wrapper. The host uses the
+original panel factory, hosting view, activity layout and hit rectangle. A separate
+Room media opt-in supplies ALO metadata and supported playback commands to the
+original player. Focused corrected-render/adapter/cleanup tests pass (20 XCTest
+and 4 Swift Testing cases). Original player, battery, tray and island PNGs were
+visually inspected; no custom room card remains.
+
+CI on macOS 15 exposed a Swift isolated-deinitializer backdeployment crash in
+Mail/Messages reader cleanup. Safe empty nonisolated destructors and task-aware
+XCTest fixture lifetimes address it; background-release regressions cover this path.

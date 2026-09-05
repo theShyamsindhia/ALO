@@ -421,7 +421,7 @@ ALO source is MIT licensed; imported DynamicNotch code is GPL-3.0 and includes i
 
 ## Optional notch presentation
 
-Open **ALO → Notch Settings…**, or **Talk settings → Notch**, and enable the notch.
+Open **ALO → Notch Settings…**, or **Room settings → Interface → Notch**, and enable the notch.
 Every additional feature starts disabled. The full settings window exposes original
 DynamicNotch feature options for media, downloads, timers, file tray/AirDrop, conversion,
 camera, CPU/RAM, battery, Bluetooth, Wi-Fi/hotspot, VPN, Focus, volume/brightness HUDs,
@@ -432,8 +432,10 @@ Enable only the features you want. Features requiring access to camera, calendar
 Contacts, Accessibility, or protected files use the corresponding macOS permission
 flow. Turning off a feature stops its monitor; turning off the notch stops all feature
 services while retaining your choices. Camera and CPU/RAM capture are also tied to
-page visibility. The notch works outside a room for utility features; room controls
-appear when you join a room. Use **Activities** and **Room controls** to switch surfaces.
+page visibility. Enable **Room media** inside Notch Settings to show shared room
+playback in the original compact player. Playback buttons use ALO's room commands;
+unsupported seek actions stay disabled. The original battery, tray and other activity
+views use the same renderer and motion. Screens without a notch use its island mode.
 
 Original DynamicNotch shapes, spring motion, feature views, and settings are compiled
 as `ALONotchRuntime`; ALO supplies the lifecycle and window adapters. The standalone

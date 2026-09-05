@@ -5,14 +5,14 @@ import XCTest
 
 final class MessagesDatabaseReaderTests: XCTestCase {
 
-    func testDatabaseURLReturnsExistingOverride() throws {
+    func testDatabaseURLReturnsExistingOverride() async throws {
         let database = try MessagesTestDatabase()
         let reader = makeReader(databaseURL: database.url)
 
         XCTAssertEqual(reader.databaseURL(), database.url)
     }
 
-    func testDatabaseURLReturnsNilForMissingOverride() {
+    func testDatabaseURLReturnsNilForMissingOverride() async {
         let missingURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
             .appendingPathComponent("chat.db")
@@ -22,7 +22,7 @@ final class MessagesDatabaseReaderTests: XCTestCase {
         XCTAssertNil(reader.databaseURL())
     }
 
-    func testLatestRowIDReturnsHighestIncomingRowID() throws {
+    func testLatestRowIDReturnsHighestIncomingRowID() async throws {
         let database = try makeDatabase()
 
         try database.insertMessage(rowID: 10)
@@ -34,14 +34,14 @@ final class MessagesDatabaseReaderTests: XCTestCase {
         XCTAssertEqual(reader.latestRowID(), 42)
     }
 
-    func testLatestRowIDReturnsZeroWhenMessageTableIsEmpty() throws {
+    func testLatestRowIDReturnsZeroWhenMessageTableIsEmpty() async throws {
         let database = try makeDatabase()
         let reader = makeReader(databaseURL: database.url)
 
         XCTAssertEqual(reader.latestRowID(), 0)
     }
 
-    func testMessagesReturnsRowsAfterCheckpointInAscendingOrder() throws {
+    func testMessagesReturnsRowsAfterCheckpointInAscendingOrder() async throws {
         let database = try makeDatabase()
 
         try database.insertMessage(rowID: 30, guid: "message-30")
@@ -54,7 +54,7 @@ final class MessagesDatabaseReaderTests: XCTestCase {
         XCTAssertEqual(messages.map(\.rowID), [20, 30])
     }
 
-    func testMessagesReturnsEmptyArrayWhenNoRowsMatch() throws {
+    func testMessagesReturnsEmptyArrayWhenNoRowsMatch() async throws {
         let database = try makeDatabase()
 
         try database.insertMessage(rowID: 10)
@@ -65,7 +65,7 @@ final class MessagesDatabaseReaderTests: XCTestCase {
         XCTAssertTrue(messages.isEmpty)
     }
 
-    func testMessagesExcludesOutgoingRows() throws {
+    func testMessagesExcludesOutgoingRows() async throws {
         let database = try makeDatabase()
 
         try database.insertMessage(rowID: 1, guid: "incoming")
@@ -77,7 +77,7 @@ final class MessagesDatabaseReaderTests: XCTestCase {
         XCTAssertEqual(messages.map(\.rowID), [1])
     }
 
-    func testMessagesExcludesAssociatedMessageRows() throws {
+    func testMessagesExcludesAssociatedMessageRows() async throws {
         let database = try makeDatabase()
 
         try database.insertMessage(rowID: 1, guid: "regular")
@@ -93,7 +93,7 @@ final class MessagesDatabaseReaderTests: XCTestCase {
         XCTAssertEqual(messages.map(\.rowID), [1])
     }
 
-    func testMessagesExcludesItemTypeRows() throws {
+    func testMessagesExcludesItemTypeRows() async throws {
         let database = try makeDatabase()
 
         try database.insertMessage(rowID: 1, guid: "regular")
@@ -105,7 +105,7 @@ final class MessagesDatabaseReaderTests: XCTestCase {
         XCTAssertEqual(messages.map(\.rowID), [1])
     }
 
-    func testMessagesExcludesGroupActionRows() throws {
+    func testMessagesExcludesGroupActionRows() async throws {
         let database = try makeDatabase()
 
         try database.insertMessage(rowID: 1, guid: "regular")
@@ -117,7 +117,7 @@ final class MessagesDatabaseReaderTests: XCTestCase {
         XCTAssertEqual(messages.map(\.rowID), [1])
     }
 
-    func testMessageWithRowIDReturnsMatchingMessage() throws {
+    func testMessageWithRowIDReturnsMatchingMessage() async throws {
         let database = try makeDatabase()
 
         try database.insertMessage(rowID: 10, guid: "message-10")
@@ -130,7 +130,7 @@ final class MessagesDatabaseReaderTests: XCTestCase {
         XCTAssertEqual(message.guid, "message-20")
     }
 
-    func testMessageWithRowIDReturnsNilForMissingRow() throws {
+    func testMessageWithRowIDReturnsNilForMissingRow() async throws {
         let database = try makeDatabase()
 
         try database.insertMessage(rowID: 10)
@@ -140,7 +140,7 @@ final class MessagesDatabaseReaderTests: XCTestCase {
         XCTAssertNil(reader.message(withRowID: 999))
     }
 
-    func testMessageWithRowIDReturnsNilForFilteredRow() throws {
+    func testMessageWithRowIDReturnsNilForFilteredRow() async throws {
         let database = try makeDatabase()
 
         try database.insertMessage(rowID: 10, isFromMe: true)
@@ -150,7 +150,7 @@ final class MessagesDatabaseReaderTests: XCTestCase {
         XCTAssertNil(reader.message(withRowID: 10))
     }
 
-    func testMessageMapsCoreValues() throws {
+    func testMessageMapsCoreValues() async throws {
         let database = try makeDatabase()
         let senderIdentifier = "reader-test@example.invalid"
 
@@ -178,7 +178,7 @@ final class MessagesDatabaseReaderTests: XCTestCase {
         XCTAssertEqual(message.parts, [.text("Hello from Messages")])
     }
 
-    func testMessageUsesFallbackGUIDWhenGUIDIsMissing() throws {
+    func testMessageUsesFallbackGUIDWhenGUIDIsMissing() async throws {
         let database = try makeDatabase()
 
         try database.insertMessage(rowID: 42, guid: nil)
@@ -189,7 +189,7 @@ final class MessagesDatabaseReaderTests: XCTestCase {
         XCTAssertEqual(message.guid, "message-42")
     }
 
-    func testMessageMapsIMessageSMSAndUnknownServices() throws {
+    func testMessageMapsIMessageSMSAndUnknownServices() async throws {
         let database = try makeDatabase()
 
         try database.insertMessage(rowID: 1, service: "iMessage")
@@ -202,7 +202,7 @@ final class MessagesDatabaseReaderTests: XCTestCase {
         XCTAssertEqual(messages.map(\.service), [.iMessage, .sms, .unknown])
     }
 
-    func testMessageMapsNanosecondDate() throws {
+    func testMessageMapsNanosecondDate() async throws {
         let database = try makeDatabase()
 
         try database.insertMessage(rowID: 1, date: 1_234_000_000_000)
@@ -213,7 +213,7 @@ final class MessagesDatabaseReaderTests: XCTestCase {
         XCTAssertEqual(message.receivedDate.timeIntervalSinceReferenceDate, 1_234, accuracy: 0.001)
     }
 
-    func testMessageUsesAttributedBodyWhenPlainTextIsUnavailable() throws {
+    func testMessageUsesAttributedBodyWhenPlainTextIsUnavailable() async throws {
         let database = try makeDatabase()
         let attributedBody = try keyedArchive("Archived Messages text")
 
@@ -229,7 +229,7 @@ final class MessagesDatabaseReaderTests: XCTestCase {
         XCTAssertEqual(message.parts, [.text("Archived Messages text")])
     }
 
-    func testMessageMapsOneToOneConversation() throws {
+    func testMessageMapsOneToOneConversation() async throws {
         let database = try makeDatabase()
 
         try database.insertHandle(rowID: 1, identifier: "first@example.invalid")
@@ -251,7 +251,7 @@ final class MessagesDatabaseReaderTests: XCTestCase {
         )
     }
 
-    func testMessageMapsGroupConversation() throws {
+    func testMessageMapsGroupConversation() async throws {
         let database = try makeDatabase()
 
         try database.insertHandle(rowID: 1, identifier: "first@example.invalid")
@@ -275,7 +275,7 @@ final class MessagesDatabaseReaderTests: XCTestCase {
         )
     }
 
-    func testMessageHasNoConversationWithoutChat() throws {
+    func testMessageHasNoConversationWithoutChat() async throws {
         let database = try makeDatabase()
 
         try database.insertMessage(rowID: 1)
@@ -286,7 +286,7 @@ final class MessagesDatabaseReaderTests: XCTestCase {
         XCTAssertNil(message.conversation)
     }
 
-    func testMessageKeepsTextBeforeAttachmentsAndOrdersAttachmentsByJoinRowID() throws {
+    func testMessageKeepsTextBeforeAttachmentsAndOrdersAttachmentsByJoinRowID() async throws {
         let database = try makeDatabase()
         let imageURL = try database.createFile(named: "photo.jpg")
         let fileURL = try database.createFile(named: "document.pdf")
@@ -344,7 +344,7 @@ final class MessagesDatabaseReaderTests: XCTestCase {
         )
     }
 
-    func testMessageExcludesHiddenAttachments() throws {
+    func testMessageExcludesHiddenAttachments() async throws {
         let database = try makeDatabase()
         let visibleURL = try database.createFile(named: "visible.pdf")
         let hiddenURL = try database.createFile(named: "hidden.pdf")
@@ -383,7 +383,7 @@ final class MessagesDatabaseReaderTests: XCTestCase {
         XCTAssertEqual(attachmentIDs, ["100"])
     }
 
-    func testMessageKeepsUnavailableAttachmentWithNilFileURL() throws {
+    func testMessageKeepsUnavailableAttachmentWithNilFileURL() async throws {
         let database = try makeDatabase()
         let missingURL = database.url.deletingLastPathComponent().appendingPathComponent("missing.caf")
 
@@ -418,7 +418,7 @@ final class MessagesDatabaseReaderTests: XCTestCase {
         )
     }
 
-    func testMessageCanContainNoParts() throws {
+    func testMessageCanContainNoParts() async throws {
         let database = try makeDatabase()
 
         try database.insertMessage(rowID: 1, text: nil, attributedBody: nil)
@@ -429,7 +429,7 @@ final class MessagesDatabaseReaderTests: XCTestCase {
         XCTAssertTrue(message.parts.isEmpty)
     }
 
-    func testMessagesReturnsNilWhenSchemaIsUnavailable() throws {
+    func testMessagesReturnsNilWhenSchemaIsUnavailable() async throws {
         let database = try MessagesTestDatabase()
         let reader = makeReader(databaseURL: database.url)
 

@@ -6,7 +6,7 @@ import XCTest
 @MainActor
 final class MessagesAttachmentReaderTests: XCTestCase {
 
-    func testAttachmentsReturnsEmptyArrayWhenMessageHasNoAttachments() throws {
+    func testAttachmentsReturnsEmptyArrayWhenMessageHasNoAttachments() async throws {
         let database = try makeDatabase()
 
         try database.insertMessage(rowID: 1)
@@ -16,7 +16,7 @@ final class MessagesAttachmentReaderTests: XCTestCase {
         XCTAssertTrue(attachments.isEmpty)
     }
 
-    func testAttachmentsPreservesJoinOrderAndExcludesHiddenAttachments() throws {
+    func testAttachmentsPreservesJoinOrderAndExcludesHiddenAttachments() async throws {
         let database = try makeDatabase()
         let firstURL = try database.createFile(named: "first.pdf")
         let secondURL = try database.createFile(named: "second.pdf")
@@ -58,7 +58,7 @@ final class MessagesAttachmentReaderTests: XCTestCase {
         XCTAssertEqual(attachments.map(\.id), ["200", "100"])
     }
 
-    func testImageAttachmentUsesUTIAndReadsPixelDimensions() throws {
+    func testImageAttachmentUsesUTIAndReadsPixelDimensions() async throws {
         let database = try makeDatabase()
         let imageData = try pngData(width: 38, height: 30)
         let imageURL = try database.createFile(named: "photo.bin", data: imageData)
@@ -92,7 +92,7 @@ final class MessagesAttachmentReaderTests: XCTestCase {
         )
     }
 
-    func testAudioAttachmentUsesMIMETypeWhenUTIIsUnavailable() throws {
+    func testAudioAttachmentUsesMIMETypeWhenUTIIsUnavailable() async throws {
         let database = try makeDatabase()
         let audioURL = try database.createFile(named: "recording.data", data: Data([0]))
 
@@ -124,7 +124,7 @@ final class MessagesAttachmentReaderTests: XCTestCase {
         )
     }
 
-    func testVideoAttachmentUsesFilenameExtensionWhenMetadataIsUnavailable() throws {
+    func testVideoAttachmentUsesFilenameExtensionWhenMetadataIsUnavailable() async throws {
         let database = try makeDatabase()
         let videoURL = try database.createFile(named: "preview.mov", data: Data([0]))
 
@@ -156,7 +156,7 @@ final class MessagesAttachmentReaderTests: XCTestCase {
         )
     }
 
-    func testFileAttachmentKeepsMetadataAndUsesTransferName() throws {
+    func testFileAttachmentKeepsMetadataAndUsesTransferName() async throws {
         let database = try makeDatabase()
         let fileURL = try database.createFile(named: "payload.bin", data: Data([0]))
 
@@ -190,7 +190,7 @@ final class MessagesAttachmentReaderTests: XCTestCase {
         )
     }
 
-    func testMissingFileKeepsAttachmentAndFallsBackToStoredFilename() throws {
+    func testMissingFileKeepsAttachmentAndFallsBackToStoredFilename() async throws {
         let database = try makeDatabase()
         let missingURL = database.url.deletingLastPathComponent().appendingPathComponent("missing-file.pdf")
 
@@ -224,7 +224,7 @@ final class MessagesAttachmentReaderTests: XCTestCase {
         )
     }
 
-    func testAttachmentsReturnsEmptyArrayWhenSchemaIsUnavailable() throws {
+    func testAttachmentsReturnsEmptyArrayWhenSchemaIsUnavailable() async throws {
         let database = try MessagesTestDatabase()
 
         let attachments = try readAttachments(for: 1, in: database)

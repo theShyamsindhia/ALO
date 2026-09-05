@@ -461,8 +461,8 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     private let updater = AppUpdater()
     private var window: NSWindow?
     private var roomBarController: FloatingRoomWindowController?
-    private var walkieTalkieBarController: WalkieTalkieWindowController?
     private var notchController: ALONotchWindowController?
+    private var walkieTalkieBarController: WalkieTalkieWindowController?
     private var fullScreenVideoController: FullScreenVideoWindowController?
     private var statusMenuController: ALOStatusMenuController?
     private var diagnosticsController: DiagnosticsWindowController?
@@ -813,7 +813,7 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
         ALONotchFeatureBridge.shared.showSettings()
     }
 
-    @objc private func checkForUpdates(_ sender: Any?) {
+    @objc func checkForUpdates(_ sender: Any?) {
         updater.checkForUpdates(userInitiated: true)
     }
 
@@ -1515,20 +1515,6 @@ final class ALOViewModel: ObservableObject {
     @Published var floatingSection: FloatingSection = .collapsed
     @Published var floatingBarHidden: Bool
     @Published private(set) var menuBarPopoverVisible = false
-    @Published var notchExpandedVisible = false
-    @Published private(set) var notchPopoverHolds = Set<UUID>()
-
-    var notchHasOpenPopover: Bool { !notchPopoverHolds.isEmpty }
-
-    func setNotchPopoverPresented(_ presented: Bool, owner: UUID) {
-        if presented {
-            guard !notchPopoverHolds.contains(owner) else { return }
-            notchPopoverHolds.insert(owner)
-        } else {
-            guard notchPopoverHolds.contains(owner) else { return }
-            notchPopoverHolds.remove(owner)
-        }
-    }
 
     private var roomBrowser: MeshRoomBrowser!
     private var secureRoomBrowser: MeshRoomBrowser!
@@ -2930,7 +2916,7 @@ final class ALOViewModel: ObservableObject {
 
     func setMenuBarPopoverVisible(_ visible: Bool) {
         menuBarPopoverVisible = visible
-        if !visible, floatingBarHidden, !notchExpandedVisible {
+        if !visible, floatingBarHidden {
             floatingSection = .collapsed
         }
     }
@@ -3115,6 +3101,12 @@ final class ALOViewModel: ObservableObject {
 
     func showAppSettings() {
         (NSApp.delegate as? ALOAppDelegate)?.showSettings(nil)
+    }
+
+    var canCheckForUpdates: Bool { !ALOAppFlavor.isDevelopment }
+
+    func checkForUpdates() {
+        (NSApp.delegate as? ALOAppDelegate)?.checkForUpdates(nil)
     }
 
     func setChatViewportAtLatest(_ id: UUID, _ atLatest: Bool) {
@@ -3451,7 +3443,7 @@ final class ALOViewModel: ObservableObject {
                 self.messages = self.chatDocument.messages
                 guard isNewMessage, let receivedMessage = self.messages.first(where: { $0.senderID == senderID && $0.sentNanos == sentNanos }) else { return }
                 let chatIsVisible = self.floatingSection == .chat
-                    && (!self.floatingBarHidden || self.menuBarPopoverVisible || self.notchExpandedVisible)
+                    && (!self.floatingBarHidden || self.menuBarPopoverVisible)
                 let chatIsAtLatest = chatIsVisible && !self.chatViewportsAtLatest.isEmpty
                 if senderID != self.currentParticipantID {
                     let mentionsThisMac = ChatNotificationMode.mentions.shouldPreview(
@@ -4244,7 +4236,6 @@ struct ALOView: View {
 enum RoomControlsPresentation {
     case floating
     case menuBar
-    case notch
 }
 
 struct FloatingRoomView: View {
@@ -4260,7 +4251,6 @@ struct FloatingRoomView: View {
     @State private var showsRoomInfo = false
     @State private var showsMediaMore = false
     @State private var showsLyrics = false
-    @State private var notchPopoverOwner = UUID()
 
     private var panelTransition: AnyTransition {
         reduceMotion
@@ -4293,7 +4283,7 @@ struct FloatingRoomView: View {
     }
 
     private var roomBarHeight: CGFloat {
-        if presentation != .floating { return FloatingMetrics.menuBarMediaHeight }
+        if presentation == .menuBar { return FloatingMetrics.menuBarMediaHeight }
         return compactRoomBar ? 44 : FloatingMetrics.barHeight
     }
 
@@ -4382,13 +4372,6 @@ struct FloatingRoomView: View {
             RoomPreferencesView(model: model)
         }
         .animation(themeAnimation, value: model.roomArtworkPalette)
-        .onChange(of: showsLyrics || showsMediaMore || showsRoomInfo) { _, presented in
-            guard presentation == .notch else { return }
-            model.setNotchPopoverPresented(presented, owner: notchPopoverOwner)
-        }
-        .onDisappear {
-            model.setNotchPopoverPresented(false, owner: notchPopoverOwner)
-        }
     }
 
     private func roomContent(width: CGFloat, height: CGFloat) -> some View {
@@ -4550,7 +4533,7 @@ struct FloatingRoomView: View {
                 .padding(8).frame(width: 220)
             }
 
-            if presentation != .floating {
+            if presentation == .menuBar {
                 Divider().frame(height: 20)
 
                 Button(action: model.stop) {
@@ -4568,12 +4551,12 @@ struct FloatingRoomView: View {
         .frame(maxWidth: .infinity)
         .frame(height: roomBarHeight)
         .background(alignment: .leading) {
-            if presentation != .floating {
+            if presentation == .menuBar {
                 menuBarArtworkBackdrop
             }
         }
         .background {
-            if presentation != .floating {
+            if presentation == .menuBar {
                 ArtworkHeaderBackground(palette: model.roomArtworkPalette)
             }
         }
@@ -4583,7 +4566,7 @@ struct FloatingRoomView: View {
     @ViewBuilder
     private var roomIdentity: some View {
         let identity = HStack(spacing: 9) {
-            if presentation != .floating {
+            if presentation == .menuBar {
                 // The artwork itself bleeds to the row edge behind this clear
                 // lane; text begins after its strongest, most legible area.
                 Color.clear
@@ -4697,8 +4680,8 @@ struct FloatingRoomView: View {
     }
 
     private var artworkTile: some View {
-        let size: CGFloat = presentation != .floating ? 62 : compactRoomBar ? 28 : 38
-        let radius: CGFloat = presentation != .floating ? 17 : compactRoomBar ? 8 : 11
+        let size: CGFloat = presentation == .menuBar ? 62 : compactRoomBar ? 28 : 38
+        let radius: CGFloat = presentation == .menuBar ? 17 : compactRoomBar ? 8 : 11
         return Group {
             if let data = model.nowPlaying.artworkData, let image = NSImage(data: data) {
                 Image(nsImage: image)
@@ -5000,14 +4983,10 @@ struct FloatingRoomView: View {
     }
 
     private var chatIsPresented: Bool {
-        guard !showsGames, model.phase == .live, model.floatingSection == .chat, !model.permissionNotice else {
-            return false
-        }
-        switch presentation {
-        case .floating: return !model.floatingBarHidden && !model.videoFullscreen
-        case .menuBar: return model.menuBarPopoverVisible
-        case .notch: return model.notchExpandedVisible
-        }
+        !showsGames && model.phase == .live && model.floatingSection == .chat && !model.permissionNotice
+            && (presentation == .menuBar
+                ? model.menuBarPopoverVisible
+                : !model.floatingBarHidden && !model.videoFullscreen)
     }
 
     private var chatHeader: some View {
@@ -5948,12 +5927,10 @@ struct RoomPlaybackProgressDivider: View {
 struct WalkieTalkieBar: View {
     @ObservedObject var model: ALOViewModel
     var showsCloseButton = true
-    var presentation: RoomControlsPresentation = .floating
     var embeddedFloating = false
     var onRoomSettings: (() -> Void)? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showsSettings = false
-    @State private var notchPopoverOwner = UUID()
 
     var body: some View {
         Group {
@@ -5980,13 +5957,6 @@ struct WalkieTalkieBar: View {
         .onAppear(perform: model.refreshVoiceInputs)
         .environment(\.roomAccent, model.roomAccentColor)
         .animation(reduceMotion ? nil : .easeInOut(duration: 1.1), value: model.roomArtworkPalette)
-        .onChange(of: showsSettings) { _, presented in
-            guard presentation == .notch else { return }
-            model.setNotchPopoverPresented(presented, owner: notchPopoverOwner)
-        }
-        .onDisappear {
-            model.setNotchPopoverPresented(false, owner: notchPopoverOwner)
-        }
     }
 
     private var controls: some View {
@@ -6177,7 +6147,6 @@ struct WalkieTalkieBar: View {
             .popover(isPresented: $showsSettings, arrowEdge: .top) {
                 RoomPreferencesView(model: model)
             }
-
         }
     }
 

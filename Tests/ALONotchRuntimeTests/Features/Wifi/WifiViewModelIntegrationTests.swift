@@ -3,7 +3,7 @@ import XCTest
 
 @MainActor
 final class WifiViewModelIntegrationTests: XCTestCase {
-    func testExplicitStartAndStopControlMonitoring() {
+    func testExplicitStartAndStopControlMonitoring() async {
         let monitor = FakeWifiMonitor()
         let viewModel = makeViewModel(monitor: monitor, startMonitoring: false)
         XCTAssertEqual(monitor.startCalls, 0)
@@ -15,7 +15,7 @@ final class WifiViewModelIntegrationTests: XCTestCase {
         XCTAssertFalse(viewModel.isMonitoring)
     }
 
-    func testInitialHotspotStateProducesHotspotEvent() {
+    func testInitialHotspotStateProducesHotspotEvent() async {
         let monitor = FakeWifiMonitor()
         let viewModel = makeViewModel(monitor: monitor)
 
@@ -25,7 +25,7 @@ final class WifiViewModelIntegrationTests: XCTestCase {
         XCTAssertTrue(viewModel.hotspotActive)
     }
 
-    func testNetworkTransitionsProduceExpectedEvents() {
+    func testNetworkTransitionsProduceExpectedEvents() async {
         let monitor = FakeWifiMonitor()
         let viewModel = makeViewModel(monitor: monitor)
 
@@ -65,7 +65,7 @@ final class WifiViewModelIntegrationTests: XCTestCase {
         XCTAssertEqual(viewModel.wifiEvent, .wifiConnected)
     }
 
-    func testConnectedNetworkNamesAreUpdatedFromMonitor() {
+    func testConnectedNetworkNamesAreUpdatedFromMonitor() async {
         let monitor = FakeWifiMonitor()
         let viewModel = makeViewModel(monitor: monitor)
 
@@ -84,7 +84,7 @@ final class WifiViewModelIntegrationTests: XCTestCase {
         XCTAssertEqual(viewModel.wifiName, "")
     }
 
-    func testInternetBecomingUnavailableProducesNoInternetEvent() {
+    func testInternetBecomingUnavailableProducesNoInternetEvent() async {
         let monitor = FakeWifiMonitor()
         let viewModel = makeViewModel(monitor: monitor)
 
@@ -99,7 +99,7 @@ final class WifiViewModelIntegrationTests: XCTestCase {
         XCTAssertFalse(viewModel.hotspotActive)
     }
 
-    func testInitialUnavailableInternetUpdatesStateWithoutShowingNotification() {
+    func testInitialUnavailableInternetUpdatesStateWithoutShowingNotification() async {
         let monitor = FakeWifiMonitor()
         let viewModel = makeViewModel(monitor: monitor)
 

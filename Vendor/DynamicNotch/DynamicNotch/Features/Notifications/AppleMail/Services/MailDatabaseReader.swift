@@ -4,6 +4,10 @@ import SQLite3
 
 final class MailDatabaseReader {
 
+    // All SQLite connections are scoped to individual reads. Destruction only
+    // releases immutable dependencies and must not schedule actor teardown.
+    nonisolated deinit {}
+
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "DynamicNotch", category: "MailDatabaseReader")
     private let databaseURLOverride: URL?
     private let contactResolver: MessagesContactResolver

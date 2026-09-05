@@ -9,7 +9,7 @@ import SQLite3
 
 final class ChromiumDownloadMetadataReaderTests: XCTestCase {
 
-    func testQueriesTotalBytesAndTargetPathFromChromiumHistory() throws {
+    func testQueriesTotalBytesAndTargetPathFromChromiumHistory() async throws {
         let tempDir = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
@@ -37,7 +37,7 @@ final class ChromiumDownloadMetadataReaderTests: XCTestCase {
         XCTAssertEqual(info?.targetPath, targetPath)
     }
 
-    func testMatchesByTargetPathIfCurrentPathDiffers() throws {
+    func testMatchesByTargetPathIfCurrentPathDiffers() async throws {
         let tempDir = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
@@ -65,7 +65,7 @@ final class ChromiumDownloadMetadataReaderTests: XCTestCase {
         XCTAssertEqual(info?.targetPath, targetPath)
     }
 
-    func testReturnsNilWhenDownloadNotFoundOrTotalBytesZero() throws {
+    func testReturnsNilWhenDownloadNotFoundOrTotalBytesZero() async throws {
         let tempDir = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
@@ -78,7 +78,7 @@ final class ChromiumDownloadMetadataReaderTests: XCTestCase {
         XCTAssertNil(info)
     }
 
-    func testFolderFileDownloadMonitorCalculatesExactProgressUsingChromiumMetadata() {
+    func testFolderFileDownloadMonitorCalculatesExactProgressUsingChromiumMetadata() async {
         let tempDir = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
@@ -123,7 +123,7 @@ final class ChromiumDownloadMetadataReaderTests: XCTestCase {
         }
 
         monitor.startMonitoring()
-        wait(for: [expectation], timeout: 3.0)
+        await fulfillment(of: [expectation], timeout: 3.0)
         monitor.stopMonitoring()
     }
 }

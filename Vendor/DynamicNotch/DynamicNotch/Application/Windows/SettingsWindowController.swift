@@ -51,7 +51,8 @@ class SettingsWindowController: NSWindowController {
     private func setupContentView() {
         guard let window = window, let appDelegate = appDelegate else { return }
         
-        let settingsView = SettingsRootView(container: appDelegate.container)
+        let settingsView = (EmbeddedNotchRuntime.activeInstance?.settingsView
+            ?? AnyView(SettingsRootView(container: appDelegate.container)))
             .defaultAppStorage(.aloNotch)
             .frame(width: SettingsWindowLayout.width, height: SettingsWindowLayout.height)
         

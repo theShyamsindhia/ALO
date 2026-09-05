@@ -4,6 +4,9 @@ import SQLite3
 
 final class MessagesDatabaseReader {
 
+    // Connections/statements are closed within each read; ARC needs no actor.
+    nonisolated deinit {}
+
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "DynamicNotch", category: "MessagesDatabaseReader")
 
     private let databaseURLOverride: URL?
