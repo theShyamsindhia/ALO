@@ -97,4 +97,12 @@ A physical two-Mac listening test and output-device hot-swap have not been perfo
 - [x] Add configurable U/I recording keys and preserve older custom bindings.
 - [x] Correct CGFloat geometry for pinned Xcode26.3 release compiler.
 - [x] Verify final recorded-deck UI and audio regressions: 41 tests in 12 suites passed (7.389 seconds), including native preview, real captured PCM playback and key migration.
-- [ ] Push main, build signed/notarized0.14.3 at the exact commit and verify downloadable assets.
+- [x] Push main, build signed/notarized 0.14.3 at the exact commit and verify downloadable assets.
+
+### Recording release verification
+- Release v0.14.3 is pinned to 77ca0de8800dbc29ac00e11152b051e4f936e0a4 and is published as latest with verified assets.
+- Main CI: 777 tests in 128 suites plus 7 room scenarios passed; iOS build passed.
+- Release attempt 1 hit an existing timing-sensitive room fan-out threshold (48 packets vs minimum 50). The unchanged retry passed; no test limits or code were changed.
+- Release workflow 33995337699 passed packaging, Developer ID signing, Apple notarization/stapling and Gatekeeper checks.
+- Verified uploaded DMG 30,943,863 bytes; ZIP 29,941,070 bytes. Captured takes are deleted on normal Studio close; imported user audio is never deleted.
+- Updated REC/recorded-take native preview: `dist/previews/dj-studio-recording.png`.
