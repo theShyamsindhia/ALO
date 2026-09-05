@@ -658,7 +658,10 @@ final class HostServer {
             client.syncReport = report
             let now = MonotonicClock.nowNanos()
             client.lastPlaybackReportNanos = now
+            // Updated receivers own their local drift policy (including opt-out).
+            // Do not fight it with the legacy host loop or replay sticky lateness.
             if client.id != localParticipantID,
+               report.automaticSyncEnabled == nil,
                report.latenessNanos > SynchronizedPlayer.hardResyncThresholdNanos,
                !receiverAlreadyResynced,
                now - client.lastResyncCommandNanos > 2_000_000_000 {

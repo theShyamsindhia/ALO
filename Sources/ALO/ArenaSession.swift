@@ -3,6 +3,15 @@ import SwiftUI
 import ALOCore
 import GameController
 
+struct ArenaMatchResult {
+    let sessionID: String
+    let round: Int
+    let participantIDs: [String?]
+    let playerNames: [String]
+    let winner: Int
+    let botSlots: Set<Int>
+}
+
 @MainActor
 final class ArenaSession: ObservableObject {
     enum Mode { case picker, practice, hosting, joining, readyHost, readyGuest, host, guest, spectator }
@@ -11,8 +20,12 @@ final class ArenaSession: ObservableObject {
         let peerID: String
         let sessionID: String
         let fighter: ArenaFighterKind
+        let map: ArenaMap
         let round: Int
         let started: Bool
+        var availableSlots: Int = 1
+        var humanCount: Int = 1
+        var botCount: Int = 0
         var seen: TimeInterval
     }
     @Published var mode: Mode = .picker { didSet { configureTimer() } }
@@ -28,7 +41,15 @@ final class ArenaSession: ObservableObject {
     @Published var effectsEnabled = true
     private(set) var gameBackground: NSImage?
     private(set) var fighterArtwork: NSImage?
+    private(set) var gardenBackground: NSImage?
+    private(set) var midgroundArtwork: NSImage?
+    var arenaBackground: NSImage? { selectedMap == .observatory ? gameBackground : gardenBackground ?? gameBackground }
     private var loadTask: Task<Void, Never>?
+    @Published var selectedMap: ArenaMap = .observatory
+    @Published private(set) var latencyMilliseconds: Int?
+    private var sentProbe: Double?
+    private var peerProbe: Double?
+    private var measuredProbe: Double?
     @Published var selected: ArenaFighterKind = .nova
     @Published var notice = ""
     @Published var lobbies: [Lobby] = []
@@ -47,6 +68,38 @@ final class ArenaSession: ObservableObject {
     var send: ((Data, String?) -> Void)?
     var names: [String: String] = [:]
     var localName = "You"
+    var localParticipantID = "local"
+    var onMatchFinished: ((ArenaMatchResult) -> Void)?
+    var onLobbyDiscovered: ((Lobby) -> Void)?
+    var onLobbyRemoved: ((String) -> Void)?
+    @Published private(set) var botSlots = Set<Int>()
+    @Published private(set) var playerSlots: [ArenaPlayerSlot] = []
+    private struct Member {
+        var slot: Int
+        var ready = false
+        var input = ArenaInput()
+        var lastInput = 0.0
+        var lastSeen: Double
+        var sequence = -1
+        var probe: Double?
+        var latency: Int?
+        var measuredProbe: Double?
+    }
+    private var members: [String: Member] = [:]
+    private var spectatorProbes: [String: Double] = [:]
+    private var assignedSlot = 0
+    private var reportedResultKeys = Set<String>()
+    private var reportedRound: Int?
+    private var remoteParticipantIDs: [String?]?
+    private var announcedSessions = Set<String>()
+    var canAddBot: Bool { [.hosting, .readyHost].contains(mode) && simulation.fighters.count < 4 }
+    var canRemoveBot: Bool { [.hosting, .readyHost].contains(mode) && !botSlots.isEmpty }
+    var readyPlayerCount: Int { playerSlots.filter(\.ready).count }
+    var isActivityHost: Bool { [.hosting, .readyHost, .host].contains(mode) }
+    var availableSlots: Int {
+        if mode == .host { return simulation.winner == nil ? botSlots.filter { simulation.fighters[$0].stocks > 0 }.count : 0 }
+        return max(0, 4 - simulation.fighters.count) + botSlots.count
+    }
     private(set) var peerID: String?
     private var round = 0
     private var sessionID = UUID().uuidString
@@ -69,13 +122,25 @@ final class ArenaSession: ObservableObject {
     private var window: NSWindow?
     private var windowDelegate: ArenaWindowDelegate?
     var scene: ArenaScene?
-    var localIndex: Int { mode == .guest ? 1 : 0 }
+    var localIndex: Int { [.joining, .readyGuest, .guest].contains(mode) ? assignedSlot : 0 }
     var playing: Bool { [.practice, .host, .guest, .spectator].contains(mode) }
     var networked: Bool { [.host, .guest, .hosting, .joining, .readyHost, .readyGuest, .spectator].contains(mode) }
     var playerNames: [String] {
-        if mode == .spectator, let remotePlayerNames { return remotePlayerNames }
-        return mode == .guest || mode == .spectator || mode == .readyGuest ? [names[peerID ?? ""] ?? "Host", localName]
-            : [localName, mode == .practice ? "Training bot" : names[peerID ?? ""] ?? "Challenger"]
+        if [.joining, .readyGuest, .guest, .spectator].contains(mode), let remotePlayerNames,
+           remotePlayerNames.count == simulation.fighters.count { return remotePlayerNames }
+        return simulation.fighters.indices.map { slot in
+            if slot == 0 { return localName }
+            if let peer = members.first(where: { $0.value.slot == slot })?.key { return names[peer] ?? "Room player" }
+            return "Bot \(slot)"
+        }
+    }
+    private func refreshSlots() {
+        playerSlots = simulation.fighters.indices.map { slot in
+            ArenaPlayerSlot(index: slot, name: String(playerNames[slot].prefix(40)), isBot: botSlots.contains(slot),
+                ready: slot == 0 ? localReady : botSlots.contains(slot) || members.values.first(where: { $0.slot == slot })?.ready == true)
+        }
+        remoteReady = members.values.allSatisfy(\.ready)
+        revision += 1
     }
 
     func openGame(_ pack: InstalledGamePack) {
@@ -88,6 +153,8 @@ final class ArenaSession: ObservableObject {
                 fourfold.subtitle = pack.content.subtitle; fourfold.accentHex = pack.content.accentHex
             }
             gameBackground = pack.content.backgroundImageData.flatMap(NSImage.init(data:))
+            gardenBackground = pack.content.gardenImageData.flatMap(NSImage.init(data:))
+            midgroundArtwork = pack.content.midgroundImageData.flatMap(NSImage.init(data:))
             fighterArtwork = pack.content.fighterImageData.flatMap(NSImage.init(data:))
             if pack.content.backgroundImageBase64 != nil && gameBackground == nil {
                 gameLoadError = "The artwork could not be loaded. Remove the pack and download it again."
@@ -97,7 +164,7 @@ final class ArenaSession: ObservableObject {
     }
     func returnToLibrary() {
         leave(); loadTask?.cancel(); selectedGameID = nil; loadingGame = false
-        gameBackground = nil; fighterArtwork = nil; gameLoadError = nil; controlsFocused = false; configureTimer()
+        gameBackground = nil; gardenBackground = nil; midgroundArtwork = nil; fighterArtwork = nil; gameLoadError = nil; controlsFocused = false; configureTimer()
     }
     func closeMenu() { showsMenu = false; paused = false; clearInput() }
     func activate() { configureTimer() }
@@ -120,15 +187,35 @@ final class ArenaSession: ObservableObject {
         self.timer = timer
     }
     func practice() {
-        leave(); simulation = ArenaSimulation(first: selected, second: selected == .nova ? .atlas : .nova)
-        mode = .practice; paused = false; activate()
+        leave(); simulation = ArenaSimulation(first: selected, second: selected == .nova ? .atlas : .nova, map: selectedMap)
+        botSlots = [1]; mode = .practice; paused = false; refreshSlots(); activate()
     }
-    func host() {
-        leave(); round = 0; sessionID = UUID().uuidString; mode = .hosting
-        notice = "Waiting for a room member to join…"; activate(); advertise()
+    func host(botCount: Int = 0) {
+        leave(); round = 0; sessionID = UUID().uuidString
+        let count = min(3, max(0, botCount))
+        simulation = ArenaSimulation(kinds: [selected] + (0..<count).map { $0.isMultiple(of: 2) ? .atlas : .nova }, map: selectedMap)
+        botSlots = Set(1..<simulation.fighters.count)
+        mode = count > 0 ? .readyHost : .hosting
+        notice = "Room arena open. Add bots or invite people, then ready up."
+        refreshSlots(); activate(); advertise()
+    }
+    func addBot() {
+        guard [.hosting, .readyHost].contains(mode), simulation.fighters.count < 4 else { return }
+        let index = simulation.fighters.count
+        simulation = ArenaSimulation(kinds: simulation.fighters.map(\.kind) + [index.isMultiple(of: 2) ? .nova : .atlas], map: selectedMap)
+        botSlots.insert(index); mode = .readyHost; refreshSlots(); sendRoster(); advertise(); startIfReady()
+    }
+    func removeBot() {
+        guard [.hosting, .readyHost].contains(mode), let index = botSlots.max() else { return }
+        var kinds = simulation.fighters.map(\.kind); kinds.remove(at: index)
+        simulation = ArenaSimulation(kinds: kinds, map: selectedMap)
+        botSlots = Set(botSlots.filter { $0 != index }.map { $0 > index ? $0 - 1 : $0 })
+        for id in members.keys where members[id]!.slot > index { members[id]!.slot -= 1 }
+        mode = simulation.fighters.count > 1 ? .readyHost : .hosting
+        refreshSlots(); sendRoster(); advertise()
     }
     func join(_ lobby: Lobby, spectate: Bool = false) {
-        leave(); round = lobby.round; peerID = lobby.peerID; sessionID = lobby.sessionID
+        leave(); selectedMap = lobby.map; round = lobby.round; peerID = lobby.peerID; sessionID = lobby.sessionID
         mode = spectate ? .spectator : .joining; lastRemote = ProcessInfo.processInfo.systemUptime
         notice = "Connecting to \(names[lobby.peerID] ?? "host")…"; activate()
         transmit(spectate ? .spectate : .join, fighter: spectate ? nil : selected)
@@ -140,31 +227,43 @@ final class ArenaSession: ObservableObject {
     }
     private func beginRematch() {
         guard round < 1000 else { leave(); return }
-        round += 1; localReady = false; remoteReady = false
-        simulation = ArenaSimulation(first: simulation.fighters[0].kind, second: simulation.fighters[1].kind)
-        mode = .readyHost
-        transmit(.ready, ready: false)
-        for spectator in spectators.keys { transmit(.ready, target: spectator, ready: false) }
+        round += 1; localReady = false; remoteReady = false; reportedRound = nil
+        for id in members.keys { members[id]!.ready = false; members[id]!.input = ArenaInput() }
+        simulation = ArenaSimulation(kinds: simulation.fighters.map(\.kind), map: simulation.map)
+        mode = .readyHost; refreshSlots(); sendRoster(); advertise()
     }
     func readyUp() {
-        localReady.toggle(); transmit(.ready, ready: localReady); startIfReady()
+        guard [.hosting, .readyHost, .readyGuest].contains(mode) else { return }
+        localReady.toggle()
+        if isActivityHost { refreshSlots(); sendRoster(); startIfReady() }
+        else { transmit(.ready, ready: localReady) }
     }
     private func startIfReady() {
-        guard mode == .readyHost, localReady, remoteReady else { return }
-        mode = .host; notice = ""; transmit(.state, state: simulation)
+        guard [.hosting, .readyHost].contains(mode), simulation.fighters.count >= 2,
+              localReady, members.values.allSatisfy(\.ready) else { return }
+        mode = .host; notice = ""; refreshSlots(); sendRoster(); advertise()
+    }
+    private func sendRoster() {
+        guard isActivityHost else { return }
+        let kind: ArenaPacket.Kind = mode == .host ? .state : .ready
+        for id in members.keys { transmit(kind, state: simulation, target: id, ready: localReady, started: mode == .host) }
+        for id in spectators.keys { transmit(kind, state: simulation, target: id, ready: localReady, started: mode == .host) }
     }
     func leave(message: String = "") {
-        if networked {
-            transmit(.leave)
-            for spectator in spectators.keys { transmit(.leave, target: spectator) }
-        }
-        showsMenu = false
-        localReady = false; remoteReady = false; spectators = [:]; spectatorCount = 0
+        if isActivityHost {
+            for id in members.keys { transmit(.leave, target: id) }
+            for id in spectators.keys { transmit(.leave, target: id) }
+            transmit(.leave, target: "")
+        } else if networked { transmit(.leave) }
+        latencyMilliseconds = nil; sentProbe = nil; peerProbe = nil; measuredProbe = nil
+        showsMenu = false; localReady = false; remoteReady = false
+        spectators = [:]; spectatorProbes = [:]; spectatorCount = 0; members = [:]; botSlots = []; playerSlots = []
+        remotePlayerNames = nil; remoteParticipantIDs = nil; assignedSlot = 0; reportedRound = nil
         mode = .picker; peerID = nil; clearInput(); remoteInput = ArenaInput()
         remoteSequence = -1; sequence = 0; accumulator = 0; notice = message; paused = false
     }
     func disconnect() {
-        returnToLibrary(); send = nil; lobbies = []; timer?.invalidate(); timer = nil
+        returnToLibrary(); send = nil; lobbies = []; announcedSessions = []; reportedResultKeys = []; timer?.invalidate(); timer = nil
         closeExpanded(); scene = nil; sound.stop()
     }
     func surfaceVisibility(_ id: UUID, visible: Bool) {
@@ -211,7 +310,8 @@ final class ArenaSession: ObservableObject {
     private func playImpacts() {
         guard !visibleSurfaces.isEmpty else { return }
         sound.volume = Float(gameVolume)
-        for i in 0..<2 {
+        if priorSoundHits.count != simulation.fighters.count { priorSoundHits = simulation.fighters.map(\.hitSerial); priorSoundStocks = simulation.fighters.map(\.stocks) }
+        for i in simulation.fighters.indices {
             let f = simulation.fighters[i]
             if f.stocks < priorSoundStocks[i] { sound.play(knockout: true) }
             else if f.hitSerial > priorSoundHits[i] { sound.play(knockout: false) }
@@ -232,114 +332,188 @@ final class ArenaSession: ObservableObject {
     private func transmit(_ kind: ArenaPacket.Kind, fighter: ArenaFighterKind? = nil,
                           input: ArenaInput? = nil, state: ArenaSimulation? = nil, target: String? = nil, ready: Bool? = nil, started: Bool? = nil) {
         sequence += 1
+        let now = ProcessInfo.processInfo.systemUptime
+        if networked && (sentProbe == nil || now - sentProbe! >= 1) { sentProbe = now }
+        let destination = target == "" ? nil : target ?? peerID
+        let rosterPacket = state != nil && isActivityHost
         let packet = ArenaPacket(kind: kind, session: sessionID, sequence: sequence,
-                                 fighter: fighter, input: input, state: state, ready: ready, started: started, playerNames: kind == .state ? playerNames.map { String($0.prefix(40)) } : nil, round: round)
-        if let data = try? JSONEncoder().encode(packet) { send?(data, target == "" ? nil : target ?? peerID) }
+            fighter: fighter, input: input, state: state, ready: ready, started: started,
+            playerNames: rosterPacket ? playerNames.map { String($0.prefix(40)) } : nil, round: round,
+            map: selectedMap, probe: sentProbe,
+            echo: isActivityHost ? destination.flatMap { members[$0]?.probe ?? spectatorProbes[$0] } : peerProbe,
+            slots: rosterPacket ? playerSlots : nil,
+            assignedSlot: rosterPacket ? destination.flatMap { members[$0]?.slot } : nil,
+            spectating: rosterPacket ? destination.map { spectators[$0] != nil } : nil,
+            availableSlots: kind == .lobby ? availableSlots : nil,
+            humanCount: kind == .lobby ? 1 + members.count : nil,
+            botCount: kind == .lobby ? botSlots.count : nil,
+            participantIDs: rosterPacket ? simulation.fighters.indices.map { slot in slot == 0 ? localParticipantID : members.first(where: { $0.value.slot == slot })?.key } : nil)
+        if let data = try? JSONEncoder().encode(packet), data.count <= 8192 { send?(data, destination) }
     }
     func receive(from sender: String, data: Data) {
-        guard data.count <= 8192, let packet = try? JSONDecoder().decode(ArenaPacket.self, from: data),
-              packet.isValid else { return }
+        guard data.count <= 8192, let packet = try? JSONDecoder().decode(ArenaPacket.self, from: data), packet.isValid else { return }
         let now = ProcessInfo.processInfo.systemUptime
         if packet.kind == .lobby {
+            let announcementKey = sender + "/" + packet.session
+            let fresh = !announcedSessions.contains(announcementKey)
             lobbies.removeAll { $0.peerID == sender }
-            if lobbies.count < 32 {
-                lobbies.append(Lobby(peerID: sender, sessionID: packet.session, fighter: packet.fighter!, round: packet.round, started: packet.started ?? false, seen: now))
-            }
-            if timer == nil { activate() }; return
-        }
-        if packet.kind == .leave { lobbies.removeAll { $0.peerID == sender && $0.sessionID == packet.session } }
-        guard packet.session == sessionID else { return }
-        if packet.kind == .spectate && (mode == .host || mode == .readyHost) {
-            guard spectators[sender] != nil || spectators.count < 8 else { return }
-            spectators[sender] = now; spectatorCount = spectators.count
-            if mode == .host { transmit(.state, state: simulation, target: sender) }
-            else { transmit(.ready, target: sender, ready: localReady) }
+            let lobby = Lobby(peerID: sender, sessionID: packet.session, fighter: packet.fighter!, map: packet.map ?? .observatory,
+                round: packet.round, started: packet.started ?? false, availableSlots: packet.availableSlots ?? 0,
+                humanCount: packet.humanCount ?? 1, botCount: packet.botCount ?? 0, seen: now)
+            if lobbies.count < 32 { lobbies.append(lobby); if fresh { if announcedSessions.count >= 128 { announcedSessions.removeAll() }; announcedSessions.insert(announcementKey); onLobbyDiscovered?(lobby) } }
             return
         }
-        if packet.kind == .leave && spectators.removeValue(forKey: sender) != nil {
-            spectatorCount = spectators.count; return
+        if packet.kind == .leave {
+            let removed = lobbies.contains { $0.peerID == sender && $0.sessionID == packet.session }
+            lobbies.removeAll { $0.peerID == sender && $0.sessionID == packet.session }
+            if removed { onLobbyRemoved?(packet.session) }
         }
-        if packet.kind == .join && mode == .hosting {
-            peerID = sender; remoteSequence = packet.sequence; lastRemote = now
-            simulation = ArenaSimulation(first: selected, second: packet.fighter!)
-            mode = .readyHost; notice = "Challenger joined. Ready up to begin."
-            transmit(.ready, ready: localReady); return
-        }
-        if packet.kind == .join && sender != peerID && [.readyHost, .host].contains(mode) {
-            transmit(.busy, target: sender); return
-        }
+        guard packet.session == sessionID else { return }
+        if isActivityHost { receiveAsHost(sender: sender, packet: packet, now: now); return }
         guard sender == peerID, packet.sequence > remoteSequence else { return }
-        if packet.kind == .ready && packet.round == round + 1 && (mode == .guest || mode == .spectator) {
-            round = packet.round; localReady = false; remoteReady = false
-            simulation = ArenaSimulation(first: simulation.fighters[0].kind, second: simulation.fighters[1].kind)
-            if mode == .guest { mode = .readyGuest }
-            else { notice = "Waiting for players to ready up…" }
+        if packet.kind == .leave, packet.round >= round {
+            leave(message: "The activity host left. Your room and chat are still open."); return
         }
-        guard packet.round == round else { return }
+        let advancedRound = packet.round != round
+        if advancedRound {
+            guard (mode == .joining && packet.round >= round) || (packet.round == round + 1 && [.ready, .state].contains(packet.kind)) else { return }
+            round = packet.round; localReady = false; remoteReady = false; reportedRound = nil
+        }
         remoteSequence = packet.sequence
+        if let probe = packet.probe { peerProbe = probe }
+        if let echo = packet.echo, echo == sentProbe, echo != measuredProbe, now >= echo, now - echo < 10 {
+            let sample = Int((now - echo) * 1000)
+            latencyMilliseconds = latencyMilliseconds.map { ($0 * 3 + sample) / 4 } ?? sample; measuredProbe = echo
+        }
         switch packet.kind {
-        case .state where mode == .joining || mode == .readyGuest || mode == .guest || mode == .spectator:
-            guard let state = packet.state, (mode == .joining || mode == .readyGuest || mode == .spectator) || state.frame >= simulation.frame else { return }
-            remotePlayerNames = packet.playerNames
-            simulation = state; if mode != .spectator && mode != .guest { mode = .guest }; lastRemote = now; notice = ""; revision += 1; playImpacts()
-        case .ready where mode == .joining || mode == .readyHost || mode == .readyGuest || mode == .spectator:
-            if mode == .joining { mode = .readyGuest }
-            remoteReady = packet.ready!; lastRemote = now; startIfReady()
-        case .rematch where mode == .host && simulation.winner != nil:
-            lastRemote = now; beginRematch()
-        case .input where mode == .host:
-            remoteInput = packet.input!; lastInput = now; lastRemote = now
-        case .leave:
-            leave(message: "The other player left. Start another match whenever you’re ready.")
-        case .busy:
-            leave(message: "That arena is no longer available.")
+        case .state, .ready:
+            guard [.joining, .readyGuest, .guest, .spectator].contains(mode), let state = packet.state,
+                  let slots = packet.slots, let rosterNames = packet.playerNames,
+                  slots.count == state.fighters.count, rosterNames.count == slots.count else { return }
+            if packet.kind == .state, state.frame < simulation.frame, mode == .guest, !advancedRound { return }
+            if packet.spectating == true { mode = .spectator }
+            else {
+                guard let slot = packet.assignedSlot, state.fighters.indices.contains(slot), !slots[slot].isBot else { return }
+                assignedSlot = slot; mode = packet.started == true ? .guest : .readyGuest
+            }
+            remotePlayerNames = rosterNames; remoteParticipantIDs = packet.participantIDs; playerSlots = slots; botSlots = Set(slots.filter(\.isBot).map(\.index))
+            selectedMap = state.map; simulation = state; remoteReady = packet.ready ?? false
+            lastRemote = now; notice = mode == .spectator ? "Spectating · four fighter slots; join a live bot slot when available." : ""
+            revision += 1; playImpacts(); reportResultIfNeeded()
+        case .leave: leave(message: "The activity host left. Your room and chat are still open.")
+        case .busy: leave(message: "This arena has no spectator space available.")
         default: break
         }
     }
+    private func receiveAsHost(sender: String, packet: ArenaPacket, now: Double) {
+        if packet.kind == .join {
+            if members[sender] != nil {
+                transmit(mode == .host ? .state : .ready, state: simulation, target: sender, ready: localReady, started: mode == .host); return
+            }
+            let replacement = botSlots.sorted().first { mode != .host || (simulation.winner == nil && simulation.fighters[$0].stocks > 0) }
+            let canAppend = mode != .host && simulation.fighters.count < 4
+            guard let slot = replacement ?? (canAppend ? simulation.fighters.count : nil) else { admitSpectator(sender, packet: packet, now: now); return }
+            if slot == simulation.fighters.count {
+                simulation = ArenaSimulation(kinds: simulation.fighters.map(\.kind) + [packet.fighter!], map: selectedMap)
+            } else if mode != .host {
+                var kinds = simulation.fighters.map(\.kind); kinds[slot] = packet.fighter!
+                simulation = ArenaSimulation(kinds: kinds, map: selectedMap)
+            }
+            botSlots.remove(slot); spectators.removeValue(forKey: sender); spectatorProbes.removeValue(forKey: sender)
+            members[sender] = Member(slot: slot, ready: mode == .host, lastSeen: now, sequence: packet.sequence, probe: packet.probe)
+            spectatorCount = spectators.count
+            if mode == .hosting { mode = .readyHost }
+            notice = mode == .host ? "A room member took over a bot's live fighter." : "Room member joined. Ready up when everyone is here."
+            refreshSlots(); sendRoster(); advertise(); startIfReady(); return
+        }
+        if packet.kind == .spectate { admitSpectator(sender, packet: packet, now: now); return }
+        if packet.kind == .leave, spectators.removeValue(forKey: sender) != nil {
+            spectatorProbes.removeValue(forKey: sender); spectatorCount = spectators.count; return
+        }
+        guard var member = members[sender], packet.sequence > member.sequence, packet.round == round else { return }
+        member.sequence = packet.sequence; member.lastSeen = now; member.probe = packet.probe
+        if let echo = packet.echo, echo == sentProbe, echo != member.measuredProbe, now >= echo, now - echo < 10 { member.latency = Int((now - echo) * 1000); member.measuredProbe = echo }
+        switch packet.kind {
+        case .ready where mode != .host:
+            let changed = member.ready != packet.ready!
+            member.ready = packet.ready!; members[sender] = member
+            if changed { refreshSlots(); sendRoster(); startIfReady() }
+        case .input where mode == .host: member.input = packet.input!; member.lastInput = now; members[sender] = member
+        case .leave: replaceWithBot(sender)
+        case .rematch where mode == .host && simulation.winner != nil: members[sender] = member; beginRematch()
+        default: members[sender] = member
+        }
+        latencyMilliseconds = members.values.compactMap(\.latency).max()
+    }
+    private func admitSpectator(_ sender: String, packet: ArenaPacket, now: Double) {
+        guard members[sender] == nil else { return }
+        guard spectators[sender] != nil || spectators.count < 8 else { transmit(.busy, target: sender); return }
+        spectators[sender] = now; spectatorProbes[sender] = packet.probe; spectatorCount = spectators.count
+        transmit(mode == .host ? .state : .ready, state: simulation, target: sender, ready: localReady, started: mode == .host)
+    }
+    private func replaceWithBot(_ id: String) {
+        guard let member = members.removeValue(forKey: id) else { return }
+        botSlots.insert(member.slot)
+        latencyMilliseconds = members.values.compactMap(\.latency).max()
+        notice = "A disconnected player's fighter is now controlled by a bot."
+        refreshSlots(); sendRoster(); advertise(); startIfReady()
+    }
     private func update() {
         let now = ProcessInfo.processInfo.systemUptime
-        let elapsed = min(0.1, max(0, now - previousTime)); previousTime = now
-        tickCount += 1
+        let elapsed = min(0.1, max(0, now - previousTime)); previousTime = now; tickCount += 1
         if now - lastAdvertise >= 1 {
             lastAdvertise = now
+            let expired = lobbies.filter { now - $0.seen > 3.5 }.map(\.sessionID)
             lobbies.removeAll { now - $0.seen > 3.5 }
-            if mode == .hosting || mode == .host { advertise() }
-            if mode == .readyHost || mode == .readyGuest {
-                transmit(.ready, ready: localReady)
-                if mode == .readyHost {
-                    for spectator in spectators.keys { transmit(.ready, target: spectator, ready: localReady) }
-                }
+            for id in expired { onLobbyRemoved?(id) }
+            if isActivityHost {
+                for id in members.keys.filter({ now - members[$0]!.lastSeen > 5 }) { replaceWithBot(id) }
+                spectators = spectators.filter { now - $0.value < 5 }; spectatorCount = spectators.count
+                spectatorProbes = spectatorProbes.filter { spectators[$0.key] != nil }
+                advertise(); if mode != .host { sendRoster() }
             }
+            if mode == .readyGuest { transmit(.ready, ready: localReady) }
             if mode == .spectator { transmit(.spectate) }
-            spectators = spectators.filter { now - $0.value < 5 }
-            spectatorCount = spectators.count
             if mode == .joining { transmit(.join, fighter: selected) }
         }
-        if [.joining, .host, .guest, .readyHost, .readyGuest, .spectator].contains(mode) && now - lastRemote > 5 {
-            leave(message: "Connection lost. Your room and chat are still open."); return
+        if [.joining, .guest, .readyGuest, .spectator].contains(mode) && now - lastRemote > 5 {
+            leave(message: "Activity connection lost. Your room and chat are still open."); return
         }
         let frameInput = sampledInput()
         if mode == .guest {
-            // Send heartbeat inputs even after results so the host doesn't time out.
             if tickCount % 2 == 0 { transmit(.input, input: frameInput); bufferedActions = ArenaInput() }
             return
         }
         guard mode == .host || (mode == .practice && !paused) else { accumulator = 0; return }
-        if mode == .host && now - lastInput > 0.25 { remoteInput = ArenaInput() }
-        accumulator += elapsed
-        var steps = 0
+        accumulator += elapsed; var steps = 0
         while accumulator >= ArenaSimulation.step && steps < 6 {
-            simulation.tick([frameInput, mode == .practice ? simulation.botInput() : remoteInput])
-            accumulator -= ArenaSimulation.step; steps += 1
+            let inputs = simulation.fighters.indices.map { slot -> ArenaInput in
+                if slot == 0 { return frameInput }
+                if botSlots.contains(slot) || mode == .practice { return simulation.botInput(for: slot) }
+                guard let member = members.values.first(where: { $0.slot == slot }), now - member.lastInput <= 0.25 else { return ArenaInput() }
+                return member.input
+            }
+            simulation.tick(inputs); accumulator -= ArenaSimulation.step; steps += 1
         }
         if steps > 0 { bufferedActions = ArenaInput() }
-        if tickCount % 3 == 0 {
-            revision += 1; playImpacts()
-            if mode == .host {
-                transmit(.state, state: simulation)
-                for spectator in spectators.keys { transmit(.state, state: simulation, target: spectator) }
-            }
+        reportResultIfNeeded()
+        if tickCount % 3 == 0 { revision += 1; playImpacts(); if mode == .host { sendRoster() } }
+    }
+    private func reportResultIfNeeded() {
+        guard [.host, .guest, .spectator].contains(mode), let winner = simulation.winner, reportedRound != round else { return }
+        let resultKey = sessionID + "/" + String(round)
+        guard !reportedResultKeys.contains(resultKey) else { return }
+        let ids: [String?]
+        if mode == .host {
+            ids = simulation.fighters.indices.map { slot in slot == 0 ? localParticipantID : members.first(where: { $0.value.slot == slot })?.key }
+        } else {
+            guard let remoteParticipantIDs, remoteParticipantIDs.count == simulation.fighters.count else { return }
+            ids = remoteParticipantIDs
         }
+        reportedRound = round
+        if reportedResultKeys.count >= 2048 { reportedResultKeys.removeAll() }
+        reportedResultKeys.insert(resultKey)
+        onMatchFinished?(ArenaMatchResult(sessionID: sessionID, round: round, participantIDs: ids, playerNames: playerNames, winner: winner, botSlots: botSlots))
     }
     func openExpanded() {
         guard window == nil else {

@@ -53,13 +53,35 @@ public struct ArenaPlatform: Sendable {
     public let droppable: Bool
 }
 
+public enum ArenaMap: String, Codable, CaseIterable, Sendable {
+    case observatory, moonGarden, skybridge
+    public var title: String {
+        switch self { case .observatory: "Hollow Observatory"; case .moonGarden: "Moon Garden"; case .skybridge: "Skybridge" }
+    }
+    public var subtitle: String {
+        switch self { case .observatory: "Balanced · twin platforms"; case .moonGarden: "Vertical · three platforms"; case .skybridge: "Open · no upper platforms" }
+    }
+    public var platforms: [ArenaPlatform] {
+        let floor = ArenaPlatform(left: 180, right: 820, top: 150, droppable: false)
+        switch self {
+        case .observatory: return [floor,
+            ArenaPlatform(left: 255, right: 415, top: 305, droppable: true),
+            ArenaPlatform(left: 585, right: 745, top: 305, droppable: true)]
+        case .moonGarden: return [floor,
+            ArenaPlatform(left: 225, right: 365, top: 280, droppable: true),
+            ArenaPlatform(left: 635, right: 775, top: 280, droppable: true),
+            ArenaPlatform(left: 425, right: 575, top: 405, droppable: true)]
+        case .skybridge: return [floor]
+        }
+    }
+}
+
 public struct ArenaSimulation: Codable, Equatable, Sendable {
+    public static let maximumFighters = 4
     public static let step = 1.0 / 60.0
-    public static let platforms = [
-        ArenaPlatform(left: 180, right: 820, top: 150, droppable: false),
-        ArenaPlatform(left: 255, right: 415, top: 305, droppable: true),
-        ArenaPlatform(left: 585, right: 745, top: 305, droppable: true)
-    ]
+    public static var platforms: [ArenaPlatform] { ArenaMap.observatory.platforms }
+    public var map: ArenaMap
+    public var arenaPlatforms: [ArenaPlatform] { map.platforms }
     public var fighters: [ArenaFighter]
     public var frame = 0
     public var countdown = 180
@@ -67,20 +89,33 @@ public struct ArenaSimulation: Codable, Equatable, Sendable {
     /// -1 is a draw; nil means the round is still running.
     public var winner: Int?
     private var previousInputs = [ArenaInput(), ArenaInput()]
-    public init(first: ArenaFighterKind = .nova, second: ArenaFighterKind = .atlas) {
-        fighters = [ArenaFighter(kind: first, x: 350, facing: 1), ArenaFighter(kind: second, x: 650, facing: -1)]
+    public init(first: ArenaFighterKind = .nova, second: ArenaFighterKind = .atlas, map: ArenaMap = .observatory) {
+        self.init(kinds: [first, second], map: map)
+    }
+    public init(kinds: [ArenaFighterKind], map: ArenaMap = .observatory) {
+        self.map = map
+        let roster = kinds.isEmpty ? [.nova] : Array(kinds.prefix(Self.maximumFighters))
+        fighters = roster.enumerated().map { index, kind in
+            ArenaFighter(kind: kind, x: Self.spawnX(index, count: roster.count), facing: index % 2 == 0 ? 1 : -1)
+        }
+        previousInputs = Array(repeating: ArenaInput(), count: roster.count)
+    }
+    private static func spawnX(_ index: Int, count: Int) -> Double {
+        count == 2 ? (index == 0 ? 350 : 650) : 280 + Double(index) * 440 / Double(max(1, count - 1))
     }
 
     public mutating func tick(_ inputs: [ArenaInput]) {
-        guard inputs.count == 2, inputs.allSatisfy(\.isValid), winner == nil else { return }
+        guard fighters.count >= 2, inputs.count == fighters.count, previousInputs.count == fighters.count, inputs.allSatisfy(\.isValid), winner == nil else { return }
         frame += 1
         if countdown > 0 { countdown -= 1; previousInputs = inputs; return }
         remainingFrames -= 1
-        for i in 0..<2 { advance(i, input: inputs[i], old: previousInputs[i]) }
+        for i in fighters.indices { advance(i, input: inputs[i], old: previousInputs[i]) }
         // Resolve both active hitboxes from the same pre-hit state, allowing trades.
-        let hits = (0..<2).filter { canHit($0, 1 - $0) }
-        for i in hits { hit(i, 1 - i) }
-        for i in 0..<2 {
+        let hits = fighters.indices.flatMap { attacker in
+            fighters.indices.filter { $0 != attacker && canHit(attacker, $0) }.map { (attacker, $0) }
+        }
+        for (attacker, target) in hits { hit(attacker, target) }
+        for i in fighters.indices {
             if fighters[i].stocks > 0 && fighters[i].respawn == 0 &&
                 (fighters[i].x < -100 || fighters[i].x > 1100 || fighters[i].y < -130 || fighters[i].y > 780) {
                 fighters[i].stocks -= 1
@@ -91,9 +126,11 @@ public struct ArenaSimulation: Codable, Equatable, Sendable {
         let alive = fighters.indices.filter { fighters[$0].stocks > 0 }
         if alive.count < 2 { winner = alive.first ?? -1 }
         if remainingFrames <= 0 && winner == nil {
-            let a = fighters[0], b = fighters[1]
-            winner = a.stocks != b.stocks ? (a.stocks > b.stocks ? 0 : 1)
-                : (a.damage == b.damage ? -1 : (a.damage < b.damage ? 0 : 1))
+            let ranked = fighters.indices.sorted {
+                fighters[$0].stocks != fighters[$1].stocks ? fighters[$0].stocks > fighters[$1].stocks : fighters[$0].damage < fighters[$1].damage
+            }
+            let first = ranked[0], second = ranked[1]
+            winner = fighters[first].stocks == fighters[second].stocks && fighters[first].damage == fighters[second].damage ? -1 : first
         }
         previousInputs = inputs
     }
@@ -105,7 +142,7 @@ public struct ArenaSimulation: Codable, Equatable, Sendable {
             f.respawn -= 1
             if f.respawn == 0 {
                 let stocks = f.stocks, serial = f.hitSerial
-                f = ArenaFighter(kind: f.kind, x: i == 0 ? 350 : 650, facing: i == 0 ? 1 : -1)
+                f = ArenaFighter(kind: f.kind, x: Self.spawnX(i, count: fighters.count), facing: i % 2 == 0 ? 1 : -1)
                 f.stocks = stocks; f.invulnerable = 120; f.hitSerial = serial
             }
             fighters[i] = f; return
@@ -147,7 +184,7 @@ public struct ArenaSimulation: Codable, Equatable, Sendable {
         f.x += f.vx * Self.step; f.y += f.vy * Self.step
         f.grounded = false
         if f.vy <= 0 {
-            for p in Self.platforms where !(p.droppable && input.vertical == -1) {
+            for p in arenaPlatforms where !(p.droppable && input.vertical == -1) {
                 if f.x + 16 > p.left && f.x - 16 < p.right && oldY >= p.top && f.y <= p.top {
                     f.y = p.top; f.vy = 0; f.grounded = true
                     f.airJumps = 2; f.recoveryAvailable = true
@@ -172,7 +209,7 @@ public struct ArenaSimulation: Codable, Equatable, Sendable {
     }
     private func canHit(_ a: Int, _ b: Int) -> Bool {
         let f = fighters[a], target = fighters[b]
-        guard attackActive(a), !f.attackConnected, f.respawn == 0, target.respawn == 0,
+        guard f.stocks > 0, attackActive(a), !f.attackConnected, f.respawn == 0, target.respawn == 0,
               target.invulnerable == 0, target.stocks > 0 else { return false }
         let box = attackCenter(a)
         return abs(target.x - box.x) < box.radius + 17 && abs(target.y + 25 - box.y) < box.radius + 25
@@ -191,9 +228,13 @@ public struct ArenaSimulation: Codable, Equatable, Sendable {
         fighters[b].hitSerial += 1
     }
 
-    public func botInput() -> ArenaInput {
-        let bot = fighters[1], foe = fighters[0]
+    public func botInput(for index: Int = 1) -> ArenaInput {
         var result = ArenaInput()
+        guard fighters.indices.contains(index), fighters[index].stocks > 0,
+              let enemy = fighters.indices.filter({ $0 != index && fighters[$0].stocks > 0 }).min(by: {
+                  abs(fighters[$0].x - fighters[index].x) < abs(fighters[$1].x - fighters[index].x)
+              }) else { return result }
+        let bot = fighters[index], foe = fighters[enemy]
         let targetX = bot.x < 200 || bot.x > 800 || bot.y < 130 ? 500 : foe.x
         let dx = targetX - bot.x
         result.horizontal = abs(dx) > 46 ? (dx > 0 ? 1 : -1) : 0
@@ -206,12 +247,15 @@ public struct ArenaSimulation: Codable, Equatable, Sendable {
     }
 
     public var isValidSnapshot: Bool {
-        fighters.count == 2 && (0...20_000).contains(frame) && (0...180).contains(countdown)
-            && (0...10_800).contains(remainingFrames) && (winner == nil || [-1, 0, 1].contains(winner!))
+        (1...Self.maximumFighters).contains(fighters.count) && previousInputs.count == fighters.count && previousInputs.allSatisfy(\.isValid) && (0...20_000).contains(frame) && (0...180).contains(countdown)
+            && (0...10_800).contains(remainingFrames) && (winner == nil || (-1..<fighters.count).contains(winner!))
             && fighters.allSatisfy {
-                $0.x.isFinite && $0.y.isFinite && $0.vx.isFinite && $0.vy.isFinite && $0.damage.isFinite
+                $0.facing.isFinite && [-1.0, 1.0].contains($0.facing) && $0.x.isFinite && $0.y.isFinite && $0.vx.isFinite && $0.vy.isFinite && $0.damage.isFinite
                 && abs($0.x) < 3000 && abs($0.y) < 3000 && abs($0.vx) < 20_000 && abs($0.vy) < 20_000
-                && (0...3).contains($0.stocks) && (0...10_000).contains($0.damage)
+                && (0...2).contains($0.airJumps) && (0...120).contains($0.invulnerable) && (0...75).contains($0.respawn)
+                && (0...40).contains($0.attackFrames) && (0...40).contains($0.attackAge) && (0...24).contains($0.stun)
+                && (0...150).contains($0.dodgeCooldown) && (0...12).contains($0.dodgeFrames) && (-1...1).contains($0.attackDirection)
+                && (0...1_000_000).contains($0.hitSerial) && (0...3).contains($0.stocks) && (0...10_000).contains($0.damage)
             }
     }
 }

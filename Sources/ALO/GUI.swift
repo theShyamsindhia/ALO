@@ -837,6 +837,7 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
 
 @MainActor
 private final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
+    private var roomTouchBar: RoomTouchBarController?
     private let model: ALOViewModel
     private let toggleMainWindow: () -> Void
     private let statusItem: NSStatusItem
@@ -887,6 +888,9 @@ private final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
         popoverController.view.wantsLayer = true
         popoverController.view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         popover.contentViewController = popoverController
+        let touchBar = RoomTouchBarController(model: model, onGames: { [weak model] in model?.showGamesLibrary() })
+        touchBar.attach(to: popoverController)
+        roomTouchBar = touchBar
 
         model.$unreadMessageCount
             .removeDuplicates()
@@ -1471,6 +1475,12 @@ final class ALOViewModel: ObservableObject {
 
     private var roomBrowser: MeshRoomBrowser!
     let arena = ArenaSession()
+    let lyrics = LyricsController()
+    @Published var roomGamesVisible = false
+    @Published var activityInvitation: ArenaSession.Lobby?
+    private var activityInvitationTask: Task<Void, Never>?
+    @Published private(set) var localAudioTiming: ReceiverTimingDiagnostics?
+    @Published private(set) var automaticAudioSync = UserDefaults.standard.object(forKey: "automaticAudioSync") as? Bool ?? true
     private var meshSession: MeshSession?
     private var liveSyncTask: Task<Void, Never>?
     private let syncHealthLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "in.werai.audio", category: "synchronization")
@@ -1887,10 +1897,26 @@ final class ALOViewModel: ObservableObject {
         roomBrowser.stop()
         meshSession = session
         arena.localName = currentUserName
+        arena.localParticipantID = currentParticipantID ?? ""
+        arena.onLobbyDiscovered = { [weak self] lobby in
+            guard let self, !self.arena.playing else { return }
+            self.activityInvitation = lobby
+            self.activityInvitationTask?.cancel()
+            self.activityInvitationTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(8))
+                guard !Task.isCancelled, self?.activityInvitation?.sessionID == lobby.sessionID else { return }
+                self?.activityInvitation = nil
+            }
+        }
+        arena.onLobbyRemoved = { [weak self] sessionID in
+            if self?.activityInvitation?.sessionID == sessionID { self?.activityInvitation = nil }
+        }
+        arena.onMatchFinished = { result in ArenaRecordStore.shared.record(result) }
         arena.send = { [weak session] data, target in session?.sendArena(data, targetID: target) }
         session.setIncomingMediaMuted(incomingMediaMuted)
         session.setIncomingWalkieTalkieMuted(incomingCallsMuted)
         session.setMusicDuckingEnabled(musicDuckingEnabled)
+        session.setAutomaticSyncEnabled(automaticAudioSync)
         for (id, level) in participantVoiceLevels { session.setVoiceVolume(level, for: id) }
         do {
             try session.start(broadcastInitially: broadcastInitially)
@@ -2622,6 +2648,7 @@ final class ALOViewModel: ObservableObject {
     }
 
     func showChatInFloatingBar() {
+        roomGamesVisible = false
         dismissIncomingMessagePreview()
         showFloatingBar()
         floatingSection = .chat
@@ -2642,6 +2669,27 @@ final class ALOViewModel: ObservableObject {
 
     func canControl(_ participant: RoomParticipant) -> Bool {
         isHost || participant.id == currentParticipantID
+    }
+
+    func joinActivityInvitation() {
+        guard let invitation = activityInvitation else { return }
+        activityInvitation = nil
+        showGamesLibrary()
+        guard let pack = arena.library.installed["rift-arena"] else { return }
+        arena.openGame(pack)
+        arena.join(invitation)
+    }
+
+    func showGamesLibrary() {
+        showFloatingBar()
+        floatingSection = .chat; roomGamesVisible = true
+        if !arena.expanded { arena.returnToLibrary() }
+    }
+
+    func setAutomaticAudioSync(_ enabled: Bool) {
+        automaticAudioSync = enabled
+        UserDefaults.standard.set(enabled, forKey: "automaticAudioSync")
+        meshSession?.setAutomaticSyncEnabled(enabled)
     }
 
     func sendMessage() {
@@ -2942,6 +2990,7 @@ final class ALOViewModel: ObservableObject {
             invalidateLiveSyncSample()
             return
         }
+        if localAudioTiming != freshTiming.receiver { localAudioTiming = freshTiming.receiver }
         let result = diagnosticRoomContext(timing: freshTiming).result
         if liveSyncHealth.recentTransitions.last?.outcome != result.outcome {
             // Anonymous, transition-only evidence; never log peer names or content.
@@ -2958,6 +3007,7 @@ final class ALOViewModel: ObservableObject {
     }
 
     private func invalidateLiveSyncSample() {
+        if localAudioTiming != nil { localAudioTiming = nil }
         // Guard before mutating the @Published value: even an unchanged inout
         // write would otherwise redraw the whole model on every idle timer tick.
         guard liveSyncHealth.hasCurrentSample else { return }
@@ -3003,6 +3053,7 @@ final class ALOViewModel: ObservableObject {
         { [weak self] id, name in
             DispatchQueue.main.async {
                 self?.currentParticipantID = id
+                self?.arena.localParticipantID = id
                 self?.currentUserName = name
             }
         }
@@ -3101,6 +3152,7 @@ final class ALOViewModel: ObservableObject {
                     && self.nowPlaying.artist == media.artist
                     && self.nowPlaying.album == media.album
                 self.nowPlaying = media
+                self.lyrics.update(media: media)
                 if (media.artworkData != nil || !sameTrack), self.roomArtworkPalette != artworkPalette {
                     self.roomArtworkPalette = artworkPalette
                     self.roomAccentHex = artworkPalette?.accentHex
@@ -3191,6 +3243,10 @@ final class ALOViewModel: ObservableObject {
         videoBroadcastTimeoutTask?.cancel()
         videoBroadcastTimeoutTask = nil
         nowPlaying = NowPlayingMedia()
+        lyrics.cancel()
+        roomGamesVisible = false
+        activityInvitation = nil
+        activityInvitationTask?.cancel(); activityInvitationTask = nil
         roomAccentHex = nil
         roomArtworkPalette = nil
         localNowPlaying = NowPlayingMedia()
@@ -3848,7 +3904,10 @@ struct FloatingRoomView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var composerFocused: Bool
     @FocusState private var queueFocused: Bool
-    @State private var showsGames = false
+    private var showsGames: Bool {
+        get { model.roomGamesVisible }
+        nonmutating set { model.roomGamesVisible = newValue }
+    }
     @State private var showsRoomInfo = false
     @State private var showsMediaMore = false
 
@@ -3958,16 +4017,7 @@ struct FloatingRoomView: View {
         .tint(roomAccent)
         .environment(\.roomAccent, roomAccent)
         .popover(isPresented: $showsRoomInfo) {
-            VStack(alignment: .leading, spacing: 12) {
-                Text(model.roomTitle).font(.headline)
-                Text(model.connectionSummary).font(.caption)
-                Text(model.microphoneAudienceSummary).font(.caption)
-                Toggle("Lower music during voice", isOn: Binding(get: { model.musicDuckingEnabled }, set: model.setMusicDuckingEnabled))
-                Button("Turn microphone off", action: model.silenceMicrophone)
-                Button(model.incomingMediaMuted && model.incomingCallsMuted ? "Unmute room audio" : "Mute room audio", action: model.toggleAllIncomingAudio)
-                Text(model.activePrivateInviteKey == nil ? "Public room · discoverable nearby" : "Private room · invite key required")
-                    .font(.caption).foregroundStyle(.secondary)
-            }.padding(18).frame(width: 260)
+            RoomPreferencesView(model: model)
         }
         .animation(themeAnimation, value: model.roomArtworkPalette)
     }
@@ -4010,6 +4060,15 @@ struct FloatingRoomView: View {
     private var roomBar: some View {
         HStack(spacing: 8) {
             roomIdentity
+
+            if model.activityInvitation != nil && !hasExpandedContent {
+                Button(action: model.joinActivityInvitation) {
+                    Image(systemName: "gamecontroller.fill").font(.system(size: 15))
+                        .frame(width: 32, height: 32)
+                }.buttonStyle(FlatToolButtonStyle(active: false))
+                    .help("A room game is open · Join or spectate")
+                    .accessibilityLabel("Room game invitation")
+            }
 
             roomBarButton(
                 icon: model.isHost ? "dot.radiowaves.left.and.right" : "waveform.badge.mic",
@@ -4060,6 +4119,13 @@ struct FloatingRoomView: View {
                         model.showQueue()
                     } label: {
                         Label("Room queue", systemImage: "music.note.list")
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(8)
+                    }
+                    Button {
+                        showsMediaMore = false
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { showsRoomInfo = true }
+                    } label: {
+                        Label("Room settings", systemImage: "slider.horizontal.3")
                             .frame(maxWidth: .infinity, alignment: .leading).padding(8)
                     }
                     if presentation == .floating {
@@ -4456,6 +4522,19 @@ struct FloatingRoomView: View {
         VStack(spacing: 0) {
             chatHeader
             Divider().opacity(0.42)
+            if !showsGames, let invitation = model.activityInvitation {
+                HStack(spacing: 8) {
+                    Image(systemName: "gamecontroller")
+                    Text("\(model.participants.first(where: { $0.id == invitation.peerID })?.name ?? "A room member") opened Rift Arena")
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    Button("Join", action: model.joinActivityInvitation)
+                    Button { model.activityInvitation = nil } label: { Image(systemName: "xmark") }
+                        .help("Dismiss invitation")
+                }.font(.system(size: 11)).padding(.horizontal, 14).padding(.vertical, 9)
+                    .background(.white.opacity(0.035))
+            }
+            if !showsGames { LyricsPanel(controller: model.lyrics, accent: roomAccent) }
             if showsGames {
                 ArenaPanel(session: model.arena)
                     .onAppear { model.arena.names = Dictionary(uniqueKeysWithValues: model.participants.map { ($0.id, $0.name) }) }
@@ -4478,11 +4557,6 @@ struct FloatingRoomView: View {
                     mentionNames: model.participants.filter { $0.id != model.currentParticipantID }.map(\.name),
                     avatar: { id, name, size in AnyView(identityAvatar(id: id, name: name, size: size)) }
                 )
-            }
-            if showsGames {
-                Divider().opacity(0.42)
-                messageComposer
-                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -4516,7 +4590,7 @@ struct FloatingRoomView: View {
             } label: {
                 Image(systemName: showsGames ? "bubble.left.fill" : "gamecontroller.fill")
                     .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(showsGames ? roomAccent : Palette.controlIcon)
+                    .foregroundStyle(Palette.controlIcon)
                     .frame(width: 32, height: 30)
             }
             .buttonStyle(FlatToolButtonStyle(active: showsGames))
@@ -5744,6 +5818,7 @@ private final class FloatingRoomPanel: NSPanel {
 
 @MainActor
 private final class FloatingRoomWindowController: NSObject, NSWindowDelegate {
+    private var roomTouchBar: RoomTouchBarController?
     private let panel: FloatingRoomPanel
     private let model: ALOViewModel
     private var modelObserver: AnyCancellable?
@@ -5791,6 +5866,9 @@ private final class FloatingRoomWindowController: NSObject, NSWindowDelegate {
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
         hostingView.layer?.drawsAsynchronously = true
         panel.contentView = hostingView
+        let touchBar = RoomTouchBarController(model: model, onGames: { [weak model] in model?.showGamesLibrary() })
+        touchBar.attach(to: panel)
+        roomTouchBar = touchBar
 
         activityObserver = model.arena.$expanded.removeDuplicates().sink { [weak self] detached in
             guard let self else { return }
@@ -6824,6 +6902,10 @@ enum RoomPresentationPreview {
         model.floatingBarHidden = false
         model.currentParticipantID = "preview-local"
         model.currentUserName = "You"
+        model.arena.localParticipantID = "preview-local"
+        model.arena.localName = "You"
+        // Explicit offline UI harness: host bots locally, never send invitations or packets.
+        model.arena.send = { _, _ in }
         model.participants = [RoomParticipant(id: "preview-local", name: "You"), RoomParticipant(id: "preview-peer", name: "Luna")]
         model.messages = [
             RoomMessage(senderID: "preview-peer", sender: "Luna", text: "Music, conversation, or a quick round?", sentNanos: 1),

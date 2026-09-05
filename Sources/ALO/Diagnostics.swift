@@ -84,6 +84,8 @@ struct ReceiverTimingDiagnostics: Sendable, Equatable {
     var driftMeasurementAgeMilliseconds: Double? = nil
     var video: VideoPresentationTimingSnapshot? = nil
     var videoEnabled = false
+    var activePlayoutBufferMilliseconds: Double? = nil
+    var automaticSyncState: String? = nil
 }
 
 struct HostListenerTimingDiagnostics: Sendable, Equatable {

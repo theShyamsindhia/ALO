@@ -7,6 +7,7 @@ struct ArenaPanel: View {
     @ObservedObject var session: ArenaSession
     var detached = false
     @State private var showsControls = false
+    @State private var configuredBots = 1
     private let accent = ArenaAppearance.accent
     var body: some View {
         VStack(spacing: 0) {
@@ -70,12 +71,23 @@ struct ArenaPanel: View {
         ZStack {
             VStack(spacing: 0) {
                 ArenaPlayerRoster(session: session, compact: true).padding(.horizontal, 10).padding(.vertical, 6)
-                ArenaSurface(session: session).frame(maxWidth: .infinity, maxHeight: .infinity)
+                GeometryReader { geometry in
+                    let width = min(geometry.size.width, geometry.size.height * 1000 / 610)
+                    ArenaSurface(session: session)
+                        .frame(width: width, height: width * 610 / 1000)
+                        .position(x: geometry.size.width / 2, y: geometry.size.height / 2)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
                     .clipped()
                 HStack(spacing: 12) {
                     Text(session.mode == .spectator ? "Spectating" : "Click arena to focus")
                         .foregroundStyle(.white.opacity(0.5))
                     Spacer(minLength: 0)
+                    if session.networked && session.mode != .spectator && session.playerSlots.contains(where: { !$0.isBot && $0.index != session.localIndex }) {
+                        HStack(spacing: 4) {
+                            Circle().fill((session.latencyMilliseconds ?? 0) > 120 ? Color.orange : accent).frame(width: 5, height: 5)
+                            Text(session.latencyMilliseconds.map { "\($0) ms" } ?? "Measuring…").monospacedDigit()
+                        }.help("Game round-trip delay. Audio sync cannot reduce network latency.")
+                    }
                     Button("Controls") { showsControls = true; session.togglePause() }
                     Text("Esc · Menu").foregroundStyle(.white.opacity(0.5))
                 }.font(.system(size: 10, weight: .medium)).buttonStyle(.plain).padding(.horizontal, 14).frame(height: 28)
@@ -109,13 +121,13 @@ struct ArenaPanel: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 ZStack(alignment: .bottomLeading) {
-                    if let image = session.gameBackground {
+                    if let image = session.arenaBackground {
                         Image(nsImage: image).resizable().scaledToFill().frame(height: detached ? 185 : 100).clipped()
                     } else { Rectangle().fill(.white.opacity(0.04)).frame(height: 100) }
                     LinearGradient(colors: [.clear, .black.opacity(0.7)], startPoint: .top, endPoint: .bottom)
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Rift Arena").font(.system(size: 22, weight: .semibold))
-                        Text("Platform fighter · Solo or room duel").font(.system(size: 11)).foregroundStyle(.white.opacity(0.65))
+                        Text("Platform fighter · Up to 4 players").font(.system(size: 11)).foregroundStyle(.white.opacity(0.65))
                     }.padding(14)
                 }.frame(height: detached ? 185 : 100).clipShape(RoundedRectangle(cornerRadius: 14))
                 Text("Choose your fighter").font(.system(size: 12, weight: .semibold))
@@ -138,32 +150,31 @@ struct ArenaPanel: View {
                     }
                 }
                 if session.mode == .picker {
-                    HStack(spacing: 10) {
-                        Button { session.practice() } label: { Label("Play solo", systemImage: "play.fill").frame(maxWidth: .infinity) }
-                            .buttonStyle(.borderedProminent)
-                        Button { session.host() } label: { Label("Invite room", systemImage: "person.2").frame(maxWidth: .infinity) }
-                            .buttonStyle(.bordered).disabled(session.send == nil)
-                            .help("Open two player slots. Both players must ready up before the match begins.")
-                    }.controlSize(.large)
+                    Text("Choose your arena").font(.system(size: 12, weight: .semibold))
+                    HStack(spacing: 8) {
+                        ForEach(ArenaMap.allCases, id: \.self) { map in
+                            Button { session.selectedMap = map } label: {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    ArenaMapThumbnail(map: map, selected: session.selectedMap == map)
+                                        .frame(height: 45)
+                                    Text(map.title).font(.system(size: 10, weight: .semibold)).lineLimit(1)
+                                    Text(map.subtitle).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(2)
+                                }.padding(9).frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(.white.opacity(session.selectedMap == map ? 0.10 : 0.035), in: RoundedRectangle(cornerRadius: 10))
+                                    .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.white.opacity(session.selectedMap == map ? 0.3 : 0.08)))
+                            }.buttonStyle(.plain).accessibilityLabel("\(map.title), \(map.subtitle)\(session.selectedMap == map ? ", selected" : "")")
+                        }
+                    }
+                    Text("4 player slots · 8 spectators. Late joiners can take over a live bot; a full match opens in spectate mode.")
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
                     ForEach(session.lobbies) { lobby in
-                        Button { session.join(lobby, spectate: lobby.started) } label: {
+                        Button { session.join(lobby) } label: {
                             HStack {
-                                Text("\(session.names[lobby.peerID] ?? "Room member")’s match")
-                                Spacer(); Text(lobby.started ? "Spectate" : "Join").foregroundStyle(accent)
+                                Text("\(session.names[lobby.peerID] ?? "Room member") · \(lobby.map.title)")
+                                Spacer(); Text(lobby.availableSlots > 0 ? (lobby.started ? "Take bot slot" : "Join") : "Spectate").foregroundStyle(accent)
                             }.font(.system(size: 12)).padding(12).background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
                         }.buttonStyle(.plain)
                     }
-                } else if session.mode == .readyHost || session.mode == .readyGuest {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Label("You · " + (session.localReady ? "Ready" : "Not ready"), systemImage: session.localReady ? "checkmark.circle.fill" : "circle")
-                            Label("Rival · " + (session.remoteReady ? "Ready" : "Not ready"), systemImage: session.remoteReady ? "checkmark.circle.fill" : "circle")
-                        }.font(.system(size: 11))
-                        Spacer()
-                        Button(session.localReady ? "Unready" : "Ready up") { session.readyUp() }.buttonStyle(.borderedProminent)
-                    }
-                } else {
-                    HStack { ProgressView().controlSize(.small); Text(session.notice).font(.system(size: 12)); Spacer(); Button("Cancel") { session.leave() } }
                 }
                 if session.mode == .picker && !session.notice.isEmpty { Text(session.notice).font(.system(size: 11)).foregroundStyle(accent) }
                 DisclosureGroup("How to play") {
@@ -171,6 +182,44 @@ struct ArenaPanel: View {
                         .font(.system(size: 11)).foregroundStyle(.white.opacity(0.6)).padding(.top, 6)
                 }.font(.system(size: 11))
             }.padding(14).frame(maxWidth: detached ? 720 : .infinity).frame(maxWidth: .infinity)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 8) {
+                if session.mode == .picker {
+                    HStack(spacing: 12) {
+                        Stepper("Bots: \(configuredBots)", value: $configuredBots, in: 0...3)
+                            .font(.system(size: 11)).fixedSize()
+                        Spacer(minLength: 0)
+                        Button { session.host(botCount: configuredBots) } label: {
+                            Label("Create room match", systemImage: "person.2.fill")
+                        }.buttonStyle(.borderedProminent).disabled(session.send == nil)
+                            .help("Invites your room. Everyone readies up, then late joiners can replace bots.")
+                    }
+                    if session.send == nil { Text("Join a live room to create a match.").font(.system(size: 10)).foregroundStyle(.secondary) }
+                } else if session.mode == .hosting || session.mode == .readyHost || session.mode == .readyGuest {
+                    HStack(spacing: 6) {
+                        ForEach(session.playerSlots, id: \.index) { slot in
+                            VStack(spacing: 3) {
+                                Text(slot.name).lineLimit(1)
+                                Text(slot.isBot ? "Bot" : slot.ready ? "Ready" : "Not ready").foregroundStyle(.secondary)
+                            }.font(.system(size: 10)).frame(maxWidth: .infinity)
+                        }
+                    }
+                    HStack {
+                        if session.isActivityHost {
+                            Button("Add bot") { session.addBot() }.disabled(!session.canAddBot)
+                            Button("Remove bot") { session.removeBot() }.disabled(!session.canRemoveBot)
+                        }
+                        Spacer(minLength: 0)
+                        Button("Leave") { session.leave() }
+                        Button(session.localReady ? "Unready" : "Ready up") { session.readyUp() }.buttonStyle(.borderedProminent)
+                    }.font(.system(size: 11))
+                } else {
+                    HStack { ProgressView().controlSize(.small); Text(session.notice).font(.system(size: 12)); Spacer(); Button("Cancel") { session.leave() } }
+                }
+            }.padding(12).frame(maxWidth: .infinity)
+                .background(Color(red: 0.16, green: 0.16, blue: 0.17))
+                .overlay(alignment: .top) { Divider().opacity(0.3) }
         }
     }
 }
@@ -253,13 +302,18 @@ final class ArenaSKView: SKView {
 final class ArenaScene: SKScene {
     private weak var session: ArenaSession?
     private var bodies = [SKNode]()
-    private var blades = [SKShapeNode]()
+    private var rigs = [ArenaFighterRig]()
+    private var builtMap: ArenaMap?
+    private let worldCamera = SKCameraNode()
     private var shields = [SKShapeNode]()
-    private var labels = [SKLabelNode]()
-    private var damageLabels = [SKLabelNode]()
     private var ambient = SKNode()
+    private var backdropNode: SKSpriteNode?
+    private var depthLayers: [(SKNode, CGFloat)] = []
+    private var shadows: [SKShapeNode] = []
+    private var introTitle = SKLabelNode(fontNamed: "AvenirNext-DemiBold")
+    private var introNames = SKLabelNode(fontNamed: "AvenirNext-Medium")
+    private var cinematicBars: [SKSpriteNode] = []
     private var effects = SKNode()
-    private var usesIllustratedFighters = false
     private var announcement = SKLabelNode(fontNamed: "AvenirNext-Heavy")
     private var clockLabel = SKLabelNode(fontNamed: "AvenirNext-DemiBold")
     private var priorHits = [0, 0]
@@ -285,12 +339,21 @@ final class ArenaScene: SKScene {
         addChild(node); return node
     }
     private func buildWorld() {
-        // Static vector geometry: no downloads, per-frame textures or physics bodies.
-        if let image = session?.gameBackground {
+        removeAllChildren(); worldCamera.removeAllChildren(); camera = worldCamera
+        worldCamera.position = CGPoint(x: 500, y: 305); worldCamera.setScale(1); worldCamera.zPosition = 100; addChild(worldCamera)
+        bodies.removeAll(); rigs.removeAll(); shields.removeAll(); shadows.removeAll()
+        cinematicBars.removeAll(); depthLayers.removeAll(); ambient.removeAllChildren(); effects.removeAllChildren()
+        builtMap = session?.simulation.map
+        priorHits = session?.simulation.fighters.map(\.hitSerial) ?? []
+        priorStocks = session?.simulation.fighters.map(\.stocks) ?? []
+        lastFrame = -1
+        // Artwork layers are decoded once; rig nodes and platform geometry are reused per frame.
+        if let image = session?.arenaBackground {
             let backdrop = SKSpriteNode(texture: SKTexture(image: image))
-            backdrop.size = self.size; backdrop.position = CGPoint(x: 500, y: 305); backdrop.zPosition = -50
+            backdropNode = backdrop
+            backdrop.size = CGSize(width: 1280, height: 790); backdrop.position = CGPoint(x: 500, y: 305); backdrop.zPosition = -50
             addChild(backdrop)
-            let veil = SKSpriteNode(color: NSColor(white: 0.05, alpha: 0.18), size: self.size)
+            let veil = SKSpriteNode(color: NSColor(white: 0.05, alpha: 0.18), size: CGSize(width: 1280, height: 790))
             veil.position = backdrop.position; veil.zPosition = -49; addChild(veil)
         } else {
         let moon = SKShapeNode(circleOfRadius: 86)
@@ -310,9 +373,33 @@ final class ArenaScene: SKScene {
             addChild(shape(points, color: color))
         }
         }
+        if let image = session?.midgroundArtwork {
+            let layer = SKNode(); layer.zPosition = -25
+            let islands = SKSpriteNode(texture: SKTexture(image: image))
+            islands.size = CGSize(width: 1100, height: 670); islands.position = CGPoint(x: 500, y: 285)
+            islands.alpha = 0.75; layer.addChild(islands); addChild(layer); depthLayers.append((layer, 1.25))
+        }
+        // Separate vector silhouettes move at different depths; the arena stays fixed.
+        for layer in 0..<2 {
+            let node = SKNode(); node.zPosition = layer == 0 ? -20 : 22
+            for side in [0, 1] {
+                let x = side == 0 ? -35.0 : 1005.0
+                let vine = shape([CGPoint(x: x, y: 0), CGPoint(x: x + 25, y: Double(220 + layer * 100)),
+                                  CGPoint(x: x + 55, y: 0)], color: NSColor(white: 0.06 + Double(layer) * 0.02, alpha: 0.8))
+                node.addChild(vine)
+                for leaf in 0..<6 {
+                    let frond = SKShapeNode(ellipseOf: CGSize(width: 70, height: 15))
+                    frond.fillColor = NSColor(calibratedRed: 0.13, green: 0.17, blue: 0.15, alpha: 0.65)
+                    frond.strokeColor = .clear; frond.position = CGPoint(x: x + 22, y: Double(35 + leaf * 30))
+                    frond.zRotation = Double(leaf % 2 == 0 ? 1 : -1) * 0.5
+                    node.addChild(frond)
+                }
+            }
+            addChild(node); depthLayers.append((node, CGFloat(layer + 1)))
+        }
         let ring = SKShapeNode(ellipseOf: CGSize(width: 680, height: 145))
         ring.position = CGPoint(x: 500, y: 112); ring.strokeColor = mint.withAlphaComponent(0.12); ring.lineWidth = 2; addChild(ring)
-        for (index, platform) in ArenaSimulation.platforms.enumerated() {
+        for (index, platform) in (session?.simulation.arenaPlatforms ?? ArenaSimulation.platforms).enumerated() {
             let l = platform.left, r = platform.right, y = platform.top
             addChild(shape([CGPoint(x: l, y: y), CGPoint(x: r, y: y), CGPoint(x: r - 24, y: y - 40),
                             CGPoint(x: (l + r) / 2 + 25, y: y - (index == 0 ? 112 : 65)), CGPoint(x: l + 15, y: y - 40)],
@@ -327,53 +414,31 @@ final class ArenaScene: SKScene {
                 }
             }
         }
-        _ = label("Hollow Observatory", x: 500, y: 40, size: 10, color: mint.withAlphaComponent(0.4))
-        for i in 0..<2 {
-            let color = i == 0 ? mint : coral
+        _ = label(session?.simulation.map.title ?? "Hollow Observatory", x: 500, y: 40, size: 10, color: mint.withAlphaComponent(0.4))
+        for (i, fighter) in (session?.simulation.fighters ?? []).enumerated() {
+            let color = NSColor(ArenaAppearance.playerColor(i))
+            let shadow = SKShapeNode(ellipseOf: CGSize(width: 46, height: 9))
+            shadow.fillColor = NSColor.black.withAlphaComponent(0.5); shadow.strokeColor = .clear
+            shadow.zPosition = 3; addChild(shadow); shadows.append(shadow)
             let body = SKNode(); body.zPosition = 10
-            let coat = shape([CGPoint(x: -20, y: 11), CGPoint(x: -14, y: 42), CGPoint(x: 12, y: 45), CGPoint(x: 23, y: 9), CGPoint(x: 0, y: 17)], color: color.withAlphaComponent(0.85), line: color)
-            body.addChild(coat)
-            for x in [-10, 10] {
-                let leg = SKShapeNode(rectOf: CGSize(width: 10, height: 18), cornerRadius: 3)
-                leg.position = CGPoint(x: x, y: 6); leg.fillColor = NSColor(white: 0.16, alpha: 1); leg.strokeColor = color; body.addChild(leg)
-            }
-            let head = SKShapeNode(rectOf: CGSize(width: 29, height: 26), cornerRadius: 10)
-            head.position = CGPoint(x: 0, y: 47); head.fillColor = NSColor(calibratedRed: 0.10, green: 0.13, blue: 0.22, alpha: 1)
-            head.strokeColor = color; head.lineWidth = 2; body.addChild(head)
-            let visor = SKShapeNode(rectOf: CGSize(width: 23, height: 5), cornerRadius: 2)
-            visor.position = CGPoint(x: 4, y: 49); visor.fillColor = .white; visor.strokeColor = color; visor.glowWidth = 2; body.addChild(visor)
-            let blade = SKShapeNode(); blade.fillColor = color; blade.strokeColor = .white; blade.lineWidth = 1
-            body.addChild(blade); blades.append(blade)
-            if let artwork = session?.fighterArtwork {
-                usesIllustratedFighters = true
-                body.children.forEach { $0.isHidden = true }
-                let kind = session?.simulation.fighters[i].kind ?? (i == 0 ? .nova : .atlas)
-                let sheet = SKTexture(image: artwork)
-                let rect = kind == .nova ? CGRect(x: 0, y: 0.06, width: 0.55, height: 0.89) : CGRect(x: 0.55, y: 0.06, width: 0.45, height: 0.89)
-                let figure = SKSpriteNode(texture: SKTexture(rect: rect, in: sheet))
-                figure.size = CGSize(width: kind == .nova ? 88 : 65, height: 88)
-                figure.anchorPoint = CGPoint(x: 0.5, y: 0); figure.position = CGPoint(x: 0, y: -4)
-                figure.name = "illustration"; body.addChild(figure)
-                let marker = SKShapeNode(ellipseOf: CGSize(width: 40, height: 8))
-                marker.position.y = 1; marker.strokeColor = color; marker.fillColor = color.withAlphaComponent(0.18)
-                marker.lineWidth = 2; body.addChild(marker)
-            }
-            let shield = SKShapeNode(circleOfRadius: 42); shield.position.y = 29; shield.strokeColor = color
-            shield.lineWidth = 2; shield.glowWidth = 2; body.addChild(shield); shields.append(shield)
+            let rig = ArenaFighterRig(kind: fighter.kind, color: color)
+            body.addChild(rig); rigs.append(rig)
+            let shield = SKShapeNode(circleOfRadius: 44); shield.position.y = 35; shield.strokeColor = color
+            shield.lineWidth = 2; shield.glowWidth = 1; body.addChild(shield); shields.append(shield)
             addChild(body); bodies.append(body)
-            let x = i == 0 ? 155.0 : 845.0
-            let plate = SKShapeNode(rectOf: CGSize(width: 220, height: 74), cornerRadius: 14)
-            plate.position = CGPoint(x: x, y: 550); plate.fillColor = NSColor(white: 0.03, alpha: 0.75)
-            plate.strokeColor = color.withAlphaComponent(0.35); plate.isHidden = true; addChild(plate)
-            labels.append(label("", x: x, y: 563, size: 13, color: color))
-            damageLabels.append(label("", x: x, y: 531, size: 23))
-            labels[i].isHidden = true; damageLabels[i].isHidden = true
             let slot = SKLabelNode(fontNamed: "AvenirNext-DemiBold")
-            slot.text = "P\(i + 1)"; slot.fontSize = 11; slot.fontColor = color; slot.position.y = usesIllustratedFighters ? 88 : 72
+            slot.text = "P\(i + 1)"; slot.fontSize = 11; slot.fontColor = color; slot.position.y = 104
             body.addChild(slot)
         }
-        announcement.position = CGPoint(x: 500, y: 407); announcement.fontSize = 54; announcement.zPosition = 30; addChild(announcement)
-        clockLabel.position = CGPoint(x: 500, y: 549); clockLabel.fontSize = 20; addChild(clockLabel)
+        for y in [24.0, 586.0] {
+            let bar = SKSpriteNode(color: .black.withAlphaComponent(0.7), size: CGSize(width: 1000, height: 48))
+            bar.position = CGPoint(x: 0, y: y - 305); bar.zPosition = 40; worldCamera.addChild(bar); cinematicBars.append(bar)
+        }
+        introTitle.position = CGPoint(x: 0, y: 190); introTitle.fontSize = 24; introTitle.zPosition = 41; worldCamera.addChild(introTitle)
+        introNames.position = CGPoint(x: 0, y: 157); introNames.fontSize = 14; introNames.fontColor = .white.withAlphaComponent(0.7)
+        introNames.zPosition = 41; worldCamera.addChild(introNames)
+        announcement.position = CGPoint(x: 0, y: 102); announcement.fontSize = 54; announcement.zPosition = 30; worldCamera.addChild(announcement)
+        clockLabel.position = CGPoint(x: 0, y: 244); clockLabel.fontSize = 20; worldCamera.addChild(clockLabel)
         ambient.zPosition = -10; addChild(ambient)
         for index in 0..<16 {
             let mote = SKShapeNode(circleOfRadius: index % 3 == 0 ? 1.6 : 0.8)
@@ -392,10 +457,33 @@ final class ArenaScene: SKScene {
         ambient.isHidden = !session.effectsEnabled || NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         ambient.isPaused = ambient.isHidden
         let sim = session.simulation
-        guard sim.fighters.count == 2 else { return }
+        guard !sim.fighters.isEmpty else { return }
+        if bodies.count != sim.fighters.count || builtMap != sim.map { buildWorld() }
+        let motion = session.effectsEnabled && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let centre = sim.fighters.map(\.x).reduce(0, +) / Double(sim.fighters.count)
+        if motion {
+            let alive = sim.fighters.filter { $0.stocks > 0 && $0.respawn == 0 }
+            let minX = alive.map(\.x).min() ?? 350, maxX = alive.map(\.x).max() ?? 650
+            let targetX = min(550, max(450, (minX + maxX) / 2))
+            let targetScale = sim.countdown > 0 ? 1 + Double(sim.countdown) / 180 * 0.08 : min(1.12, max(1, (maxX - minX) / 800))
+            worldCamera.position.x += (targetX - worldCamera.position.x) * 0.04
+            worldCamera.setScale(worldCamera.xScale + (targetScale - worldCamera.xScale) * 0.04)
+        } else {
+            worldCamera.position = CGPoint(x: 500, y: 305); worldCamera.setScale(1)
+        }
+        let offset = motion ? min(32, max(-32, (centre - 500) * 0.11)) : 0
+        backdropNode?.position = CGPoint(x: 500 - offset * 0.35, y: 305 + (motion ? sin(currentTime * 0.18) * 3 : 0))
+        for (node, depth) in depthLayers {
+            node.position.x = -offset * depth + (motion ? sin(currentTime * 0.3) * depth * 2 : 0)
+        }
+        let introAlpha = sim.countdown > 0 ? min(1, Double(sim.countdown) / 30) : 0
+        cinematicBars.forEach { $0.alpha = introAlpha }
+        introTitle.text = sim.map.title
+        introNames.text = session.playerNames.map { String($0.prefix(16)) }.joined(separator: "   ·   ")
+        introTitle.alpha = introAlpha; introNames.alpha = introAlpha
         let changed = sim.frame != lastFrame
         lastFrame = sim.frame
-        for i in 0..<2 {
+        for i in sim.fighters.indices {
             let f = sim.fighters[i], body = bodies[i]
             let target = CGPoint(x: f.x, y: f.y)
             // Smooth remote snapshots without extrapolating authoritative game state.
@@ -403,34 +491,24 @@ final class ArenaScene: SKScene {
                 body.position.x += (target.x - body.position.x) * 0.55
                 body.position.y += (target.y - body.position.y) * 0.55
             } else { body.position = target }
+            let ground = sim.arenaPlatforms.filter { f.x >= $0.left && f.x <= $0.right && $0.top <= f.y + 1 }.map(\.top).max()
+            shadows[i].isHidden = ground == nil || f.respawn > 0 || f.stocks == 0
+            if let ground {
+                let height = max(0, f.y - ground)
+                shadows[i].position = CGPoint(x: f.x, y: ground + 2)
+                shadows[i].xScale = max(0.35, 1 - height / 500)
+                shadows[i].alpha = max(0.12, 0.65 - height / 600)
+            }
             body.xScale = f.facing * (f.kind == .atlas ? 1.16 : 1)
             body.yScale = f.kind == .atlas ? 1.08 : 1
             body.isHidden = f.respawn > 0 || f.stocks == 0
             body.alpha = f.invulnerable > 0 && sim.frame % 12 < 6 ? 0.45 : 1
-            body.zRotation = f.stun > 0 ? -f.facing * 0.18 : f.attackFrames > 0 ? -f.facing * sin(Double(f.attackAge) * 0.18) * 0.16 : sin(Double(sim.frame) * 0.2) * min(0.06, abs(f.vx) / 5000)
-            if let figure = body.childNode(withName: "illustration") {
-                figure.position.y = -4 + (f.grounded && abs(f.vx) > 40 ? abs(sin(Double(sim.frame) * 0.4)) * 3 : 0)
-            }
+            rigs[i].update(fighter: f, frame: sim.frame, reducedMotion: !motion)
             shields[i].isHidden = f.invulnerable == 0
-            if !usesIllustratedFighters && blades[i].path == nil {
-            let path = CGMutablePath()
-            if f.kind == .nova {
-                path.addLines(between: [CGPoint(x: 16, y: 26), CGPoint(x: 61, y: 39), CGPoint(x: 53, y: 27), CGPoint(x: 18, y: 21)])
-                path.closeSubpath()
-            } else { path.addRoundedRect(in: CGRect(x: 16, y: 15, width: 27, height: 25), cornerWidth: 7, cornerHeight: 7) }
-            blades[i].path = path
-            }
-            blades[i].zRotation = f.attackFrames > 0 ? Double(f.attackDirection) * 0.9 + sin(Double(f.attackAge) * 0.25) * 0.7 : 0
-            if changed {
-            let name = String(session.playerNames[i].prefix(18))
-            labels[i].text = "\(name) · \(f.kind.title.uppercased())"
-            damageLabels[i].text = "\(Int(f.damage))%   " + String(repeating: "●", count: max(0, f.stocks))
-            damageLabels[i].fontColor = f.damage > 100 ? coral : .white
-            }
             if changed && f.attackFrames > 0 && (f.attackAge == 2 || sim.attackActive(i) && f.attackAge % 3 == 0) {
                 let box = sim.attackCenter(i)
                 let arc = SKShapeNode(circleOfRadius: box.radius)
-                arc.position = CGPoint(x: box.x, y: box.y); arc.strokeColor = (i == 0 ? mint : coral).withAlphaComponent(sim.attackActive(i) ? 0.8 : 0.25)
+                arc.position = CGPoint(x: box.x, y: box.y); arc.strokeColor = NSColor(ArenaAppearance.playerColor(i)).withAlphaComponent(sim.attackActive(i) ? 0.8 : 0.25)
                 arc.lineWidth = sim.attackActive(i) ? 5 : 1; arc.xScale = 0.7
                 effects.addChild(arc); arc.run(.sequence([.group([.fadeOut(withDuration: 0.18), .scale(to: 1.25, duration: 0.18)]), .removeFromParent()]))
             }
@@ -439,7 +517,7 @@ final class ArenaScene: SKScene {
                 priorHits[i] = f.hitSerial
             }
             if f.stocks < priorStocks[i] {
-                burst(at: CGPoint(x: min(960, max(40, f.x)), y: min(480, max(50, f.y))), color: i == 0 ? mint : coral, count: 24)
+                burst(at: CGPoint(x: min(960, max(40, f.x)), y: min(480, max(50, f.y))), color: NSColor(ArenaAppearance.playerColor(i)), count: 24)
             }
             priorStocks[i] = f.stocks
         }
@@ -456,5 +534,19 @@ final class ArenaScene: SKScene {
             spark.zRotation = angle; effects.addChild(spark)
             spark.run(.sequence([.group([.moveBy(x: cos(angle) * 70, y: sin(angle) * 70, duration: 0.3), .fadeOut(withDuration: 0.3)]), .removeFromParent()]))
         }
+    }
+}
+
+private struct ArenaMapThumbnail: View {
+    let map: ArenaMap
+    let selected: Bool
+    var body: some View {
+        Canvas { context, size in
+            for platform in map.platforms {
+                let rect = CGRect(x: platform.left / 1000 * size.width, y: (1 - platform.top / 500) * size.height,
+                                  width: (platform.right - platform.left) / 1000 * size.width, height: 3)
+                context.fill(Path(roundedRect: rect, cornerRadius: 1.5), with: .color(selected ? ArenaAppearance.accent : .gray))
+            }
+        }.background(.black.opacity(0.12), in: RoundedRectangle(cornerRadius: 6)).accessibilityHidden(true)
     }
 }

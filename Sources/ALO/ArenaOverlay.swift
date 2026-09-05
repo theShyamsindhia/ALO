@@ -8,7 +8,12 @@ enum ArenaAppearance {
     static let surface = Color(red: 0.18, green: 0.18, blue: 0.19)
     static let secondary = Color.white.opacity(0.58)
     static func playerColor(_ slot: Int) -> Color {
-        slot == 0 ? accent : Color(red: 0.75, green: 0.59, blue: 0.51)
+        switch slot {
+        case 0: accent
+        case 1: Color(red: 0.75, green: 0.59, blue: 0.51)
+        case 2: Color(red: 0.49, green: 0.69, blue: 0.61)
+        default: Color(red: 0.78, green: 0.71, blue: 0.47)
+        }
     }
 }
 
@@ -19,9 +24,18 @@ struct ArenaPlayerRoster: View {
     var compact = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: compact ? 8 : 12) {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: compact ? 8 : 12), count: compact ? max(1, session.simulation.fighters.count) : min(2, max(1, session.simulation.fighters.count))), spacing: 10) {
             ForEach(Array(session.simulation.fighters.enumerated()), id: \.offset) { index, fighter in
-                player(index, fighter: fighter)
+                if compact && session.simulation.fighters.count > 2 {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(session.playerNames.indices.contains(index) ? session.playerNames[index] : "Player \(index + 1)")
+                            .font(.system(size: 10, weight: .semibold)).lineLimit(1)
+                        Text(fighter.stocks == 0 ? "Eliminated" : "P\(index + 1) · \(fighter.stocks) lives · \(Int(fighter.damage))%")
+                            .font(.system(size: 9)).monospacedDigit().lineLimit(1)
+                            .foregroundStyle(ArenaAppearance.playerColor(index))
+                    }.frame(maxWidth: .infinity, alignment: .leading).padding(7)
+                        .background(ArenaAppearance.playerColor(index).opacity(0.08), in: RoundedRectangle(cornerRadius: 9))
+                } else { player(index, fighter: fighter) }
             }
         }
         .accessibilityElement(children: .contain)

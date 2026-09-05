@@ -1,8 +1,10 @@
 # Games library and downloadable content
 
-The room's Games library lists real games supported by the installed app: Rift Arena (room duel, training, spectating) and Fourfold (bot or pass-and-play on the same Mac). Each card shows its download size, progress, verification, installation, retry/cancel state, and installed version. Installed packs can be played offline, updated or removed. An unsuccessful update keeps the previous installation intact.
+The room's Games library lists real games supported by the installed app: Rift Arena (four-player room matches, bots, spectating) and Fourfold (bot or pass-and-play on the same Mac). Artwork-led cards keep download/install/update actions visible and put removal in More. Progress, verification, retry/cancel and version details remain available. Installed packs can be loaded offline, updated or removed. Rift matches require a room; Fourfold also supports local play. An unsuccessful update keeps the previous installation intact.
 
-Native engines and multiplayer protocols ship with ALO. Downloaded packs change artwork, arena naming, descriptions and theme colors. Packs cannot add native code, scripts, executables, dynamic libraries or new mechanics; those changes require an app update. This is deliberate: content releases can stay small and independent without running downloaded code.
+Native engines and multiplayer protocols ship with ALO. Downloaded packs change artwork, arena naming, descriptions and theme colors. Version 3 of Rift adds Moon Garden and a transparent parallax layer and requires the four-player, articulated native engine; the library prompts older app versions to update ALO. Version-1 pack files remain immutable.
+
+Packs cannot add native code, scripts, executables, dynamic libraries or new mechanics; those changes require an app update. This is deliberate: content releases can stay small and independent without running downloaded code.
 
 ## Release a content pack
 

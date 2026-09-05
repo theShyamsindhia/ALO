@@ -4,10 +4,14 @@
 
 - Existing compact room aesthetic preserved, quiet status dots with accessible hover details, no permanent connection/voice/ducking dashboard. Settings hold microphone routing details, music ducking and incoming audio options.
 - Resizable expanded room with remembered dimensions. Chat/People/Games remain accessible through familiar controls and compact navigation menus. Playback stays present; Sync this Mac targets only the local receiver; screen/queue actions are in More.
-- Downloadable data-only game library, two native games, verified compact packs, offline play after installation. Rift supports solo, room ready-up, spectating, rematch, embedded/pop-out/fullscreen, menus and controller bindings. Fourfold supports bot or local pass-and-play.
+- Downloadable data-only game library, two native games, verified compact packs, offline content after installation. Rift supports four-player room creation with bots, ready-up, midgame bot takeover, spectating, rematch, embedded/pop-out/fullscreen, menus and controller bindings. Its articulated fighters, three layouts, layered parallax and local results ledger are implemented. Fourfold supports bot or local pass-and-play.
 - Replies, reactions, own-message edit/delete, retained-history search, shared pins, mentions and in-app preview preferences. URL cards and URL drops are local text operations, no automatic remote metadata retrieval. History policy is available from chat options.
 - Broadcaster UI queue ordering with backward-compatible durable carrier. Per-person persistent voice levels, optional music ducking, local microphone record/playback test, local receiving-status recovery summaries and private/public channel audit.
 - Game/session, game rendering, game packs, chat UI/reducer, microphone test and voice preference code are separate files. Existing GUI.swift remains large; further mechanical extraction should preserve behavior in small follow-up changes.
+
+- Native Touch Bar: playback, local incoming-audio mute, local sync, and More → Chat/People/Games. No polling or simulated hardware claims.
+- Local automatic audio realignment with sustained drift threshold/cooldown and timing in Settings. Receiver-owned correction avoids competing host resets. Call/Bluetooth hardware testing remains required.
+- Default-off lyrics lookup and collapsible chat panel; missing/ambiguous tracks have explicit states. Timed highlighting awaits a trustworthy song playhead.
 
 ## Remaining work with distinct acceptance criteria
 
