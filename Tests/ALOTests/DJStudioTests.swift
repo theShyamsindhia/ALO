@@ -7,6 +7,12 @@ import ALOCore
 
 @Suite(.serialized) @MainActor
 struct DJStudioTests {
+    @Test func onlyPendingDJIntentIsCancelledWhenStudioCloses() {
+        #expect(MeshSession.shouldStopDJBroadcast(intendsToBroadcast: true, audioSource: .djStudio))
+        #expect(!MeshSession.shouldStopDJBroadcast(intendsToBroadcast: false, audioSource: .djStudio))
+        #expect(!MeshSession.shouldStopDJBroadcast(intendsToBroadcast: true, audioSource: .allSystemAudio))
+    }
+
     @Test func equalPowerCrossfade() {
         for x in stride(from: 0.0, through: 1.0, by: 0.01) {
             let (a, b) = DJMixMath.gains(crossfade: x)

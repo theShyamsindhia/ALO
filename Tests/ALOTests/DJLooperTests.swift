@@ -5,7 +5,7 @@ import Testing
 @Suite(.serialized) @MainActor
 struct DJLooperTests {
     @Test func relayMetersUnsharedAndHonorsSubscriberRevocation() throws {
-        let relay = DJAudioRelay()
+        let relay = DJAudioRelay(automaticDrain: false)
         let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2))
         let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 32))
         buffer.frameLength = 32
@@ -14,18 +14,23 @@ struct DJLooperTests {
         }
         let time = AVAudioTime(sampleTime: 0, atRate: 48_000)
         relay.consume(buffer, time: time)
+        #expect(relay.level == 0) // The render callback only writes the lock-free ring.
+        relay.flushForTesting()
         #expect(relay.level == 0.25)
         let first = UUID(), second = UUID()
         let firstCalls = DJLoopCallCounter(), secondCalls = DJLoopCallCounter()
         try relay.install(owner: first) { _, _ in firstCalls.increment() }
         relay.consume(buffer, time: time)
+        relay.flushForTesting()
         #expect(firstCalls.value == 1)
         #expect(relay.remove(owner: first))
         relay.consume(buffer, time: time)
+        relay.flushForTesting()
         #expect(firstCalls.value == 1)
         try relay.install(owner: second) { _, _ in secondCalls.increment() }
         #expect(!relay.remove(owner: first))
         relay.consume(buffer, time: time)
+        relay.flushForTesting()
         #expect(firstCalls.value == 1 && secondCalls.value == 1)
         #expect(relay.remove(owner: second))
     }

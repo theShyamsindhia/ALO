@@ -2886,8 +2886,7 @@ final class ALOViewModel: ObservableObject {
     }
 
     func stopDJBroadcast() {
-        guard DJStudio.isSharingIfCreated, isHost else { return }
-        meshSession?.stopBroadcasting()
+        meshSession?.stopDJBroadcasting()
     }
 
     func startDJBroadcast() {

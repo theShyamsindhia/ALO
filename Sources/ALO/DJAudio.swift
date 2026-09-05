@@ -1,6 +1,8 @@
 import AVFoundation
 import Combine
+import CoreAudio
 import ALOCore
+import ALOSharedAudioClient
 
 /// Equal-power fades keep independent decks balanced through the center.
 enum DJMixMath {
@@ -307,51 +309,91 @@ enum DJWaveform {
 
 /// A single subscription owns DJ broadcast output. Revocation precedes graph teardown.
 final class DJAudioRelay: @unchecked Sendable {
-    private let lock = NSLock()
+    private let levelLock = NSLock()
+    private let deliveryQueue = DispatchQueue(label: "in.werai.audio.dj-relay", qos: .userInteractive)
+    private let ring: ALOTapAudioRingHandle?
+    private var timer: DispatchSourceTimer?
+    private var nextRingFrame: UInt64 = 0
     private var owner: UUID?
     private var handler: AudioSource.AudioHandler?
     private var peak: Float = 0
+    init(automaticDrain: Bool = true) {
+        ring = ALOTapAudioRingCreate()
+        guard automaticDrain else { return }
+        let timer = DispatchSource.makeTimerSource(queue: deliveryQueue)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(5), leeway: .milliseconds(1))
+        timer.setEventHandler { [weak self] in self?.drain() }
+        self.timer = timer
+        timer.resume()
+    }
+    deinit {
+        timer?.cancel()
+        if let ring { ALOTapAudioRingDestroy(ring) }
+    }
     func install(owner: UUID, handler: @escaping AudioSource.AudioHandler) throws {
-        try lock.withLock {
+        try deliveryQueue.sync {
             guard self.owner == nil else { throw ALOError("The DJ mix is already being shared.") }
+            if let ring { nextRingFrame = ALOTapAudioRingLatestFrame(ring) }
             self.owner = owner; self.handler = handler
         }
     }
     @discardableResult func remove(owner: UUID) -> Bool {
-        lock.withLock {
+        deliveryQueue.sync {
             guard self.owner == owner else { return false }
-            self.owner = nil; handler = nil; return true
+            self.owner = nil; handler = nil
+            if let ring { nextRingFrame = ALOTapAudioRingLatestFrame(ring) }
+            return true
         }
     }
-    var level: Float { lock.withLock { peak } }
+    var level: Float { levelLock.withLock { peak } }
+
+    /// Runs on AVAudioEngine's render callback. Keep this path allocation-free,
+    /// lock-free, and isolated from packetization and network fan-out.
     func consume(_ buffer: AVAudioPCMBuffer, time: AVAudioTime) {
-        guard buffer.format.channelCount == 2, let channels = buffer.floatChannelData else { return }
-        let count = Int(buffer.frameLength)
-        let recipient = lock.withLock { owner }
-        var maximum: Float = 0
-        // Rehearsal needs the meter, but no interleaved network PCM allocation.
-        var samples = recipient == nil ? [] : [Int16](repeating: 0, count: count * 2)
-        for frame in 0..<count {
-            for channel in 0..<2 {
-                let raw = channels[channel][frame]
-                let value = raw.isFinite ? raw : 0
-                maximum = max(maximum, abs(value))
-                if recipient != nil {
-                    samples[frame * 2 + channel] = Int16(max(-1, min(1, value)) * Float(Int16.max))
-                }
-            }
-        }
-        let stamp = time.isHostTimeValid
-            ? UInt64(AVAudioTime.seconds(forHostTime: time.hostTime) * 1_000_000_000)
-            : MonotonicClock.nowNanos()
-        // Allocation and conversion happen unlocked. Revocation remains atomic with
-        // delivery; a replacement subscriber cannot receive its predecessor's PCM.
-        lock.withLock {
-            peak = maximum
-            guard let recipient, owner == recipient else { return }
-            handler?(samples, stamp)
-        }
+        guard let ring, buffer.format.channelCount == 2,
+              buffer.frameLength > 0, let channels = buffer.floatChannelData else { return }
+        ALOTapAudioRingMarkCallback(ring)
+        ALOTapAudioRingWritePlanarFloat(
+            ring, channels[0], channels[1], UInt32(buffer.frameLength),
+            time.isHostTimeValid ? time.hostTime : AudioGetCurrentHostTime(),
+            AudioGetHostClockFrequency() / buffer.format.sampleRate
+        )
     }
+
+    private func drain() {
+        guard let ring else { return }
+        let latest = ALOTapAudioRingLatestFrame(ring)
+        let capacity = ALOTapAudioRingCapacity()
+        if latest > nextRingFrame &+ capacity { nextRingFrame = latest - capacity }
+        guard latest > nextRingFrame else { return }
+        let frameLimit = UInt32(min(latest - nextRingFrame, 960))
+        var floats = [Float](repeating: 0, count: Int(frameLimit) * 2)
+        var firstHostTime: UInt64 = 0
+        let count = floats.withUnsafeMutableBufferPointer {
+            ALOTapAudioRingRead(ring, nextRingFrame, $0.baseAddress, frameLimit, &firstHostTime)
+        }
+        guard count > 0 else {
+            nextRingFrame = latest > capacity ? latest - capacity : latest
+            return
+        }
+        nextRingFrame &+= UInt64(count)
+        if count < frameLimit { floats.removeLast(Int(frameLimit - count) * 2) }
+        var maximum: Float = 0
+        var samples = [Int16](repeating: 0, count: floats.count)
+        for index in floats.indices {
+            let value = floats[index].isFinite ? floats[index] : 0
+            maximum = max(maximum, abs(value))
+            samples[index] = Int16(max(-1, min(1, value)) * Float(Int16.max))
+        }
+        levelLock.withLock { peak = maximum }
+        guard owner != nil else { return }
+        let stamp = firstHostTime == 0
+            ? MonotonicClock.nowNanos()
+            : MonotonicClock.ticksToNanos(firstHostTime)
+        handler?(samples, stamp)
+    }
+
+    func flushForTesting() { deliveryQueue.sync { drain() } }
 }
 
 @MainActor
