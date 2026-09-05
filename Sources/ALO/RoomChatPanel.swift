@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import ImageIO
 import UniformTypeIdentifiers
 import ALOCore
 
@@ -409,7 +410,8 @@ struct RoomChatPanel: View {
 
     private func pendingAttachmentPreview(_ attachment: PendingChatAttachment) -> some View {
         HStack(spacing: 9) {
-            filePreview(url: attachment.url, contentType: attachment.metadata.contentType)
+            filePreview(url: attachment.url, contentType: attachment.metadata.contentType,
+                        allowsImagePreview: true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(attachment.metadata.fileName).lineLimit(1)
                 Text(ByteCountFormatter.string(fromByteCount: Int64(attachment.metadata.byteCount), countStyle: .file))
@@ -430,7 +432,8 @@ struct RoomChatPanel: View {
             if let localURL { NSWorkspace.shared.open(localURL) }
         } label: {
             HStack(spacing: 9) {
-                filePreview(url: localURL, contentType: attachment.contentType)
+                filePreview(url: localURL, contentType: attachment.contentType,
+                            allowsImagePreview: false)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(attachment.fileName).font(.system(size: 11, weight: .semibold)).lineLimit(1)
                     Text(localURL == nil
@@ -451,9 +454,10 @@ struct RoomChatPanel: View {
     }
 
     @ViewBuilder
-    private func filePreview(url: URL?, contentType: String?) -> some View {
-        if let url, contentType.flatMap(UTType.init)?.conforms(to: .image) == true,
-           let image = NSImage(contentsOf: url) {
+    private func filePreview(url: URL?, contentType: String?, allowsImagePreview: Bool) -> some View {
+        if allowsImagePreview, let url,
+           contentType.flatMap(UTType.init)?.conforms(to: .image) == true,
+           let image = Self.boundedThumbnail(at: url) {
             Image(nsImage: image).resizable().scaledToFill()
                 .frame(width: 34, height: 34).clipShape(RoundedRectangle(cornerRadius: 7))
         } else {
@@ -462,6 +466,24 @@ struct RoomChatPanel: View {
                 .frame(width: 34, height: 34)
                 .background(accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
         }
+    }
+
+    private static func boundedThumbnail(at url: URL) -> NSImage? {
+        guard let source = CGImageSourceCreateWithURL(
+            url as CFURL,
+            [kCGImageSourceShouldCache: false] as CFDictionary
+        ), CGImageSourceGetCount(source) == 1,
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+        let width = properties[kCGImagePropertyPixelWidth] as? Int,
+        let height = properties[kCGImagePropertyPixelHeight] as? Int,
+        width > 0, height > 0, width <= 8_192, height <= 8_192,
+        let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: 96,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true
+        ] as CFDictionary) else { return nil }
+        return NSImage(cgImage: image, size: .zero)
     }
 }
 

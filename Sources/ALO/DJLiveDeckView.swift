@@ -16,6 +16,7 @@ struct DJLiveDeckView: View {
             HStack {
                 Text("DECK A · LIVE").font(.caption.weight(.bold)).tracking(2).foregroundStyle(color)
                 Spacer()
+                DJRecordButton(studio: studio, label: "A", stage: live.stage, bindings: bindings)
                 Label(live.looping ? "LOOP" : waitingForInput ? "WAITING" : live.delaySeconds > 0.05 ? "REWIND" : "LIVE", systemImage: live.looping ? "repeat" : "dot.radiowaves.left.and.right")
                     .font(.caption2.weight(.bold)).foregroundStyle(live.looping ? color : waitingForInput ? .secondary : .green)
             }
@@ -23,6 +24,15 @@ struct DJLiveDeckView: View {
                 Text("Broadcast input").font(.headline)
                 Text(live.stage == .broadcast ? "Your changes are heard by the whole room" : "Your changes are heard only on this Mac")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+            if deck.isRecordingClip {
+                HStack {
+                    Text(String(format: "Take ready · %.1fs", deck.duration)).font(.caption).foregroundStyle(color)
+                    Spacer()
+                    Button("Play take") { action { try studio.playRecordedA() } }
+                        .help("Play the captured take instead of live input · \(bindings.label(for: .deckAPlay))")
+                    Button("Clear") { deck.clearRecording() }
+                }.controlSize(.small)
             }
             waveform
             HStack {
@@ -71,16 +81,16 @@ struct DJLiveDeckView: View {
             Canvas { context, size in
                 let peaks = live.waveform
                 guard !peaks.isEmpty else { return }
-                let step = size.width / Double(peaks.count)
+                let step = size.width / CGFloat(peaks.count)
                 var bars = Path()
                 for (index, peak) in peaks.enumerated() {
-                    let height = max(1, Double(peak) * size.height * 0.9)
-                    bars.addRoundedRect(in: CGRect(x: Double(index) * step, y: (size.height - height) / 2,
+                    let height = max(CGFloat(1), CGFloat(peak) * size.height * 0.9)
+                    bars.addRoundedRect(in: CGRect(x: CGFloat(index) * step, y: (size.height - height) / 2,
                                                    width: max(1, step - 1), height: height), cornerSize: CGSize(width: 1, height: 1))
                 }
                 context.fill(bars, with: .color(color.opacity(0.7)))
                 let delay = scrubbing ? scrubDelay : live.delaySeconds
-                let x = size.width * (1 - min(1, delay / max(0.001, live.historyDuration)))
+                let x = size.width * CGFloat(1 - min(1, delay / max(0.001, live.historyDuration)))
                 var playhead = Path()
                 playhead.move(to: CGPoint(x: x, y: 0)); playhead.addLine(to: CGPoint(x: x, y: size.height))
                 context.stroke(playhead, with: .color(.white), lineWidth: 2)
@@ -93,7 +103,7 @@ struct DJLiveDeckView: View {
                                     guard live.historyDuration > 0 else { return }
                                     scrubbing = true
                                     let fraction = min(1, max(0, value.location.x / max(1, geometry.size.width)))
-                                    scrubDelay = live.historyDuration * (1 - fraction)
+                                    scrubDelay = live.historyDuration * Double(1 - fraction)
                                 }
                                 .onEnded { _ in
                                     guard scrubbing else { return }

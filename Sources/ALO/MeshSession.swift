@@ -400,6 +400,21 @@ final class MeshSession {
         control.publishBroadcaster(active: false)
     }
 
+    func stopDJBroadcasting() {
+        guard Self.shouldStopDJBroadcast(
+            intendsToBroadcast: intendsToBroadcast,
+            audioSource: broadcastAudioSource
+        ) else { return }
+        stopBroadcasting()
+    }
+
+    nonisolated static func shouldStopDJBroadcast(
+        intendsToBroadcast: Bool,
+        audioSource: SystemAudioSource
+    ) -> Bool {
+        intendsToBroadcast && audioSource == .djStudio
+    }
+
     func sendArena(_ data: Data, targetID: String?) { control.publishArena(data, targetID: targetID) }
 
     func sendChat(_ text: String) { control.publishChat(text) }
