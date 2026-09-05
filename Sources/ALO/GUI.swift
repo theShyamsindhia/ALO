@@ -6818,7 +6818,7 @@ enum RoomPresentationPreview {
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
         let model = ALOViewModel(discoverRooms: false)
-        model.roomName = "After Hours"
+        model.roomName = "Offline preview"
         model.phase = .live
         model.floatingSection = .chat
         model.floatingBarHidden = false

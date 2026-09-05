@@ -17,6 +17,7 @@ struct RoomChatPanel: View {
     @State private var onlyPins = false
     @State private var showsSearch = false
     @State private var showsHistory = false
+    @State private var sendFailed = false
     @Binding var draft: String
     @Binding var notificationMode: ChatNotificationMode
     let mentionNames: [String]
@@ -83,6 +84,10 @@ struct RoomChatPanel: View {
                 TextField("Message \(roomTitle)", text: $draft, axis: .vertical)
                     .lineLimit(1...3).textFieldStyle(.plain).focused($focused)
                     .onSubmit(submit)
+                    .onKeyPress(keys: [.return], phases: .down) { press in
+                        guard !press.modifiers.contains(.shift) else { return .ignored }
+                        submit(); return .handled
+                    }
                 if draft.count > 600 { Text("\(draft.count)/700").font(.caption2).foregroundStyle(draft.count > 700 ? .red : .secondary) }
                 Button(action: submit) {
                     Image(systemName: editing == nil ? "arrow.up.circle.fill" : "checkmark.circle.fill")
@@ -97,6 +102,11 @@ struct RoomChatPanel: View {
             let proposed = draft + (draft.isEmpty ? "" : " ") + links
             guard !links.isEmpty, proposed.count <= RoomChatOperation.maximumTextLength else { return false }
             draft = proposed; focused = true; return true
+        }
+        .alert("Message not sent", isPresented: $sendFailed) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("There is no active room connection. Your draft has been kept.")
         }
         .onChange(of: isPresented) { _, visible in if visible { focused = true } }
     }
@@ -228,7 +238,7 @@ struct RoomChatPanel: View {
         guard validDraft else { return }
         let operation = RoomChatOperation(kind: editing == nil ? .message : .edit, target: editing ?? replyTo, text: draft.trimmingCharacters(in: .whitespacesAndNewlines))
         guard operation.encoded != nil else { return }
-        guard send(operation) else { return }
+        guard send(operation) else { sendFailed = true; return }
         draft = ""; editing = nil; replyTo = nil; focused = true
     }
 }
