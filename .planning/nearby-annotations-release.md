@@ -4,6 +4,14 @@ Status: full integration now targets **0.14.1/build 82**, not released. Latest p
 
 ## Current handoff — September 6
 
+- Candidate `25a6683` includes the full integration plus remote `579cb66`, the
+  bounded terminal-audio retry, deterministic Arena final-state delivery, and
+  secure automatic-sync preference/diagnostic wiring. Focused validation passed
+  51 tests in eight suites. CI run 33985273011 passed the complete Mac suite,
+  strict room scenarios, and unsigned iOS app linking. Fable low review reported
+  no actionable findings. Main merge and signed/notarized release packaging are
+  the remaining gates.
+
 - User requested removal of obsolete drafts and an increment over the actual
   latest published release. Removed empty draft release records383084669(v0.13.48)
   and383079720(v0.13.47), preserving JSON metadata outside repo under
