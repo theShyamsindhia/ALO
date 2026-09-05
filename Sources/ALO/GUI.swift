@@ -1473,6 +1473,10 @@ final class ALOViewModel: ObservableObject {
     @Published var mediaSwitchBusy = false
     @Published var permissionNotice = false
     @Published private(set) var recordingRestartRequired = false
+    @Published var floatingNavigationVisible = UserDefaults.standard.object(forKey: "room.floating.navigationVisible") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(floatingNavigationVisible, forKey: "room.floating.navigationVisible") }
+    }
+    var floatingNavigationHeight: CGFloat { floatingNavigationVisible ? FloatingMetrics.walkieBarHeight : 0 }
     @Published var floatingSection: FloatingSection = .collapsed
     @Published var floatingBarHidden: Bool
     @Published private(set) var menuBarPopoverVisible = false
@@ -4029,6 +4033,10 @@ struct FloatingRoomView: View {
         presentation == .menuBar ? FloatingMetrics.menuBarMediaHeight : FloatingMetrics.barHeight
     }
 
+    private var navigationHeight: CGFloat {
+        presentation == .floating ? model.floatingNavigationHeight : 0
+    }
+
     private var roomContentHeight: CGFloat {
         model.floatingPanelHeight + roomBarHeight - FloatingMetrics.barHeight
     }
@@ -4089,7 +4097,7 @@ struct FloatingRoomView: View {
             if presentation == .floating {
                 GeometryReader { geometry in
                     roomContent(width: max(FloatingMetrics.width, geometry.size.width - FloatingMetrics.windowInset * 2),
-                                height: max(roomBarHeight, geometry.size.height - FloatingMetrics.windowInset * 2))
+                                height: max(roomBarHeight + navigationHeight, geometry.size.height - FloatingMetrics.windowInset * 2))
                         .floatingSurface(cornerRadius: FloatingMetrics.cornerRadius)
                         .padding(FloatingMetrics.windowInset)
                 }
@@ -4112,7 +4120,7 @@ struct FloatingRoomView: View {
                 VStack(spacing: 0) {
                     expandedContent
                 }
-                    .frame(width: width, height: max(0, height - roomBarHeight - FloatingMetrics.separatorHeight))
+                    .frame(width: width, height: max(0, height - roomBarHeight - navigationHeight - FloatingMetrics.separatorHeight))
                     .id(expansionIdentity)
                     .transition(panelTransition)
 
@@ -4123,6 +4131,11 @@ struct FloatingRoomView: View {
             }
 
             roomBar
+            if presentation == .floating, model.floatingNavigationVisible {
+                WalkieTalkieBar(model: model, showsCloseButton: false, embeddedFloating: true,
+                               onRoomSettings: { showsRoomInfo = true })
+                    .frame(height: navigationHeight)
+            }
         }
         .frame(width: width, height: height, alignment: .bottom)
         .background(ArtworkAtmosphere(colors: model.roomAtmosphereColors))
@@ -4187,10 +4200,27 @@ struct FloatingRoomView: View {
                     .frame(width: 32, height: 32)
             }
             .buttonStyle(FlatToolButtonStyle(active: showsMediaMore))
-            .help("More: screen sharing and room queue")
+            .help("More: Chat, People, sharing and room settings")
             .accessibilityLabel("More room controls")
             .popover(isPresented: $showsMediaMore, arrowEdge: .top) {
                 VStack(alignment: .leading, spacing: 4) {
+                    Button {
+                        showsMediaMore = false
+                        if presentation == .floating { model.showChatInFloatingBar() }
+                        else { model.roomGamesVisible = false; model.floatingSection = .chat }
+                    } label: {
+                        Label("Chat", systemImage: "bubble.left.and.text.bubble.right")
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(8)
+                    }
+                    Button {
+                        showsMediaMore = false
+                        if presentation == .floating { model.showPeopleInFloatingBar() }
+                        else { model.floatingSection = .people }
+                    } label: {
+                        Label("People", systemImage: "person.2")
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(8)
+                    }
+                    Divider()
                     Button {
                         showsMediaMore = false
                         model.toggleVideoFromFloatingBar()
@@ -4214,6 +4244,8 @@ struct FloatingRoomView: View {
                     }
                     if presentation == .floating {
                         Divider()
+                        Toggle("Member and navigation strip", isOn: $model.floatingNavigationVisible)
+                            .toggleStyle(.checkbox).padding(8)
                         Button {
                             showsMediaMore = false
                             model.hideFloatingBar()
@@ -5583,6 +5615,8 @@ struct RoomPlaybackProgressDivider: View {
 struct WalkieTalkieBar: View {
     @ObservedObject var model: ALOViewModel
     var showsCloseButton = true
+    var embeddedFloating = false
+    var onRoomSettings: (() -> Void)? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -5623,11 +5657,11 @@ struct WalkieTalkieBar: View {
         .padding(.horizontal, 8)
         .frame(
             minWidth: showsCloseButton ? FloatingMetrics.walkieBarMinWidth : FloatingMetrics.width,
-            maxWidth: showsCloseButton ? .infinity : FloatingMetrics.width,
+            maxWidth: showsCloseButton || embeddedFloating ? .infinity : FloatingMetrics.width,
             minHeight: FloatingMetrics.walkieBarHeight,
             maxHeight: FloatingMetrics.walkieBarHeight
         )
-        .background(Color.black)
+        .background(embeddedFloating ? Palette.opaqueSurface.opacity(0.72) : Color.black)
         .overlay(alignment: .top) {
             Rectangle()
                 .fill(Palette.glassHighlight.opacity(0.72))
@@ -5734,7 +5768,8 @@ struct WalkieTalkieBar: View {
                 badge: model.unreadMessageCount,
                 help: "Conversation"
             ) {
-                showsCloseButton ? model.showChatInFloatingBar() : model.showChat()
+                if showsCloseButton || embeddedFloating { model.showChatInFloatingBar() }
+                else { model.roomGamesVisible = false; model.showChat() }
             }
             .keyboardShortcut("1", modifiers: .command)
 
@@ -5743,11 +5778,15 @@ struct WalkieTalkieBar: View {
                 active: model.floatingSection == .people,
                 help: "People and volume"
             ) {
-                showsCloseButton ? model.showPeopleInFloatingBar() : model.showPeople()
+                (showsCloseButton || embeddedFloating) ? model.showPeopleInFloatingBar() : model.showPeople()
             }
             .keyboardShortcut("2", modifiers: .command)
 
-            settingsMenu
+            if let onRoomSettings {
+                communicationButton(icon: "slider.horizontal.3", active: false, help: "Room settings", action: onRoomSettings)
+            } else {
+                settingsMenu
+            }
 
             if showsCloseButton {
                 Button(action: model.hideWalkieBar) {
@@ -6070,7 +6109,7 @@ private final class FloatingRoomWindowController: NSObject, NSWindowDelegate {
                 x: 0,
                 y: 0,
                 width: FloatingMetrics.windowWidth,
-                height: FloatingMetrics.windowHeight(for: model.floatingPanelHeight)
+                height: FloatingMetrics.windowHeight(for: model.floatingPanelHeight + model.floatingNavigationHeight)
             ),
             styleMask: [.borderless, .resizable],
             backing: .buffered,
@@ -6114,6 +6153,7 @@ private final class FloatingRoomWindowController: NSObject, NSWindowDelegate {
             model.$participants.map(\.count).removeDuplicates(),
             model.$incomingMessagePreview.map { $0?.id }.removeDuplicates()
         )
+        .combineLatest(model.$floatingNavigationVisible.removeDuplicates())
         .dropFirst()
         .sink { [weak self] _ in
             DispatchQueue.main.async { self?.resize(animated: true) }
@@ -6146,7 +6186,7 @@ private final class FloatingRoomWindowController: NSObject, NSWindowDelegate {
         pendingShrink = nil
 
         let expanded = model.floatingSection != .collapsed && !model.permissionNotice
-        let height = expanded ? preferredExpandedSize.height : FloatingMetrics.windowHeight(for: model.floatingPanelHeight)
+        let height = expanded ? preferredExpandedSize.height : FloatingMetrics.windowHeight(for: model.floatingPanelHeight + model.floatingNavigationHeight)
         let width = expanded ? preferredExpandedSize.width : FloatingMetrics.windowWidth
         panel.minSize = NSSize(width: FloatingMetrics.windowWidth, height: expanded ? 440 : height)
         panel.maxSize = expanded ? NSSize(width: 1800, height: 1400) : NSSize(width: width, height: height)

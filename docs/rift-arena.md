@@ -4,7 +4,7 @@
 
 The room gamepad opens Games, not a running game. The library lists Rift Arena and Fourfold, with explicit download, cancel, retry, verify, update and remove states. Selecting an installed game loads its presentation data; the fighter starts only after the creator starts a room match and all human players ready up. Ordinary room members receiving lobby advertisements do not start a simulation, render view, or timer. Library browsing creates no SpriteKit scene.
 
-Rift uses original illustrated observatory and moon-garden scenery and fighter artwork, compressed into an approximately 4.02 MiB version-4 pack. Only small native engines and catalog metadata ship in the app. See [downloadable packs](game-library.md) for content releases and their limits. The app shell follows ALO's charcoal surfaces, system typography and muted accents. Player 1 is lavender; player 2 is clay, with text labels and state so color is not the only identifier.
+Rift uses original illustrated observatory and moon-garden scenery and fighter artwork, compressed into an approximately 3.43 MiB version-4 pack. Only small native engines and catalog metadata ship in the app. See [downloadable packs](game-library.md) for content releases and their limits. The app shell follows ALO's charcoal surfaces, system typography and muted accents. Player 1 is lavender; player 2 is clay, with text labels and state so color is not the only identifier.
 
 ## Play
 
