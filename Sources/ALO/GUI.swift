@@ -4363,6 +4363,13 @@ struct FloatingRoomView: View {
 
             }
 
+            roomBarButton(
+                icon: "rectangle.on.rectangle",
+                active: model.roomHasVideo || model.mediaSwitchBusy,
+                disabled: !model.canSelectVideo,
+                help: videoMenuTitle
+            ) { model.toggleVideoFromFloatingBar() }
+
             Button { showsMediaMore.toggle() } label: {
                 Image(systemName: "ellipsis")
                     .font(.system(size: 15, weight: .semibold))
@@ -4406,13 +4413,6 @@ struct FloatingRoomView: View {
                             .frame(maxWidth: .infinity, alignment: .leading).padding(8)
                     }
                     .disabled(!model.hasBroadcaster || model.currentParticipantID == nil || model.mediaSwitchBusy)
-                    Button {
-                        showsMediaMore = false
-                        model.toggleVideoFromFloatingBar()
-                    } label: {
-                        Label(videoMenuTitle, systemImage: "rectangle.on.rectangle")
-                            .frame(maxWidth: .infinity, alignment: .leading).padding(8)
-                    }.disabled(!model.canSelectVideo)
                     Button {
                         showsMediaMore = false
                         model.showQueue()
