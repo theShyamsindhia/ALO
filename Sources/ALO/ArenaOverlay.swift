@@ -192,7 +192,7 @@ struct ArenaMenuOverlay: View {
                     .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(ArenaAppearance.accent)
             }
             if session.networked {
-                Text("Four player slots · \(session.spectatorCount) watching. Join mid-match by taking a live bot’s slot; otherwise spectate. The match ends if its host leaves.")
+                Text("Four player slots · \(session.spectatorCount) watching. Join mid-match through an open slot or a live bot; otherwise spectate. The match ends if its host leaves.")
                     .font(.system(size: 10)).foregroundStyle(ArenaAppearance.secondary)
             }
         }

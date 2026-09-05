@@ -311,6 +311,50 @@ struct ArenaRoomRosterTests {
         #expect(guest.notice.contains("host left"))
     }
 
+    @Test @MainActor func lateHumanCanJoinUnusedSlotWithoutResettingLiveMatch() throws {
+        let bus = Bus(), host = bus.add("host"), first = bus.add("first"), late = bus.add("late")
+        defer { bus.stop() }
+        host.host(); bus.drain()
+        first.join(try #require(first.lobbies.first)); bus.drain()
+        host.readyUp(); first.readyUp(); bus.drain()
+        #expect(host.mode == .host)
+        host.simulation.countdown = 0
+        host.simulation.frame = 120
+        host.simulation.fighters[0].damage = 44
+        host.update(at: ProcessInfo.processInfo.systemUptime + 0.1); bus.drain()
+
+        let lobby = try #require(late.lobbies.first)
+        #expect(lobby.started)
+        #expect(lobby.availableSlots == 2)
+        late.join(lobby); bus.drain()
+
+        #expect(late.mode == .guest)
+        #expect(late.localIndex == 2)
+        #expect(host.simulation.fighters.count == 3)
+        #expect(host.simulation.frame >= 120)
+        #expect(host.simulation.fighters[0].damage == 44)
+        #expect(host.availableSlots == 1)
+    }
+
+    @Test @MainActor func hostPublishesLiveStateEveryOtherSimulationTick() throws {
+        let bus = Bus(), host = bus.add("host"), guest = bus.add("guest")
+        defer { bus.stop() }
+        host.host(); bus.drain()
+        guest.join(try #require(guest.lobbies.first)); bus.drain()
+        host.readyUp(); guest.readyUp(); bus.drain()
+        #expect(host.mode == .host)
+
+        let now = ProcessInfo.processInfo.systemUptime
+        host.update(at: now + ArenaSimulation.step)
+        #expect(!bus.pending.contains { sender, data, _ in
+            sender == "host" && (try? JSONDecoder().decode(ArenaPacket.self, from: data))?.kind == .state
+        })
+        host.update(at: now + ArenaSimulation.step * 2)
+        #expect(bus.pending.contains { sender, data, _ in
+            sender == "host" && (try? JSONDecoder().decode(ArenaPacket.self, from: data))?.kind == .state
+        })
+    }
+
     @Test @MainActor func receivedResultsCarryStableIDsAndDeduplicate() throws {
         let bus = Bus(), host = bus.add("host"), guest = bus.add("guest")
         defer { bus.stop() }

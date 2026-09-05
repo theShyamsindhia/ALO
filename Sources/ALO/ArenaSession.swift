@@ -108,7 +108,12 @@ final class ArenaSession: ObservableObject {
     var readyPlayerCount: Int { playerSlots.filter(\.ready).count }
     var isActivityHost: Bool { [.hosting, .readyHost, .host].contains(mode) }
     var availableSlots: Int {
-        if mode == .host { return simulation.winner == nil ? botSlots.filter { simulation.fighters[$0].stocks > 0 }.count : 0 }
+        if mode == .host {
+            guard simulation.winner == nil else { return 0 }
+            let openSlots = max(0, ArenaSimulation.maximumFighters - simulation.fighters.count)
+            let replaceableBots = botSlots.filter { simulation.fighters[$0].stocks > 0 }.count
+            return openSlots + replaceableBots
+        }
         return max(0, 4 - simulation.fighters.count) + botSlots.count
     }
     private(set) var peerID: String?
@@ -442,10 +447,14 @@ final class ArenaSession: ObservableObject {
                 transmit(mode == .host ? .state : .ready, state: simulation, target: sender, ready: localReady, started: mode == .host); return
             }
             let replacement = botSlots.sorted().first { mode != .host || (simulation.winner == nil && simulation.fighters[$0].stocks > 0) }
-            let canAppend = mode != .host && simulation.fighters.count < 4
+            let canAppend = simulation.winner == nil && simulation.fighters.count < ArenaSimulation.maximumFighters
             guard let slot = replacement ?? (canAppend ? simulation.fighters.count : nil) else { admitSpectator(sender, packet: packet, now: now); return }
             if slot == simulation.fighters.count {
-                simulation = ArenaSimulation(kinds: simulation.fighters.map(\.kind) + [packet.fighter!], map: selectedMap)
+                if mode == .host {
+                    guard simulation.addFighter(packet.fighter!) == slot else { admitSpectator(sender, packet: packet, now: now); return }
+                } else {
+                    simulation = ArenaSimulation(kinds: simulation.fighters.map(\.kind) + [packet.fighter!], map: selectedMap)
+                }
             } else if mode != .host {
                 var kinds = simulation.fighters.map(\.kind); kinds[slot] = packet.fighter!
                 simulation = ArenaSimulation(kinds: kinds, map: selectedMap)
@@ -454,7 +463,9 @@ final class ArenaSession: ObservableObject {
             members[sender] = Member(slot: slot, ready: mode == .host, lastSeen: now, sequence: packet.sequence, probe: packet.probe)
             spectatorCount = spectators.count
             if mode == .hosting { mode = .readyHost }
-            notice = mode == .host ? "A room member took over a bot's live fighter." : "Room member joined. Ready up when everyone is here."
+            notice = mode == .host
+                ? (replacement == nil ? "A room member joined an open live slot." : "A room member took over a bot's live fighter.")
+                : "Room member joined. Ready up when everyone is here."
             refreshSlots(); sendRoster(); advertise(); startIfReady(); return
         }
         if packet.kind == .spectate { admitSpectator(sender, packet: packet, now: now); return }
@@ -530,7 +541,9 @@ final class ArenaSession: ObservableObject {
         if steps > 0 { bufferedActions = ArenaInput() }
         let finished = reportResultIfNeeded()
         if finished && mode == .host { sendRoster() }
-        if tickCount % 3 == 0 { revision += 1; playImpacts(); if mode == .host { sendRoster() } }
+        // Match the 30 Hz input cadence. Twenty-Hz snapshots made remote
+        // movement visibly step when three guests were playing at once.
+        if tickCount % 2 == 0 { revision += 1; playImpacts(); if mode == .host { sendRoster() } }
     }
     @discardableResult
     private func reportResultIfNeeded() -> Bool {

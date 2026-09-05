@@ -216,6 +216,20 @@ public struct ArenaSimulation: Codable, Equatable, Sendable {
         count == 2 ? (index == 0 ? 350 : 650) : 280 + Double(index) * 440 / Double(max(1, count - 1))
     }
 
+    /// Adds a fighter to a live round without rebuilding the existing state.
+    /// The new fighter enters protected while every current fighter, the clock,
+    /// and the remaining match time stay unchanged.
+    @discardableResult
+    public mutating func addFighter(_ kind: ArenaFighterKind) -> Int? {
+        guard winner == nil, fighters.count < Self.maximumFighters else { return nil }
+        let index = fighters.count
+        var fighter = ArenaFighter(kind: kind, x: Self.spawnX(index, count: index + 1), facing: index % 2 == 0 ? 1 : -1)
+        fighter.invulnerable = 120
+        fighters.append(fighter)
+        previousInputs.append(ArenaInput())
+        return index
+    }
+
     public mutating func tick(_ inputs: [ArenaInput]) {
         guard fighters.count >= 2, inputs.count == fighters.count, previousInputs.count == fighters.count, inputs.allSatisfy(\.isValid), winner == nil else { return }
         frame += 1
