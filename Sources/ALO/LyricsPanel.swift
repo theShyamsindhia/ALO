@@ -7,6 +7,7 @@ struct LyricsPanel: View {
     var accent: Color = Color(red: 0.55, green: 0.59, blue: 0.75)
     var position: Double? = nil
     var expandedPresentation = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var expanded = false
 
     var body: some View {
@@ -67,8 +68,22 @@ struct LyricsPanel: View {
                                 Text(result.plain).font(.system(size: 12)).foregroundStyle(.secondary)
                                     .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
                             }
-                        }.frame(maxHeight: 150)
-                            .onChange(of: active(result)) { _, id in if let id { proxy.scrollTo(id, anchor: .center) } }
+                        }
+                        .frame(maxHeight: 150)
+                        .onAppear {
+                            guard let id = active(result) else { return }
+                            DispatchQueue.main.async { proxy.scrollTo(id, anchor: .center) }
+                        }
+                        .onChange(of: active(result)) { _, id in
+                            guard let id else { return }
+                            if reduceMotion {
+                                proxy.scrollTo(id, anchor: .center)
+                            } else {
+                                withAnimation(.easeInOut(duration: 0.24)) {
+                                    proxy.scrollTo(id, anchor: .center)
+                                }
+                            }
+                        }
                     }
                     HStack {
                         if position == nil { Text("Timing unavailable").font(.system(size: 9)).foregroundStyle(.tertiary) }
