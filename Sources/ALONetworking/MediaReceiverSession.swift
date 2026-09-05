@@ -2,6 +2,28 @@ import Foundation
 import Network
 import ALOCore
 
+struct AnnotationTrafficBudget {
+    private struct Entry { let time: UInt64; let bytes: Int; let snapshot: Bool }
+    private var entries: [Entry] = []
+    private var head = 0
+    private var eventBytes = 0, snapshotBytes = 0
+    mutating func accept(bytes: Int, snapshot: Bool, now: UInt64) -> Bool {
+        while head < entries.count {
+            let entry = entries[head]
+            guard now < entry.time || now - entry.time >= 1_000_000_000 else { break }
+            if entry.snapshot { snapshotBytes -= entry.bytes } else { eventBytes -= entry.bytes }
+            head += 1
+        }
+        if head > 256 && head * 2 >= entries.count { entries.removeFirst(head); head = 0 }
+        let used = snapshot ? snapshotBytes : eventBytes
+        let limit = snapshot ? 16 * 1_024 * 1_024 : 1_048_576
+        guard bytes >= 0, entries.count - head < 2_048, bytes <= limit - used else { return false }
+        entries.append(Entry(time: now, bytes: bytes, snapshot: snapshot))
+        if snapshot { snapshotBytes += bytes } else { eventBytes += bytes }
+        return true
+    }
+}
+
 /// Receiver-only media adapter. Call attach directly from the admitted channel
 /// callback, before any MainActor hop. Packet callbacks run on its serial executor:
 /// the app must use a bounded output bridge, not an unbounded Task per packet.
@@ -62,6 +84,8 @@ public final class MediaReceiverSession: @unchecked Sendable {
         let expires: UInt64, renewAt: UInt64, setupDeadline: UInt64
         var cancel: (() -> Void)?
         var preparation: Preparation?, deferredAnchor: MediaStreamAnchor?
+        var committedPreparation: Preparation?
+        var retryAnchorAt: UInt64?
         var prepared = false, acknowledged = false, pathValidated = false
         var startup: [UInt64: AudioPacket] = [:]
         var lastData: UInt64 = 0
@@ -73,7 +97,12 @@ public final class MediaReceiverSession: @unchecked Sendable {
         var stream: MediaStreamIdentifier { .init(ticket: ticket) }
     }
     private struct Request { let id: UUID; let deadline: UInt64 }
-    private struct Output { let id = UUID(); let bytes: Data; let deadline: UInt64 }
+    private struct Output {
+        let id = UUID()
+        let bytes: Data
+        let deadline: UInt64
+        let completion: ((Result<Void, Error>) -> Void)?
+    }
     public let expected: Selection
     private let credentials: AuthenticatedChannelCredentials
     private let queue: DispatchQueue
@@ -97,6 +126,9 @@ public final class MediaReceiverSession: @unchecked Sendable {
     private var recentFrames: [UInt64: AudioPacket] = [:]
     private var retiredFrameFloor: UInt64?
     private var controlTimes: [UInt64] = [], auxiliaryTimes: [UInt64] = [], requestTimes: [UInt64] = []
+    private var annotationTraffic = AnnotationTrafficBudget()
+    private var videoReceiver: MediaVideoReceiver?
+    private var videoPreparation: Preparation?
 
     /// Inline on openMediaChannel's completion executor; handlers are installed
     /// before this completion fires. Deferred attachment cannot recover early data.
@@ -119,7 +151,7 @@ public final class MediaReceiverSession: @unchecked Sendable {
                 receiver.channel = channel
                 let priorState = channel.onState
                 channel.onState = { [weak receiver] value in
-                    if case .failed = value { receiver?.stopOnQueue(failed: true) }
+                    if case .failed(let error) = value { receiver?.stopOnQueue(failed: true, error: error) }
                     if value == .cancelled { receiver?.stopOnQueue(failed: true) }
                     priorState?(value)
                 }
@@ -150,9 +182,46 @@ public final class MediaReceiverSession: @unchecked Sendable {
     public func completePreparation(id: UUID, ready: Bool) { queue.async { self.completePreparationOnQueue(id: id, ready: ready) } }
     public func resynchronize(minimumCaptureTimeNanos: UInt64? = nil) { queue.async { self.requestRecovery(keyframe: false, minimum: minimumCaptureTimeNanos) } }
     public func requestKeyframe(minimumCaptureTimeNanos: UInt64? = nil) { queue.async { self.requestRecovery(keyframe: true, minimum: minimumCaptureTimeNanos) } }
-    public func sendAnnotation(_ bytes: Data) {
-        guard bytes.count <= AnnotationWireMessage.maximumWireBytes, (try? AnnotationWireMessage(encoded: bytes)) != nil else { return }
-        queue.async { if !self.stopped { self.enqueue(bytes) } }
+    /// The opener must return the admitted `.video` channel inline from
+    /// MeshControlPlane.openMediaChannel's completion, before hopping executors.
+    /// Video owns its retry/decoder path; its failures never stop audio.
+    public func startVideo(openChannel: @escaping VideoChannelOpener, callbacks: VideoReceiverCallbacks) {
+        queue.async {
+            guard !self.stopped, self.credentials.negotiated.initiatorCapabilities.contains(.receiveVideo) else {
+                callbacks.state(.stopped); return
+            }
+            self.videoReceiver?.stop()
+            let video = MediaVideoReceiver(credentials: self.credentials, open: { reply in
+                openChannel { result in
+                    switch result {
+                    case .success(let channel): MediaVideoConnection.attach(channel, queue: self.queue, completion: reply)
+                    case .failure(let error): self.queue.async { reply(.failure(error)) }
+                    }
+                }
+            }, callbacks: callbacks, authorized: { [weak self] stream in
+                guard let self, !self.stopped, let lease = self.lease(stream) else { return false }
+                return lease.expires > self.nowNanos() && lease.committedPreparation?.anchor.state == .running
+            }, requestIDR: { [weak self] floor in self?.requestRecovery(keyframe: true, minimum: floor) }, now: self.nowNanos)
+            self.videoReceiver = video
+            if let preparation = self.videoPreparation, preparation.anchor.state == .running {
+                video.select(stream: preparation.anchor.stream, captureFloor: preparation.anchor.captureTimeNanos,
+                             generation: preparation.lifecycleGeneration)
+            }
+        }
+    }
+    public func stopVideo() {
+        queue.async { self.videoReceiver?.stop(); self.videoReceiver = nil }
+    }
+    /// Completion runs on the media executor after the reliable send completes,
+    /// or exactly once with failure when validation, cancellation or expiry wins.
+    public func sendAnnotation(_ bytes: Data, completion: ((Result<Void, Error>) -> Void)? = nil) {
+        queue.async {
+            guard bytes.count <= AnnotationWireMessage.maximumWireBytes,
+                  (try? AnnotationWireMessage(encoded: bytes)) != nil else {
+                completion?(.failure(SecureTransportError.malformed)); return
+            }
+            self.enqueue(bytes, completion: completion)
+        }
     }
     func startOnQueue() {
         assertQueue(); guard timer == nil, !stopped else { return }
@@ -163,12 +232,15 @@ public final class MediaReceiverSession: @unchecked Sendable {
         self.timer = timer; timer.resume(); tick()
     }
     private func transition(_ value: State) { guard state != value else { return }; state = value; callbacks.state(value) }
-    func stopOnQueue(failed: Bool) {
+    func stopOnQueue(failed: Bool, error: Error = SecurePeerChannelError.cancelled) {
         assertQueue(); guard !stopped else { return }
         stopped = true; generation &+= 1; timer?.cancel(); timer = nil
+        videoReceiver?.stop(); videoReceiver = nil; videoPreparation = nil
         retire(active); retire(pending); active = nil; pending = nil
-        request = nil; extraRequests.removeAll(); outputs.removeAll(); probes.removeAll(); recentFrames.removeAll()
+        let abandoned = outputs; outputs.removeAll()
+        request = nil; extraRequests.removeAll(); probes.removeAll(); recentFrames.removeAll(); annotationTraffic = AnnotationTrafficBudget()
         clock.reset(); closeControl(); transition(failed ? .failed : .stopped)
+        for output in abandoned { output.completion?(.failure(error)) }
     }
     private func retire(_ lease: Lease?) {
         guard let lease else { return }; credentials.retireSubscriberTicket(lease.ticket)
@@ -178,7 +250,7 @@ public final class MediaReceiverSession: @unchecked Sendable {
         guard let pending else { return }
         send(.cancel(stream: pending.stream)); retire(pending); self.pending = nil
         nextAttempt = nowNanos() + 1_000_000_000
-        transition(active == nil ? .recovering : (active?.preparation?.anchor.state == .paused ? .paused : .active))
+        transition(active == nil ? .recovering : (active?.committedPreparation?.anchor.state == .paused ? .paused : .active))
     }
     func tick() {
         assertQueue(); guard !stopped else { return }
@@ -191,13 +263,17 @@ public final class MediaReceiverSession: @unchecked Sendable {
         if (request?.deadline ?? .max) <= now { request = nil; nextAttempt = now + 1_000_000_000; transition(.recovering) }
         if let active, active.expires <= now { retire(active); self.active = nil; transition(.recovering) }
         if let pending, pending.expires <= now || (!pending.acknowledged && pending.setupDeadline <= now) { discardPending() }
+        if let active, let retry = active.retryAnchorAt, now >= retry {
+            active.retryAnchorAt = nil; requestRecovery(keyframe: false, minimum: nil)
+        }
+        videoReceiver?.tick()
         let interval: UInt64 = clock.isReady ? 1_000_000_000 : 250_000_000
         if probes.count < 8, lastPing.map({ now >= $0 && now - $0 >= interval }) ?? true {
             let ping = clock.makePing(at: now)
             if let id = ping.id { probes[id] = now; lastPing = now; send(.clockPing(id: id, clientTimeNanos: now)) }
         }
         guard freshClock() != nil else { return }
-        let stalled = active.map { $0.preparation?.anchor.state == .running && now >= $0.lastData && now - $0.lastData > 3_000_000_000 } ?? false
+        let stalled = active.map { $0.committedPreparation?.anchor.state == .running && now >= $0.lastData && now - $0.lastData > 3_000_000_000 } ?? false
         if request == nil, pending == nil, now >= nextAttempt, active == nil || now >= active!.renewAt || stalled {
             let id = UUID(); request = Request(id: id, deadline: now + 8_000_000_000)
             if let active { send(.renew(requestID: id, stream: active.stream)) }
@@ -230,9 +306,20 @@ public final class MediaReceiverSession: @unchecked Sendable {
         let message: MediaControlWireMessage
         do { message = try MediaControlWireMessage(encoded: bytes) }
         catch {
-            guard budget(&auxiliaryTimes, limit: 16) else { stopOnQueue(failed: true); return }
             if bytes.count <= AnnotationWireMessage.maximumWireBytes,
-               (try? AnnotationWireMessage(encoded: bytes)) != nil, callbacks.annotation(bytes) { return }
+              let annotation = try? AnnotationWireMessage(encoded: bytes) {
+                let now = nowNanos()
+                // Up to 32 participants can each publish a 30 Hz gesture. Byte
+                // and message bounds also cover snapshot/control overhead.
+                let isSnapshot: Bool
+                if case .snapshotChunk = annotation { isSnapshot = true } else { isSnapshot = false }
+                guard annotationTraffic.accept(bytes: bytes.count, snapshot: isSnapshot, now: now) else {
+                    stopOnQueue(failed: true); return
+                }
+                if callbacks.annotation(bytes) { return }
+                stopOnQueue(failed: true); return
+            }
+            guard budget(&auxiliaryTimes, limit: 16) else { stopOnQueue(failed: true); return }
             if bytes.count <= 4_096, let root = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
                root["protocolName"] as? String == "alo.capture-metadata", callbacks.metadata(bytes) { return }
             stopOnQueue(failed: true); return
@@ -249,6 +336,7 @@ public final class MediaReceiverSession: @unchecked Sendable {
         case let .pause(stream, capture):
             guard let lease = lease(stream) else { return }
             lease.startup.removeAll(); lease.prepared = false; lease.acknowledged = false; lease.preparation = nil
+            lease.committedPreparation = nil; videoPreparation = nil; videoReceiver?.suspend()
             callbacks.paused(stream, capture); transition(.paused)
         case let .rejected(id, _):
             if request?.id == id { request = nil; nextAttempt = nowNanos() + 1_000_000_000; transition(active == nil ? .recovering : .active) }
@@ -306,7 +394,16 @@ public final class MediaReceiverSession: @unchecked Sendable {
         assertQueue(); guard !stopped else { return }
         guard let lease = [active, pending].compactMap({ $0 }).first(where: { $0.preparation?.id == id }),
               lease.preparation?.lifecycleGeneration == generation else { return }
-        if !ready { if pending === lease { discardPending() } else { stopOnQueue(failed: true) }; return }
+        if !ready {
+            if pending === lease { discardPending() }
+            else if let committed = lease.committedPreparation {
+                lease.preparation = committed; lease.prepared = true; lease.acknowledged = true
+                lease.startup.removeAll(); lease.deferredAnchor = nil
+                lease.retryAnchorAt = nowNanos() + 1_000_000_000
+                transition(committed.anchor.state == .paused ? .paused : .active)
+            }
+            return
+        }
         lease.prepared = true; acknowledgeIfReady(lease)
     }
     private func warmupReady(_ lease: Lease) -> Bool {
@@ -326,13 +423,21 @@ public final class MediaReceiverSession: @unchecked Sendable {
         let anchor = preparation.anchor
         guard active == nil || active === lease || anchor.state == .paused || anchor.hostPlaybackTimeNanos > hostNow + 20_000_000 else { discardPending(); return }
         lease.acknowledged = true
+        lease.committedPreparation = preparation; lease.retryAnchorAt = nil
         send(.anchorReady(stream: lease.stream, frameIndex: anchor.frameIndex, captureTimeNanos: anchor.captureTimeNanos, hostPlaybackTimeNanos: anchor.hostPlaybackTimeNanos))
         guard !stopped else { return }
+        videoPreparation = preparation
+        if anchor.state == .running {
+            videoReceiver?.select(stream: lease.stream, captureFloor: anchor.captureTimeNanos, generation: generation)
+        } else { videoReceiver?.suspend() }
         callbacks.anchorCommitted(preparation)
         if anchor.state == .paused { callbacks.paused(lease.stream, anchor.captureTimeNanos) }
         else {
             let packets = lease.startup.values.sorted { $0.frameIndex < $1.frameIndex }; lease.startup.removeAll()
             for packet in packets { deliver(packet, lease: lease) }
+        }
+        if !stopped, active === lease, lease.preparation?.id == preparation.id {
+            transition(anchor.state == .paused ? .paused : .active)
         }
         advance()
     }
@@ -349,16 +454,17 @@ public final class MediaReceiverSession: @unchecked Sendable {
         guard channel == .audio, let packet = AudioPacket(data: bytes), packet.captureTimeNanos <= UInt64(Int64.max),
               packet.frameIndex <= UInt64.max - UInt64(packet.frameCount) else { return }
         lease.lastData = nowNanos()
+        if lease.committedPreparation?.anchor.state == .running { deliver(packet, lease: lease) }
+        if lease.acknowledged { advance(); return }
         if let anchor = lease.preparation?.anchor {
             guard anchor.state == .running, packet.frameIndex >= anchor.frameIndex, packet.captureTimeNanos >= anchor.captureTimeNanos else { return }
         }
-        if lease.acknowledged { deliver(packet, lease: lease); advance(); return }
         lease.startup[packet.frameIndex] = packet
         while lease.startup.count > 8, let first = lease.startup.keys.min() { lease.startup.removeValue(forKey: first) }
         acknowledgeIfReady(lease)
     }
     private func deliver(_ packet: AudioPacket, lease: Lease) {
-        guard live(lease), let anchor = lease.preparation?.anchor, anchor.state == .running,
+        guard live(lease), let anchor = lease.committedPreparation?.anchor, anchor.state == .running,
               let snapshot = freshClock(), let target = localTime(host: packet.captureTimeNanos + anchor.hostPlaybackTimeNanos - anchor.captureTimeNanos,
                                                                  offset: snapshot.offsetNanos) else { return }
         let now = nowNanos()
@@ -390,18 +496,24 @@ public final class MediaReceiverSession: @unchecked Sendable {
     private func send(_ message: MediaControlWireMessage) {
         guard let bytes = try? message.encoded() else { stopOnQueue(failed: true); return }; enqueue(bytes)
     }
-    private func enqueue(_ bytes: Data) {
-        guard !stopped else { return }
-        guard outputs.count < 8, outputs.reduce(0, { $0 + $1.bytes.count }) + bytes.count <= 262_144 else { stopOnQueue(failed: true); return }
-        outputs.append(Output(bytes: bytes, deadline: nowNanos() + 2_000_000_000)); drain()
+    private func enqueue(_ bytes: Data, completion: ((Result<Void, Error>) -> Void)? = nil) {
+        guard !stopped else { completion?(.failure(SecurePeerChannelError.cancelled)); return }
+        guard outputs.count < 8, outputs.reduce(0, { $0 + $1.bytes.count }) + bytes.count <= 262_144 else {
+            completion?(.failure(SecureTransportError.capacity)); stopOnQueue(failed: true); return
+        }
+        outputs.append(Output(bytes: bytes, deadline: nowNanos() + 2_000_000_000, completion: completion)); drain()
     }
     private func drain() {
         guard !stopped, !sending, let output = outputs.first else { return }
         sending = true; let token = generation
         sendControl(output.bytes) { [weak self] result in
             guard let self, !self.stopped, self.generation == token, self.outputs.first?.id == output.id else { return }; self.assertQueue()
-            guard case .success = result, output.deadline > self.nowNanos() else { self.stopOnQueue(failed: true); return }
-            self.outputs.removeFirst(); self.sending = false; self.drain()
+            if case .failure(let error) = result { self.stopOnQueue(failed: true, error: error); return }
+            guard output.deadline > self.nowNanos() else {
+                self.stopOnQueue(failed: true, error: SecurePeerChannelError.timedOut); return
+            }
+            self.outputs.removeFirst(); self.sending = false
+            output.completion?(.success(())); self.drain()
         }
     }
 }

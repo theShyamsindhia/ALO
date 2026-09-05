@@ -76,6 +76,8 @@ public struct PCMPlaybackScheduler: Sendable {
     public private(set) var generation: UInt64 = 0
     public private(set) var lateDrops: UInt64 = 0
     public private(set) var anchor: AudioPlaybackAnchor?
+    public private(set) var lastScheduledRenderEndNanos: UInt64?
+    public private(set) var lastScheduledCaptureEndNanos: UInt64?
     public var pendingCount: Int { pending.count }
     public var scheduledCount: Int { scheduled.count }
     public var bufferedCount: Int { pending.count + scheduled.count }
@@ -106,6 +108,22 @@ public struct PCMPlaybackScheduler: Sendable {
     /// Apply fresh drift estimates only to buffers that have not been scheduled.
     public mutating func updateClockOffset(_ offsetNanos: Int64) { self.offsetNanos = offsetNanos }
 
+    /// Transfer only unscheduled PCM. Work on a copy so a rejected successor
+    /// cannot consume any predecessor ownership. Sequence is wire-only metadata;
+    /// rendering and duplicate detection use the original frame/capture values.
+    mutating func transferPendingMedia(atOrAfterCaptureTimeNanos boundary: UInt64,
+                                       to successor: inout PCMPlaybackScheduler, nowNanos: UInt64) throws {
+        let moving = pending.values.filter { $0.captureTimeNanos >= boundary }
+        var candidate = successor
+        for packet in moving.sorted(by: { $0.frameIndex < $1.frameIndex }) {
+            guard packet.channels == 2 else { throw AppleMediaError.invalidPCM }
+            try candidate.enqueueMedia(.init(sequence: 0, frameIndex: packet.frameIndex,
+                captureTimeNanos: packet.captureTimeNanos, samples: packet.samples), nowNanos: nowNanos)
+        }
+        successor = candidate
+        for packet in moving { pending.removeValue(forKey: packet.frameIndex) }
+    }
+
     public mutating func enqueueMedia(_ packet: AudioPacket, nowNanos: UInt64) throws {
         guard !packet.samples.isEmpty, packet.samples.count.isMultiple(of: 2),
               packet.samples.count <= Int(AudioPacket.framesPerPacket) * 2 else { throw AppleMediaError.invalidPCM }
@@ -118,10 +136,18 @@ public struct PCMPlaybackScheduler: Sendable {
                             samples: chunk.samples, channels: 1), now: nowNanos)
     }
 
-    public mutating func drain(nowNanos: UInt64) -> [ScheduledPCMBuffer] {
+    public mutating func drain(nowNanos: UInt64, beforeRenderTimeNanos boundary: UInt64? = nil,
+                               beforeCaptureTimeNanos captureBoundary: UInt64? = nil) -> [ScheduledPCMBuffer] {
         var result: [ScheduledPCMBuffer] = []
         for packet in pending.values.sorted(by: { $0.frameIndex < $1.frameIndex }) {
             guard let render = renderTime(for: packet.captureTimeNanos) else {
+                pending.removeValue(forKey: packet.frameIndex); continue
+            }
+            let duration = packet.frameCount * 1_000_000_000 / 48_000
+            let (renderEnd, renderOverflow) = render.addingReportingOverflow(duration)
+            let (captureEnd, captureOverflow) = packet.captureTimeNanos.addingReportingOverflow(duration)
+            if renderOverflow || captureOverflow || boundary.map({ renderEnd > $0 }) == true
+                || captureBoundary.map({ captureEnd > $0 }) == true {
                 pending.removeValue(forKey: packet.frameIndex); continue
             }
             if render <= nowNanos || render - nowNanos < limits.minimumLeadNanos {
@@ -137,6 +163,8 @@ public struct PCMPlaybackScheduler: Sendable {
             let token = AudioBufferToken(generation: generation, frameIndex: packet.frameIndex)
             scheduled.insert(token)
             lastScheduledFrameEnd = end
+            lastScheduledRenderEndNanos = renderEnd
+            lastScheduledCaptureEndNanos = captureEnd
             result.append(ScheduledPCMBuffer(token: token, renderTimeNanos: render,
                                              samples: packet.samples, channels: packet.channels))
         }
@@ -155,6 +183,8 @@ public struct PCMPlaybackScheduler: Sendable {
         pending.removeAll(keepingCapacity: true)
         scheduled.removeAll(keepingCapacity: true)
         lastScheduledFrameEnd = nil
+        lastScheduledRenderEndNanos = nil
+        lastScheduledCaptureEndNanos = nil
     }
 
     private mutating func enqueue(_ packet: Pending, now: UInt64) throws {

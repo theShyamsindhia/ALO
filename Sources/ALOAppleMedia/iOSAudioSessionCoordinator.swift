@@ -29,10 +29,10 @@ public final class iOSAudioSessionCoordinator {
     }
     private let session = AVAudioSession.sharedInstance()
     private var engine = AVAudioEngine()
-    private var mediaPlayer = AVAudioPlayerNode()
+    private var mediaPlayers: [UUID: AVAudioPlayerNode] = [:]
     private var mediaMixer = AVAudioMixerNode()
     private var voiceMixer = AVAudioMixerNode()
-    private var mediaScheduler = PCMPlaybackScheduler()
+    private var mediaTransition = MediaPlaybackTransition()
     private var voices: [UUID: VoiceTrack] = [:]
     private var observers: [NSObjectProtocol] = []
     private var pumpTask: Task<Void, Never>?
@@ -60,13 +60,35 @@ public final class iOSAudioSessionCoordinator {
     /// The generation prevents a pre-route-change synchronization reply from restarting old audio.
     public func setMediaAnchor(_ anchor: AudioPlaybackAnchor, clockOffsetNanos: Int64,
                                generation: UInt64) throws {
-        guard lifecycle.canRender, generation == lifecycle.generation else { throw AppleMediaError.invalidState }
-        lifecycle.requireResynchronization()
-        mediaPlayer.stop()
-        try mediaScheduler.setAnchor(anchor, clockOffsetNanos: clockOffsetNanos,
-                                     outputLatencyNanos: outputLatencyNanos, nowNanos: MonotonicClock.nowNanos())
-        mediaPlayer.play()
+        let id = UUID()
+        try prepareMediaAnchor(id: id, anchor: anchor, clockOffsetNanos: clockOffsetNanos, generation: generation)
+        try commitMediaAnchor(id: id, generation: generation)
+    }
+
+    public func prepareMediaAnchor(id: UUID, anchor: AudioPlaybackAnchor, clockOffsetNanos: Int64,
+                                   generation: UInt64) throws {
+        guard lifecycle.canRender, engine.isRunning, generation == lifecycle.generation else { throw AppleMediaError.invalidState }
+        try mediaTransition.prepare(id: id, anchor: anchor, offsetNanos: clockOffsetNanos,
+                                    outputLatencyNanos: outputLatencyNanos, nowNanos: MonotonicClock.nowNanos())
+    }
+
+    public func commitMediaAnchor(id: UUID, generation: UInt64) throws {
+        guard lifecycle.canRender, engine.isRunning, generation == lifecycle.generation else { throw AppleMediaError.invalidState }
+        try mediaTransition.commit(id: id, nowNanos: MonotonicClock.nowNanos())
+        // At most the live and committed successor exist. A proposal creates no
+        // hardware work, and committing never stops the live predecessor.
+        let player = AVAudioPlayerNode()
+        engine.attach(player)
+        engine.connect(player, to: mediaMixer, format: Self.format(channels: 2))
+        mediaPlayers[id] = player
+        player.play()
         lifecycle.resynchronized(generation: generation)
+    }
+
+    public func pauseMedia(generation: UInt64) {
+        guard generation == lifecycle.generation else { return }
+        clearMediaOutput()
+        lifecycle.requireResynchronization()
     }
 
     public func setMediaAnchor(_ anchor: AudioPlaybackAnchor, clock: ClockSynchronizer,
@@ -76,12 +98,12 @@ public final class iOSAudioSessionCoordinator {
         try setMediaAnchor(anchor, clockOffsetNanos: offset, generation: generation)
     }
 
-    public func updateMediaClockOffset(_ offsetNanos: Int64) { mediaScheduler.updateClockOffset(offsetNanos) }
+    public func updateMediaClockOffset(_ offsetNanos: Int64) { mediaTransition.updateClockOffset(offsetNanos) }
 
     public func enqueueMedia(_ packet: AudioPacket, generation: UInt64) throws {
         guard lifecycle.canRender, generation == lifecycle.generation,
               !lifecycle.needsResynchronization else { throw AppleMediaError.invalidState }
-        try mediaScheduler.enqueueMedia(packet, nowNanos: MonotonicClock.nowNanos())
+        try mediaTransition.enqueue(packet, nowNanos: MonotonicClock.nowNanos())
         pump()
     }
 
@@ -185,8 +207,7 @@ public final class iOSAudioSessionCoordinator {
     }
 
     private func buildGraph() {
-        engine.attach(mediaPlayer); engine.attach(mediaMixer); engine.attach(voiceMixer)
-        engine.connect(mediaPlayer, to: mediaMixer, format: Self.format(channels: 2))
+        engine.attach(mediaMixer); engine.attach(voiceMixer)
         engine.connect(mediaMixer, to: engine.mainMixerNode, format: Self.format(channels: 2))
         engine.connect(voiceMixer, to: engine.mainMixerNode, format: Self.format(channels: 2))
         applyLevels()
@@ -226,7 +247,7 @@ public final class iOSAudioSessionCoordinator {
         }
         engine.prepare()
         try engine.start()
-        mediaPlayer.play()
+        for player in mediaPlayers.values { player.play() }
         for track in voices.values { track.player.play() }
         outputFormatSignature = formatSignature()
         applyLevels()
@@ -239,9 +260,14 @@ public final class iOSAudioSessionCoordinator {
     }
 
     private func invalidateOutput() {
-        mediaScheduler.invalidate()
-        mediaPlayer.stop()
+        clearMediaOutput()
         for peer in Array(voices.keys) { endVoice(peerID: peer) }
+    }
+
+    private func clearMediaOutput() {
+        mediaTransition.reset()
+        for player in mediaPlayers.values { player.stop(); engine.detach(player) }
+        mediaPlayers.removeAll()
     }
 
     private func startPump() {
@@ -258,8 +284,14 @@ public final class iOSAudioSessionCoordinator {
     private func pump() {
         guard lifecycle.canRender, engine.isRunning else { return }
         let now = MonotonicClock.nowNanos()
-        for scheduled in mediaScheduler.drain(nowNanos: now) {
-            schedule(scheduled, player: mediaPlayer) { [weak self] token in _ = self?.mediaScheduler.completed(token) }
+        for delivery in mediaTransition.drain(nowNanos: now) {
+            guard let player = mediaPlayers[delivery.trackID] else { continue }
+            schedule(delivery.buffer, player: player) { [weak self] token in
+                self?.mediaTransition.completed(trackID: delivery.trackID, token: token)
+            }
+        }
+        for id in Array(mediaPlayers.keys) where !mediaTransition.trackIDs.contains(id) {
+            if let player = mediaPlayers.removeValue(forKey: id) { player.stop(); engine.detach(player) }
         }
         for (peer, track) in voices {
             for scheduled in track.scheduler.drain(nowNanos: now) {
@@ -352,7 +384,7 @@ public final class iOSAudioSessionCoordinator {
     private func mediaServicesReset() {
         lifecycle.routeChanged()
         invalidateOutput(); stopHardware()
-        engine = AVAudioEngine(); mediaPlayer = AVAudioPlayerNode()
+        engine = AVAudioEngine()
         mediaMixer = AVAudioMixerNode(); voiceMixer = AVAudioMixerNode()
         buildGraph()
         guard lifecycle.canRender else { return }

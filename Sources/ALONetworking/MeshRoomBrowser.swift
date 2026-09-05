@@ -119,6 +119,10 @@ public final class MeshRoomBrowser {
     private let readyHandler: () -> Void
     private var browser: NWBrowser?
     private let transportPolicy: RoomTransportPolicy
+    private var scanGeneration: UInt64 = 0
+    private var expiration: DispatchWorkItem?
+    private var retry: DispatchWorkItem?
+    private var retryAttempt = 0
 
     public init(
         updateHandler: @escaping ([NearbyRoom]) -> Void,
@@ -133,25 +137,57 @@ public final class MeshRoomBrowser {
     }
 
     public func start() {
+        queue.async { [weak self] in self?.beginScan() }
+    }
+
+    private func beginScan() {
         guard browser == nil else { return }
         guard transportPolicy != .migrationRequired else { errorHandler("This room requires an explicit transport migration."); return }
+        scanGeneration &+= 1
+        retryAttempt = 0
+        let generation = scanGeneration
+        let expiration = DispatchWorkItem { [weak self] in
+            guard let self, self.scanGeneration == generation else { return }
+            self.stopOnQueue()
+        }
+        self.expiration = expiration
+        queue.asyncAfter(deadline: .now() + 15, execute: expiration)
+        createBrowser(generation: generation)
+    }
+
+    private func createBrowser(generation: UInt64) {
+        guard generation == scanGeneration else { return }
         let parameters = NWParameters(); parameters.includePeerToPeer = true
         let browser = NWBrowser(
             for: .bonjourWithTXTRecord(type: transportPolicy == .secureV2 ? Self.secureServiceType : Self.serviceType, domain: nil),
             using: transportPolicy == .secureV2 ? parameters : LocalNetworkParameters.tcp()
         )
         browser.browseResultsChangedHandler = { [weak self, weak browser] results, _ in
-            guard let self, let browser, self.browser === browser else { return }
+            guard let self, let browser, self.scanGeneration == generation, self.browser === browser else { return }
             self.updateHandler(RoomDiscovery.rooms(from: results.prefix(256).compactMap {
                 guard case .bonjour(let record) = $0.metadata else { return nil }
                 return record
             }, transportPolicy: self.transportPolicy))
         }
         browser.stateUpdateHandler = { [weak self, weak browser] state in
-            guard let self, let browser, self.browser === browser else { return }
+            guard let self, let browser, self.scanGeneration == generation, self.browser === browser else { return }
             switch state {
             case .ready: self.readyHandler()
-            case .failed(let error), .waiting(let error): self.errorHandler(error.localizedDescription)
+            case .failed(let error), .waiting(let error):
+                self.errorHandler(error.localizedDescription)
+                // Denied consent is a user state, not an automatic retry loop.
+                if case .dns(let code) = error, code == -65570 {
+                    self.stopOnQueue()
+                    return
+                }
+                browser.cancel(); self.browser = nil
+                let delay = ConnectionTimingPolicy().retryDelay(attempt: self.retryAttempt,
+                                                               jitterUnit: Double.random(in: 0...1))
+                self.retryAttempt += 1
+                self.retry?.cancel()
+                let retry = DispatchWorkItem { [weak self] in self?.createBrowser(generation: generation) }
+                self.retry = retry
+                self.queue.asyncAfter(deadline: .now() + delay, execute: retry)
             default: break
             }
         }
@@ -160,11 +196,20 @@ public final class MeshRoomBrowser {
     }
 
     public func restart() {
-        stop()
-        start()
+        queue.async { [weak self] in
+            self?.stopOnQueue()
+            self?.beginScan()
+        }
     }
 
     public func stop() {
+        queue.async { [weak self] in self?.stopOnQueue() }
+    }
+
+    private func stopOnQueue() {
+        scanGeneration &+= 1
+        expiration?.cancel(); expiration = nil
+        retry?.cancel(); retry = nil
         browser?.cancel()
         browser = nil
     }

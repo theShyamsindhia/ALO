@@ -17,7 +17,7 @@ import ALOAppleMedia
         ? "ALO Simulator Test" : UserDefaults.standard.string(forKey: "displayName") ?? "iPhone"
     @Published var levels = AudioMixLevels() { didSet { audio.levels = levels } }
     let audio = iOSAudioSessionCoordinator()
-    let mediaAvailability = "Media and voice are unavailable in this build. Secure media transport is not connected yet."
+    @Published private(set) var mediaAvailability = "Waiting for a secure broadcaster. Screen and voice are not connected yet."
     let isTemporarySimulatorSession = MobileRoomStore.usesTemporarySimulatorIdentity
     private(set) var localID = ""
     private var identity: InstallationIdentity?
@@ -30,6 +30,44 @@ import ALOAppleMedia
     private var started = false
     private var joinTimeout: Task<Void, Never>?
     private var shutdownTask: Task<Void, Never>?
+    private var mediaReceiver: MediaReceiverSession?
+    private var mediaSelection: MediaReceiverSession.Selection?
+    private var mediaBridge: BoundedMediaEventBridge<MediaEvent>?
+    private var mediaOwner: MediaTransportOwner?
+    private var mediaToken = UUID()
+    private var mediaRetry: Task<Void, Never>?
+    private var renderPreparations: [UUID: UInt64] = [:]
+    private var receiverGeneration: UInt64?
+    private var startingAudio = false
+
+    private enum MediaEvent: Sendable {
+        case attached(Result<MediaReceiverSession, Error>)
+        case prepare(MediaReceiverSession.Preparation)
+        case commit(MediaReceiverSession.Preparation)
+        case audio(AudioPacket, UInt64)
+        case state(MediaReceiverSession.State)
+        case clock(MediaReceiverSession.ClockSnapshot)
+        case paused
+    }
+
+    /// Attachment ownership cannot live only in the bounded UI event queue: an
+    /// overflow can discard its attached-success event before MainActor sees it.
+    private final class MediaTransportOwner: @unchecked Sendable {
+        private let lock = NSLock()
+        private var receiver: MediaReceiverSession?
+        private var closed = false
+        func install(_ receiver: MediaReceiverSession) -> Bool {
+            lock.lock()
+            guard !closed else { lock.unlock(); receiver.stop(); return false }
+            self.receiver = receiver; lock.unlock(); return true
+        }
+        func stop() {
+            lock.lock(); closed = true
+            let receiver = self.receiver; self.receiver = nil
+            lock.unlock(); receiver?.stop()
+        }
+        deinit { receiver?.stop() }
+    }
 
     func activate() {
         foreground = true
@@ -42,6 +80,18 @@ import ALOAppleMedia
                 store = storage; identity = key; localID = key.publicIdentity.nodeID.uuidString
                 pins = isTemporarySimulatorSession ? MemoryPeerPinStore()
                     : KeychainPeerPinStore(namespace: storage.namespace)
+                audio.onNeedsResynchronization = { [weak self] _ in
+                    guard let self, !self.startingAudio else { return }
+                    // Route/engine generation changes invalidate output preparation,
+                    // not the mesh connection or the user's room membership.
+                    self.stopMedia()
+                    self.synchronizeMediaSelection()
+                }
+                audio.onLifecycleChanged = { [weak self] lifecycle in
+                    guard !lifecycle.canRender else { return }
+                    self?.stopMedia()
+                }
+                audio.onError = { [weak self] _ in self?.mediaAvailability = "Audio output needs attention. Retry the room connection." }
                 let scanner = DiscoveryCoordinator(ownPeerID: key.publicIdentity.nodeID)
                 scanner.onChange = { [weak self] state, hints in
                     guard let self else { return }
@@ -150,6 +200,7 @@ import ALOAppleMedia
                 Task { @MainActor in
                     guard let self, self.generation == token else { return }
                     self.replica = value
+                    self.synchronizeMediaSelection()
                 }
             }, participantsHandler: { [weak self] value in
                 Task { @MainActor in
@@ -158,6 +209,7 @@ import ALOAppleMedia
                     self.connected = value.contains { $0.id != self.localID }
                     self.status = self.connected ? "Connected · encrypted mesh" : "Waiting for a room member…"
                     if self.connected { self.joinTimeout?.cancel() }
+                    self.synchronizeMediaSelection()
                 }
             }, mediaCommandHandler: { _, _, _ in false }, resyncRequestHandler: { _, _, _ in false },
             roomStatePersistenceHandler: { [weak self] data in
@@ -168,7 +220,7 @@ import ALOAppleMedia
                         self.errorMessage = "Room history could not be saved on this device."
                     }
                 }
-            }, installationIdentity: identity, peerPins: pins, secureCapabilities: [.chat],
+            }, installationIdentity: identity, peerPins: pins, secureCapabilities: [.chat, .receiveAudio],
             secureStateHandler: { [weak self] _, state in
                 Task { @MainActor in
                     guard let self, self.generation == token else { return }
@@ -176,6 +228,7 @@ import ALOAppleMedia
                     case .authenticated:
                         do { try store.saveSelectedRoom(choice) }
                         catch { self.errorMessage = "Connected, but this room could not be saved for automatic rejoin." }
+                        self.synchronizeMediaSelection()
                     case .failed(let failure):
                         guard !self.connected else { return }
                         self.status = failure == .admissionFailed
@@ -214,6 +267,7 @@ import ALOAppleMedia
 
     private func disconnectRuntime() {
         generation &+= 1
+        stopMedia()
         joinTimeout?.cancel(); joinTimeout = nil
         if let runtime = mesh {
             let pendingShutdown = shutdownTask
@@ -227,5 +281,138 @@ import ALOAppleMedia
         mesh = nil
         connected = false
         audio.stop()
+    }
+
+    private func synchronizeMediaSelection() {
+        guard foreground, connected, let mesh, let roomID = room.flatMap({ UUID(uuidString: $0.id) }),
+              let localPeerID = UUID(uuidString: localID), let broadcaster = replica.broadcaster,
+              let peerID = UUID(uuidString: broadcaster.nodeID), peerID != localPeerID,
+              participants.contains(where: { $0.id == broadcaster.nodeID }) else {
+            if mediaSelection != nil { stopMedia() }
+            return
+        }
+        let selection = MediaReceiverSession.Selection(roomID: roomID, localPeerID: localPeerID,
+            broadcasterPeerID: peerID, broadcasterEpoch: broadcaster.epoch)
+        guard selection != mediaSelection else { return }
+        stopMedia()
+        mediaSelection = selection
+        let token = mediaToken
+        let owner = MediaTransportOwner()
+        mediaOwner = owner
+        if !audio.lifecycle.canRender {
+            startingAudio = true
+            defer { startingAudio = false }
+            do { try audio.startListening() }
+            catch {
+                mediaAvailability = "Audio output could not start. Retry the room connection."
+                mediaSelection = nil
+                return
+            }
+        }
+        mediaAvailability = "Synchronizing encrypted audio… Screen and voice are not connected yet."
+        let bridge = BoundedMediaEventBridge<MediaEvent>(
+            schedule: { DispatchQueue.main.async(execute: $0) },
+            receive: { [weak self] events in
+                MainActor.assumeIsolated {
+                    guard let self, self.mediaToken == token else {
+                        for event in events { if case .attached(.success(let receiver)) = event { receiver.stop() } }
+                        return
+                    }
+                    for event in events where self.mediaToken == token { self.consumeMedia(event) }
+                }
+            }, overflow: { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, self.mediaToken == token else { return }
+                    self.scheduleMediaRetry(message: "Audio delivery fell behind. Resynchronizing…")
+                }
+            })
+        mediaBridge = bridge
+        let submit: @Sendable (MediaEvent, Int) -> Void = { event, bytes in
+            if !bridge.submit(event, byteCount: bytes) { owner.stop() }
+        }
+        mesh.openMediaChannel(to: peerID, role: .mediaControl) { result in
+            switch result {
+            case .failure(let error): submit(.attached(.failure(error)), 0)
+            case .success(let (channel, _)):
+                // Attach inline, before hopping to MainActor: reliable frames may
+                // already be coalesced behind the authentication response.
+                MediaReceiverSession.attach(channel: channel, expected: selection, callbacks: .init(
+                    prepareAnchor: { submit(.prepare($0), 0) },
+                    anchorCommitted: { submit(.commit($0), 0) },
+                    audio: { packet, _, generation in submit(.audio(packet, generation), packet.samples.count * 2) },
+                    state: { submit(.state($0), 0) }, clock: { submit(.clock($0), 0) },
+                    paused: { _, _ in submit(.paused, 0) })) { result in
+                        if case .success(let receiver) = result, !owner.install(receiver) { return }
+                        submit(.attached(result), 0)
+                    }
+            }
+        }
+    }
+
+    private func consumeMedia(_ event: MediaEvent) {
+        switch event {
+        case .attached(.success(let receiver)): mediaReceiver = receiver
+        case .attached(.failure): scheduleMediaRetry(message: "Secure audio is unavailable. Retrying…")
+        case .prepare(let preparation):
+            let renderGeneration = audio.lifecycle.generation
+            do {
+                guard audio.lifecycle.canRender else { throw AppleMediaError.invalidState }
+                if preparation.anchor.state == .running {
+                    try audio.prepareMediaAnchor(id: preparation.id,
+                        anchor: .init(captureTimeNanos: preparation.anchor.captureTimeNanos,
+                                      hostPlaybackTimeNanos: preparation.anchor.hostPlaybackTimeNanos),
+                        clockOffsetNanos: preparation.clock.offsetNanos, generation: renderGeneration)
+                }
+                // Keep this app/render generation separate from the receiver's
+                // transport lifecycle generation (which starts at one per session).
+                renderPreparations = [preparation.id: renderGeneration]
+                receiverGeneration = preparation.lifecycleGeneration
+                mediaReceiver?.completePreparation(id: preparation.id, ready: true)
+            } catch { mediaReceiver?.completePreparation(id: preparation.id, ready: false) }
+        case .commit(let preparation):
+            guard let renderGeneration = renderPreparations.removeValue(forKey: preparation.id),
+                  renderGeneration == audio.lifecycle.generation else { mediaReceiver?.resynchronize(); return }
+            guard preparation.anchor.state == .running else { return }
+            do { try audio.commitMediaAnchor(id: preparation.id, generation: renderGeneration) }
+            catch { mediaReceiver?.resynchronize() }
+        case .audio(let packet, let transportGeneration):
+            guard receiverGeneration == transportGeneration else { return }
+            do { try audio.enqueueMedia(packet, generation: audio.lifecycle.generation) }
+            catch AppleMediaError.duplicate { }
+            catch AppleMediaError.late { }
+            catch { mediaReceiver?.resynchronize() }
+        case .clock(let clock): audio.updateMediaClockOffset(clock.offsetNanos)
+        case .paused:
+            audio.pauseMedia(generation: audio.lifecycle.generation)
+        case .state(let state):
+            switch state {
+            case .failed, .stopped: scheduleMediaRetry(message: "Audio connection interrupted. Retrying…")
+            case .active: mediaAvailability = "Encrypted audio connected. Screen and voice are not connected yet."
+            case .paused: mediaAvailability = "Broadcaster audio is paused."
+            default: mediaAvailability = "Synchronizing encrypted audio…"
+            }
+        }
+    }
+
+    private func scheduleMediaRetry(message: String) {
+        stopMedia()
+        mediaAvailability = message
+        let token = mediaToken
+        mediaRetry = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled, let self, self.mediaToken == token else { return }
+            self.synchronizeMediaSelection()
+        }
+    }
+
+    private func stopMedia() {
+        mediaToken = UUID()
+        mediaRetry?.cancel(); mediaRetry = nil
+        mediaBridge?.close(); mediaBridge = nil
+        mediaOwner?.stop(); mediaOwner = nil
+        mediaReceiver?.stop(); mediaReceiver = nil
+        mediaSelection = nil; receiverGeneration = nil; renderPreparations.removeAll()
+        audio.pauseMedia(generation: audio.lifecycle.generation)
+        mediaAvailability = "Waiting for a secure broadcaster. Screen and voice are not connected yet."
     }
 }

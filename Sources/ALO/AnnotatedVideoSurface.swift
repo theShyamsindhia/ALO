@@ -14,16 +14,30 @@ struct AnnotatedVideoSurface: View {
                     .resizable()
                     .aspectRatio(contentMode: .fit)
                     .frame(width: geometry.size.width, height: geometry.size.height)
-                if let scene,
-                   let rect = AnnotationGeometry.aspectFitRect(
-                    contentSize: CGSize(width: frame.width, height: frame.height),
-                    in: CGRect(origin: .zero, size: geometry.size)) {
-                    AnnotationSceneView(model: scene, contentRect: rect)
+                if let scene {
+                    VideoAnnotationContent(scene: scene,
+                        frameSize: CGSize(width: frame.width, height: frame.height),
+                        bounds: CGRect(origin: .zero, size: geometry.size))
                 }
             }
             .overlay(alignment: .topLeading) {
                 if let scene { AnnotationToolbarView(model: scene).padding(12) }
             }
+        }
+    }
+}
+
+/// Metadata can suspend input while the decoder still displays its last image.
+/// Observe the scene independently so that transition does not need a new frame.
+@MainActor
+private struct VideoAnnotationContent: View {
+    @ObservedObject var scene: AnnotationSceneModel
+    let frameSize: CGSize
+    let bounds: CGRect
+
+    var body: some View {
+        if let rect = scene.visibleContentRect(frameSize: frameSize, in: bounds) {
+            AnnotationSceneView(model: scene, contentRect: rect)
         }
     }
 }

@@ -4,6 +4,143 @@ import Testing
 
 @Suite("Media host authorization and lifecycle")
 struct MediaHostSessionTests {
+    @Test func publisherQueuePressureRetriesWithoutLosingHealthyBurst() throws {
+        let h = try MediaHostHarness()
+        try h.queue.sync {
+            h.host.publisherReady(port: 54321)
+            _ = try h.activate()
+            h.rejectNextAudioEnqueues = 1
+            for index in 0..<8 { h.host.publishAudio(h.packet(index: index)) }
+            #expect(h.datagrams.isEmpty)
+            #expect(h.audioRetries.count == 1)
+            h.time += 5_000_000; h.audioRetries.removeFirst()()
+            #expect(h.datagrams.count == 8)
+            h.rejectNextAudioEnqueues = 1
+            h.host.publishAudio(h.packet(index: 8))
+            h.time += 81_000_000; h.audioRetries.removeFirst()()
+            #expect(h.datagrams.count == 8)
+        }
+    }
+
+    @Test func captureIngressPreservesHealthyBatchAndExpiresBlockedBatch() throws {
+        let h = try MediaHostHarness()
+        try h.queue.sync {
+            h.host.publisherReady(port: 54321)
+            _ = try h.activate()
+            h.host.submitAudio((0..<8).map { h.packet(index: $0) })
+        }
+        h.queue.sync {
+            #expect(h.datagrams.count == 8)
+            h.host.submitAudio((8..<16).map { h.packet(index: $0) })
+            h.time += 81_000_000
+        }
+        h.queue.sync { #expect(h.datagrams.count == 8) }
+    }
+
+    @Test func annotationSendCompletesOnlyWithTransportAndCancellationIsOnce() throws {
+        let h = try MediaHostHarness()
+        try h.queue.sync {
+            h.holdAnnotationCompletions = true
+            let bytes = try AnnotationWireMessage.hello(capabilities: [AnnotationWireMessage.capability]).encoded()
+            var outcomes: [Result<Void, Error>] = []
+            h.host.sendAnnotation(bytes, connectionID: h.publisher.connectionID) { outcomes.append($0) }
+            #expect(outcomes.isEmpty)
+            h.annotationCompletions.removeFirst()(.success(()))
+            #expect(outcomes.count == 1)
+            h.host.sendAnnotation(bytes, connectionID: h.publisher.connectionID) { outcomes.append($0) }
+            let late = h.annotationCompletions.removeFirst()
+            h.host.detach(connectionID: h.publisher.connectionID)
+            #expect(outcomes.count == 2)
+            if case .failure(let error) = outcomes[1] { #expect(error as? SecurePeerChannelError == .cancelled) }
+            else { Issue.record("Cancellation reported successful annotation delivery") }
+            late(.success(()))
+            #expect(outcomes.count == 2)
+        }
+    }
+
+    @Test func receiverAnnotationBudgetAllowsThirtyHzAndSendReportsActualFailure() throws {
+        let h = try MediaHostHarness()
+        let bytes = try AnnotationWireMessage.hello(capabilities: [AnnotationWireMessage.capability]).encoded()
+        var delivered = 0
+        var sendCompletion: ((Result<Void, Error>) -> Void)?
+        var outcomes: [Result<Void, Error>] = []
+        let receiver = try h.queue.sync {
+            try MediaReceiverSession(expected: .init(roomID: NetworkFixture.room, localPeerID: h.receiver.localPeerID,
+                broadcasterPeerID: NetworkFixture.sender, broadcasterEpoch: 7), credentials: h.receiver, queue: h.queue,
+                callbacks: .init(prepareAnchor: { _ in }, audio: { _, _, _ in }, annotation: { _ in delivered += 1; return true }),
+                nowNanos: { h.time }, sendControl: { _, done in sendCompletion = done },
+                resolveEndpoint: { _, done in done(.failure(SecureTransportError.invalidState)) },
+                makeSubscriber: { _, _, _, _ in throw SecureTransportError.invalidState }, closeControl: {})
+        }
+        h.queue.sync {
+            for _ in 0..<60 { receiver.receive(bytes) }
+            #expect(delivered == 60)
+        }
+        receiver.sendAnnotation(bytes) { outcomes.append($0) }
+        try h.queue.sync {
+            #expect(outcomes.isEmpty)
+            let done = try #require(sendCompletion)
+            done(.failure(SecurePeerChannelError.connectionFailed))
+            #expect(outcomes.count == 1)
+            if case .failure(let error) = outcomes[0] { #expect(error as? SecurePeerChannelError == .connectionFailed) }
+            else { Issue.record("Failed transport reported successful annotation delivery") }
+            done(.success(())); #expect(outcomes.count == 1)
+        }
+    }
+
+    @Test func captureBurstDrainsEveryPacketAfterDelayedEnqueueCompletion() throws {
+        let h = try MediaHostHarness()
+        try h.queue.sync {
+            h.host.publisherReady(port: 54321)
+            let ticket = try h.activate()
+            h.holdAudioCompletions = true
+            for index in 0..<8 { h.host.publishAudio(h.packet(index: index)) }
+            #expect(h.datagrams.count == 1)
+            while !h.audioCompletions.isEmpty { h.audioCompletions.removeFirst()(true) }
+            let opener = try h.receiver.makeSubscriberDatagramOpener(ticket: ticket, channel: .audio)
+            let frames = try h.datagrams.map { try AudioPacket(data: opener.open($0.bytes))?.frameIndex }
+            #expect(frames == (0..<8).map { Optional(UInt64($0 * 240)) })
+        }
+    }
+
+    @Test func queuedAudioExpiresAndLateCompletionCannotReviveRetiredEpoch() throws {
+        let h = try MediaHostHarness()
+        try h.queue.sync {
+            h.host.publisherReady(port: 54321)
+            _ = try h.activate()
+            h.holdAudioCompletions = true
+            h.host.publishAudio(h.packet(index: 0)); h.host.publishAudio(h.packet(index: 1))
+            h.time += 81_000_000
+            h.audioCompletions.removeFirst()(true)
+            #expect(h.datagrams.count == 1)
+            h.host.publishAudio(h.packet(index: 2)); h.host.publishAudio(h.packet(index: 3))
+            h.owner = .init(peerID: NetworkFixture.sender, epoch: 8)
+            h.host.tick()
+            h.audioCompletions.removeFirst()(true)
+            #expect(h.datagrams.count == 2)
+            #expect(h.registry.count == 0)
+        }
+    }
+
+    @Test func sustainedBurstIsBoundedAndPauseDiscardsPendingAudio() throws {
+        let h = try MediaHostHarness()
+        try h.queue.sync {
+            h.host.publisherReady(port: 54321)
+            let ticket = try h.activate()
+            h.holdAudioCompletions = true
+            for index in 0..<100 { h.host.publishAudio(h.packet(index: index)) }
+            while !h.audioCompletions.isEmpty { h.audioCompletions.removeFirst()(true) }
+            let opener = try h.receiver.makeSubscriberDatagramOpener(ticket: ticket, channel: .audio)
+            let frames = try h.datagrams.map { try AudioPacket(data: opener.open($0.bytes))?.frameIndex }
+            #expect(frames == ([0] + Array(84..<100)).map { Optional(UInt64($0 * 240)) })
+            h.host.publishAudio(h.packet(index: 101)); h.host.publishAudio(h.packet(index: 102))
+            let beforePause = h.datagrams.count
+            h.anchorState = .paused; h.host.refreshTimeline()
+            while !h.audioCompletions.isEmpty { h.audioCompletions.removeFirst()(true) }
+            #expect(h.datagrams.count == beforePause)
+        }
+    }
+
     @Test func grantRequiresTrustedLocalOwnerAndActualPublisherPort() throws {
         let h = try MediaHostHarness()
         try h.queue.sync {
@@ -240,7 +377,7 @@ struct MediaHostSessionTests {
 
 /// Deterministic adapter tests with authenticated credential fixtures and real
 /// registry MAC/path/encryption checks. This is not a TLS/NWConnection integration harness.
-private final class MediaHostHarness {
+final class MediaHostHarness {
     let queue = DispatchQueue(label: "alo.tests.media-host")
     let registry = MediaSubscriptionRegistry(limits: .init(maximumSubscriptions: 64, maximumPending: 32, maximumPerPeer: 2))
     let publisher: AuthenticatedChannelCredentials
@@ -257,12 +394,22 @@ private final class MediaHostHarness {
     var anchorState: MediaStreamAnchor.State = .running
     var holdNextAnchor = false
     var heldAnchorCompletion: ((Result<Void, Error>) -> Void)?
+    var holdAudioCompletions = false
+    var audioCompletions: [(Bool) -> Void] = []
+    var rejectNextAudioEnqueues = 0
+    var audioRetries: [() -> Void] = []
+    var holdAnnotationCompletions = false
+    var annotationCompletions: [(Result<Void, Error>) -> Void] = []
     var keyframeRequests = 0
     var acceptAnnotations = false
     var annotationPayloads: [Data] = []
     var grantedPort: UInt16?
     var packet: AudioPacket { .init(sequence: 1, frameIndex: 0, captureTimeNanos: time,
                                     samples: Array(repeating: 7, count: 480)) }
+    func packet(index: Int) -> AudioPacket {
+        .init(sequence: UInt32(index), frameIndex: UInt64(index * 240), captureTimeNanos: time,
+              samples: Array(repeating: 7, count: 480))
+    }
     var anchors: [MediaStreamAnchor] { messages.compactMap { if case .anchor(let anchor) = $0 { return anchor }; return nil } }
     var rejections: [MediaControlWireMessage.Rejection] { messages.compactMap { if case .rejected(_, let reason) = $0 { return reason }; return nil } }
 
@@ -279,11 +426,15 @@ private final class MediaHostHarness {
                 self.annotationPayloads.append(bytes); return self.acceptAnnotations
             }), registry: registry, nowNanos: { [weak self] in self?.time ?? 0 },
             sendDatagram: { [weak self] bytes, session, done in
-                guard let self, let flow = self.flows[session],
+                guard let self else { done(false); return }
+                if self.rejectNextAudioEnqueues > 0 { self.rejectNextAudioEnqueues -= 1; done(false); return }
+                guard let flow = self.flows[session],
                       let sealed = try? self.registry.sealMedia(bytes, sessionID: session, acceptedFlowID: flow,
                                                                channel: .audio, now: self.seconds) else { done(false); return }
-                self.datagrams.append((session, sealed)); done(true)
-            }, cancelDatagram: { [weak self] in self?.flows.removeValue(forKey: $0) })
+                self.datagrams.append((session, sealed))
+                if self.holdAudioCompletions { self.audioCompletions.append(done) } else { done(true) }
+            }, cancelDatagram: { [weak self] in self?.flows.removeValue(forKey: $0) },
+            scheduleAudioRetry: { [weak self] in self?.audioRetries.append($0) })
         try queue.sync {
             try host.addPeer(credentials: publisher, send: { [weak self] bytes, done in
                 guard let self else { return }
@@ -293,17 +444,19 @@ private final class MediaHostHarness {
                     if case .anchor = message, self.holdNextAnchor {
                         self.holdNextAnchor = false; self.heldAnchorCompletion = done; return
                     }
+                } else if self.holdAnnotationCompletions {
+                    self.annotationCompletions.append(done); return
                 }
                 done(.success(()))
             }, close: { [weak self] in if let self { self.closed.append(self.publisher.connectionID) } })
         }
     }
     static func credentials(role: ReliableChannelRole = .mediaControl,
-                            initiatorCapabilities: PeerCapabilities = .desktop) throws
+                            initiatorCapabilities: PeerCapabilities = .desktop, initiatorID: UUID = UUID()) throws
         -> (host: AuthenticatedChannelCredentials, receiver: AuthenticatedChannelCredentials) {
         let initiator = try ProtocolOffer(wireVersions: [2], stateSyncVersions: [1], capabilities: initiatorCapabilities)
         let responder = try ProtocolOffer(wireVersions: [2], stateSyncVersions: [1], capabilities: .desktop)
-        let transcript = try AdmissionTranscript(roomID: NetworkFixture.room, initiatorID: UUID(),
+        let transcript = try AdmissionTranscript(roomID: NetworkFixture.room, initiatorID: initiatorID,
             responderID: NetworkFixture.sender, connectionID: UUID(), initiatorKeyHash: Data(repeating: 1, count: 32),
             responderKeyHash: Data(repeating: 2, count: 32), initiatorNonce: Data(repeating: 3, count: 32),
             responderNonce: Data(repeating: 4, count: 32), initiatorOffer: initiator, responderOffer: responder,

@@ -2,12 +2,13 @@ import Foundation
 import Network
 import ALOCore
 
-/// Media-only publisher adapter. Every method and callback belongs to `queue`,
-/// which MUST also own the attached SecurePeerChannels. Call attach directly in
+/// Media-only publisher adapter. Callbacks and channel operations belong to
+/// `queue`, which MUST also own the attached SecurePeerChannels. Lifecycle methods
+/// and submitAudio marshal to that executor. Call attach directly in
 /// onAuthenticated, before the channel releases any coalesced payloads.
 /// Ownership comes exclusively from the application's currentBroadcaster callback.
 /// Authentication alone never permits a participant to publish or change playback.
-public final class MediaHostSession {
+public final class MediaHostSession: @unchecked Sendable {
     public struct Broadcaster: Equatable, Sendable {
         public let peerID: UUID
         public let epoch: UInt64
@@ -40,6 +41,13 @@ public final class MediaHostSession {
 
     typealias ControlSend = (Data, @escaping (Result<Void, Error>) -> Void) -> Void
     typealias DatagramSend = (Data, UUID, @escaping (Bool) -> Void) -> Void
+    typealias AudioRetry = (@escaping () -> Void) -> Void
+    private struct PendingAudio {
+        let packet: AudioPacket
+        let enqueuedAt: UInt64
+    }
+    private static let maximumPendingAudio = 16
+    private static let maximumAudioWait: UInt64 = 80_000_000
     private final class Lease {
         let ticket: MediaSubscriptionTicket
         let deadline: TimeInterval
@@ -49,6 +57,7 @@ public final class MediaHostSession {
         var cutover: UInt64?
         var proposedAnchor: MediaStreamAnchor?
         var audioInFlight = false
+        var pendingAudio: [PendingAudio] = []
         init(_ ticket: MediaSubscriptionTicket, now: TimeInterval) {
             self.ticket = ticket; deadline = min(ticket.expiresAt, now + 10)
         }
@@ -58,7 +67,7 @@ public final class MediaHostSession {
         let id = UUID()
         let bytes: Data
         let deadline: TimeInterval
-        let completion: (() -> Void)?
+        let completion: ((Result<Void, Error>) -> Void)?
     }
     private final class Peer {
         let credentials: AuthenticatedChannelCredentials
@@ -84,12 +93,22 @@ public final class MediaHostSession {
     private let registry: MediaSubscriptionRegistry
     private let sendDatagram: DatagramSend
     private let cancelDatagram: (UUID) -> Void
+    private let scheduleAudioRetry: AudioRetry
     private var publisher: SecureMediaDatagramPublisher?
     private var port: UInt16?
     private var peers: [UUID: Peer] = [:]
     private var generation: UInt64 = 0
     private var timer: DispatchSourceTimer?
     private var stopped = false
+    private let ingressLock = NSLock()
+    private var ingress: [PendingAudio] = []
+    private var ingressScheduled = false
+    private var ingressStopped = false
+    private var videoIngress = VideoSendQueue()
+    private var videoIngressScheduled = false
+    private lazy var videoHost = MediaVideoHost(authorize: { [weak self] credentials, stream in
+        self?.videoCaptureFloor(credentials: credentials, stream: stream)
+    }, requestKeyframe: callbacks.requestKeyframe, now: nowNanos)
 
     public convenience init(roomID: UUID, localPeerID: UUID, queue: DispatchQueue,
                             callbacks: Callbacks) throws {
@@ -112,10 +131,12 @@ public final class MediaHostSession {
     /// publisher above; test callers must perform registry proofs before validation.
     init(roomID: UUID, localPeerID: UUID, queue: DispatchQueue, callbacks: Callbacks,
          registry: MediaSubscriptionRegistry, nowNanos: @escaping () -> UInt64,
-         sendDatagram: @escaping DatagramSend, cancelDatagram: @escaping (UUID) -> Void) {
+         sendDatagram: @escaping DatagramSend, cancelDatagram: @escaping (UUID) -> Void,
+         scheduleAudioRetry: AudioRetry? = nil) {
         self.roomID = roomID; self.localPeerID = localPeerID; self.queue = queue
         self.callbacks = callbacks; self.registry = registry; self.nowNanos = nowNanos
         self.sendDatagram = sendDatagram; self.cancelDatagram = cancelDatagram
+        self.scheduleAudioRetry = scheduleAudioRetry ?? { retry in queue.asyncAfter(deadline: .now() + .milliseconds(5), execute: retry) }
         queue.setSpecific(key: executorKey, value: 1)
     }
     deinit { timer?.cancel(); publisher?.stop(); queue.setSpecific(key: executorKey, value: nil) }
@@ -123,6 +144,7 @@ public final class MediaHostSession {
     private var now: TimeInterval { TimeInterval(nowNanos()) / 1_000_000_000 }
 
     public func start() {
+        if DispatchQueue.getSpecific(key: executorKey) != 1 { queue.async { self.start() }; return }
         assertQueue()
         guard timer == nil, !stopped else { return }
         let timer = DispatchSource.makeTimerSource(queue: queue)
@@ -132,9 +154,12 @@ public final class MediaHostSession {
     }
 
     public func stop() {
+        if DispatchQueue.getSpecific(key: executorKey) != 1 { queue.async { self.stop() }; return }
         assertQueue()
         guard !stopped else { return }
         stopped = true; port = nil; timer?.cancel(); timer = nil
+        ingressLock.withLock { ingressStopped = true; ingress.removeAll(); videoIngress.reset() }
+        videoHost.setEnabled(false)
         for id in Array(peers.keys) { detach(connectionID: id) }
         registry.cancelAll(); publisher?.stop()
     }
@@ -152,7 +177,7 @@ public final class MediaHostSession {
                 try addPeer(credentials: credentials, send: { channel.send(payload: $0, completion: $1) }, close: { channel.cancel() })
                 let priorState = channel.onState
                 channel.onState = { [weak self] state in
-                    if case .failed = state { self?.detach(connectionID: credentials.connectionID) }
+                    if case .failed(let error) = state { self?.detach(connectionID: credentials.connectionID, error: error) }
                     if state == .cancelled { self?.detach(connectionID: credentials.connectionID) }
                     priorState?(state)
                 }
@@ -160,6 +185,83 @@ public final class MediaHostSession {
             }
         }
         try result.get()
+    }
+
+    /// Attach inline on the admitted video's executor. Its first payload binds
+    /// it to a currently authorized audio lease for this same room and peer.
+    public func attachVideo(channel: SecurePeerChannel, credentials: AuthenticatedChannelCredentials) throws {
+        assertQueue()
+        var result: Result<Void, Error> = .failure(SecureTransportError.invalidState)
+        channel.withAuthenticatedCredentials { actual in
+            guard DispatchQueue.getSpecific(key: self.executorKey) == 1 else { return }
+            result = Result {
+                guard try actual.get() === credentials, !self.stopped,
+                      credentials.roomID == self.roomID, credentials.localPeerID == self.localPeerID else {
+                    throw SecureTransportError.invalidCredentials
+                }
+                try self.addVideoPeer(credentials: credentials, send: { channel.send(payload: $0, completion: $1) },
+                                      close: { channel.cancel() })
+                let previous = channel.onState
+                channel.onState = { [weak self] state in
+                    if case .failed = state { self?.videoHost.remove(credentials.connectionID) }
+                    if state == .cancelled { self?.videoHost.remove(credentials.connectionID) }
+                    previous?(state)
+                }
+                channel.onPayload = { [weak self] in self?.receiveVideoBinding($0, connectionID: credentials.connectionID) }
+            }
+        }
+        try result.get()
+    }
+
+    func addVideoPeer(credentials: AuthenticatedChannelCredentials, send: @escaping MediaVideoHost.Send,
+                      close: @escaping () -> Void) throws {
+        assertQueue()
+        guard !stopped, credentials.roomID == roomID, credentials.localPeerID == localPeerID else {
+            throw SecureTransportError.invalidCredentials
+        }
+        try videoHost.add(credentials: credentials, send: send, close: close)
+    }
+    func receiveVideoBinding(_ data: Data, connectionID: UUID) { assertQueue(); videoHost.receive(data, from: connectionID) }
+    func removeVideoPeer(connectionID: UUID) { assertQueue(); videoHost.remove(connectionID) }
+
+    public func setVideoEnabled(_ enabled: Bool) {
+        if DispatchQueue.getSpecific(key: executorKey) != 1 { queue.async { self.setVideoEnabled(enabled) }; return }
+        guard !stopped else { return }
+        if !enabled { ingressLock.withLock { videoIngress.reset() } }
+        videoHost.setEnabled(enabled)
+    }
+
+    public func submitVideo(_ frame: VideoFrame) {
+        guard MediaVideoWire.validate(frame) else { return }
+        let schedule = ingressLock.withLock { () -> Bool in
+            guard !ingressStopped else { return false }
+            videoIngress.append(frame, nowNanos: nowNanos())
+            guard !videoIngressScheduled else { return false }
+            videoIngressScheduled = true; return true
+        }
+        if schedule {
+            queue.async {
+                let batch = self.ingressLock.withLock { () -> (frames: [VideoFrame], needsKeyframe: Bool) in
+                    var frames: [VideoFrame] = []
+                    while let entry = self.videoIngress.takeNext(nowNanos: self.nowNanos()) { frames.append(entry.frame) }
+                    self.videoIngressScheduled = false; return (frames, self.videoIngress.requiresKeyframe)
+                }
+                if batch.needsKeyframe { self.videoHost.requireKeyframe() }
+                for frame in batch.frames { self.videoHost.publish(frame) }
+            }
+        }
+    }
+
+    private func videoCaptureFloor(credentials: AuthenticatedChannelCredentials, stream: MediaStreamIdentifier) -> UInt64? {
+        guard !stopped, credentials.isActive, credentials.roomID == roomID, credentials.localPeerID == localPeerID,
+              credentials.channelRole == .video, credentials.localRole == .responder,
+              credentials.negotiated.initiatorCapabilities.contains(.receiveVideo),
+              let peer = peers.values.first(where: { $0.credentials.remotePeerID == credentials.remotePeerID }),
+              peer.credentials.isActive, peer.credentials.negotiated.initiatorCapabilities.contains(.receiveVideo),
+              let lease = validatedLease(stream, peer: peer),
+              registry.containsLiveSubscription(sessionID: stream.sessionID, now: now),
+              let anchor = lease.proposedAnchor, anchor.state == .running else { return nil }
+        return anchor.captureTimeNanos
     }
 
     func addPeer(credentials: AuthenticatedChannelCredentials, send: @escaping ControlSend,
@@ -180,10 +282,16 @@ public final class MediaHostSession {
     }
 
     public func detach(connectionID: UUID) {
+        detach(connectionID: connectionID, error: SecurePeerChannelError.cancelled)
+    }
+
+    private func detach(connectionID: UUID, error: Error) {
         assertQueue()
         guard let peer = peers.removeValue(forKey: connectionID) else { return }
-        revoke(peer.active); revoke(peer.pending); peer.outputs.removeAll()
+        revoke(peer.active); revoke(peer.pending)
+        let outputs = peer.outputs; peer.outputs.removeAll()
         peer.close(); callbacks.peerDetached(connectionID)
+        for output in outputs { output.completion?(.failure(error)) }
     }
 
     func publisherReady(port: UInt16) { assertQueue(); if !stopped, port != 0 { self.port = port } }
@@ -262,6 +370,7 @@ public final class MediaHostSession {
     /// renderer before resuming playout. Readiness ACK commits initial/replacement
     /// tickets, not every refresh. Paused tickets may ACK without audio warmup.
     public func refreshTimeline() {
+        if DispatchQueue.getSpecific(key: executorKey) != 1 { queue.async { self.refreshTimeline() }; return }
         assertQueue(); tick()
         for peer in Array(peers.values) {
             if let active = peer.active { sendAnchor(peer, lease: active) }
@@ -269,34 +378,133 @@ public final class MediaHostSession {
         }
     }
 
-    /// Queue-confined: the caller must bound its capture-to-host queue crossing.
-    /// One enqueue in flight per lease prevents a slow UDP peer retaining audio.
+    /// Thread-safe capture bridge. At most one executor drain and 16 packets are
+    /// retained; capture bursts do not create an unbounded queue of closures.
+    public func submitAudio(_ packets: [AudioPacket]) {
+        let shouldSchedule = ingressLock.withLock { () -> Bool in
+            guard !ingressStopped else { return false }
+            let time = nowNanos()
+            ingress.removeAll { time < $0.enqueuedAt || time - $0.enqueuedAt >= Self.maximumAudioWait }
+            for packet in packets.suffix(Self.maximumPendingAudio) {
+                guard !packet.samples.isEmpty,
+                      packet.samples.count <= Int(AudioPacket.framesPerPacket) * Int(AudioPacket.channelCount),
+                      packet.samples.count.isMultiple(of: Int(AudioPacket.channelCount)),
+                      packet.captureTimeNanos <= UInt64(Int64.max) else { continue }
+                if ingress.count >= Self.maximumPendingAudio { ingress.removeFirst() }
+                ingress.append(PendingAudio(packet: packet, enqueuedAt: time))
+            }
+            guard !ingressScheduled, !ingress.isEmpty else { return false }
+            ingressScheduled = true; return true
+        }
+        if shouldSchedule { queue.async { self.drainIngress() } }
+    }
+
+    private func drainIngress() {
+        assertQueue()
+        let batch = ingressLock.withLock { () -> [PendingAudio] in
+            let batch = ingress; ingress.removeAll(); ingressScheduled = false; return batch
+        }
+        let time = nowNanos()
+        for item in batch where time >= item.enqueuedAt && time - item.enqueuedAt < Self.maximumAudioWait {
+            publishAudio(item.packet, enqueuedAt: item.enqueuedAt)
+        }
+    }
+
+    /// Queue-confined. Each lease preserves short bursts in a bounded FIFO while
+    /// its publisher enqueue is outstanding; expired audio never drains later.
     public func publishAudio(_ packet: AudioPacket) {
+        publishAudio(packet, enqueuedAt: nowNanos())
+    }
+
+    private func publishAudio(_ packet: AudioPacket, enqueuedAt: UInt64) {
         assertQueue(); tick()
         guard !stopped, localEpoch != nil, !packet.samples.isEmpty,
               packet.samples.count <= Int(AudioPacket.framesPerPacket) * Int(AudioPacket.channelCount),
               packet.samples.count.isMultiple(of: Int(AudioPacket.channelCount)),
               packet.captureTimeNanos <= UInt64(Int64.max) else { return }
-        let bytes = packet.encoded()
         for peer in Array(peers.values) {
             for lease in [peer.active, peer.pending].compactMap({ $0 }) {
                 // A validated pending path needs startup data before the receiver
                 // can acknowledge readiness. Its predecessor remains live until ACK.
                 guard lease.validated, let anchor = lease.proposedAnchor,
                       anchor.state == .running, packet.frameIndex >= anchor.frameIndex, packet.captureTimeNanos >= anchor.captureTimeNanos,
-                      lease.ticket.channels.contains(.audio), !lease.audioInFlight else { continue }
-                lease.audioInFlight = true
-                sendDatagram(bytes, lease.ticket.sessionID) { [weak self, weak lease] _ in
-                    self?.assertQueue(); lease?.audioInFlight = false
+                      lease.ticket.channels.contains(.audio) else { continue }
+                pruneAudio(lease)
+                while lease.pendingAudio.count >= Self.maximumPendingAudio ||
+                    lease.pendingAudio.first.map({ packet.captureTimeNanos >= $0.packet.captureTimeNanos &&
+                        packet.captureTimeNanos - $0.packet.captureTimeNanos > Self.maximumAudioWait }) == true {
+                    lease.pendingAudio.removeFirst()
                 }
+                lease.pendingAudio.append(PendingAudio(packet: packet, enqueuedAt: enqueuedAt))
+                drainAudio(lease, peer: peer)
             }
         }
     }
 
-    public func sendAnnotation(_ bytes: Data, connectionID: UUID) {
+    private func pruneAudio(_ lease: Lease) {
+        let time = nowNanos()
+        lease.pendingAudio.removeAll { item in
+            guard let anchor = lease.proposedAnchor, anchor.state == .running,
+                  item.packet.frameIndex >= anchor.frameIndex, item.packet.captureTimeNanos >= anchor.captureTimeNanos,
+                  time >= item.enqueuedAt, time - item.enqueuedAt < Self.maximumAudioWait else { return true }
+            let delay = anchor.hostPlaybackTimeNanos - anchor.captureTimeNanos
+            let deadline = item.packet.captureTimeNanos.addingReportingOverflow(delay)
+            return deadline.overflow || deadline.partialValue <= time
+        }
+    }
+
+    private func drainAudio(_ lease: Lease, peer: Peer) {
+        guard !stopped, peers[peer.credentials.connectionID] === peer, peer.credentials.isActive,
+              peer.active === lease || peer.pending === lease,
+              lease.ticket.broadcasterEpoch == localEpoch,
+              registry.containsLiveSubscription(sessionID: lease.ticket.sessionID, now: now) else {
+            lease.pendingAudio.removeAll(); return
+        }
+        pruneAudio(lease)
+        guard !lease.audioInFlight, !lease.pendingAudio.isEmpty else { return }
+        let item = lease.pendingAudio.removeFirst()
+        lease.audioInFlight = true
+        sendDatagram(item.packet.encoded(), lease.ticket.sessionID) { [weak self, weak lease, weak peer] accepted in
+            guard let self, let lease, let peer else { return }; self.assertQueue()
+            if !accepted, !self.stopped, self.peers[peer.credentials.connectionID] === peer,
+               peer.credentials.isActive, peer.active === lease || peer.pending === lease,
+               lease.ticket.broadcasterEpoch == self.localEpoch {
+                // This completion reports queue admission, so false means no
+                // datagram was enqueued. Preserve order through brief pressure
+                // without retrying any packet already handed to the transport.
+                if lease.pendingAudio.count >= Self.maximumPendingAudio { lease.pendingAudio.removeLast() }
+                lease.pendingAudio.insert(item, at: 0)
+                self.pruneAudio(lease)
+                if !lease.pendingAudio.isEmpty {
+                    self.scheduleAudioRetry { [weak self, weak lease, weak peer] in
+                        guard let self, let lease, let peer else { return }; self.assertQueue()
+                        lease.audioInFlight = false; self.drainAudio(lease, peer: peer)
+                    }
+                    return
+                }
+            }
+            lease.audioInFlight = false; self.drainAudio(lease, peer: peer)
+        }
+    }
+
+    /// Queue-confined. Completion reflects the reliable send, including terminal
+    /// errors and cancellation; adding bytes to the local queue is not success.
+    public func sendAnnotation(_ bytes: Data, connectionID: UUID,
+                               completion: ((Result<Void, Error>) -> Void)? = nil) {
         assertQueue(); tick()
-        guard let peer = peers[connectionID], (try? AnnotationWireMessage(encoded: bytes)) != nil else { return }
-        enqueue(bytes, peer: peer)
+        guard let peer = peers[connectionID] else { completion?(.failure(SecurePeerChannelError.notAuthenticated)); return }
+        guard (try? AnnotationWireMessage(encoded: bytes)) != nil else { completion?(.failure(SecureTransportError.malformed)); return }
+        enqueue(bytes, peer: peer, completion: completion)
+    }
+
+    /// The validated DTO carries geometry only. The annotation coordinator owns
+    /// source identity/permission and decides which admitted peers receive it.
+    public func sendCaptureMetadata(_ metadata: CaptureMetadataWireMessage, connectionID: UUID,
+                                     completion: ((Result<Void, Error>) -> Void)? = nil) {
+        assertQueue(); tick()
+        guard let peer = peers[connectionID] else { completion?(.failure(SecurePeerChannelError.notAuthenticated)); return }
+        do { enqueue(try metadata.encoded(), peer: peer, completion: completion) }
+        catch { completion?(.failure(error)) }
     }
 
     private var localEpoch: UInt64? {
@@ -350,7 +558,8 @@ public final class MediaHostSession {
               peer.active == nil || peer.active === lease || anchor.hostPlaybackTimeNanos > time,
               let bytes = try? MediaControlWireMessage.anchor(anchor).encoded() else { return }
         lease.anchorSending = true; lease.proposedAnchor = anchor
-        enqueue(bytes, peer: peer) { [weak self, weak peer, weak lease] in
+        enqueue(bytes, peer: peer) { [weak self, weak peer, weak lease] result in
+            guard case .success = result else { return }
             guard let self, let peer, let lease,
                   self.peers[peer.credentials.connectionID] === peer else { return }
             lease.anchorSending = false
@@ -367,6 +576,7 @@ public final class MediaHostSession {
     }
     private func revoke(_ lease: Lease?) {
         guard let lease else { return }
+        lease.pendingAudio.removeAll()
         registry.cancel(sessionID: lease.ticket.sessionID) // Immediate revocation on owning queue.
         cancelDatagram(lease.ticket.sessionID)
     }
@@ -375,7 +585,8 @@ public final class MediaHostSession {
         let time = now, epoch = localEpoch
         for peer in Array(peers.values) {
             if !peer.credentials.isActive || peer.outputs.first.map({ $0.deadline <= time }) == true {
-                detach(connectionID: peer.credentials.connectionID); continue
+                detach(connectionID: peer.credentials.connectionID, error: peer.credentials.isActive
+                    ? SecurePeerChannelError.timedOut : SecurePeerChannelError.cancelled); continue
             }
             if let active = peer.active, active.ticket.expiresAt <= time || active.ticket.broadcasterEpoch != epoch {
                 revoke(active); peer.active = nil
@@ -386,8 +597,10 @@ public final class MediaHostSession {
                 revoke(pending); peer.pending = nil
             }
             advance(peer)
+            for lease in [peer.active, peer.pending].compactMap({ $0 }) { pruneAudio(lease) }
         }
         registry.expire(now: time)
+        videoHost.tick()
     }
     private func reject(_ id: UUID, _ reason: MediaControlWireMessage.Rejection, _ peer: Peer) {
         send(.rejected(requestID: id, reason: reason), to: peer)
@@ -395,10 +608,10 @@ public final class MediaHostSession {
     private func send(_ message: MediaControlWireMessage, to peer: Peer) {
         guard let bytes = try? message.encoded() else { return }; enqueue(bytes, peer: peer)
     }
-    private func enqueue(_ bytes: Data, peer: Peer, completion: (() -> Void)? = nil) {
-        guard peers[peer.credentials.connectionID] === peer else { return }
+    private func enqueue(_ bytes: Data, peer: Peer, completion: ((Result<Void, Error>) -> Void)? = nil) {
+        guard peers[peer.credentials.connectionID] === peer else { completion?(.failure(SecurePeerChannelError.cancelled)); return }
         guard peer.outputs.count < 8, peer.outputs.reduce(0, { $0 + $1.bytes.count }) + bytes.count <= 262_144 else {
-            detach(connectionID: peer.credentials.connectionID); return
+            completion?(.failure(SecureTransportError.capacity)); detach(connectionID: peer.credentials.connectionID); return
         }
         peer.outputs.append(Output(bytes: bytes, deadline: now + 2, completion: completion)); drain(peer)
     }
@@ -408,10 +621,13 @@ public final class MediaHostSession {
         peer.send(output.bytes) { [weak self, weak peer] result in
             guard let self, let peer else { return }; self.assertQueue()
             guard self.peers[peer.credentials.connectionID] === peer, peer.outputs.first?.id == output.id else { return }
-            guard case .success = result, output.deadline > self.now else {
-                self.detach(connectionID: peer.credentials.connectionID); return
+            if case .failure(let error) = result {
+                self.detach(connectionID: peer.credentials.connectionID, error: error); return
             }
-            peer.outputs.removeFirst(); peer.sending = false; output.completion?(); self.drain(peer)
+            guard output.deadline > self.now else {
+                self.detach(connectionID: peer.credentials.connectionID, error: SecurePeerChannelError.timedOut); return
+            }
+            peer.outputs.removeFirst(); peer.sending = false; output.completion?(.success(())); self.drain(peer)
         }
     }
 }

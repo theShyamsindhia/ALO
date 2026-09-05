@@ -182,6 +182,7 @@ public final class MeshControlPlane: @unchecked Sendable {
     private var deviceColorHex: String
     private var profileImageData: Data?
     private let queue = DispatchQueue(label: "in.werai.mesh.control", qos: .userInteractive)
+    private let mediaExecutorKey = DispatchSpecificKey<UInt8>()
     private let roomStateWorkerQueue = DispatchQueue(label: "in.werai.mesh.room-state", qos: .utility)
     private let replicaHandler: (MeshRoomReplica) -> Void
     private let participantsHandler: ([RoomParticipant]) -> Void
@@ -342,6 +343,14 @@ public final class MeshControlPlane: @unchecked Sendable {
         self.listenerStateHandler = listenerStateHandler
         self.replicaHandler = replicaHandler
         self.participantsHandler = participantsHandler
+        queue.setSpecific(key: mediaExecutorKey, value: 1)
+    }
+
+    /// For bounded/coalesced application work sharing admitted media ownership.
+    /// Cleanup remains available after stop; callers guard their own lifecycle.
+    public func performMediaWork(_ callback: @escaping () -> Void) {
+        if DispatchQueue.getSpecific(key: mediaExecutorKey) == 1 { callback() }
+        else { queue.async(execute: callback) }
     }
 
     public func start(advertise: Bool = true) throws {
@@ -457,6 +466,24 @@ public final class MeshControlPlane: @unchecked Sendable {
                     completion(.success((channel, authenticated)))
                 }
                 channel.start()
+            } catch { completion(.failure(error)) }
+        }
+    }
+
+    /// Creates a host owned by the same executor as admitted channels. Attach
+    /// incoming media channels inline in incomingMediaChannelHandler. The caller
+    /// owns this host and must stop it on room leave or ownership loss.
+    public func makeMediaHost(callbacks: MediaHostSession.Callbacks,
+                              completion: @escaping (Result<MediaHostSession, Error>) -> Void) {
+        queue.async {
+            guard !self.isStopped, self.room.transportPolicy == .secureV2,
+                  let roomID = UUID(uuidString: self.room.id),
+                  let peerID = UUID(uuidString: self.nodeID), self.localPermits(.broadcast) else {
+                completion(.failure(SecureTransportError.invalidState)); return
+            }
+            do {
+                let host = try MediaHostSession(roomID: roomID, localPeerID: peerID, queue: self.queue, callbacks: callbacks)
+                host.start(); completion(.success(host))
             } catch { completion(.failure(error)) }
         }
     }

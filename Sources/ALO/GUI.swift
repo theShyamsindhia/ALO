@@ -1475,6 +1475,10 @@ final class ALOViewModel: ObservableObject {
     @Published private(set) var menuBarPopoverVisible = false
 
     private var roomBrowser: MeshRoomBrowser!
+    private var secureRoomBrowser: MeshRoomBrowser!
+    private var legacyNearbyRooms: [NearbyRoom] = []
+    private var secureNearbyRooms: [NearbyRoom] = []
+    private var secureRoomIdentity: MacSecureRoomIdentity?
     private var meshSession: MeshSession?
     private var liveSyncTask: Task<Void, Never>?
     private let syncHealthLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "in.werai.audio", category: "synchronization")
@@ -1549,7 +1553,8 @@ final class ALOViewModel: ObservableObject {
             updateHandler: { [weak self] rooms in
                 DispatchQueue.main.async {
                     guard let self else { return }
-                    self.nearbyRooms = rooms
+                    self.legacyNearbyRooms = rooms
+                    self.updateNearbyRoomChoices()
                     if let selected = self.selectedRoomID, !self.roomChoices.contains(where: { $0.id == selected }) {
                         self.selectedRoomID = nil
                     }
@@ -1569,7 +1574,37 @@ final class ALOViewModel: ObservableObject {
                 }
             }
         )
-        if discoverRooms { roomBrowser.start() }
+        secureRoomBrowser = MeshRoomBrowser(
+            updateHandler: { [weak self] rooms in
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.secureNearbyRooms = rooms
+                    self.updateNearbyRoomChoices()
+                }
+            }, errorHandler: { [weak self] message in
+                DispatchQueue.main.async { self?.roomsRefreshError = message }
+            }, transportPolicy: .secureV2, readyHandler: { [weak self] in
+                DispatchQueue.main.async {
+                    self?.roomsRefreshing = false
+                    self?.roomsRefreshError = nil
+                }
+            })
+        if discoverRooms { roomBrowser.start(); secureRoomBrowser.start() }
+    }
+
+    private func updateNearbyRoomChoices() {
+        // Conflicting advertisements must not silently select a weaker policy.
+        let ambiguous = Set(legacyNearbyRooms.map(\.id)).intersection(secureNearbyRooms.map(\.id))
+        nearbyRooms = (legacyNearbyRooms + secureNearbyRooms)
+            .filter { !ambiguous.contains($0.id) }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    private func requireSecureRoomIdentity() throws -> MacSecureRoomIdentity {
+        if let secureRoomIdentity { return secureRoomIdentity }
+        let loaded = try MacSecureRoomIdentity()
+        secureRoomIdentity = loaded
+        return loaded
     }
 
     var normalizedRoomName: String { roomName.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -1582,12 +1617,14 @@ final class ALOViewModel: ObservableObject {
         guard let id = selectedRoomID else { return nil }
         if let saved = savedRooms.first(where: { $0.id == id }) { return saved }
         guard let nearby = nearbyRooms.first(where: { $0.id == id }) else { return nil }
-        return RoomConfiguration(id: nearby.id, name: nearby.name, isPrivate: nearby.isPrivate)
+        return RoomConfiguration(id: nearby.id, name: nearby.name, isPrivate: nearby.isPrivate,
+                                 transportPolicy: nearby.transportPolicy, icon: nearby.icon)
     }
     var roomChoices: [RoomConfiguration] {
         var result = savedRooms
         for nearby in nearbyRooms where !result.contains(where: { $0.id == nearby.id }) {
-            result.append(RoomConfiguration(id: nearby.id, name: nearby.name, isPrivate: nearby.isPrivate))
+            result.append(RoomConfiguration(id: nearby.id, name: nearby.name, isPrivate: nearby.isPrivate,
+                                            transportPolicy: nearby.transportPolicy, icon: nearby.icon))
         }
         return result
     }
@@ -1667,12 +1704,16 @@ final class ALOViewModel: ObservableObject {
     func startSharing() {
         guard canStartSharing else { return }
         resetRoomState()
-        let room = RoomConfiguration(
-            name: normalizedRoomName,
-            creatorPeerID: nodeID,
-            isPrivate: createPrivateRoom,
-            accessKey: createPrivateRoom ? UUID().uuidString : nil
-        )
+        let room: RoomConfiguration
+        do {
+            let identity = try requireSecureRoomIdentity()
+            room = .secure(name: normalizedRoomName,
+                creatorPeerID: identity.identity.publicIdentity.nodeID.uuidString,
+                isPrivate: createPrivateRoom)
+        } catch {
+            errorMessage = "Could not load this Mac's secure identity: \(error.localizedDescription)"
+            return
+        }
         do { try roomStore.save(room); savedRooms = roomStore.load() }
         catch { errorMessage = "Could not save the room: \(error.localizedDescription)"; return }
         open(room, broadcastInitially: false)
@@ -1700,7 +1741,8 @@ final class ALOViewModel: ObservableObject {
                 transportPolicy: room.transportPolicy,
                 icon: room.icon
             )
-            try? roomStore.save(unlocked)
+            do { try unlocked.validateForJoining(); try roomStore.save(unlocked) }
+            catch { errorMessage = "Could not join this room: \(error.localizedDescription)"; return }
             savedRooms = roomStore.load()
             open(unlocked, broadcastInitially: false)
         } else { open(room, broadcastInitially: false) }
@@ -1750,7 +1792,8 @@ final class ALOViewModel: ObservableObject {
         let nearbyIcon = nearbyRooms.first(where: { $0.id == roomID })?.icon
         let counter = max(room.icon?.version.counter ?? 0, nearbyIcon?.version.counter ?? 0)
         guard counter < UInt64.max - 1 else { return }
-        let icon = RoomIcon(symbol: symbol, version: MeshVersion(counter: counter + 1, nodeID: nodeID))
+        let icon = RoomIcon(symbol: symbol, version: MeshVersion(counter: counter + 1,
+            nodeID: meshSession?.nodeID ?? nodeID))
         do {
             try roomStore.mergeIcon(icon, roomID: roomID)
             savedRooms = roomStore.load()
@@ -1768,14 +1811,24 @@ final class ALOViewModel: ObservableObject {
 
     private func open(_ room: RoomConfiguration, broadcastInitially: Bool) {
         resetRoomState()
+        let secure: MacSecureRoomIdentity?
+        do {
+            try room.validateForJoining()
+            secure = room.transportPolicy == .secureV2 ? try requireSecureRoomIdentity() : nil
+        } catch {
+            errorMessage = "Could not open this room securely: \(error.localizedDescription)"
+            return
+        }
         let session = MeshSession(
             room: room,
-            nodeID: nodeID,
+            nodeID: secure?.identity.publicIdentity.nodeID.uuidString ?? nodeID,
             displayName: currentUserName,
             deviceIcon: currentDeviceIcon,
             deviceColorHex: currentDeviceColorHex,
             profileImageData: currentDeviceProfileImageData,
             audioOutput: audioOutput,
+            installationIdentity: secure?.identity,
+            peerPins: secure?.pins,
             initialEvents: roomStore.loadEvents(roomID: room.id),
             initialRoomStateDocument: roomStore.loadRoomStateDocument(roomID: room.id),
             statusHandler: { [weak self] status in
@@ -1796,6 +1849,7 @@ final class ALOViewModel: ObservableObject {
             chatHandler: chatCallback,
             queueHandler: queueCallback,
             videoHandler: videoCallback,
+            annotationSceneHandler: { [weak self] scene in self?.annotationScene = scene },
             peerVersionHandler: { [weak self] version in self?.peerVersionHandler(version) },
             roomIconHandler: { [weak self] icon in
                 guard let self else { return }
@@ -1886,6 +1940,7 @@ final class ALOViewModel: ObservableObject {
         phase = .starting
         statusText = "Opening \(room.name)"
         roomBrowser.stop()
+        secureRoomBrowser.stop()
         meshSession = session
         session.setIncomingMediaMuted(incomingMediaMuted)
         session.setIncomingWalkieTalkieMuted(incomingCallsMuted)
@@ -1904,6 +1959,7 @@ final class ALOViewModel: ObservableObject {
             errorMessage = readable(error)
             statusText = "Could not open the room"
             roomBrowser.start()
+            secureRoomBrowser.start()
         }
     }
 
@@ -2145,8 +2201,7 @@ final class ALOViewModel: ObservableObject {
             syncAllDevices()
         case .toggleAnnotations:
             guard let scene = annotationScene else { return }
-            if scene.annotationEnabled { scene.escape() }
-            else { scene.annotationEnabled = true; scene.tool = .pencil }
+            scene.toggleAnnotations()
         }
     }
 
@@ -2742,16 +2797,20 @@ final class ALOViewModel: ObservableObject {
         phase = .idle
         statusText = "Ready"
         roomBrowser.restart()
+        secureRoomBrowser.restart()
     }
 
     func refreshRooms() {
         guard phase == .idle, !roomsRefreshing else { return }
         savedRooms = roomStore.load()
         nearbyRooms = []
+        legacyNearbyRooms = []
+        secureNearbyRooms = []
         roomsRefreshing = true
         roomsRefreshError = nil
         statusText = "Looking for rooms"
         roomBrowser.restart()
+        secureRoomBrowser.restart()
     }
 
     func dismissPermissionNotice() {
@@ -3143,6 +3202,7 @@ final class ALOViewModel: ObservableObject {
         phase = .idle
         statusText = "Ready"
         roomBrowser.restart()
+        secureRoomBrowser.restart()
     }
 
     private func startLocalNowPlayingMonitor() {
@@ -3202,6 +3262,8 @@ final class ALOViewModel: ObservableObject {
         }
         if status.contains("waiting for audio")
             || status.hasPrefix("Connecting")
+            || status.hasPrefix("Recovering room audio")
+            || status.hasPrefix("Synchronizing room audio")
             || status.hasPrefix("Room open")
             || status.hasPrefix("Taking over") {
             return false

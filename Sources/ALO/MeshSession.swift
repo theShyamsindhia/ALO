@@ -95,7 +95,13 @@ final class MeshSession {
     }
     private let walkieTransmissionState = WalkieTransmissionState()
     private var hostSession: HostSession?
+    private var secureHost: SecureMacMediaHost?
     private var receiver: Receiver?
+    private var secureReceiver: SecureMacMediaReceiver?
+    private var secureAnnotations: SecureMacAnnotationViewer?
+    private var currentParticipants: [RoomParticipant] = []
+    private let annotationSceneHandler: (AnnotationSceneModel?) -> Void
+    private let secureMediaAdmission: SecureMediaAdmissionRelay
     private var replica = MeshRoomReplica()
     private var appliedBroadcaster: MeshBroadcaster?
     private var transitionGeneration = 0
@@ -126,6 +132,7 @@ final class MeshSession {
 
     func diagnosticsSnapshot() -> SessionTimingDiagnostics? {
         if let hostSession { return hostSession.diagnosticsSnapshot() }
+        if let secureReceiver { return SessionTimingDiagnostics(receiver: secureReceiver.diagnosticsSnapshot(), host: nil) }
         if let receiver {
             return SessionTimingDiagnostics(receiver: receiver.diagnosticsSnapshot(), host: nil)
         }
@@ -133,6 +140,11 @@ final class MeshSession {
     }
 
     func sampleTimingDiagnostics() async -> SessionTimingDiagnostics? {
+        if let sampled = secureReceiver {
+            let snapshot = await Task.detached(priority: .utility) { sampled.diagnosticsSnapshot() }.value
+            guard secureReceiver === sampled else { return nil }
+            return SessionTimingDiagnostics(receiver: snapshot, host: nil)
+        }
         let sampledHost = hostSession
         let sampledReceiver = receiver
         let snapshot: SessionTimingDiagnostics?
@@ -195,6 +207,8 @@ final class MeshSession {
         deviceColorHex: String? = nil,
         profileImageData: Data? = nil,
         audioOutput: RoomAudioOutputEngine = RoomAudioOutputEngine(),
+        installationIdentity: InstallationIdentity? = nil,
+        peerPins: (any PeerPinStore)? = nil,
         initialEvents: [MeshRoomEvent] = [],
         initialRoomStateDocument: Data? = nil,
         statusHandler: @escaping (String) -> Void,
@@ -205,6 +219,7 @@ final class MeshSession {
         chatHandler: @escaping (String, String, String, UInt64) -> Void,
         queueHandler: @escaping ([RoomQueueItem]) -> Void,
         videoHandler: @escaping (CGImage) -> Void,
+        annotationSceneHandler: @escaping (AnnotationSceneModel?) -> Void = { _ in },
         peerVersionHandler: @escaping (String) -> Void = { _ in },
         roomIconHandler: @escaping (RoomIcon) -> Void = { _ in },
         errorHandler: @escaping (Error) -> Void = { _ in },
@@ -217,6 +232,8 @@ final class MeshSession {
     ) {
         let relay = CallbackRelay()
         let mediaRelay = MediaActionRelay()
+        let secureMediaAdmission = SecureMediaAdmissionRelay()
+        self.secureMediaAdmission = secureMediaAdmission
         self.room = room
         self.nodeID = nodeID
         self.displayName = displayName
@@ -237,6 +254,7 @@ final class MeshSession {
         self.chatHandler = chatHandler
         self.queueHandler = queueHandler
         self.videoHandler = videoHandler
+        self.annotationSceneHandler = annotationSceneHandler
         self.errorHandler = errorHandler
         self.walkieTalkieStateHandler = walkieTalkieStateHandler
         self.walkieTalkieTransmissionEndedHandler = walkieTalkieTransmissionEndedHandler
@@ -287,10 +305,19 @@ final class MeshSession {
             openLineHandler: { message in
                 DispatchQueue.main.async { relay.openLine(message) }
             },
-            roomStatePersistenceHandler: roomStatePersistenceHandler
+            roomStatePersistenceHandler: roomStatePersistenceHandler,
+            installationIdentity: installationIdentity,
+            peerPins: peerPins,
+            incomingMediaChannelHandler: { [secureMediaAdmission] channel, peer in
+                secureMediaAdmission.receive(channel, peer: peer)
+            }
         )
         relay.replica = { [weak self] in self?.apply($0) }
-        relay.participants = participantsHandler
+        relay.participants = { [weak self] participants in
+            participantsHandler(participants)
+            self?.currentParticipants = participants
+            self?.secureAnnotations?.updateParticipants(Dictionary(participants.map { ($0.id, $0.name) }, uniquingKeysWith: { _, new in new }))
+        }
         relay.openLine = { [weak self] in self?.receiveOpenLine($0) }
         relay.walkieTalkie = { [weak self] in
             self?.updateIncomingVoiceActivity(
@@ -675,6 +702,10 @@ final class MeshSession {
     }
     func requestResync(participantID: String? = nil) -> Bool {
         guard let broadcaster = replica.broadcaster else { return false }
+        if let secureReceiver, participantID == nodeID {
+            secureReceiver.resynchronize()
+            return true
+        }
         if broadcaster.nodeID == nodeID {
             return receiveResyncRequest(
                 targetID: participantID,
@@ -694,11 +725,15 @@ final class MeshSession {
         let routing = incomingAudioMuteRouting
         receiver?.setLocalLevel(volume: localVolume, muted: routing.publishedParticipantMediaMuted)
         receiver?.setLocalPlaybackMuted(routing.incomingMediaMuted)
+        secureReceiver?.setLevel(volume: localVolume, muted: routing.localMediaPlaybackMuted)
+        secureHost?.setLevel(volume: localVolume, muted: routing.localMediaPlaybackMuted)
     }
     func setParticipantLevel(id: String, volume: Double, muted: Bool) {
         if id == nodeID {
             localVolume = min(max(volume, 0), 1)
             localParticipantMuted = muted
+            secureReceiver?.setLevel(volume: localVolume, muted: incomingAudioMuteRouting.localMediaPlaybackMuted)
+            secureHost?.setLevel(volume: localVolume, muted: incomingAudioMuteRouting.localMediaPlaybackMuted)
         }
         hostSession?.setParticipantLevel(
             id: id,
@@ -713,6 +748,8 @@ final class MeshSession {
         // Only the remote receiver is incoming audio. HostSession owns the
         // source return and its direct-source fallback independently.
         receiver?.setLocalPlaybackMuted(incomingAudioMuteRouting.incomingMediaMuted)
+        secureReceiver?.setLevel(volume: localVolume, muted: incomingAudioMuteRouting.localMediaPlaybackMuted)
+        secureHost?.setLevel(volume: localVolume, muted: incomingAudioMuteRouting.localMediaPlaybackMuted)
     }
     func setIncomingWalkieTalkieMuted(_ muted: Bool) {
         incomingVoiceMuted = muted
@@ -749,6 +786,21 @@ final class MeshSession {
     }
 
     func setVideoEnabled(_ enabled: Bool) async throws {
+        if let secureHost, let broadcaster = replica.broadcaster, broadcaster.nodeID == nodeID {
+            try await secureHost.setVideoEnabled(enabled, videoHandler: videoHandler, stopped: { [weak self] error in
+                guard let self, self.replica.broadcaster == broadcaster else { return }
+                self.intendsToBroadcastVideo = false
+                self.control.publishVideo(false, broadcasterID: self.nodeID, broadcasterEpoch: broadcaster.epoch)
+                self.errorHandler(error)
+            })
+            guard self.secureHost === secureHost, replica.broadcaster == broadcaster else {
+                if enabled { try? await secureHost.setVideoEnabled(false) }
+                return
+            }
+            intendsToBroadcastVideo = enabled
+            control.publishVideo(enabled, broadcasterID: nodeID, broadcasterEpoch: broadcaster.epoch)
+            return
+        }
         guard let hostSession,
               let broadcaster = replica.broadcaster,
               broadcaster.nodeID == nodeID
@@ -782,9 +834,15 @@ final class MeshSession {
         mediaActionRelay.clear()
         receiver?.stop()
         receiver = nil
+        secureReceiver?.stop()
+        secureReceiver = nil
+        secureAnnotations?.stop(); secureAnnotations = nil
+        secureMediaAdmission.update(nil)
         await activeTransition?.value
         await hostSession?.stop()
         hostSession = nil
+        await secureHost?.stop()
+        secureHost = nil
         await withCheckedContinuation { continuation in
             control.stop { continuation.resume() }
         }
@@ -804,6 +862,12 @@ final class MeshSession {
         mediaActionRelay.clear()
         receiver?.stop()
         hostSession?.stopImmediately()
+        secureHost?.stopImmediately()
+        secureHost = nil
+        secureReceiver?.stop()
+        secureReceiver = nil
+        secureAnnotations?.stop(); secureAnnotations = nil
+        secureMediaAdmission.update(nil)
         control.stop()
     }
 
@@ -821,6 +885,7 @@ final class MeshSession {
         nowPlayingHandler(next.nowPlaying)
         receiver?.updateNowPlaying(next.nowPlaying)
         mediaStateHandler(next.videoEnabled)
+        secureReceiver?.setVideoEnabled(next.videoEnabled)
         guard next.broadcaster != appliedBroadcaster else { return }
         let wasLocalBroadcaster = appliedBroadcaster?.nodeID == nodeID
         appliedBroadcaster = next.broadcaster
@@ -842,13 +907,21 @@ final class MeshSession {
         let oldReceiver = receiver
         receiver = nil
         oldReceiver?.stop()
+        secureReceiver?.stop()
+        secureReceiver = nil
+        secureAnnotations?.stop(); secureAnnotations = nil
+        annotationSceneHandler(nil)
+        secureMediaAdmission.update(nil)
         let oldHost = hostSession
         hostSession = nil
+        let oldSecureHost = secureHost
+        secureHost = nil
 
         transitionTask = Task {
             await previousTransition?.value
             // This task owns the detached host even if a newer transition cancels it.
             await oldHost?.stop()
+            await oldSecureHost?.stop()
             guard !Task.isCancelled, generation == transitionGeneration else { return }
             guard let broadcaster else {
                 statusHandler("Room open · no one is broadcasting")
@@ -857,6 +930,53 @@ final class MeshSession {
             do {
                 if broadcaster.nodeID == nodeID {
                     statusHandler("Taking over room audio")
+                    if room.transportPolicy == .secureV2 {
+                        let host = SecureMacMediaHost()
+                        secureHost = host
+                        secureMediaAdmission.update { [weak host] channel, peer in
+                            guard let host else { channel.cancel(); return }
+                            host.admit(channel: channel, peer: peer)
+                        }
+                        try await host.start(mesh: control, room: room, broadcaster: broadcaster,
+                            audioOutput: audioOutput, nowPlaying: { [weak self] media in
+                                guard let self, self.transitionGeneration == generation else { return }
+                                self.nowPlayingHandler(media)
+                                self.control.publishPlayback(media)
+                            }, status: statusHandler, stopped: { [weak self, weak host] error in
+                                Task { @MainActor in
+                                    guard let self, let host, self.secureHost === host,
+                                          self.transitionGeneration == generation else { return }
+                                    self.intendsToBroadcast = false
+                                    self.control.publishBroadcaster(active: false)
+                                    self.statusHandler("Broadcast stopped: \(error.localizedDescription)")
+                                    self.errorHandler(error)
+                                }
+                            })
+                        guard !Task.isCancelled, generation == transitionGeneration,
+                              replica.broadcaster == broadcaster else { await host.stop(); return }
+                        mediaCommandReady = true
+                        let localID = nodeID
+                        mediaActionRelay.update(media: { [weak self, weak host] command, id, epoch in
+                            guard id == localID, epoch == broadcaster.epoch else { return false }
+                            Task { @MainActor in
+                                guard let self, let host, self.secureHost === host,
+                                      self.transitionGeneration == generation else { return }
+                                _ = host.performMediaCommand(command)
+                            }
+                            return true
+                        }, resync: { [weak self, weak host] _, id, epoch in
+                            guard id == localID, epoch == broadcaster.epoch else { return false }
+                            Task { @MainActor in
+                                guard let self, let host, self.secureHost === host,
+                                      self.transitionGeneration == generation else { return }
+                                host.requestResync()
+                            }
+                            return true
+                        })
+                        host.setLevel(volume: localVolume, muted: incomingAudioMuteRouting.localMediaPlaybackMuted)
+                        if intendsToBroadcastVideo { try await setVideoEnabled(true) }
+                        return
+                    }
                     let host = HostSession()
                     let initialVideoEnabled = intendsToBroadcastVideo
                     hostSession = host
@@ -940,6 +1060,46 @@ final class MeshSession {
                     )
                 } else {
                     statusHandler("Connecting to the room broadcaster")
+                    if room.transportPolicy == .secureV2 {
+                        guard let roomID = UUID(uuidString: room.id),
+                              let localID = UUID(uuidString: nodeID),
+                              let remoteID = UUID(uuidString: broadcaster.nodeID) else {
+                            throw SecureTransportError.invalidCredentials
+                        }
+                        let annotations = SecureMacAnnotationViewer(localID: localID, presenterID: remoteID,
+                            onScene: { [weak self] scene in
+                                guard let self, !self.isStopped, self.transitionGeneration == generation else { return }
+                                self.annotationSceneHandler(scene)
+                            })
+                        secureAnnotations = annotations
+                        annotations.updateParticipants(Dictionary(currentParticipants.map { ($0.id, $0.name) }, uniquingKeysWith: { _, new in new }))
+                        let secure = try SecureMacMediaReceiver(mesh: control,
+                            selection: .init(roomID: roomID, localPeerID: localID,
+                                broadcasterPeerID: remoteID, broadcasterEpoch: broadcaster.epoch),
+                            audioOutput: audioOutput, status: { [weak self] state in
+                                DispatchQueue.main.async {
+                                    guard let self, !self.isStopped, self.transitionGeneration == generation else { return }
+                                    self.mediaCommandReady = state == .active || state == .paused
+                                    switch state {
+                                    case .active: self.statusHandler("Media transport ready")
+                                    case .paused: self.statusHandler("Connected · waiting for audio")
+                                    case .recovering, .failed: self.statusHandler("Recovering room audio")
+                                    default: self.statusHandler("Synchronizing room audio")
+                                    }
+                                }
+                            }, playbackActivity: { [weak self] active in
+                                DispatchQueue.main.async {
+                                    guard let self, !self.isStopped, self.transitionGeneration == generation else { return }
+                                    self.statusHandler(active ? "Listening in sync" : "Connected · waiting for audio")
+                                }
+                            }, annotations: annotations, videoHandler: videoHandler)
+                        secureReceiver = secure
+                        let routing = incomingAudioMuteRouting
+                        secure.setLevel(volume: localVolume, muted: routing.localMediaPlaybackMuted)
+                        secure.start()
+                        secure.setVideoEnabled(replica.videoEnabled)
+                        return
+                    }
                     let receiver = try Receiver(
                         requestedRoom: broadcaster.mediaServiceName,
                         mediaSecurity: try RoomMediaSecurity.forRoom(room, serviceName: broadcaster.mediaServiceName),
@@ -995,6 +1155,9 @@ final class MeshSession {
                     intendsToBroadcast = false
                     await hostSession?.stop()
                     hostSession = nil
+                    await secureHost?.stop()
+                    secureHost = nil
+                    secureMediaAdmission.update(nil)
                     control.publishBroadcaster(active: false)
                     statusHandler("Media connection failed: \(error.localizedDescription)")
                     errorHandler(error)
@@ -1017,6 +1180,7 @@ final class MeshSession {
               broadcaster.nodeID == broadcasterID,
               broadcaster.epoch == broadcasterEpoch
         else { return false }
+        if mediaCommandReady, let secureHost { return secureHost.performMediaCommand(command) }
         guard mediaCommandReady, let hostSession else { return false }
         return hostSession.sendRoomMediaCommand(command)
     }
@@ -1031,6 +1195,7 @@ final class MeshSession {
               broadcaster.nodeID == broadcasterID,
               broadcaster.epoch == broadcasterEpoch
         else { return false }
+        if mediaCommandReady, let secureHost { secureHost.requestResync(); return true }
         guard mediaCommandReady, let hostSession else { return false }
         return hostSession.requestResync(participantID: targetID)
     }

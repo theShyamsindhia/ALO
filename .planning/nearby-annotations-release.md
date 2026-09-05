@@ -496,3 +496,43 @@ local signing or production installation is authorized by this progress file.
   User was told this arrived after release cutoff, is preserved on remote main,
   and0.14 ships from frozen9950d97 release branch without restarting validation
   for artwork-only expansion. Never force-push main or discard89fe9a9.
+
+### Full integration is now the explicit release requirement (September 5)
+
+- The user superseded the earlier Mac-only split: **wait for full nearby,
+  iOS and annotation integration, then publish 0.14.0**. No 0.14 tag/release
+  exists. Never publish the older Mac-only artifacts as this full release.
+- The original unfinished work was preserved in 6ef5b24 and pushed on
+  `codex/full-nearby-integration`. Latest main (including artwork and README)
+  was merged in a188231 and pushed; that coherent checkpoint passed 477 tests.
+- Runtime wave 1 reproduced the healthy capture-burst loss against untouched
+  a188231 source: only frame 0 arrived from eight frames [0,240,...,1680].
+  Red evidence is `/tmp/alo-media-burst-red-erGgsp/red.log`. The bounded FIFO
+  fix now preserves this burst; cancellation, expiry and overload are tested.
+- Wave 1 full run compiled and ran 508 tests. It found one real active-pause
+  state regression and two native snapshot barrier failures. These were fixed;
+  the artwork pixel/contrast requirements were NOT relaxed. A phase marker and
+  stable native rasters replace an arbitrary sleep; fixture colors use sRGB.
+- Fable low reviewed runtime wave 1 (review-runtime-wave1.log outside repo).
+  Findings covered active preparation failure, stale Mac render state, FIFO
+  eviction, annotation budget cost, bridge overflow ownership and cutover clock
+  changes. Fixes are in progress/covered by the next focused run, not a claim
+  of a final clean release review. Persistent annotation tools are intentional.
+- Wave 2 focused run passed 53 tests in 10 suites, including real admitted audio
+  bootstrap/rejoin/renewal, active refresh rejection, independent video channel
+  authorization/chunking/repair, render handoff, capture metadata, secure-room
+  selection, bounded UI bridges and both artwork appearances.
+- Mac app source now constructs secure media host/receiver for secure rooms,
+  retains explicit legacy policy for existing rooms, creates new rooms with
+  secure identities, and uses bounded discovery windows. Mac secure video and
+  annotation viewer are wired. Presenter annotation runtime, mobile video/voice,
+  authenticated hardware-floor reporting, remaining review follow-ups and full
+  runtime/device acceptance are still pending. Do not advertise completion.
+- Wave 2 full run passed 528 tests in 78 suites (157.920 seconds), and the
+  unsigned Debug iOS simulator build passed with CODE_SIGNING_ALLOWED=NO.
+  Remote main advanced to 1732660 with branding, games and chat fixes; merge
+  those after preserving this tested runtime checkpoint.
+- Temporary identities stay
+  restricted to the explicitly approved isolated Debug simulator flag. No local
+  signing or installed app/data changes were made. All live timing CI gates
+  remain mandatory; local timing does not replace them.

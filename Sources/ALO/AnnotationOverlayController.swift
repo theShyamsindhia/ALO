@@ -11,7 +11,7 @@ private final class AnnotationPanel: NSPanel {
 /// A presenter-only desktop surface. The session owns this controller and feeds
 /// capture metadata into it; creating it never starts capture or asks for access.
 @MainActor
-final class AnnotationOverlayController {
+final class AnnotationOverlayController: AnnotationOverlayPresenting {
     let model: AnnotationSceneModel
     private let overlay: AnnotationPanel
     private let palette: AnnotationPanel
@@ -59,7 +59,7 @@ final class AnnotationOverlayController {
         let unavailable: String?
         if !metadata.desktopOverlaySupported {
             unavailable = "Desktop annotations are unavailable for this display selection. Share a single window, or update macOS."
-        } else if !metadata.isInteractive {
+        } else if !metadata.isInteractive || (model.captureMetadata != nil && model.inputUnavailableReason != nil) {
             unavailable = "The shared content is unavailable. Restore the shared window to annotate."
         } else {
             unavailable = nil

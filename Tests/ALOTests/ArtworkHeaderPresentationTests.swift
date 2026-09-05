@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 import SwiftUI
 import Testing
 import ALOCore
@@ -20,24 +21,69 @@ extension NativePresentationTests {
                 FloatingRoomView(model: model, presentation: .menuBar)
                 WalkieTalkieBar(model: model, showsCloseButton: false)
             }
-            .transaction { $0.disablesAnimations = true }
+            .overlay(alignment: .bottomTrailing) {
+                ArtworkRenderMarker(model: model).frame(width: 4, height: 4)
+            }
+            .transaction { $0.disablesAnimations = true; $0.animation = nil }
             .environment(\.colorScheme, dark ? .dark : .light))
             window.contentView = hosting
             defer { window.close() }
             window.orderBack(nil)
 
             func snapshot(_ name: String) async throws -> NSBitmapImageRep {
-                try await Task.sleep(for: .milliseconds(180))
-                hosting.layoutSubtreeIfNeeded()
-                let bitmap = try #require(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
-                hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
-                if let directory = ProcessInfo.processInfo.environment["ALO_SPACES_SNAPSHOT_DIR"] {
-                    let folder = URL(fileURLWithPath: directory, isDirectory: true)
-                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                let environment = ProcessInfo.processInfo.environment
+                let folder = environment["ALO_SPACES_SNAPSHOT_DIR"].map { URL(fileURLWithPath: $0, isDirectory: true) }
+                    ?? URL(fileURLWithPath: environment["RUNNER_TEMP"] ?? NSTemporaryDirectory(), isDirectory: true)
+                        .appendingPathComponent("alo-artwork-snapshots", isDirectory: true)
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                let destination = folder.appendingPathComponent("artwork-header-\(name)-\(dark ? "dark" : "light").png")
+                let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+                var previousPNG: Data?
+                var consecutiveFrames = 0
+                var result: NSBitmapImageRep?
+                var phaseWasRendered = false
+                var markerDescription = "not captured"
+                repeat {
+                    // Drain the callback's queued model update, then explicitly
+                    // commit AppKit/Core Animation display work. An offscreen
+                    // window does not receive regular display-link updates.
+                    await withCheckedContinuation { continuation in
+                        DispatchQueue.main.async { continuation.resume() }
+                    }
+                    hosting.layoutSubtreeIfNeeded()
+                    hosting.needsDisplay = true
+                    window.displayIfNeeded()
+                    hosting.displayIfNeeded()
+                    CATransaction.flush()
+                    let bitmap = try #require(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
+                    hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
                     let png = try #require(bitmap.representation(using: .png, properties: [:]))
-                    try png.write(to: folder.appendingPathComponent("artwork-header-\(name)-\(dark ? "dark" : "light").png"))
+                    result = bitmap
+                    let marker = try pixel(bitmap, x: 558, y: 142)
+                    markerDescription = marker.description
+                    // Native cacheDisplay converts through the display color
+                    // profile: even a red marker can gain nonzero green/blue.
+                    // Its dominant channel encodes the phase across profiles.
+                    let currentPhaseRendered = switch name {
+                    case "multicolour": marker.redComponent - max(marker.greenComponent, marker.blueComponent) > 0.35
+                    case "paused": marker.greenComponent - max(marker.redComponent, marker.blueComponent) > 0.35
+                    default: marker.blueComponent - max(marker.redComponent, marker.greenComponent) > 0.35
+                    }
+                    phaseWasRendered = phaseWasRendered || currentPhaseRendered
+                    consecutiveFrames = currentPhaseRendered && png == previousPNG ? consecutiveFrames + 1 : 0
+                    previousPNG = png
+                    if consecutiveFrames >= 2 { break }
+                    try await Task.sleep(for: .milliseconds(16))
+                } while ContinuousClock.now < deadline
+                // Keep the actual raster even on failure, without requiring CI
+                // to preconfigure the optional local screenshot directory.
+                if let png = previousPNG {
+                    try png.write(to: destination)
+                    print("Artwork snapshot: \(destination.path); phase rendered=\(phaseWasRendered), consecutive identical comparisons=\(consecutiveFrames), marker=\(markerDescription)")
                 }
-                return bitmap
+                try #require(consecutiveFrames >= 2,
+                    "The current model state did not finish rendering; inspect \(destination.path)")
+                return try #require(result)
             }
             func pixel(_ bitmap: NSBitmapImageRep, x: CGFloat, y: CGFloat) throws -> NSColor {
                 let scale = CGFloat(bitmap.pixelsWide) / 560
@@ -50,7 +96,13 @@ extension NativePresentationTests {
 
             let cover = NSImage(size: NSSize(width: 60, height: 60))
             cover.lockFocus()
-            for (index, color) in [NSColor.systemRed, .systemTeal, .systemPurple].enumerated() {
+            // Fixed sRGB swatches avoid OS-dependent system color palettes.
+            // These three hues also stay chromatic between gradient stops;
+            // complementary red/teal interpolation can correctly become gray.
+            let colors = [NSColor(srgbRed: 1, green: 0.1, blue: 0.15, alpha: 1),
+                          NSColor(srgbRed: 1, green: 0.9, blue: 0.1, alpha: 1),
+                          NSColor(srgbRed: 0.8, green: 0.1, blue: 0.9, alpha: 1)]
+            for (index, color) in colors.enumerated() {
                 color.setFill()
                 NSRect(x: index * 20, y: 0, width: 20, height: 60).fill()
             }
@@ -104,5 +156,19 @@ extension NativePresentationTests {
             return 0.2126 * linear(color.redComponent) + 0.7152 * linear(color.greenComponent)
                 + 0.0722 * linear(color.blueComponent)
         }
+    }
+}
+
+/// A pixel outside the measured header and Talk samples confirms that SwiftUI
+/// rendered the requested model update before checking raster stability. A
+/// stable image of the previous state must never satisfy the completion barrier.
+@MainActor
+private struct ArtworkRenderMarker: View {
+    @ObservedObject var model: ALOViewModel
+
+    var body: some View {
+        Rectangle().fill(model.nowPlaying.title == "Monochrome" ? Color(.sRGB, red: 0, green: 0, blue: 1)
+            : model.nowPlaying.isPlaying == false ? Color(.sRGB, red: 0, green: 1, blue: 0)
+            : model.nowPlaying.title == "Colour study" ? Color(.sRGB, red: 1, green: 0, blue: 0) : .black)
     }
 }

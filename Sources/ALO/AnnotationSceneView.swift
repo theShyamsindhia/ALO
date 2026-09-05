@@ -53,7 +53,9 @@ final class AnnotationSceneModel: ObservableObject {
     @Published private(set) var recentStickers: [AnnotationStickerID] = []
     @Published private(set) var notice: String?
     @Published var inputUnavailableReason: String?
-    var authorNames: [String: String] = [:]
+    @Published var authorNames: [String: String] = [:]
+    @Published private(set) var captureMetadata: CapturedFrameMetadata?
+    private var captureFrameSize: CGSize?
     var videoCaptureTimeNanos: UInt64?
     var requestSnapshot: () -> Void = {}
     let localActorID: String
@@ -194,6 +196,45 @@ final class AnnotationSceneModel: ObservableObject {
         commandSequence = 0
         cleanupSentObjectIDs.removeAll()
         replica = AnnotationReplica()
+        captureMetadata = nil
+        captureFrameSize = nil
+        videoCaptureTimeNanos = nil
+    }
+
+    func toggleAnnotations() {
+        if annotationEnabled { escape() }
+        else if inputAvailable { annotationEnabled = true }
+    }
+
+    func updateCaptureMetadata(_ metadata: CapturedFrameMetadata, frameSize: CGSize) {
+        captureMetadata = metadata
+        captureFrameSize = frameSize
+        videoCaptureTimeNanos = metadata.captureTimeNanos
+        let validGeometry = AnnotationGeometry.isUsable(CGRect(origin: .zero, size: frameSize))
+            && AnnotationGeometry.isUsable(metadata.contentRect)
+            && CGRect(origin: .zero, size: frameSize).contains(metadata.contentRect)
+            && metadata.contentScale.isFinite && metadata.contentScale > 0
+            && metadata.scaleFactor.isFinite && metadata.scaleFactor > 0
+        if isPresenter && !metadata.desktopOverlaySupported {
+            inputUnavailableReason = "Desktop annotations are unavailable for this display selection. Share a single window, or update macOS."
+        } else if !metadata.status.isVisible || !validGeometry || (isPresenter && !metadata.isInteractive) {
+            inputUnavailableReason = "The shared content is unavailable. Restore the shared window to annotate."
+        } else {
+            inputUnavailableReason = nil
+        }
+        if inputUnavailableReason != nil { escape() }
+    }
+
+    func visibleContentRect(frameSize: CGSize, in bounds: CGRect) -> CGRect? {
+        guard let metadata = captureMetadata, metadata.status.isVisible,
+              let capturedSize = captureFrameSize,
+              AnnotationGeometry.isUsable(CGRect(origin: .zero, size: capturedSize)),
+              CGRect(origin: .zero, size: capturedSize).contains(metadata.contentRect) else { return nil }
+        let rect = CGRect(x: metadata.contentRect.minX / capturedSize.width * frameSize.width,
+                          y: metadata.contentRect.minY / capturedSize.height * frameSize.height,
+                          width: metadata.contentRect.width / capturedSize.width * frameSize.width,
+                          height: metadata.contentRect.height / capturedSize.height * frameSize.height)
+        return AnnotationGeometry.visibleContentRect(frameSize: frameSize, contentRect: rect, in: bounds)
     }
 
     func authorName(_ object: AnnotationObject) -> String {
