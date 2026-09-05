@@ -318,6 +318,10 @@ final class ArenaSKView: SKView {
             if !event.isARepeat { resetKeyboard(); session?.togglePause() }
             return
         }
+        if event.keyCode == 48 {
+            super.keyDown(with: event)
+            return
+        }
         guard session?.showsMenu != true, session?.paused != true else { resetKeyboard(); return }
         keyboard.press(event.keyCode); session?.setInput(keyboard.input)
         // The focused arena owns unmodified gameplay keystrokes. Consuming

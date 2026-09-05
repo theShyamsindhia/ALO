@@ -81,6 +81,15 @@ import Testing
         #expect(sim.fighters[1].damage > 0)
         #expect(sim.fighters[1].hitSerial == 1)
     }
+    @Test func forwardAttackCannotHitATargetBehindTheFighter() {
+        var sim = ArenaSimulation(kinds: [.ember, .wisp]); sim.countdown = 0
+        for i in sim.fighters.indices { sim.fighters[i].y = 150; sim.fighters[i].grounded = true }
+        sim.fighters[0].x = 350; sim.fighters[0].facing = 1
+        sim.fighters[1].x = 340
+        var thrust = ArenaInput(); thrust.light = true
+        for _ in 0..<9 { sim.tick([thrust, ArenaInput()]) }
+        #expect(sim.fighters[1].damage == 0)
+    }
     @Test func dodgeAvoidsActiveAttackAndCannotBeSpammed() {
         var sim = started(); sim.fighters[1].x = 405
         var light = ArenaInput(); light.light = true

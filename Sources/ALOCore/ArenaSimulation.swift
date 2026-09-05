@@ -345,8 +345,14 @@ public struct ArenaSimulation: Codable, Equatable, Sendable {
                                 targetX: Double, targetY: Double) -> Bool {
         let endX = fighter.x + fighter.facing * move.reach
         let startX = fighter.x + fighter.facing * min(18, abs(move.reach))
-        let lowX = min(startX, endX) - move.radius - 17
-        let highX = max(startX, endX) + move.radius + 17
+        var lowX = min(startX, endX) - move.radius - 17
+        var highX = max(startX, endX) + move.radius + 17
+        // The shaft begins at the fighter's front face. Its capsule may grow
+        // outward for wide targets, but its target center cannot wrap behind.
+        if move.reach != 0 {
+            if fighter.facing >= 0 { lowX = max(lowX, fighter.x) }
+            else { highX = min(highX, fighter.x) }
+        }
         let centerY = fighter.y + 25 + move.lift
         return targetX > lowX && targetX < highX && abs(targetY + 25 - centerY) < move.radius + 25
     }

@@ -87,20 +87,34 @@ struct ArenaKeyBindings: Equatable {
 struct ArenaKeyboardInput {
     var bindings: ArenaKeyBindings
     private var keys = Set<UInt16>()
+    private static let legacyDefaultAliases: [ArenaKeyAction: Set<UInt16>] = [
+        .moveLeft: [123], .moveRight: [124], .aimUp: [126], .aimDown: [125],
+        .light: [6], .heavy: [7], .dodge: [8]
+    ]
 
     init(bindings: ArenaKeyBindings = .defaults) { self.bindings = bindings }
-    mutating func press(_ code: UInt16) { if bindings.handledKeys.contains(code) { keys.insert(code) } }
+    mutating func press(_ code: UInt16) {
+        let isLegacyAlias = bindings == .defaults
+            && Self.legacyDefaultAliases.values.contains(where: { $0.contains(code) })
+        if bindings.handledKeys.contains(code) || isLegacyAlias { keys.insert(code) }
+    }
     mutating func release(_ code: UInt16) { keys.remove(code) }
     mutating func reset() { keys.removeAll() }
 
+    private func pressed(_ action: ArenaKeyAction) -> Bool {
+        if keys.contains(bindings[action]) { return true }
+        return bindings == .defaults
+            && Self.legacyDefaultAliases[action]?.isDisjoint(with: keys) == false
+    }
+
     var input: ArenaInput {
         var input = ArenaInput()
-        input.horizontal = (keys.contains(bindings[.moveRight]) ? 1 : 0) - (keys.contains(bindings[.moveLeft]) ? 1 : 0)
-        input.vertical = (keys.contains(bindings[.aimUp]) ? 1 : 0) - (keys.contains(bindings[.aimDown]) ? 1 : 0)
-        input.jump = keys.contains(bindings[.jump])
-        input.light = keys.contains(bindings[.light])
-        input.heavy = keys.contains(bindings[.heavy])
-        input.dodge = keys.contains(bindings[.dodge])
+        input.horizontal = (pressed(.moveRight) ? 1 : 0) - (pressed(.moveLeft) ? 1 : 0)
+        input.vertical = (pressed(.aimUp) ? 1 : 0) - (pressed(.aimDown) ? 1 : 0)
+        input.jump = pressed(.jump)
+        input.light = pressed(.light)
+        input.heavy = pressed(.heavy)
+        input.dodge = pressed(.dodge)
         return input
     }
 }
