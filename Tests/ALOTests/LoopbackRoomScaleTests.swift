@@ -428,6 +428,30 @@ struct LoopbackRoomScaleTests {
         #expect(original.packetCount == 0)
     }
 
+    @Test("Observational timer-only controls isolate source wake scheduling before and after fan-out")
+    func timerOnlyCaptureSchedulingDiagnostic() throws {
+        func control(_ phase: String) throws {
+            let probe = TimerOnlyCaptureProbe()
+            let samples = try probe.measure()
+            try #require(samples.count == 50)
+            #expect(samples.allSatisfy { $0.returnedNanos >= $0.scheduledNanos })
+            #expect(samples.allSatisfy { $0.clockStatus == 0 && $0.cpuNanos >= 0 })
+            #expect(samples.allSatisfy { $0.waitFailures == 0 })
+            let wake = AudioCompletionLatencies()
+            samples.forEach { wake.record($0.returnedNanos - $0.scheduledNanos) }
+            print("Timer-only source \(phase): wake [\(wake.summary)], elapsed=\(samples.last?.returnedNanos ?? 0)ns, threadCPU=\(samples.last?.cpuNanos ?? 0)ns")
+            // Bounded numeric trace; these are relative monotonic deadlines and
+            // cumulative current-thread CPU, not wall-clock dates or a pass gate.
+            print("Timer-only source \(phase) samples [scheduledNs,returnedNs,cpuNs,waitCalls,lastMachStatus,clockStatus]: \(samples.map { "[\($0.scheduledNanos),\($0.returnedNanos),\($0.cpuNanos),\($0.waitCalls),\($0.lastWaitStatus),\($0.clockStatus)]" }.joined(separator: ","))")
+        }
+        try control("before")
+        let loaded = try runRoom(peerCount: 8, linkBitsPerSecond: nil, policy: .unbounded,
+            schedulerOversleep: 0, deferredPCM: false)
+        #expect(loaded.minimumPacketsReceived >= 190)
+        print("Timer-only comparison loaded capture age [\(loaded.captureCallbackAgeSummary)] (includes the normal 20ms captured chunk)")
+        try control("after")
+    }
+
     @Test("Observational A/B separates colocated receiver PCM work from capture scheduling")
     func receiverPCMPlacementCaptureAB() throws {
         let inline = try runRoom(peerCount: 8, linkBitsPerSecond: nil, policy: .unbounded,
@@ -2020,6 +2044,62 @@ private final class LoopbackCaptureClock: @unchecked Sendable {
     var now: UInt64 { lock.withLock { value } }
     func advance(by nanos: UInt64) -> UInt64 {
         lock.withLock { value += nanos; return value }
+    }
+}
+
+/// Matches runRoom's nominal source executor and wait loop, with no host,
+/// connections, PCM processing or ping callbacks during either control.
+private final class TimerOnlyCaptureProbe: @unchecked Sendable {
+    struct Sample {
+        let scheduledNanos: UInt64
+        let returnedNanos: UInt64
+        let cpuNanos: Int64
+        let waitCalls: Int
+        let lastWaitStatus: kern_return_t
+        let waitFailures: Int
+        let clockStatus: Int32
+    }
+    private let lock = NSLock()
+    private var samples: [Sample] = []
+
+    func measure() throws -> [Sample] {
+        let activity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
+            reason: "Measure timer-only source scheduling")
+        defer { ProcessInfo.processInfo.endActivity(activity) }
+        let finished = DispatchSemaphore(value: 0)
+        let sourceQueue = DispatchQueue(label: "in.werai.tests.timer-only-capture", qos: .userInteractive)
+        sourceQueue.async {
+            defer { finished.signal() }
+            var cpuAnchor = timespec()
+            let initialClockStatus = clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpuAnchor)
+            let anchor = MonotonicClock.nowNanos()
+            for index in 0..<50 {
+                let deadline = anchor + UInt64(index) * 20_000_000
+                var calls = 0
+                var lastStatus: kern_return_t = KERN_SUCCESS
+                var failures = 0
+                while MonotonicClock.nowNanos() < deadline {
+                    lastStatus = mach_wait_until(MonotonicClock.nanosToTicks(deadline))
+                    calls += 1
+                    if lastStatus != KERN_SUCCESS { failures += 1 }
+                }
+                let returned = MonotonicClock.nowNanos()
+                var cpuNow = timespec()
+                let clockStatus = clock_gettime(CLOCK_THREAD_CPUTIME_ID, &cpuNow)
+                let cpuElapsed = Int64(cpuNow.tv_sec - cpuAnchor.tv_sec) * 1_000_000_000
+                    + Int64(cpuNow.tv_nsec - cpuAnchor.tv_nsec)
+                self.lock.withLock {
+                    self.samples.append(Sample(scheduledNanos: deadline - anchor,
+                        returnedNanos: returned - anchor, cpuNanos: cpuElapsed,
+                        waitCalls: calls, lastWaitStatus: lastStatus, waitFailures: failures,
+                        clockStatus: initialClockStatus == 0 ? clockStatus : initialClockStatus))
+                }
+            }
+        }
+        try #require(finished.wait(timeout: .now() + 5) == .success,
+            "Timer-only control failed to finish its one-second source timeline")
+        return lock.withLock { samples }
     }
 }
 
