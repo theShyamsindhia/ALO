@@ -80,6 +80,9 @@ final class NowPlayingMonitor {
 
     private func consume(_ information: NSDictionary) {
         guard isRunning else { return }
+        let receivedAt = Date()
+        let playbackRate = playbackRate(information["kMRMediaRemoteNowPlayingInfoPlaybackRate"])
+        let duration = playbackTime(information["kMRMediaRemoteNowPlayingInfoDuration"])
         let media = NowPlayingMedia(
             title: clean(information["kMRMediaRemoteNowPlayingInfoTitle"] as? String),
             artist: clean(information["kMRMediaRemoteNowPlayingInfoArtist"] as? String),
@@ -88,9 +91,15 @@ final class NowPlayingMonitor {
                 information["kMRMediaRemoteNowPlayingInfoArtworkData"] as? Data
             ),
             sourceURL: firstWebURL(information),
-            isPlaying: playbackState(information["kMRMediaRemoteNowPlayingInfoPlaybackRate"]),
-            elapsedTime: playbackTime(information["kMRMediaRemoteNowPlayingInfoElapsedTime"]),
-            duration: playbackTime(information["kMRMediaRemoteNowPlayingInfoDuration"])
+            isPlaying: playbackRate.map { $0 > 0 },
+            elapsedTime: Self.currentElapsedTime(
+                elapsedTime: playbackTime(information["kMRMediaRemoteNowPlayingInfoElapsedTime"]),
+                timestamp: information["kMRMediaRemoteNowPlayingInfoTimestamp"] as? Date,
+                playbackRate: playbackRate,
+                duration: duration,
+                at: receivedAt
+            ),
+            duration: duration
         )
         guard !media.isEmpty else { return }
         publish(media)
@@ -239,6 +248,25 @@ final class NowPlayingMonitor {
         )
     }
 
+    static func currentElapsedTime(
+        elapsedTime: TimeInterval?,
+        timestamp: Date?,
+        playbackRate: Double?,
+        duration: TimeInterval?,
+        at date: Date
+    ) -> TimeInterval? {
+        guard let elapsedTime, elapsedTime.isFinite, elapsedTime >= 0 else { return nil }
+        let advancement: TimeInterval
+        if let timestamp, let playbackRate, playbackRate.isFinite, playbackRate > 0 {
+            advancement = max(0, date.timeIntervalSince(timestamp)) * playbackRate
+        } else {
+            advancement = 0
+        }
+        let current = elapsedTime + advancement
+        if let duration, duration.isFinite, duration > 0 { return min(current, duration) }
+        return current
+    }
+
     private static func sameTrack(_ lhs: NowPlayingMedia, _ rhs: NowPlayingMedia) -> Bool {
         let lhsIdentity = [lhs.title, lhs.artist, lhs.album].map(cleanIdentity)
         let rhsIdentity = [rhs.title, rhs.artist, rhs.album].map(cleanIdentity)
@@ -266,6 +294,15 @@ final class NowPlayingMonitor {
         case "paused", "stopped", "pause", "stop": return false
         default: return nil
         }
+    }
+
+    private func playbackRate(_ value: Any?) -> Double? {
+        let rate: Double?
+        if let number = value as? NSNumber { rate = number.doubleValue }
+        else if let text = value as? String { rate = Double(text) }
+        else { rate = nil }
+        guard let rate, rate.isFinite, rate >= 0 else { return nil }
+        return rate
     }
 
     private func playbackTime(_ value: Any?) -> TimeInterval? {
