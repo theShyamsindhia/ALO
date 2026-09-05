@@ -18,17 +18,31 @@ struct DJKeyBindingsTests {
         let preferences = try #require(UserDefaults(suiteName: suite))
         defer { preferences.removePersistentDomain(forName: suite) }
         let bindings = DJKeyBindings(preferences: preferences)
-        try bindings.setKey("U", for: .deckAPlay)
-        #expect(bindings.action(for: "u") == .deckAPlay)
-        #expect(bindings.label(for: .deckAPlay) == "U")
-        #expect(DJKeyBindings(preferences: preferences).key(for: .deckAPlay) == "u")
-        #expect(throws: (any Error).self) { try bindings.setKey("u", for: .deckBPlay) }
+        try bindings.setKey("O", for: .deckAPlay)
+        #expect(bindings.action(for: "o") == .deckAPlay)
+        #expect(bindings.label(for: .deckAPlay) == "O")
+        #expect(DJKeyBindings(preferences: preferences).key(for: .deckAPlay) == "o")
+        #expect(throws: (any Error).self) { try bindings.setKey("o", for: .deckBPlay) }
         #expect(bindings.key(for: .deckBPlay) == "y")
         #expect(throws: (any Error).self) { try bindings.setKey("two", for: .deckAPlay) }
         #expect(throws: (any Error).self) { try bindings.setKey("\n", for: .deckAPlay) }
         bindings.resetDefaults()
         #expect(DJKeyBindings(preferences: preferences).mapping == DJKeyBindings.defaults)
         #expect(bindings.action(for: "\u{1b}") == .stopAll)
+    }
+    @Test func addingRecordKeysPreservesLegacyCustomBindings() throws {
+        let suite = "alo.dj.keys.migration.\(UUID())"
+        let preferences = try #require(UserDefaults(suiteName: suite))
+        defer { preferences.removePersistentDomain(forName: suite) }
+        var saved = Dictionary(uniqueKeysWithValues: DJKeyBindings.defaults.map { ($0.key.rawValue, $0.value) })
+        saved.removeValue(forKey: DJAction.deckARecord.rawValue)
+        saved.removeValue(forKey: DJAction.deckBRecord.rawValue)
+        saved[DJAction.deckAPlay.rawValue] = "u"
+        preferences.set(saved, forKey: DJKeyBindings.storageKey)
+        let bindings = DJKeyBindings(preferences: preferences)
+        #expect(bindings.key(for: .deckAPlay) == "u")
+        #expect(bindings.key(for: .deckARecord) != "u")
+        #expect(Set(bindings.mapping.values).count == DJAction.allCases.count)
     }
     @Test func corruptPersistedMappingFallsBackAtomically() throws {
         let suite = "alo.dj.keys.tests.\(UUID())"

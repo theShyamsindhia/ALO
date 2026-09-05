@@ -203,22 +203,8 @@ extension NativePresentationTests {
             let fixture = FileManager.default.temporaryDirectory.appendingPathComponent("dj-preview-\(UUID())", isDirectory: true)
             try FileManager.default.createDirectory(at: fixture, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: fixture) }
-            let url = fixture.appendingPathComponent("Practice beat.wav")
-            let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2))
-            let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 48_000 * 8))
-            buffer.frameLength = buffer.frameCapacity
-            for frame in 0..<Int(buffer.frameLength) {
-                let t = Double(frame) / 48_000
-                let pulse = exp(-t.truncatingRemainder(dividingBy: 0.5) * 12)
-                let sample = Float(sin(t * 2 * .pi * 110) * pulse * 0.7)
-                buffer.floatChannelData![0][frame] = sample
-                buffer.floatChannelData![1][frame] = sample
-            }
-            do { let writer = try AVAudioFile(forWriting: url, settings: format.settings); try writer.write(from: buffer) }
-            try studio.b.load(url)
-            try studio.b.seek(2)
-            try studio.b.toggleBeatLoop()
             studio.setLiveStage(.listening)
+            try studio.toggleDeckRecording("B", stage: .listening)
             for block in 0..<400 {
                 let samples: [Int16] = (0..<960).flatMap { frame in
                     let t = Double(block * 960 + frame) / 48_000
@@ -228,6 +214,9 @@ extension NativePresentationTests {
                 }
                 _ = DJLiveAudio.shared.process(samples, stage: .listening)
             }
+            try studio.toggleDeckRecording("B", stage: .listening)
+            try studio.b.seek(2)
+            try studio.b.toggleBeatLoop()
             try studio.toggleLiveLoop()
             studio.refreshLive()
             let waveformDeadline = ContinuousClock.now + .seconds(10)
@@ -235,14 +224,14 @@ extension NativePresentationTests {
                 try await Task.sleep(for: .milliseconds(10))
             }
             #expect(!studio.b.waveformLoading && studio.b.waveform.count == 256)
-            let window = NSWindow(contentRect: NSRect(x: -2000, y: 0, width: 1040, height: 1020),
+            let window = NSWindow(contentRect: NSRect(x: -2000, y: 0, width: 1040, height: 1120),
                                   styleMask: .borderless, backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false
             window.appearance = NSAppearance(named: .darkAqua)
             let hosting = NSHostingView(rootView: DJStudioView(model: model, studio: studio)
                 .transaction { $0.disablesAnimations = true })
             window.contentView = hosting
-            defer { window.close(); studio.setLiveStage(nil); studio.stopAll() }
+            defer { window.close(); studio.setLiveStage(nil); studio.stopAll(); studio.clearRecordings() }
             window.orderBack(nil)
             try await Task.sleep(for: .milliseconds(200))
             hosting.layoutSubtreeIfNeeded()

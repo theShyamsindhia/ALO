@@ -7,6 +7,7 @@ enum DJAction: String, CaseIterable, Identifiable {
     case pad8, pad9, pad10, pad11, pad12, pad13, pad14, pad15
     case deckAPlay, deckBPlay, deckACue, deckBCue, deckALoop, deckBLoop
     case stopAll, crossfadeLeft, crossfadeCenter, crossfadeRight
+    case deckARecord, deckBRecord
 
     var id: String { rawValue }
     static func pad(_ index: Int) -> DJAction { allCases[min(15, max(0, index))] }
@@ -17,6 +18,8 @@ enum DJAction: String, CaseIterable, Identifiable {
     var title: String {
         if let index = padIndex { return "Pad \(index + 1)" }
         switch self {
+        case .deckARecord: return "Deck A · Record / stop"
+        case .deckBRecord: return "Deck B · Record / stop"
         case .deckAPlay: return "Deck A · Play / pause"
         case .deckBPlay: return "Deck B · Play / pause"
         case .deckACue: return "Deck A · Return to cue"
@@ -44,6 +47,7 @@ final class DJKeyBindings: ObservableObject {
         mapping[.deckALoop] = "b"; mapping[.deckBLoop] = "n"
         mapping[.crossfadeLeft] = "j"; mapping[.crossfadeCenter] = "k"; mapping[.crossfadeRight] = "l"
         mapping[.stopAll] = "escape"
+        mapping[.deckARecord] = "u"; mapping[.deckBRecord] = "i"
         return mapping
     }()
     @Published private(set) var mapping: [DJAction: String]
@@ -52,14 +56,22 @@ final class DJKeyBindings: ObservableObject {
     init(preferences: UserDefaults = .standard) {
         self.preferences = preferences
         mapping = Self.defaults
-        // Load atomically: a corrupt/incomplete mapping must never silently steal an action's key.
-        if let saved = preferences.dictionary(forKey: Self.storageKey) as? [String: String],
-           saved.count == DJAction.allCases.count {
+        // Preserve earlier custom keys when the two recording actions are added.
+        if let saved = preferences.dictionary(forKey: Self.storageKey) as? [String: String] {
+            let recordingActions: [DJAction] = [.deckARecord, .deckBRecord]
+            let legacyActions = DJAction.allCases.filter { !recordingActions.contains($0) }
+            let expected = saved.count == legacyActions.count ? legacyActions : DJAction.allCases
+            guard Set(saved.keys) == Set(expected.map(\.rawValue)) else { return }
             var restored: [DJAction: String] = [:]
-            for action in DJAction.allCases {
+            for action in expected {
                 guard let raw = saved[action.rawValue], let key = Self.normalized(raw),
                       !restored.values.contains(key) else { return }
                 restored[action] = key
+            }
+            for action in recordingActions where restored[action] == nil {
+                let candidates = [Self.defaults[action]!] + Array("abcdefghijklmnopqrstuvwxyz0123456789,./;[]-=!@#$%^&*()").map(String.init)
+                guard let free = candidates.first(where: { !restored.values.contains($0) }) else { return }
+                restored[action] = free
             }
             mapping = restored
         }
