@@ -1,8 +1,13 @@
 # Integrated nearby + screen annotations release
 
-Status: full integration now targets **0.14.1/build 82**, not released. Latest published release is 0.14.0, independently published from8437bf0. Historical checkpoints below are append-only; see the latest runtime checkpoint for current verification.
+Status: full integration now targets **0.14.2/build 83**, not released. A separate 0.14.1 release was published from `4f89410` while final integration validation was running. Historical checkpoints below are append-only; see the latest runtime checkpoint for current verification.
 
 ## Current handoff — September 6
+
+- Public `v0.14.1` was created from Arena-only commit `4f89410` while the full
+  integration was being validated. Its signed assets and historical notes are
+  preserved. Full integration therefore advances to `0.14.2/build 83`; never
+  retarget or overwrite the published `v0.14.1` tag.
 
 - Candidate `25a6683` includes the full integration plus remote `579cb66`, the
   bounded terminal-audio retry, deterministic Arena final-state delivery, and
