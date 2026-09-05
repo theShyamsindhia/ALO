@@ -45,7 +45,7 @@ A physical two-Mac listening test and output-device hot-swap have not been perfo
 - [x] Add an in-app Guide and a repository user guide.
 - [x] Verify key dispatch, loop PCM repetition, waveform lifecycle, and native layout.
 - [x] Run optimized Mac tests and inspect relevant CI configuration.
-- [ ] Commit this feature, fast-forward main, push origin/main, and verify the remote commit.
+- [x] Commit this feature and integrate the latest origin/main. Final remote delivery is reported in the task response.
 
 - [x] Review storage and CPU: stream source files, avoid disk caches, cap PCM buffers, cancel stale waveform jobs, and stop idle engine/UI work.
 
@@ -59,3 +59,8 @@ A physical two-Mac listening test and output-device hot-swap have not been perfo
 - Native loaded-song/loop screenshot checked at `/tmp/alo-dj-snapshots/dj-studio.png`.
 
 - The standalone scenario script initially ran Debug and hit the existing 3-second processing budget in a pending-document test. The identical optimized test passed in 0.773 seconds. Aligned the script with the existing CI release flags and serial execution; all fixture sizes, assertions, and timing limits remain unchanged. Added a guard against a zero-test success.
+
+- Corrected standalone room-scenario runner: **7 tests in 3 suites passed** (12.735 seconds), retaining the original 3-second per-message budget.
+- Integrated current main through `d9dd3e1`, preserving its screen-sharing, icon, and Arena changes without conflicts.
+- Final optimized integration run after that merge and the selected-loop UI polish: **83 tests in 22 suites passed** (36.722 seconds), including native waveform readiness and layout.
+- Storage measurement: current arm64 testable release executable ~25 MiB and existing app-icon resource bundle ~19 MiB. Estimated packaged arm64 app 45–50 MB; no signed distribution was produced or measured. DJ code adds no sound pack, media cache, or new dependency. Optional downloadable media packs and further Apple-style visual polish remain product recommendations, not features claimed by this delivery.
