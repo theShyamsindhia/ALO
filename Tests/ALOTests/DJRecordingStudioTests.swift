@@ -31,6 +31,7 @@ struct DJRecordingStudioTests {
         var peak = 0
         for _ in 0..<12 {
             _ = try studio.engine.renderOffline(1024, to: output)
+            studio.relay.flushForTesting()
             let mixed = DJLiveAudio.shared.process(dry, stage: .broadcast)
             peak = max(peak, mixed.map { abs(Int($0)) }.max() ?? 0)
         }
