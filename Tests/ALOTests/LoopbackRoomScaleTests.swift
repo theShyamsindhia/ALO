@@ -1148,6 +1148,7 @@ struct LoopbackRoomScaleTests {
         let hostReady = DispatchSemaphore(value: 0)
         let state = PortState()
         let shaper = linkBitsPerSecond.map(FluidLinkShaper.init(bitsPerSecond:))
+        let completionLatencies = AudioCompletionLatencies()
         let host = HostServer(
             roomName: "Loopback test \(UUID().uuidString)",
             advertise: false,
@@ -1155,14 +1156,25 @@ struct LoopbackRoomScaleTests {
                 state.set(port)
                 hostReady.signal()
             },
-            outboundSend: shaper.map { shaper in
-                { connection, data, isComplete, completion in
+            outboundSend: { connection, data, isComplete, completion in
+                let isAudioPacket = AudioPacket(data: data) != nil
+                let started = MonotonicClock.nowNanos()
+                let measuredCompletion: (NWError?) -> Void = { error in
+                    if isAudioPacket {
+                        completionLatencies.record(MonotonicClock.nowNanos() - started)
+                    }
+                    completion(error)
+                }
+                if let shaper {
                     shaper.send(
                         data,
                         over: connection,
                         isComplete: isComplete,
-                        completion: completion
+                        completion: measuredCompletion
                     )
+                } else {
+                    connection.send(content: data, contentContext: .defaultMessage,
+                        isComplete: isComplete, completion: .contentProcessed(measuredCompletion))
                 }
             },
             audioBackpressurePolicy: policy
@@ -1226,6 +1238,7 @@ struct LoopbackRoomScaleTests {
             }
 
             let snapshots = peers.map { $0.snapshot() }
+            print("Audio send completion latency: peers=\(peerCount), link=\(linkBitsPerSecond.map(String.init) ?? "unshaped"), policy=\(policy), \(completionLatencies.summary)")
             let commonSequence = snapshots.compactMap(\.lastSequence).min()
             guard let commonSequence else {
                 throw LoopbackTestError.noAudioReceived
@@ -1350,7 +1363,14 @@ private final class HeadlessLoopbackPeer {
         self.control = control
         receiveControl(from: control)
         control.stateUpdateHandler = { [weak self] state in
-            guard let self, case .ready = state else { return }
+            guard let self else { return }
+            switch state {
+            case .waiting(let error), .failed(let error):
+                print("Loopback peer \(self.index) control \(state): host=127.0.0.1:\(hostPort), UDP=\(udpPort), video=\(videoPort), error=\(error)")
+                return
+            case .ready: break
+            default: return
+            }
             let join = ControlMessage(
                 type: "join",
                 udpPort: udpPort.rawValue,
@@ -1364,7 +1384,13 @@ private final class HeadlessLoopbackPeer {
     }
 
     func waitUntilJoined(timeout: TimeInterval) -> Bool {
-        joined.wait(timeout: .now() + timeout) == .success
+        let didJoin = joined.wait(timeout: .now() + timeout) == .success
+        if !didJoin {
+            queue.sync {
+                print("Loopback peer \(index) join timed out: control=\(String(describing: control?.state)), endpoint=\(String(describing: control?.endpoint)), UDP=\(String(describing: udpListener?.port)), video=\(String(describing: videoListener?.port))")
+            }
+        }
+        return didJoin
     }
 
     func sendPing() {
@@ -1558,7 +1584,11 @@ private final class HeadlessLoopbackPeer {
 
     private func send(_ message: ControlMessage) {
         guard let data = try? message.encodedLine() else { return }
-        control?.send(content: data, completion: .contentProcessed { _ in })
+        control?.send(content: data, completion: .contentProcessed { [weak self] error in
+            if let self, let error {
+                print("Loopback peer \(self.index) \(message.type) send failed: \(error), endpoint=\(String(describing: self.control?.endpoint))")
+            }
+        })
     }
 }
 
@@ -1637,6 +1667,22 @@ private final class ReceiverRestartObservations: @unchecked Sendable {
         lock.lock()
         storedLatestLevel = nil
         lock.unlock()
+    }
+}
+
+private final class AudioCompletionLatencies: @unchecked Sendable {
+    private let lock = NSLock()
+    private var nanos: [UInt64] = []
+    func record(_ value: UInt64) {
+        lock.withLock { if nanos.count < 2_000 { nanos.append(value) } }
+    }
+    var summary: String {
+        let values = lock.withLock { nanos.sorted() }
+        guard !values.isEmpty else { return "no completions" }
+        let median = values[(values.count - 1) / 2] / 1_000_000
+        let p95 = values[(values.count - 1) * 95 / 100] / 1_000_000
+        let maximum = (values.last ?? 0) / 1_000_000
+        return "n=\(values.count), p50=\(median)ms, p95=\(p95)ms, max=\(maximum)ms"
     }
 }
 

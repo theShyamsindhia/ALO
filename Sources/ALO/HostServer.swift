@@ -11,6 +11,16 @@ final class HostServer {
         case unbounded
         case boundedLatest(maxInFlight: Int)
     }
+    // Preserve short capture/completion bursts without letting a slow peer
+    // accumulate a growing timeline. This is separate from the socket limit.
+    private static let maximumPendingAudioPackets = 16
+    private static let maximumPendingAudioWaitNanos: UInt64 = 80_000_000
+    private static let maximumPendingAudioSpanNanos: UInt64 = 80_000_000
+    private struct PendingAudio {
+        let data: Data
+        let captureTimeNanos: UInt64
+        let enqueuedAtNanos: UInt64
+    }
     typealias OutboundSend = (
         _ connection: NWConnection,
         _ data: Data,
@@ -35,7 +45,8 @@ final class HostServer {
         var outputLatencyPlayoutFloorNanos = RoomTiming.defaultPlayoutDelayNanos
         var lastSyncReportNanos: UInt64?
         var audioSendsInFlight = 0
-        var pendingAudio: Data?
+        var pendingAudio: [PendingAudio] = []
+        var audioBacklogCongested = false
         var syncReport: PlaybackSyncReport?
         var lastResyncCommandNanos: UInt64 = 0
         var lastManualResyncRequestNanos: UInt64 = 0
@@ -53,6 +64,7 @@ final class HostServer {
     private let advertise: Bool
     private let listenerReadyHandler: ((NWEndpoint.Port) -> Void)?
     private let outboundSend: OutboundSend?
+    private let audioSendNowNanos: () -> UInt64
     private let audioBackpressurePolicy: AudioBackpressurePolicy
     private let playbackRequestHandler: ((RoomMediaCommand) -> Bool)?
     private let localParticipantID: String?
@@ -89,6 +101,7 @@ final class HostServer {
         advertise: Bool = true,
         listenerReadyHandler: ((NWEndpoint.Port) -> Void)? = nil,
         outboundSend: OutboundSend? = nil,
+        audioSendNowNanos: @escaping () -> UInt64 = MonotonicClock.nowNanos,
         audioBackpressurePolicy: AudioBackpressurePolicy = .boundedLatest(maxInFlight: 8),
         playbackRequestHandler: ((RoomMediaCommand) -> Bool)? = nil,
         localParticipantID: String? = nil
@@ -100,6 +113,7 @@ final class HostServer {
         self.advertise = advertise
         self.listenerReadyHandler = listenerReadyHandler
         self.outboundSend = outboundSend
+        self.audioSendNowNanos = audioSendNowNanos
         self.audioBackpressurePolicy = audioBackpressurePolicy
         self.playbackRequestHandler = playbackRequestHandler
         self.localParticipantID = localParticipantID
@@ -139,6 +153,7 @@ final class HostServer {
             listener?.cancel()
             listener = nil
             for client in clients.values {
+                client.pendingAudio.removeAll()
                 client.audio?.cancel()
                 client.video?.cancel()
                 client.control.cancel()
@@ -214,9 +229,11 @@ final class HostServer {
                 let data = packet.encoded()
                 for client in audioClients {
                     if let sealer = client.audioSealer {
-                        if let protected = try? sealer.seal(data) { self.sendAudio(protected, to: client) }
+                        if let protected = try? sealer.seal(data) {
+                            self.sendAudio(protected, captureTimeNanos: packet.captureTimeNanos, to: client)
+                        }
                     } else if self.mediaSecurity == nil {
-                        self.sendAudio(data, to: client)
+                        self.sendAudio(data, captureTimeNanos: packet.captureTimeNanos, to: client)
                     }
                 }
             }
@@ -434,7 +451,8 @@ final class HostServer {
             client.name = uniqueName(for: proposedName, client: client)
             client.audio?.cancel()
             client.audioSendsInFlight = 0
-            client.pendingAudio = nil
+            client.pendingAudio.removeAll()
+            client.audioBacklogCongested = false
             let connection = NWConnection(
                 host: host,
                 port: port,
@@ -619,6 +637,7 @@ final class HostServer {
             timingEligibleClients?.insert(replacementIdentifier)
         }
         stale.audio?.cancel()
+        stale.pendingAudio.removeAll()
         stale.video?.cancel()
         stale.control.cancel()
     }
@@ -693,15 +712,20 @@ final class HostServer {
         targetID: String?,
         nowNanos: UInt64 = MonotonicClock.nowNanos()
     ) -> Bool {
+        // Flush queued pre-cutover audio so it cannot leak across a new timeline.
+        // Under pressure this may omit a still-playable pre-boundary tail; the
+        // shared future restart takes priority over draining that old backlog.
         guard let data = try? coordinatedResyncMessage(nowNanos: nowNanos).encodedLine() else { return false }
         if let targetID {
             guard let target = clients.values.first(where: { $0.id == targetID }) else { return false }
+            target.pendingAudio.removeAll()
             send(data, over: target.control)
             return true
         } else {
             let targets = clients.values.filter { $0.id != nil }
             guard !targets.isEmpty else { return false }
             for target in targets {
+                target.pendingAudio.removeAll()
                 send(data, over: target.control)
             }
             return true
@@ -711,6 +735,7 @@ final class HostServer {
     private func removeClient(_ identifier: ObjectIdentifier) {
         guard let client = clients.removeValue(forKey: identifier) else { return }
         timingEligibleClients?.remove(identifier)
+        client.pendingAudio.removeAll()
         client.audio?.cancel()
         client.video?.cancel()
         receiverCountHandler?(participantNames.count)
@@ -938,39 +963,65 @@ final class HostServer {
         }
     }
 
-    private func sendAudio(_ data: Data, to client: Client) {
+    private func sendAudio(_ data: Data, captureTimeNanos: UInt64, to client: Client) {
         guard let connection = client.audio else { return }
         switch audioBackpressurePolicy {
         case .unbounded:
             send(data, over: connection, isComplete: true)
 
         case .boundedLatest(let maxInFlight):
-            guard client.audioSendsInFlight < max(1, maxInFlight) else {
-                // Audio timestamps define the shared timeline, so keeping an old queued
-                // packet is worse than replacing it with the newest available packet.
-                client.pendingAudio = data
-                return
+            client.pendingAudio.append(PendingAudio(data: data, captureTimeNanos: captureTimeNanos,
+                enqueuedAtNanos: audioSendNowNanos()))
+            if let first = client.pendingAudio.first {
+                let exceedsSpan = captureTimeNanos >= first.captureTimeNanos
+                    && captureTimeNanos - first.captureTimeNanos >= Self.maximumPendingAudioSpanNanos
+                if client.pendingAudio.count > Self.maximumPendingAudioPackets || exceedsSpan {
+                    client.audioBacklogCongested = true
+                }
             }
+            if client.audioBacklogCongested, client.pendingAudio.count > 1 {
+                client.pendingAudio.removeFirst(client.pendingAudio.count - 1)
+            }
+            drainAudio(for: client, over: connection, maxInFlight: maxInFlight)
+        }
+    }
+
+    private func drainAudio(for client: Client, over connection: NWConnection, maxInFlight: Int) {
+        guard client.audio === connection,
+              clients[ObjectIdentifier(client.control)] === client else { return }
+        let now = audioSendNowNanos()
+        client.pendingAudio.removeAll {
+            (now >= $0.enqueuedAtNanos && now - $0.enqueuedAtNanos >= Self.maximumPendingAudioWaitNanos)
+                || (now >= $0.captureTimeNanos && now - $0.captureTimeNanos >= groupPlayoutDelayNanos)
+        }
+        // Only backlog growth triggers latest-only mode, not delayed callback
+        // dispatch on a fast link. Congestion clears only with an empty pending
+        // queue and at least half the socket capacity free: an empty pending
+        // slot at full capacity is not recovery, but a steady stream need not
+        // become completely idle. Queue wait and the shared playout deadline still
+        // expire old audio even if capture has stopped.
+        while client.audioSendsInFlight < max(1, maxInFlight), !client.pendingAudio.isEmpty {
+            let packet = client.pendingAudio.removeFirst()
             client.audioSendsInFlight += 1
-            send(data, over: connection, isComplete: true) { [weak self, weak client] error in
+            send(packet.data, over: connection, isComplete: true) { [weak self, weak client] error in
                 guard let self, let client else { return }
                 self.queue.async { [weak self, weak client] in
-                    guard let self, let client else { return }
+                    guard let self, let client, client.audio === connection,
+                          self.clients[ObjectIdentifier(client.control)] === client else { return }
                     client.audioSendsInFlight = max(0, client.audioSendsInFlight - 1)
                     if let error {
                         fputs("Audio send failed: \(error)\n", stderr)
-                        if client.audio === connection {
-                            connection.cancel()
-                            client.audio = nil
-                            client.pendingAudio = nil
-                        }
+                        connection.cancel()
+                        client.audio = nil
+                        client.pendingAudio.removeAll()
                         return
                     }
-                    guard let pending = client.pendingAudio else { return }
-                    client.pendingAudio = nil
-                    self.sendAudio(pending, to: client)
+                    self.drainAudio(for: client, over: connection, maxInFlight: maxInFlight)
                 }
             }
+        }
+        if client.audioSendsInFlight <= max(1, maxInFlight) / 2, client.pendingAudio.isEmpty {
+            client.audioBacklogCongested = false
         }
     }
 }
