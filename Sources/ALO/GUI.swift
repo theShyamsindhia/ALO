@@ -465,6 +465,7 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     private var fullScreenVideoController: FullScreenVideoWindowController?
     private var statusMenuController: ALOStatusMenuController?
     private var diagnosticsController: DiagnosticsWindowController?
+    private var settingsController: AppSettingsWindowController?
     private var shortcutManager: GlobalShortcutManager?
     private var shortcutMapperController: ShortcutMapperWindowController?
     private var phaseObserver: AnyCancellable?
@@ -481,6 +482,7 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         installTerminationSignalHandlers()
         installMainMenu()
+        AppIconPreferences.shared.applySavedIcon()
         RoomMentionNotifier.shared.prepare { [weak self] in
             self?.model.showChatInFloatingBar()
         }
@@ -762,6 +764,12 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
             keyEquivalent: ""
         )
         appMenu.addItem(.separator())
+        let settingsItem = appMenu.addItem(
+            withTitle: "Settings…",
+            action: #selector(showSettings(_:)),
+            keyEquivalent: ","
+        )
+        settingsItem.target = self
         let updateItem = appMenu.addItem(
             withTitle: "Check for Updates…",
             action: #selector(checkForUpdates(_:)),
@@ -778,7 +786,7 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
         let shortcutsItem = appMenu.addItem(
             withTitle: "Shortcut Mapper…",
             action: #selector(showShortcutMapper(_:)),
-            keyEquivalent: ","
+            keyEquivalent: ""
         )
         shortcutsItem.keyEquivalentModifierMask = [.command]
         shortcutsItem.target = self
@@ -806,6 +814,13 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
             diagnosticsController = DiagnosticsWindowController(model: model)
         }
         diagnosticsController?.show()
+    }
+
+    @objc func showSettings(_ sender: Any?) {
+        if settingsController == nil {
+            settingsController = AppSettingsWindowController()
+        }
+        settingsController?.show()
     }
 
     @objc func showShortcutMapper(_ sender: Any?) {
@@ -4377,6 +4392,13 @@ struct FloatingRoomView: View {
 
             }
 
+            roomBarButton(
+                icon: "rectangle.on.rectangle",
+                active: model.roomHasVideo || model.mediaSwitchBusy,
+                disabled: !model.canSelectVideo,
+                help: videoMenuTitle
+            ) { model.toggleVideoFromFloatingBar() }
+
             Button { showsMediaMore.toggle() } label: {
                 Image(systemName: "ellipsis")
                     .font(.system(size: 15, weight: .semibold))
@@ -4420,13 +4442,6 @@ struct FloatingRoomView: View {
                             .frame(maxWidth: .infinity, alignment: .leading).padding(8)
                     }
                     .disabled(!model.hasBroadcaster || model.currentParticipantID == nil || model.mediaSwitchBusy)
-                    Button {
-                        showsMediaMore = false
-                        model.toggleVideoFromFloatingBar()
-                    } label: {
-                        Label(videoMenuTitle, systemImage: "rectangle.on.rectangle")
-                            .frame(maxWidth: .infinity, alignment: .leading).padding(8)
-                    }.disabled(!model.canSelectVideo)
                     Button {
                         showsMediaMore = false
                         model.showQueue()
@@ -6039,31 +6054,29 @@ struct WalkieTalkieBar: View {
 
     private var settingsMenu: some View {
         Menu {
-            Menu("Microphone input") {
-                Button {
-                    model.selectVoiceInput(nil)
-                } label: {
-                    if model.selectedVoiceInputUID == nil {
-                        Label(systemDefaultMicrophoneLabel, systemImage: "checkmark")
-                    } else {
-                        Text(systemDefaultMicrophoneLabel)
-                    }
+            Text("Microphone input")
+            Button {
+                model.selectVoiceInput(nil)
+            } label: {
+                if model.selectedVoiceInputUID == nil {
+                    Label(systemDefaultMicrophoneLabel, systemImage: "checkmark")
+                } else {
+                    Text(systemDefaultMicrophoneLabel)
                 }
-                Divider()
-                ForEach(model.voiceInputDevices) { input in
-                    Button {
-                        model.selectVoiceInput(input.id)
-                    } label: {
-                        if input.id == model.selectedVoiceInputUID {
-                            Label(input.menuName, systemImage: "checkmark")
-                        } else {
-                            Text(input.menuName)
-                        }
-                    }
-                }
-                Divider()
-                Button("Refresh microphones") { model.refreshVoiceInputs() }
             }
+            ForEach(model.voiceInputDevices) { input in
+                Button {
+                    model.selectVoiceInput(input.id)
+                } label: {
+                    if input.id == model.selectedVoiceInputUID {
+                        Label(input.menuName, systemImage: "checkmark")
+                    } else {
+                        Text(input.menuName)
+                    }
+                }
+            }
+            Button("Refresh microphones") { model.refreshVoiceInputs() }
+            Divider()
             Menu("Audio to share: \(model.selectedAudioSourceTitle)") {
                 Button {
                     model.selectAudioSource(nil)
@@ -6123,6 +6136,9 @@ struct WalkieTalkieBar: View {
             }
             Button("Diagnostics…") {
                 (NSApp.delegate as? ALOAppDelegate)?.showDiagnostics(nil)
+            }
+            Button("Settings…") {
+                (NSApp.delegate as? ALOAppDelegate)?.showSettings(nil)
             }
         } label: {
             Image(systemName: "slider.horizontal.3")

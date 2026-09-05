@@ -314,6 +314,10 @@ private final class ArenaKeyRecorderButton: NSButton {
     override var acceptsFirstResponder: Bool { true }
 
     override func mouseDown(with event: NSEvent) {
+        beginRecording()
+    }
+
+    private func beginRecording() {
         isRecording = true
         title = "Press key…"
         toolTip = "Press a key for \(actionToRecord.title), or Escape to cancel"
@@ -321,7 +325,14 @@ private final class ArenaKeyRecorderButton: NSButton {
     }
 
     override func keyDown(with event: NSEvent) {
-        guard isRecording else { return }
+        guard isRecording else {
+            if event.keyCode == 36 || event.keyCode == 49 {
+                beginRecording()
+            } else {
+                super.keyDown(with: event)
+            }
+            return
+        }
         guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty else { return }
         if event.keyCode != 53 { session?.assignKey(event.keyCode, to: actionToRecord) }
         isRecording = false

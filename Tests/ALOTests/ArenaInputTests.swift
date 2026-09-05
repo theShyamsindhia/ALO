@@ -12,6 +12,18 @@ struct ArenaInputTests {
         #expect(!keyboard.input.light && !keyboard.input.heavy && !keyboard.input.dodge)
     }
 
+    @Test func legacyArrowAndAttackAliasesRemainAvailableUntilBindingsChange() {
+        var keyboard = ArenaKeyboardInput()
+        for code: UInt16 in [124, 126, 6, 7, 8] { keyboard.press(code) }
+        #expect(keyboard.input.horizontal == 1 && keyboard.input.vertical == 1)
+        #expect(keyboard.input.light && keyboard.input.heavy && keyboard.input.dodge)
+        var custom = ArenaKeyBindings.defaults
+        custom.assign(14, to: .light)
+        keyboard = ArenaKeyboardInput(bindings: custom)
+        keyboard.press(6)
+        #expect(!keyboard.input.light)
+    }
+
     @Test func aimKeysDoNotPretendToBeJump() {
         var keyboard = ArenaKeyboardInput()
         keyboard.press(13)
@@ -60,6 +72,8 @@ struct ArenaInputTests {
         #expect(bindings[.moveRight] == 0)
         let before = bindings
         bindings.assign(53, to: .jump)
+        #expect(bindings == before)
+        bindings.assign(48, to: .jump)
         #expect(bindings == before)
     }
 
@@ -117,5 +131,9 @@ struct ArenaInputTests {
                                                   isARepeat: false, keyCode: 13))
         #expect(ArenaWindow.isCloseShortcut(close))
         #expect(!ArenaWindow.isCloseShortcut(plain))
+        let shifted = try #require(NSEvent.keyEvent(with: .keyDown, location: .zero,
+            modifierFlags: [.command, .shift], timestamp: 0, windowNumber: 0, context: nil,
+            characters: "W", charactersIgnoringModifiers: "w", isARepeat: false, keyCode: 13))
+        #expect(!ArenaWindow.isCloseShortcut(shifted))
     }
 }
