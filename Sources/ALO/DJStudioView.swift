@@ -25,11 +25,14 @@ final class DJStudioWindowController: NSObject, NSWindowDelegate {
             if let pad = action.padIndex { studio.trigger(pad); return }
             studio.perform {
                 switch action {
-                case .deckAPlay: try studio.a.toggle()
+                case .deckAPlay:
+                    if studio.liveEnabled { studio.toggleLivePlayback() } else { try studio.a.toggle() }
                 case .deckBPlay: try studio.b.toggle()
-                case .deckACue: try studio.a.returnToCue()
+                case .deckACue:
+                    if studio.liveEnabled { try DJLiveAudio.shared.returnToCue(); studio.refreshLive() } else { try studio.a.returnToCue() }
                 case .deckBCue: try studio.b.returnToCue()
-                case .deckALoop: try studio.a.toggleBeatLoop()
+                case .deckALoop:
+                    if studio.liveEnabled { try studio.toggleLiveLoop() } else { try studio.a.toggleBeatLoop() }
                 case .deckBLoop: try studio.b.toggleBeatLoop()
                 case .stopAll: studio.stopAll()
                 case .crossfadeLeft: studio.crossfade = 0
@@ -47,6 +50,7 @@ final class DJStudioWindowController: NSObject, NSWindowDelegate {
         keyMonitor.stop()
         stopBroadcast?()
         stopBroadcast = nil
+        DJStudio.shared.setLiveStage(nil)
         DJStudio.shared.stopAll()
         DJStudio.shared.stopUpdates()
         window = nil
@@ -66,7 +70,20 @@ struct DJStudioView: View {
             VStack(alignment: .leading, spacing: 20) {
                 header
                 HStack(alignment: .top, spacing: 14) {
-                    DJDeckView(deck: studio.a, studio: studio, other: studio.b, bindings: bindings, label: "A", color: .cyan)
+                    VStack(spacing: 10) {
+                        Picker("Deck A source", selection: Binding(get: { studio.liveEnabled }, set: { live in
+                            guard !live || (model.hasBroadcaster && !studio.sharing) else { return }
+                            studio.setLiveStage(live ? (model.isHost ? .broadcast : .listening) : nil)
+                        })) {
+                            Text("Live broadcast").tag(true).disabled(!model.hasBroadcaster || studio.sharing)
+                            Text("Audio file").tag(false)
+                        }.pickerStyle(.segmented).accessibilityLabel("Deck A source")
+                        if studio.liveEnabled {
+                            DJLiveDeckView(studio: studio, deck: studio.a, bindings: bindings)
+                        } else {
+                            DJDeckView(deck: studio.a, studio: studio, other: studio.b, bindings: bindings, label: "A", color: .cyan)
+                        }
+                    }.frame(maxWidth: .infinity)
                     mixer.frame(width: 172)
                     DJDeckView(deck: studio.b, studio: studio, other: studio.a, bindings: bindings, label: "B", color: .purple)
                 }
@@ -78,6 +95,13 @@ struct DJStudioView: View {
         }
         .background(Color(red: 0.055, green: 0.06, blue: 0.075))
         .preferredColorScheme(.dark)
+        .onAppear {
+            if model.hasBroadcaster && !studio.sharing && !studio.liveEnabled {
+                studio.setLiveStage(model.isHost ? .broadcast : .listening)
+            }
+        }
+        .onChange(of: model.hasBroadcaster) { _, _ in studio.setLiveStage(nil) }
+        .onChange(of: model.isHost) { _, _ in studio.setLiveStage(nil) }
         .sheet(isPresented: $showsKeys) { DJKeyEditorView(bindings: bindings) }
         .sheet(isPresented: $showsGuide) { DJGuideView(bindings: bindings) }
         .alert("DJ Studio", isPresented: Binding(get: { studio.error != nil }, set: { if !$0 { studio.error = nil } })) {
@@ -93,7 +117,7 @@ struct DJStudioView: View {
                 Text("Two decks. Sixteen pads. Your room.").font(.callout).foregroundStyle(.secondary)
             }
             Spacer()
-            Label(studio.sharing ? "Sharing with room" : "Local playback", systemImage: studio.sharing ? "dot.radiowaves.left.and.right" : "headphones")
+            Label(studio.sharing || studio.liveSnapshot.stage == .broadcast ? "Sharing with room" : "Local listening mix", systemImage: studio.sharing || studio.liveSnapshot.stage == .broadcast ? "dot.radiowaves.left.and.right" : "headphones")
                 .font(.caption.weight(.semibold)).foregroundStyle(studio.sharing ? .green : .secondary)
             Button { showsKeys = true } label: { Label("Keys", systemImage: "keyboard") }
                 .help("Edit and save DJ key bindings")
@@ -120,7 +144,7 @@ struct DJStudioView: View {
                 Button("Center") { studio.crossfade = 0.5 }.controlSize(.small)
             }
             Divider()
-            Text("Tempo match uses the BPM you enter on each deck.").font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            Text(studio.liveEnabled ? "Live input follows the stream. Enter its BPM to set beat loop length." : "Tempo match uses the BPM you enter on each deck.").font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
             Text("Close this window to stop playback.").font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
         }.padding(16).djCard()
     }
@@ -177,9 +201,9 @@ struct DJStudioView: View {
                     }
                 }.frame(width: 46, height: 46).clipShape(RoundedRectangle(cornerRadius: 8))
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(model.hasBroadcaster ? (model.nowPlaying.title ?? "Live room audio") : "No song broadcasting")
+                    Text(model.hasBroadcaster || studio.liveEnabled ? (model.nowPlaying.title ?? "Live room audio") : "No song broadcasting")
                         .font(.headline).lineLimit(2)
-                    Text(model.hasBroadcaster ? (model.nowPlaying.artist ?? "Shared with the room") : "Start a room broadcast to listen")
+                    Text(model.hasBroadcaster || studio.liveEnabled ? (model.nowPlaying.artist ?? "Shared with the room") : "Start a room broadcast to listen")
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
             }
@@ -212,10 +236,10 @@ struct DJStudioView: View {
                 Button { model.startDJBroadcast() } label: { Label("Share DJ mix", systemImage: "dot.radiowaves.left.and.right") }
                     .buttonStyle(.borderedProminent).tint(.cyan)
                     .disabled(model.phase != .live || model.hasBroadcaster || model.mediaSwitchBusy)
-                Text(model.hasBroadcaster ? "Decks and pads play locally. Stop the current broadcast before sharing your DJ mix." : model.phase != .live ? "Join a room to share your mix." : "Share both decks and pads with the room.")
+                Text(studio.liveEnabled ? (model.isHost ? "Live input, deck B and pads feed your room broadcast." : "Live input, deck B and pads blend in your listening mix on this Mac.") : model.hasBroadcaster ? "Select Live broadcast on deck A to mix the current room audio." : model.phase != .live ? "Join a room to share your mix." : "Share both decks and pads with the room.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Text("Load local files on the decks. Mixer controls affect the decks and pads.")
+            Text(studio.liveEnabled ? "Scrub and loop the recent live buffer on deck A. Room song controls above operate the original source." : "Load songs on the decks, or select the current live broadcast on deck A.")
                 .font(.caption2).foregroundStyle(.secondary)
         }.padding(18).frame(maxWidth: .infinity, alignment: .leading).djCard()
     }
@@ -362,7 +386,7 @@ private enum DJFilePicker {
 
 private extension View {
     func djCard() -> some View {
-        background(Color.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 16))
+        background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
             .overlay(RoundedRectangle(cornerRadius: 16).stroke(.white.opacity(0.09), lineWidth: 1))
     }
 }

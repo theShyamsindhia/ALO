@@ -77,6 +77,7 @@ final class SynchronizedPlayer {
     static let targetLatencyNanos = RoomTiming.defaultPlayoutDelayNanos
     static let hardResyncThresholdNanos: UInt64 = 100_000_000
     private let audioOutput: RoomAudioOutputEngine
+    private let liveDJAudio: DJLiveAudio
     private var engine: AVAudioEngine { audioOutput.engine }
     var outputEngineIdentityForTesting: ObjectIdentifier { audioOutput.identity }
     private let player = AVAudioPlayerNode()
@@ -138,9 +139,11 @@ final class SynchronizedPlayer {
         audioOutput: RoomAudioOutputEngine = RoomAudioOutputEngine(),
         outputDeviceUID: String? = nil,
         outputDeviceID: AudioDeviceID? = nil,
-        playbackActivityChanged: ((Bool) -> Void)? = nil
+        playbackActivityChanged: ((Bool) -> Void)? = nil,
+        liveDJAudio: DJLiveAudio = .shared
     ) throws {
         self.audioOutput = audioOutput
+        self.liveDJAudio = liveDJAudio
         self.playbackActivityChanged = playbackActivityChanged
         self.outputDeviceUID = outputDeviceUID
         self.explicitOutputDeviceID = outputDeviceID
@@ -323,7 +326,13 @@ final class SynchronizedPlayer {
                 continue
             }
 
-            guard let buffer = makeBuffer(packet.samples) else {
+            // This seam follows sequence admission, reordering and late-packet
+            // rejection. Voice has a separate renderer and never enters here.
+            // Secure cutover tracks own disjoint capture ranges; the processor's
+            // timestamp guard also excludes a late predecessor from new history.
+            let djSamples = liveDJAudio.process(packet.samples, stage: .listening,
+                                                       captureTimeNanos: packet.captureTimeNanos)
+            guard let buffer = makeBuffer(djSamples.count == packet.samples.count ? djSamples : packet.samples) else {
                 expectedSequence = sequence &+ 1
                 continue
             }
