@@ -445,6 +445,7 @@ struct LoopbackRoomScaleTests {
         let encoded = AudioPacket(sequence: 73, frameIndex: 0, captureTimeNanos: 1,
             samples: [Int16](repeating: 42, count: 480)).encoded()
         #expect(AudioProbeHeader.sequence(in: encoded) == 73)
+        #expect(AudioProbeHeader.read(in: encoded)?.captureTimeNanos == 1)
         var prefixed = Data([0, 0, 0])
         prefixed.append(encoded)
         #expect(AudioProbeHeader.sequence(in: prefixed.dropFirst(3)) == 73)
@@ -1201,6 +1202,11 @@ struct LoopbackRoomScaleTests {
         let state = PortState()
         let shaper = linkBitsPerSecond.map(FluidLinkShaper.init(bitsPerSecond:))
         let completionLatencies = AudioCompletionLatencies()
+        let captureCallbackAges = AudioCompletionLatencies()
+        let captureToAdmissionAges = AudioCompletionLatencies()
+        defer {
+            print("Fixture scheduler: peers=\(peerCount), link=\(linkBitsPerSecond.map(String.init) ?? "unshaped"), policy=\(policy), injectedWake=\(schedulerOversleep * 1_000)ms; capture callback age [\(captureCallbackAges.summary)]; capture-to-outbound-admission age [\(captureToAdmissionAges.summary)]; shaper dispatch lateness [\(shaper?.dispatchLatenessSummary ?? "not shaped")]")
+        }
         let submissions = AudioSubmissionLedger()
         let host = HostServer(
             roomName: "Loopback test \(UUID().uuidString)",
@@ -1210,7 +1216,13 @@ struct LoopbackRoomScaleTests {
                 hostReady.signal()
             },
             outboundSend: { connection, data, isComplete, completion in
-                let sequence = AudioProbeHeader.sequence(in: data)
+                let header = AudioProbeHeader.read(in: data)
+                let sequence = header?.sequence
+                if let header {
+                    let admittedAt = MonotonicClock.nowNanos()
+                    captureToAdmissionAges.record(admittedAt > header.captureTimeNanos
+                        ? admittedAt - header.captureTimeNanos : 0)
+                }
                 let destinationPort: UInt16?
                 if case .hostPort(_, let port) = connection.endpoint {
                     destinationPort = port.rawValue
@@ -1273,23 +1285,33 @@ struct LoopbackRoomScaleTests {
             // Keep the offered source at 48 kHz even if a runner wakes late.
             // Capture timestamps follow the nominal 20 ms sample timeline;
             // missed callback deadlines catch up without another relative sleep.
-            let captureAnchorNanos = MonotonicClock.nowNanos()
             let callbackDurationNanos: UInt64 = 20_000_000
-            for callbackIndex in 0..<(expectedPacketCount / packetsPerCallback) {
-                let callbackDeadlineNanos = captureAnchorNanos + UInt64(callbackIndex) * callbackDurationNanos
-                let now = MonotonicClock.nowNanos()
-                if now < callbackDeadlineNanos {
-                    let remaining = Double(callbackDeadlineNanos - now) / 1_000_000_000
-                    Thread.sleep(forTimeInterval: remaining + schedulerOversleep)
-                }
-                host.acceptAudio(
-                    samples: samples,
-                    captureTimeNanos: callbackDeadlineNanos - callbackDurationNanos
-                )
-                if callbackIndex.isMultiple(of: 5) {
-                    peers.forEach { $0.sendPing() }
+            // Match both production capture backends rather than inheriting the
+            // Swift Testing worker's priority. This does not suppress OS stalls.
+            let sourceQueue = DispatchQueue(label: "in.werai.tests.fanout-capture", qos: .userInteractive)
+            let sourceTimeline = CaptureTimeline()
+            let sourceFinished = DispatchSemaphore(value: 0)
+            let capturePeers = peers
+            sourceQueue.async {
+                let captureAnchorNanos = sourceTimeline.start()
+                defer { sourceFinished.signal() }
+                for callbackIndex in 0..<(expectedPacketCount / packetsPerCallback) {
+                    let callbackDeadlineNanos = captureAnchorNanos + UInt64(callbackIndex) * callbackDurationNanos
+                    let now = MonotonicClock.nowNanos()
+                    if now < callbackDeadlineNanos {
+                        let remaining = Double(callbackDeadlineNanos - now) / 1_000_000_000
+                        Thread.sleep(forTimeInterval: remaining + schedulerOversleep)
+                    }
+                    let captureTimeNanos = callbackDeadlineNanos - callbackDurationNanos
+                    captureCallbackAges.record(MonotonicClock.nowNanos() - captureTimeNanos)
+                    host.acceptAudio(samples: samples, captureTimeNanos: captureTimeNanos)
+                    if callbackIndex.isMultiple(of: 5) {
+                        capturePeers.forEach { $0.sendPing() }
+                    }
                 }
             }
+            sourceFinished.wait()
+            let captureAnchorNanos = sourceTimeline.anchorNanos
 
             let expectedIDs = Set((0..<peerCount).map { "loopback-peer-\($0)" })
             let peerPorts = try peers.map { try #require($0.audioPort) }
@@ -1448,7 +1470,7 @@ private final class HeadlessLoopbackPeer {
         self.index = index
         self.participantID = participantID ?? "loopback-peer-\(index)"
         self.expectedSample = expectedSample
-        self.queue = DispatchQueue(label: "in.werai.tests.loopback-peer.\(index)")
+        self.queue = DispatchQueue(label: "in.werai.tests.loopback-peer.\(index)", qos: .userInteractive)
     }
 
     var packetCount: Int { queue.sync { arrivals.count } }
@@ -1837,10 +1859,24 @@ private final class LoopbackCaptureClock: @unchecked Sendable {
     }
 }
 
-private enum AudioProbeHeader {
+private final class CaptureTimeline: @unchecked Sendable {
+    private let lock = NSLock()
+    private var anchor: UInt64 = 0
+    var anchorNanos: UInt64 { lock.withLock { anchor } }
+    func start() -> UInt64 {
+        lock.withLock { anchor = MonotonicClock.nowNanos(); return anchor }
+    }
+}
+
+private struct AudioProbeHeader {
+    let sequence: UInt32
+    let captureTimeNanos: UInt64
+
+    static func sequence(in data: Data) -> UInt32? { read(in: data)?.sequence }
+
     /// Inspect only the wire header on the sender queue. Receiver tests still
     /// decode/validate the complete PCM payload, as the real receiver does.
-    static func sequence(in data: Data) -> UInt32? {
+    static func read(in data: Data) -> AudioProbeHeader? {
         guard data.count >= 36 else { return nil }
         return data.withUnsafeBytes { bytes in
             guard bytes.loadUnaligned(fromByteOffset: 0, as: UInt32.self).littleEndian == 0x5745_5241,
@@ -1851,7 +1887,8 @@ private enum AudioProbeHeader {
             let frames = bytes.loadUnaligned(fromByteOffset: 32, as: UInt16.self).littleEndian
             guard frames > 0, frames <= AudioPacket.framesPerPacket,
                   data.count == 36 + Int(frames) * Int(AudioPacket.channelCount) * 2 else { return nil }
-            return bytes.loadUnaligned(fromByteOffset: 8, as: UInt32.self).littleEndian
+            return AudioProbeHeader(sequence: bytes.loadUnaligned(fromByteOffset: 8, as: UInt32.self).littleEndian,
+                captureTimeNanos: bytes.loadUnaligned(fromByteOffset: 20, as: UInt64.self).littleEndian)
         }
     }
 }
@@ -1864,7 +1901,7 @@ private final class AudioCompletionLatencies: @unchecked Sendable {
     }
     var summary: String {
         let values = lock.withLock { nanos.sorted() }
-        guard !values.isEmpty else { return "no completions" }
+        guard !values.isEmpty else { return "no samples" }
         let median = values[(values.count - 1) / 2] / 1_000_000
         let p95 = values[(values.count - 1) * 95 / 100] / 1_000_000
         let maximum = (values.last ?? 0) / 1_000_000
@@ -1875,7 +1912,9 @@ private final class AudioCompletionLatencies: @unchecked Sendable {
 private final class FluidLinkShaper: @unchecked Sendable {
     private let bitsPerSecond: UInt64
     private let lock = NSLock()
-    private let deliveryQueue = DispatchQueue(label: "in.werai.tests.fluid-link")
+    private let deliveryQueue = DispatchQueue(label: "in.werai.tests.fluid-link", qos: .userInteractive)
+    private let dispatchLatencies = AudioCompletionLatencies()
+    var dispatchLatenessSummary: String { dispatchLatencies.summary }
     private var nextAvailableNanos: UInt64 = 0
 
     init(bitsPerSecond: UInt64) {
@@ -1897,6 +1936,8 @@ private final class FluidLinkShaper: @unchecked Sendable {
         lock.unlock()
 
         deliveryQueue.asyncAfter(deadline: DispatchTime(uptimeNanoseconds: deliversAt)) {
+            let executedAt = DispatchTime.now().uptimeNanoseconds
+            self.dispatchLatencies.record(executedAt > deliversAt ? executedAt - deliversAt : 0)
             connection.send(
                 content: data,
                 contentContext: .defaultMessage,
