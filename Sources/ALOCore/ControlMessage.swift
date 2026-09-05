@@ -110,6 +110,21 @@ public struct RoomQueueItem: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
+/// Relative observations at the receiver's UI handoff, not physical display or
+/// lip-sync measurements. No receiver monotonic timestamp crosses this boundary.
+public struct PlaybackScreenTimingReport: Codable, Sendable, Equatable {
+    public let latestHandoffAgeNanos: UInt64?
+    public let latestDeadlineMissNanos: UInt64?
+    public let oldestPendingDeadlineMissNanos: UInt64?
+
+    public init(latestHandoffAgeNanos: UInt64? = nil, latestDeadlineMissNanos: UInt64? = nil,
+                oldestPendingDeadlineMissNanos: UInt64? = nil) {
+        self.latestHandoffAgeNanos = latestHandoffAgeNanos
+        self.latestDeadlineMissNanos = latestDeadlineMissNanos
+        self.oldestPendingDeadlineMissNanos = oldestPendingDeadlineMissNanos
+    }
+}
+
 public struct PlaybackSyncReport: Codable, Sendable, Equatable {
     public let measuredAtNanos: UInt64
     public let latenessNanos: UInt64
@@ -119,6 +134,7 @@ public struct PlaybackSyncReport: Codable, Sendable, Equatable {
     /// Optional so older peers can still decode and send the original report.
     public let driftNanos: UInt64?
     public let driftSampleAgeNanos: UInt64?
+    public let screenTiming: PlaybackScreenTimingReport?
 
     public init(
         measuredAtNanos: UInt64,
@@ -126,7 +142,8 @@ public struct PlaybackSyncReport: Codable, Sendable, Equatable {
         latePacketCount: UInt64,
         resyncCount: UInt64,
         driftNanos: UInt64? = nil,
-        driftSampleAgeNanos: UInt64? = nil
+        driftSampleAgeNanos: UInt64? = nil,
+        screenTiming: PlaybackScreenTimingReport? = nil
     ) {
         self.measuredAtNanos = measuredAtNanos
         self.latenessNanos = latenessNanos
@@ -134,6 +151,7 @@ public struct PlaybackSyncReport: Codable, Sendable, Equatable {
         self.resyncCount = resyncCount
         self.driftNanos = driftNanos
         self.driftSampleAgeNanos = driftSampleAgeNanos
+        self.screenTiming = screenTiming
     }
 }
 

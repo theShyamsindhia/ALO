@@ -203,6 +203,7 @@ final class HostServer {
                 maximumLatenessMilliseconds: Double(reports.map(\.latenessNanos).max() ?? 0) / 1_000_000,
                 totalResyncCount: reports.reduce(0) { $0 &+ $1.resyncCount },
                 roomTimingChangeCount: roomTimingChangeCount,
+                videoEnabled: videoEnabled,
                 listeners: listeners.sorted { ($0.id ?? "") < ($1.id ?? "") }.prefix(64).map { client in
                     HostListenerTimingDiagnostics(
                         peerID: client.id ?? "unknown",
@@ -216,7 +217,8 @@ final class HostServer {
                         audioReplaced: client.audioReplaced, audioDiscardedBoundary: client.audioDiscardedBoundary,
                         driftMilliseconds: client.syncReport?.driftNanos.map { Double($0) / 1_000_000 },
                         driftSampleAgeMilliseconds: client.syncReport?.driftSampleAgeNanos.map { Double($0) / 1_000_000 },
-                        playbackReportAgeMilliseconds: client.lastPlaybackReportNanos.map { Double(now >= $0 ? now - $0 : 0) / 1_000_000 }
+                        playbackReportAgeMilliseconds: client.lastPlaybackReportNanos.map { Double(now >= $0 ? now - $0 : 0) / 1_000_000 },
+                        screenTiming: client.syncReport?.screenTiming
                     )
                 }
             )

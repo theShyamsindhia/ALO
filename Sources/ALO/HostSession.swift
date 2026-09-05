@@ -257,6 +257,19 @@ final class HostSession {
         )
     }
 
+    /// Polling live health must not wait on audio/network queues on the UI thread.
+    func sampleTimingDiagnostics() async -> SessionTimingDiagnostics? {
+        let sampledReceiver = localReceiver
+        let sampledHost = host
+        let snapshot = await Task.detached(priority: .utility) {
+            SessionTimingDiagnostics(
+                receiver: sampledReceiver?.diagnosticsSnapshot(),
+                host: sampledHost?.diagnosticsSnapshot())
+        }.value
+        guard localReceiver === sampledReceiver, host === sampledHost else { return nil }
+        return snapshot
+    }
+
     func setVideoEnabled(_ enabled: Bool) async throws {
         if enabled {
             guard videoPicker == nil, videoCapture == nil else {

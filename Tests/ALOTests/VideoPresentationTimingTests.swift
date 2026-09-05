@@ -4,6 +4,25 @@ import Testing
 
 @Suite(.serialized)
 struct VideoPresentationTimingTests {
+    @Test
+    func screenReportUsesRelativeAgesAndNeverExportsTheReceiverClockEpoch() {
+        let epoch: UInt64 = 9_000_000_000_000_000_000
+        let snapshot = VideoPresentationTimingSnapshot(measuredAtNanos: epoch + 20_000_000,
+            latestHandoffAtNanos: epoch, latestDeadlineMissNanos: 150_000_000,
+            maximumDeadlineMissNanos: 150_000_000, presentedCount: 1,
+            pendingCount: 1, oldestPendingDeadlineNanos: epoch - 130_000_000)
+        let report = snapshot.relativeTimingReport
+        #expect(report.latestHandoffAgeNanos == 20_000_000)
+        #expect(report.latestDeadlineMissNanos == 150_000_000)
+        #expect(report.oldestPendingDeadlineMissNanos == 150_000_000)
+        let future = VideoPresentationTimingSnapshot(measuredAtNanos: 1,
+            latestHandoffAtNanos: 2, latestDeadlineMissNanos: 0,
+            maximumDeadlineMissNanos: 0, presentedCount: 1,
+            pendingCount: 1, oldestPendingDeadlineNanos: 3).relativeTimingReport
+        #expect(future.latestHandoffAgeNanos == nil)
+        #expect(future.oldestPendingDeadlineMissNanos == 0)
+    }
+
     private final class Fixture: @unchecked Sendable {
         let lock = NSLock()
         private var time: UInt64 = 1_000_000_000

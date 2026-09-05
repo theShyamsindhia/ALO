@@ -7,6 +7,7 @@ import QuartzCore
 import SwiftUI
 import UniformTypeIdentifiers
 import ALOCore
+import os
 
 private enum ALOAppFlavor {
     static var isDevelopment: Bool {
@@ -1451,6 +1452,7 @@ final class ALOViewModel: ObservableObject {
     @Published private(set) var roomArtworkPalette: ArtworkPalette?
     @Published var localNowPlaying = NowPlayingMedia()
     @Published private(set) var audioIsRendering = false
+    @Published private(set) var liveSyncHealth = LiveSyncHealth()
     @Published var experience: Experience = .audio
     @Published var mediaSwitchBusy = false
     @Published var permissionNotice = false
@@ -1461,6 +1463,8 @@ final class ALOViewModel: ObservableObject {
 
     private var roomBrowser: MeshRoomBrowser!
     private var meshSession: MeshSession?
+    private var liveSyncTask: Task<Void, Never>?
+    private let syncHealthLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "in.werai.audio", category: "synchronization")
     private var requestedVideoBroadcast = false
     private var videoBroadcastTimeoutTask: Task<Void, Never>?
     private let roomStore = RoomStore()
@@ -1603,8 +1607,12 @@ final class ALOViewModel: ObservableObject {
     var roomSyncLabel: String {
         if !hasBroadcaster { return "No broadcaster" }
         if nowPlaying.isPlaying == false { return "Paused" }
-        if isHost { return nowPlaying.isEmpty ? "Waiting for audio" : "Broadcasting" }
-        if audioIsRendering { return "Synced" }
+        if isHost {
+            if nowPlaying.isEmpty { return "Waiting for audio" }
+            if participants.count <= 1 { return "Broadcasting" }
+            return liveSyncHealth.playbackLabel(isHost: true, now: MonotonicClock.nowNanos())
+        }
+        if audioIsRendering { return liveSyncHealth.playbackLabel(isHost: false, now: MonotonicClock.nowNanos()) }
         return nowPlaying.isEmpty ? "Waiting for audio" : "Recovering audio…"
     }
     var canSelectVideo: Bool { phase == .live && meshSession != nil }
@@ -1874,6 +1882,7 @@ final class ALOViewModel: ObservableObject {
             savedRooms = roomStore.load()
             phase = .live
             statusText = broadcastInitially ? "Starting this Mac's broadcast" : "Room open"
+            startLiveSyncMonitoring(session)
             updateLocalNowPlayingMonitor()
         } catch {
             meshSession = nil
@@ -2694,6 +2703,7 @@ final class ALOViewModel: ObservableObject {
 
     func stop() {
         isLeavingRoom = true
+        stopLiveSyncMonitoring()
         lastJoinedRoomStore.clear(ifMatching: activeRoomConfiguration?.id)
         phase = .starting
         statusText = "Leaving the room"
@@ -2761,11 +2771,16 @@ final class ALOViewModel: ObservableObject {
 
     func stopImmediately() {
         isLeavingRoom = true
+        stopLiveSyncMonitoring()
         stopLocalNowPlayingMonitor()
         meshSession?.stopImmediately()
     }
 
     func diagnosticRoomContext() -> DiagnosticRoomContext {
+        diagnosticRoomContext(timing: meshSession?.diagnosticsSnapshot())
+    }
+
+    private func diagnosticRoomContext(timing: SessionTimingDiagnostics?) -> DiagnosticRoomContext {
         let active = phase == .live && meshSession != nil
         let remotePeerCount = participants.filter { $0.id != currentParticipantID }.count
         return DiagnosticRoomContext(
@@ -2776,8 +2791,70 @@ final class ALOViewModel: ObservableObject {
             syncLabel: roomSyncLabel,
             audioIsRendering: audioIsRendering,
             hasBroadcaster: hasBroadcaster,
-            timing: meshSession?.diagnosticsSnapshot()
+            timing: timing
         )
+    }
+
+    private func startLiveSyncMonitoring(_ session: MeshSession) {
+        stopLiveSyncMonitoring()
+        // Retain incidents after leaving for export; only a new room clears them.
+        liveSyncHealth = LiveSyncHealth()
+        liveSyncTask = Task { [weak self, weak session] in
+            while !Task.isCancelled {
+                guard self != nil, let session else { return }
+                let started = MonotonicClock.nowNanos()
+                // A stalled diagnostic read cannot leave the last healthy badge
+                // latched indefinitely. This timeout does not start another read.
+                let freshnessTimeout = Task { [weak self, weak session] in
+                    do { try await Task.sleep(nanoseconds: 2_500_000_000) }
+                    catch { return }
+                    guard !Task.isCancelled, let session, self?.meshSession === session else { return }
+                    self?.invalidateLiveSyncSample()
+                }
+                let timing = await session.sampleTimingDiagnostics()
+                freshnessTimeout.cancel()
+                guard !Task.isCancelled else { return }
+                self?.applyLiveSyncTiming(timing, from: session, sampledAt: started)
+                do { try await Task.sleep(nanoseconds: 1_000_000_000) }
+                catch { return }
+            }
+        }
+    }
+
+    private func applyLiveSyncTiming(_ timing: SessionTimingDiagnostics?, from session: MeshSession, sampledAt: UInt64) {
+        guard meshSession === session, phase == .live, !isLeavingRoom else { return }
+        guard hasBroadcaster, nowPlaying.isPlaying != false else {
+            invalidateLiveSyncSample()
+            return
+        }
+        let now = MonotonicClock.nowNanos()
+        // Snapshot collection can span separate receiver/host queues. Old values
+        // must not become fresh merely because the async call finally completed.
+        let freshTiming = now >= sampledAt && now - sampledAt <= 500_000_000 ? timing : nil
+        guard let freshTiming else {
+            invalidateLiveSyncSample()
+            return
+        }
+        let result = diagnosticRoomContext(timing: freshTiming).result
+        if liveSyncHealth.recentTransitions.last?.outcome != result.outcome {
+            // Anonymous, transition-only evidence; never log peer names or content.
+            let detail = DiagnosticRedactor.redact(result.detail)
+            syncHealthLogger.notice("Playback timing \(result.outcome.rawValue, privacy: .public): \(detail, privacy: .public)")
+        }
+        liveSyncHealth.observe(result, at: sampledAt)
+    }
+
+    private func stopLiveSyncMonitoring() {
+        liveSyncTask?.cancel()
+        liveSyncTask = nil
+        invalidateLiveSyncSample()
+    }
+
+    private func invalidateLiveSyncSample() {
+        // Guard before mutating the @Published value: even an unchanged inout
+        // write would otherwise redraw the whole model on every idle timer tick.
+        guard liveSyncHealth.hasCurrentSample else { return }
+        liveSyncHealth.invalidateCurrentSample()
     }
 
     private func ensureScreenRecordingPermission() -> Bool {
@@ -2974,6 +3051,7 @@ final class ALOViewModel: ObservableObject {
     }
 
     private func resetRoomState() {
+        stopLiveSyncMonitoring()
         stopLocalNowPlayingMonitor()
         isLeavingRoom = false
         errorMessage = nil

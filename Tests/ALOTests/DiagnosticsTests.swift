@@ -4,6 +4,56 @@ import Testing
 
 @Suite("Privacy-conscious diagnostics")
 struct DiagnosticsTests {
+    @Test @MainActor
+    func liveRoomVerdictsReplaceDisplayedResultsAndClearOnDisconnect() {
+        let runner = DiagnosticsRunner()
+        let warning = DiagnosticCheckResult(outcome: .warning, detail: "Screen late", checkedAt: Date())
+        runner.acceptLiveRoomResult(warning)
+        #expect(runner.results[.roomSync] == warning)
+        let recovered = DiagnosticCheckResult(outcome: .passed, detail: "Recovered", checkedAt: Date())
+        runner.acceptLiveRoomResult(recovered)
+        #expect(runner.results[.roomSync] == recovered)
+        runner.acceptLiveRoomResult(nil)
+        #expect(runner.results[.roomSync]?.outcome == .running)
+        #expect(runner.results[.roomSync]?.detail.contains("Checking") == true)
+        runner.acceptLiveRoomResult(nil, isActive: false)
+        #expect(runner.results[.roomSync]?.detail.contains("Open a room") == true)
+        runner.acceptLiveRoomResult(nil, isPaused: true)
+        #expect(runner.results[.roomSync]?.detail.contains("Playback is paused") == true)
+        runner.acceptLiveRoomResult(nil, hasBroadcaster: false)
+        #expect(runner.results[.roomSync]?.detail.contains("Waiting for a broadcaster") == true)
+        runner.acceptLiveRoomResult(recovered)
+        #expect(runner.results[.roomSync] == recovered)
+        let inactive = DiagnosticRoomContext(isActive: false, role: .none, participantCount: 0,
+            remotePeerCount: 0, syncLabel: "No broadcaster", audioIsRendering: false,
+            hasBroadcaster: false, timing: nil)
+        runner.testRoom(inactive)
+        #expect(runner.results[.roomSync]?.detail.contains("Open a room") == true,
+            "Explicit refresh remains available alongside live guidance")
+    }
+
+    @Test
+    func diagnosticExportRetainsBoundedRedactedSyncTransitionsAfterRecovery() {
+        let room = DiagnosticRoomContext(isActive: false, role: .none, participantCount: 0,
+            remotePeerCount: 0, syncLabel: "No broadcaster", audioIsRendering: false,
+            hasBroadcaster: false, timing: nil)
+        let events = (0..<20).map { index in
+            DiagnosticCheckResult(outcome: index.isMultiple(of: 2) ? .warning : .passed,
+                detail: "[event:\(index)] /Users/alice/Library 192.168.1.20 alice@example.com",
+                checkedAt: Date(timeIntervalSince1970: Double(index)))
+        }
+        let context = DiagnosticReportContext(generatedAt: Date(timeIntervalSince1970: 20),
+            appVersion: "test", appBuild: "test", operatingSystem: "macOS", architecture: "arm64",
+            room: room, microphoneSelection: "system default", recentSyncEvents: events)
+        let report = DiagnosticReportBuilder.build(context: context, results: [:])
+        #expect(!report.contains("[event:3]"))
+        #expect(report.contains("[event:4]") && report.contains("[event:19]"))
+        #expect(report.components(separatedBy: "[event:").count - 1 == 16)
+        #expect(report.contains("Needs attention") && report.contains("Ready"))
+        #expect(!report.contains("alice") && !report.contains("192.168.1.20"))
+        #expect(report.contains("<redacted-email>"))
+    }
+
     @Test("A clock connection alone must not mark late or absent playback ready")
     func connectedButDesynchronizedPlaybackNeedsAttention() {
         for (lateness, rendering) in [(150.0, true), (0.0, false)] {
@@ -107,7 +157,8 @@ struct DiagnosticsTests {
     @Test("Drift detection rejects missing or stale measurements and recovers with fresh samples")
     func continuousDriftAndPresentationHealth() {
         func context(drift: Double? = 0, age: Double? = 20,
-                     video: VideoPresentationTimingSnapshot? = nil) -> DiagnosticRoomContext {
+                     video: VideoPresentationTimingSnapshot? = nil,
+                     videoEnabled: Bool = false) -> DiagnosticRoomContext {
             DiagnosticRoomContext(isActive: true, role: .listener, participantCount: 2,
                 remotePeerCount: 1, syncLabel: "Synced", audioIsRendering: true,
                 hasBroadcaster: true, timing: SessionTimingDiagnostics(
@@ -118,7 +169,7 @@ struct DiagnosticsTests {
                         outputChannelCount: 2, latenessMilliseconds: 0,
                         latePacketCount: 15, resyncCount: 3,
                         currentDriftMilliseconds: drift, driftMeasurementAgeMilliseconds: age,
-                        video: video), host: nil))
+                        video: video, videoEnabled: videoEnabled), host: nil))
         }
         #expect(context(drift: 150).result.outcome == .warning)
         #expect(context(drift: 100).result.outcome == .warning)
@@ -149,6 +200,15 @@ struct DiagnosticsTests {
             maximumDeadlineMissNanos: 0, presentedCount: 0,
             pendingCount: 2, oldestPendingDeadlineNanos: 850_000_000)
         #expect(context(video: blocked).result.outcome == .warning)
+        let neverPresented = VideoPresentationTimingSnapshot(measuredAtNanos: 8_000_000_000,
+            latestHandoffAtNanos: nil, latestDeadlineMissNanos: nil,
+            maximumDeadlineMissNanos: 0, presentedCount: 0,
+            pendingCount: 0, oldestPendingDeadlineNanos: nil)
+        #expect(context(video: neverPresented, videoEnabled: true).result.outcome == .warning,
+            "Enabled sharing with no displayed frame must not report healthy")
+        #expect(context(video: neverPresented, videoEnabled: false).result.outcome == .passed)
+        #expect(context(video: idle, videoEnabled: true).result.outcome == .passed,
+            "An already displayed static screen is not a fabricated stall")
     }
 
     @Test("Broadcasters verify fresh listener drift and local playback without assuming old peers are healthy")

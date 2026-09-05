@@ -39,6 +39,35 @@ struct ReceiverLevelPreference {
     }
 }
 
+/// Queue-confined screen-session observations, independent of media delivery.
+struct ReceiverScreenTiming {
+    private(set) var videoEnabled = false
+    private var hasEnabledBefore = false
+    private var requireHandoffAfterNanos: UInt64?
+
+    mutating func update(enabled: Bool, at now: UInt64) {
+        if enabled, !videoEnabled {
+            // The initial video can beat its control notification. After a
+            // restart, however, a retained/disabled-period image is not proof of
+            // new delivery: require another handoff after this local boundary.
+            // A restarted static frame that beats control remains unverified,
+            // rather than guessing its stream generation across transports.
+            if hasEnabledBefore { requireHandoffAfterNanos = now }
+            hasEnabledBefore = true
+        }
+        videoEnabled = enabled
+    }
+
+    func presentationSnapshot(_ snapshot: VideoPresentationTimingSnapshot) -> VideoPresentationTimingSnapshot {
+        guard let boundary = requireHandoffAfterNanos,
+              let handoff = snapshot.latestHandoffAtNanos, handoff <= boundary else { return snapshot }
+        return VideoPresentationTimingSnapshot(measuredAtNanos: snapshot.measuredAtNanos,
+            latestHandoffAtNanos: nil, latestDeadlineMissNanos: nil,
+            maximumDeadlineMissNanos: snapshot.maximumDeadlineMissNanos, presentedCount: 0,
+            pendingCount: snapshot.pendingCount, oldestPendingDeadlineNanos: snapshot.oldestPendingDeadlineNanos)
+    }
+}
+
 final class Receiver {
     private final class PlaybackActivityRelay {
         var handler: (Bool) -> Void = { _ in }
@@ -77,6 +106,7 @@ final class Receiver {
     private var maintenanceTimer: DispatchSourceTimer?
     private var hasChosenRoom = false
     private var hasAuthenticatedControl = false
+    private var screenTiming = ReceiverScreenTiming()
     private var audioListenerReady = false
     private var videoListenerReady = false
     private var audioConnections = [NWConnection]()
@@ -209,6 +239,7 @@ final class Receiver {
             control?.cancel()
             control = nil
             hasAuthenticatedControl = false
+            screenTiming = ReceiverScreenTiming()
             udpListener?.cancel()
             udpListener = nil
             videoListener?.cancel()
@@ -253,7 +284,8 @@ final class Receiver {
                 resyncCount: report.resyncCount,
                 currentDriftMilliseconds: report.driftNanos.map { Double($0) / 1_000_000 },
                 driftMeasurementAgeMilliseconds: report.driftSampleAgeNanos.map { Double($0) / 1_000_000 },
-                video: videoDecoder.presentationTimingSnapshot
+                video: screenTiming.presentationSnapshot(videoDecoder.presentationTimingSnapshot),
+                videoEnabled: screenTiming.videoEnabled
             )
         }
     }
@@ -474,7 +506,8 @@ final class Receiver {
                         // newly authenticated transport epoch.
                         self.sendPreferredLevel()
                     case "media_state":
-                        self.mediaStateHandler?(message.videoEnabled ?? false)
+                        self.screenTiming.update(enabled: message.videoEnabled ?? false, at: MonotonicClock.nowNanos())
+                        self.mediaStateHandler?(self.screenTiming.videoEnabled)
                     case "now_playing":
                         let media = message.nowPlaying ?? NowPlayingMedia()
                         if self.capturesSystemMediaCommands {
@@ -530,6 +563,7 @@ final class Receiver {
         control?.cancel()
         control = nil
         hasAuthenticatedControl = false
+        screenTiming = ReceiverScreenTiming()
         controlDecoder = ControlLineDecoder()
         audioConnections.forEach { $0.cancel() }
         audioConnections.removeAll()
@@ -603,10 +637,16 @@ final class Receiver {
                 renderSchedulingHeadroomNanos: player.renderSchedulingHeadroomForTimingNanos
             )
         ))
+        let audioReport = player.syncReport()
+        let playbackReport = PlaybackSyncReport(measuredAtNanos: audioReport.measuredAtNanos,
+            latenessNanos: audioReport.latenessNanos, latePacketCount: audioReport.latePacketCount,
+            resyncCount: audioReport.resyncCount, driftNanos: audioReport.driftNanos,
+            driftSampleAgeNanos: audioReport.driftSampleAgeNanos,
+            screenTiming: screenTiming.presentationSnapshot(videoDecoder.presentationTimingSnapshot).relativeTimingReport)
         send(ControlMessage(
             type: "sync_status",
             participantID: participantID,
-            syncReport: player.syncReport()
+            syncReport: playbackReport
         ))
     }
 

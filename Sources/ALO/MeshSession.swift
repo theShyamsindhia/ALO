@@ -132,6 +132,22 @@ final class MeshSession {
         return nil
     }
 
+    func sampleTimingDiagnostics() async -> SessionTimingDiagnostics? {
+        let sampledHost = hostSession
+        let sampledReceiver = receiver
+        let snapshot: SessionTimingDiagnostics?
+        if let sampledHost {
+            snapshot = await sampledHost.sampleTimingDiagnostics()
+        } else if let sampledReceiver {
+            snapshot = await Task.detached(priority: .utility) {
+                SessionTimingDiagnostics(receiver: sampledReceiver.diagnosticsSnapshot(), host: nil)
+            }.value
+        } else { return nil }
+        // A takeover/rejoin while sampling cannot apply the previous source's verdict.
+        guard hostSession === sampledHost, receiver === sampledReceiver else { return nil }
+        return snapshot
+    }
+
     private final class CallbackRelay {
         var replica: (MeshRoomReplica) -> Void = { _ in }
         var participants: ([RoomParticipant]) -> Void = { _ in }

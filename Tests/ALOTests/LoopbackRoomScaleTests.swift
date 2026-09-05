@@ -6,6 +6,60 @@ import Testing
 
 @Suite("Single-Mac room integration", .serialized)
 struct LoopbackRoomScaleTests {
+    @Test("Broadcaster diagnostics detect remote screen lateness received over the control connection")
+    func remoteScreenTimingReachesBroadcasterDiagnostics() throws {
+        let ready = DispatchSemaphore(value: 0)
+        let ports = PortState()
+        let host = HostServer(roomName: "Remote screen timing", advertise: false,
+            listenerReadyHandler: { ports.set($0); ready.signal() })
+        try host.start()
+        defer { host.stop() }
+        try #require(ready.wait(timeout: .now() + 3) == .success)
+        let port = try #require(ports.port)
+        let peer = HeadlessLoopbackPeer(index: 720)
+        try peer.start(hostPort: port)
+        defer { peer.stop() }
+        try #require(peer.waitUntilJoined(timeout: 3))
+        host.setVideoEnabled(true)
+        // Absolute peer time deliberately differs from the broadcaster epoch.
+        // Only the relative ages/misses in screenTiming may determine health.
+        peer.sendRawControl(Data("""
+        {"type":"sync_status","participantID":"loopback-peer-720","syncReport":{"measuredAtNanos":1,"latenessNanos":0,"latePacketCount":0,"resyncCount":0,"driftNanos":2000000,"driftSampleAgeNanos":20000000,"screenTiming":{"latestHandoffAgeNanos":20000000,"latestDeadlineMissNanos":150000000}}}
+
+        """.utf8))
+        try #require(waitUntil(timeout: 3) { host.diagnosticsSnapshot().reportingListenerCount == 1 })
+        func result() -> DiagnosticCheckResult {
+            DiagnosticRoomContext(isActive: true, role: .broadcaster,
+                participantCount: 2, remotePeerCount: 1, syncLabel: "Broadcasting",
+                audioIsRendering: true, hasBroadcaster: true,
+                timing: SessionTimingDiagnostics(receiver: nil, host: host.diagnosticsSnapshot())).result
+        }
+        #expect(result().outcome == .warning,
+            "Healthy audio cannot conceal a current remote screen handoff miss")
+        let cases: [(PlaybackScreenTimingReport?, DiagnosticOutcome)] = [
+            (.init(latestHandoffAgeNanos: 20_000_000, latestDeadlineMissNanos: 0), .passed),
+            (.init(latestHandoffAgeNanos: 20_000_000, latestDeadlineMissNanos: 0,
+                   oldestPendingDeadlineMissNanos: 150_000_000), .warning),
+            (.init(latestHandoffAgeNanos: 10_000_000_000, latestDeadlineMissNanos: 150_000_000), .passed),
+            (.init(), .warning),
+            (nil, .warning)
+        ]
+        for (screen, expected) in cases {
+            let report = PlaybackSyncReport(measuredAtNanos: 1, latenessNanos: 0,
+                latePacketCount: 0, resyncCount: 0, driftNanos: 2_000_000,
+                driftSampleAgeNanos: 20_000_000, screenTiming: screen)
+            peer.sendRawControl(try ControlMessage(type: "sync_status",
+                participantID: "loopback-peer-720", syncReport: report).encodedLine())
+            try #require(waitUntil(timeout: 3) { host.diagnosticsSnapshot().listeners.first?.screenTiming == screen })
+            #expect(result().outcome == expected)
+        }
+        #expect(result().detail.contains("screen timing unverified"))
+        #expect(result().detail.contains("not a physical display or lip-sync measurement"))
+        host.setVideoEnabled(false)
+        try #require(waitUntil(timeout: 3) { !host.diagnosticsSnapshot().videoEnabled })
+        #expect(result().outcome == .passed, "Audio-only rooms do not require screen telemetry")
+    }
+
     @Test("A late listener's rising network RTT cannot repeatedly reset every output", arguments: [UInt64(10_000_000), 150_000_000])
     func lateListenerNetworkDelayCannotMasqueradeAsHardwareLatency(outputLatency: UInt64) throws {
         let ready = DispatchSemaphore(value: 0)
@@ -1554,6 +1608,13 @@ private final class HeadlessLoopbackPeer {
         queue.async { [weak self] in
             self?.send(ControlMessage(type: "sync_report", playoutDelayNanos: recommendation,
                 outputLatencyPlayoutFloorNanos: hardwareFloor))
+        }
+    }
+
+    func sendRawControl(_ data: Data) {
+        queue.async {
+            self.control?.send(content: data, contentContext: .defaultMessage,
+                isComplete: false, completion: .contentProcessed { _ in })
         }
     }
 

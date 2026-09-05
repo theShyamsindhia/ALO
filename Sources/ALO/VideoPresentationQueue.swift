@@ -1,4 +1,5 @@
 import Foundation
+import ALOCore
 
 /// Timing at the image-handler boundary, not a measurement of physical display
 /// scanout or speaker-to-screen skew. No new frames can mean a static screen.
@@ -10,6 +11,17 @@ struct VideoPresentationTimingSnapshot: Sendable, Equatable {
     let presentedCount: UInt64
     let pendingCount: Int
     let oldestPendingDeadlineNanos: UInt64?
+
+    var relativeTimingReport: PlaybackScreenTimingReport {
+        PlaybackScreenTimingReport(
+            latestHandoffAgeNanos: latestHandoffAtNanos.flatMap {
+                measuredAtNanos >= $0 ? measuredAtNanos - $0 : nil
+            },
+            latestDeadlineMissNanos: latestDeadlineMissNanos,
+            oldestPendingDeadlineMissNanos: oldestPendingDeadlineNanos.map {
+                measuredAtNanos > $0 ? measuredAtNanos - $0 : 0
+            })
+    }
 }
 
 /// One timer owns a bounded set of frames. Reset releases them immediately,
