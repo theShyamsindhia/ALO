@@ -3,6 +3,31 @@ import Foundation
 import Network
 import ALOCore
 
+struct ChatAttachmentReceiveAdmission {
+    static let windowNanos: UInt64 = 60_000_000_000
+    static let maximumBytes = 32 * 1_024 * 1_024
+    static let maximumTransfers = 8
+
+    private(set) var windowStartedAt: UInt64 = 0
+    private(set) var bytes = 0
+    private(set) var transfers = 0
+
+    mutating func permits(packetBytes: Int, now: UInt64) -> Bool {
+        if windowStartedAt == 0 || now < windowStartedAt || now - windowStartedAt >= Self.windowNanos {
+            windowStartedAt = now
+            bytes = 0
+            transfers = 0
+        }
+        guard packetBytes > 0, packetBytes <= RoomChatAttachmentPacket.chunkBytes,
+              transfers < Self.maximumTransfers,
+              bytes <= Self.maximumBytes - packetBytes else { return false }
+        bytes += packetBytes
+        return true
+    }
+
+    mutating func completedTransfer() { transfers += 1 }
+}
+
 struct RealtimeVoiceSendQueue {
     struct Item {
         let kind: WalkieTalkieKind
@@ -142,6 +167,7 @@ public final class MeshControlPlane: @unchecked Sendable {
         var chatAttachmentQueuedBytes = 0
         var arenaReceiveWindow: UInt64 = 0
         var arenaReceiveCount = 0
+        var chatAttachmentReceiveAdmission = ChatAttachmentReceiveAdmission()
         var legacyVoiceDownsamplers = [String: LegacyVoiceDownsampler]()
         var remoteVersionVector: [String: UInt64]?
         let roomStateSyncSession: RoomStateSyncSession
@@ -685,7 +711,7 @@ public final class MeshControlPlane: @unchecked Sendable {
 
     public func publishChatAttachment(_ payload: RoomChatAttachmentPayload) {
         let packets = RoomChatAttachmentPacket.packets(for: payload)
-        guard !packets.isEmpty else { return }
+        guard localPermits(.chat), !packets.isEmpty else { return }
         queue.async { [weak self] in
             guard let self, !self.isStopped else { return }
             let wires = packets.compactMap {
@@ -1492,7 +1518,13 @@ public final class MeshControlPlane: @unchecked Sendable {
             arenaHandler(remoteID, data)
         case "chat_attachment":
             guard envelope.nodeID == remoteID, let packet = envelope.chatAttachmentPacket,
+                  permitsTransient(envelope, from: link, capability: .chat),
+                  link.chatAttachmentReceiveAdmission.permits(
+                    packetBytes: packet.bytes.count,
+                    now: MonotonicClock.nowNanos()
+                  ),
                   let payload = chatAttachmentAssembler.receive(senderID: remoteID, packet: packet) else { return }
+            link.chatAttachmentReceiveAdmission.completedTransfer()
             chatAttachmentHandler(remoteID, payload)
         case "room_icon":
             if let icon = envelope.roomIcon { mergeRoomIcon(icon) }
@@ -1964,6 +1996,7 @@ public final class MeshControlPlane: @unchecked Sendable {
         let wasCanonical = disconnectedID.map { peers[$0] === link } ?? false
         if let id = disconnectedID, wasCanonical {
             peers.removeValue(forKey: id)
+            chatAttachmentAssembler.discard(senderID: id)
         }
         if room.transportPolicy == .secureV2 {
             if wasCanonical, peers.isEmpty, scanWindowExpiresAtNanos == nil {

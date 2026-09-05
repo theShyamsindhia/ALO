@@ -1,26 +1,53 @@
+import CryptoKit
 import Foundation
 import ALOCore
 
 enum ChatAttachmentStore {
     private static let maximumCacheBytes = 128 * 1_024 * 1_024
 
-    static func save(_ payload: RoomChatAttachmentPayload, roomID: String) throws -> URL {
+    private enum StoreError: Error { case identityCollision }
+
+    static func save(_ payload: RoomChatAttachmentPayload, roomID: String, senderID: String) throws -> URL {
         let manager = FileManager.default
         let directory = try cacheDirectory(roomID: roomID)
         let fileExtension = URL(fileURLWithPath: payload.attachment.fileName).pathExtension
-        let diskName = payload.attachment.id + (fileExtension.isEmpty ? "" : "." + String(fileExtension.prefix(24)))
+        let senderHash = SHA256.hash(data: Data(senderID.utf8)).prefix(12)
+            .map { String(format: "%02x", $0) }.joined()
+        let diskName = senderHash + "-" + payload.attachment.id
+            + (fileExtension.isEmpty ? "" : "." + String(fileExtension.prefix(24)))
         let url = directory.appendingPathComponent(diskName)
+        if manager.fileExists(atPath: url.path) {
+            guard (try? Data(contentsOf: url, options: [.mappedIfSafe])) == payload.data else {
+                throw StoreError.identityCollision
+            }
+            try? manager.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path)
+            return url
+        }
         try payload.data.write(to: url, options: [.atomic])
         try? manager.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path)
         prune(directory: directory, preserving: url)
         return url
     }
 
+    static func existingURL(for attachment: RoomChatAttachment, roomID: String, senderID: String) -> URL? {
+        guard let directory = try? cacheDirectory(roomID: roomID) else { return nil }
+        let fileExtension = URL(fileURLWithPath: attachment.fileName).pathExtension
+        let senderHash = SHA256.hash(data: Data(senderID.utf8)).prefix(12)
+            .map { String(format: "%02x", $0) }.joined()
+        let diskName = senderHash + "-" + attachment.id
+            + (fileExtension.isEmpty ? "" : "." + String(fileExtension.prefix(24)))
+        let url = directory.appendingPathComponent(diskName)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
     private static func cacheDirectory(roomID: String) throws -> URL {
         let manager = FileManager.default
         let root = try manager.url(for: .cachesDirectory, in: .userDomainMask,
                                    appropriateFor: nil, create: true)
-            .appendingPathComponent("ALO", isDirectory: true)
+            .appendingPathComponent(
+                Bundle.main.bundleIdentifier == "in.werai.audio.dev" ? "ALO-Dev" : "ALO",
+                isDirectory: true
+            )
             .appendingPathComponent("Chat Attachments", isDirectory: true)
         let safeRoomID = "room-" + roomID.replacingOccurrences(of: "/", with: "-")
         let directory = root.appendingPathComponent(safeRoomID, isDirectory: true)

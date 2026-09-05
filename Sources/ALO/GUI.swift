@@ -2959,7 +2959,8 @@ final class ALOViewModel: ObservableObject {
         guard let data = try? Data(contentsOf: fileURL, options: [.mappedIfSafe]),
               let payload = RoomChatAttachmentPayload(attachment: attachment, data: data),
               let roomID = activeRoomConfiguration?.id,
-              let stored = try? ChatAttachmentStore.save(payload, roomID: roomID) else { return false }
+              let stored = try? ChatAttachmentStore.save(payload, roomID: roomID,
+                                                         senderID: meshSession.nodeID) else { return false }
         let key = chatAttachmentKey(senderID: meshSession.nodeID, attachmentID: attachment.id)
         chatAttachmentURLs[key] = stored
         guard sendChatOperation(operation) else {
@@ -2971,14 +2972,27 @@ final class ALOViewModel: ObservableObject {
     }
 
     func chatAttachmentURL(for message: RoomChatMessage) -> URL? {
-        guard let attachment = message.attachment else { return nil }
-        return chatAttachmentURLs[chatAttachmentKey(senderID: message.senderID, attachmentID: attachment.id)]
+        guard let attachment = message.attachment, let roomID = activeRoomConfiguration?.id else { return nil }
+        let key = chatAttachmentKey(senderID: message.senderID, attachmentID: attachment.id)
+        if let cached = chatAttachmentURLs[key], FileManager.default.fileExists(atPath: cached.path) {
+            return cached
+        }
+        return ChatAttachmentStore.existingURL(for: attachment, roomID: roomID, senderID: message.senderID)
     }
 
     private func receiveChatAttachment(_ payload: RoomChatAttachmentPayload, senderID: String) {
         guard let roomID = activeRoomConfiguration?.id,
-              let stored = try? ChatAttachmentStore.save(payload, roomID: roomID) else { return }
+              Self.shouldAcceptChatAttachment(payload, senderID: senderID, messages: messages),
+              let stored = try? ChatAttachmentStore.save(payload, roomID: roomID,
+                                                         senderID: senderID) else { return }
         chatAttachmentURLs[chatAttachmentKey(senderID: senderID, attachmentID: payload.attachment.id)] = stored
+    }
+
+    static func shouldAcceptChatAttachment(_ payload: RoomChatAttachmentPayload, senderID: String,
+                                           messages: [RoomChatMessage]) -> Bool {
+        messages.contains {
+            !$0.deleted && $0.senderID == senderID && $0.attachment == payload.attachment
+        }
     }
 
     private func chatAttachmentKey(senderID: String, attachmentID: String) -> String {

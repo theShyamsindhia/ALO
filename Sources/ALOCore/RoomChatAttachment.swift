@@ -113,4 +113,10 @@ public struct RoomChatAttachmentAssembler: Sendable {
               Data(SHA256.hash(data: transfer.data)) == transfer.digest else { return nil }
         return RoomChatAttachmentPayload(attachment: transfer.attachment, data: transfer.data)
     }
+
+    public mutating func discard(senderID: String) {
+        let prefix = senderID + "|"
+        pending.keys.filter { $0.hasPrefix(prefix) }.forEach { pending.removeValue(forKey: $0) }
+        order.removeAll { $0.hasPrefix(prefix) }
+    }
 }
