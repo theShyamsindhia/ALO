@@ -151,6 +151,8 @@ public struct PlaybackSyncReport: Codable, Sendable, Equatable {
     public let driftNanos: UInt64?
     public let driftSampleAgeNanos: UInt64?
     public let screenTiming: PlaybackScreenTimingReport?
+    /// Present means this receiver owns drift realignment; the host must not run a duplicate loop.
+    public let automaticSyncEnabled: Bool?
 
     public init(
         measuredAtNanos: UInt64,
@@ -159,7 +161,8 @@ public struct PlaybackSyncReport: Codable, Sendable, Equatable {
         resyncCount: UInt64,
         driftNanos: UInt64? = nil,
         driftSampleAgeNanos: UInt64? = nil,
-        screenTiming: PlaybackScreenTimingReport? = nil
+        screenTiming: PlaybackScreenTimingReport? = nil,
+        automaticSyncEnabled: Bool? = nil
     ) {
         self.measuredAtNanos = measuredAtNanos
         self.latenessNanos = latenessNanos
@@ -168,6 +171,7 @@ public struct PlaybackSyncReport: Codable, Sendable, Equatable {
         self.driftNanos = driftNanos
         self.driftSampleAgeNanos = driftSampleAgeNanos
         self.screenTiming = screenTiming
+        self.automaticSyncEnabled = automaticSyncEnabled
     }
 }
 

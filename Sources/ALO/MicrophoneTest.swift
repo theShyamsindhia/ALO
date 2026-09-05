@@ -123,11 +123,12 @@ final class MicrophoneTestController: ObservableObject {
 struct MicrophoneTestPanel: View {
     let selectedInputUID: String?
     let unavailable: Bool
+    var showsTitle = true
     @StateObject private var test = MicrophoneTestController()
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Label("Microphone test", systemImage: "mic.badge.plus").font(.system(size: 11, weight: .semibold))
+                if showsTitle { Label("Microphone test", systemImage: "mic.badge.plus").font(.system(size: 11, weight: .semibold)) }
                 Spacer()
                 if test.phase == .idle || test.phase == .ready {
                     Button(test.phase == .idle ? "Record 5s" : "Record again") { test.start(inputUID: selectedInputUID) }

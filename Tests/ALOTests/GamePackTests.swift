@@ -5,8 +5,8 @@ import Testing
 @testable import ALOCore
 
 struct GamePackTests {
-    private func fixture(version: Int = 1, engine: String = "rift-arena-v1") throws -> (GamePackDescriptor, Data) {
-        let pack = GamePackContent(id: "rift-arena", engine: engine, version: version, arenaName: "The Hollow", subtitle: "Play together", accentHex: "A2ADBE")
+    private func fixture(version: Int = 1, engine: String = "rift-arena-v1", platform: String? = nil) throws -> (GamePackDescriptor, Data) {
+        let pack = GamePackContent(id: "rift-arena", engine: engine, version: version, arenaName: "The Hollow", subtitle: "Play together", accentHex: "A2ADBE", platformImageBase64: platform)
         let data = try JSONEncoder().encode(pack)
         return (GamePackDescriptor(id: "rift-arena", engine: engine, title: "Rift Arena", summary: "A duel", version: version,
                                    url: URL(string: "https://raw.githubusercontent.com/theShyamsindhia/ALO/main/GamePacks/rift-arena/1/pack.json")!,
@@ -20,6 +20,19 @@ struct GamePackTests {
         #expect(throws: GamePackError.self) { try GamePackContent.verify(changed, descriptor: descriptor) }
         #expect(throws: GamePackError.self) { try GamePackContent.verify(data + Data([0]), descriptor: descriptor) }
     }
+    @Test("Platform art rejects malformed base64 and undecodable images before installation")
+    @MainActor func platformArtworkValidation() throws {
+        let (invalid, data) = try fixture(platform: "invalid base64")
+        #expect(throws: GamePackError.self) { try GamePackContent.verify(data, descriptor: invalid) }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = GameLibraryStore(directory: directory)
+        let headerOnly = Data([137, 80, 78, 71, 13, 10, 26, 10]).base64EncodedString()
+        let (truncated, truncatedData) = try fixture(platform: headerOnly)
+        #expect(throws: GamePackError.self) { try store.install(truncatedData, descriptor: truncated) }
+        #expect(store.installed.isEmpty)
+    }
+
     @Test("Catalog rejects untrusted URLs, duplicate entries, traversal IDs and excessive downloads")
     func catalogSafety() throws {
         let (valid, _) = try fixture()
@@ -64,7 +77,12 @@ struct GamePackTests {
         #expect(Set(catalog.games.map(\.id)) == ["rift-arena", "fourfold"])
         for descriptor in catalog.games {
             let data = try Data(contentsOf: root.appendingPathComponent("GamePacks/\(descriptor.id)/\(descriptor.version)/pack.json"))
-            #expect(try GamePackContent.verify(data, descriptor: descriptor).id == descriptor.id)
+            let content = try GamePackContent.verify(data, descriptor: descriptor)
+            #expect(content.id == descriptor.id)
+            if descriptor.id == "rift-arena", descriptor.version >= 3 {
+                #expect(content.platformImageData != nil)
+                if descriptor.version >= 4 { #expect(content.expandedFighterImageData != nil) }
+            }
         }
     }
     @Test("Pack downloads are explicit; canceled responses cannot replace an immediate retry")
