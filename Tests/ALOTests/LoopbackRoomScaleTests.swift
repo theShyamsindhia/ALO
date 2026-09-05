@@ -360,15 +360,23 @@ struct LoopbackRoomScaleTests {
         #expect(original.packetCount == 0)
     }
 
-    @Test("Bounded fan-out prevents live room latency growth")
-    func boundedFanoutPreventsRoomScaleDelay() throws {
+    @Test("Bounded fan-out prevents live room latency growth", arguments: [0.0, 0.035])
+    func boundedFanoutPreventsRoomScaleDelay(schedulerOversleep: TimeInterval) throws {
         let boundedPolicy = HostServer.AudioBackpressurePolicy.boundedLatest(maxInFlight: 8)
-        let directEight = try runRoom(peerCount: 8, linkBitsPerSecond: nil, policy: boundedPolicy)
-        let shapedOne = try runRoom(peerCount: 1, linkBitsPerSecond: 4_000_000, policy: boundedPolicy)
-        let unboundedEight = try runRoom(peerCount: 8, linkBitsPerSecond: 4_000_000, policy: .unbounded)
-        let boundedEight = try runRoom(peerCount: 8, linkBitsPerSecond: 4_000_000, policy: boundedPolicy)
+        // This baseline isolates actual Network.framework delivery with no imposed
+        // link bottleneck. An intentional catch-up burst can exceed eight in-flight
+        // packets even on localhost; the separate bounded baseline records that tradeoff.
+        let directEight = try runRoom(peerCount: 8, linkBitsPerSecond: nil, policy: .unbounded, schedulerOversleep: schedulerOversleep)
+        let directBoundedEight = try runRoom(peerCount: 8, linkBitsPerSecond: nil, policy: boundedPolicy, schedulerOversleep: schedulerOversleep)
+        let shapedOne = try runRoom(peerCount: 1, linkBitsPerSecond: 4_000_000, policy: boundedPolicy, schedulerOversleep: schedulerOversleep)
+        let unboundedEight = try runRoom(peerCount: 8, linkBitsPerSecond: 4_000_000, policy: .unbounded, schedulerOversleep: schedulerOversleep)
+        let boundedEight = try runRoom(peerCount: 8, linkBitsPerSecond: 4_000_000, policy: boundedPolicy, schedulerOversleep: schedulerOversleep)
 
+        print("Injected capture wake oversleep: \(schedulerOversleep * 1_000) ms")
         print("Direct 8-peer final packet age: \(directEight.maximumFinalAgeNanos / 1_000_000) ms")
+        print("Direct bounded 8-peer final packet age: \(directBoundedEight.maximumFinalAgeNanos / 1_000_000) ms")
+        print("Direct bounded 8-peer audible lateness: \(directBoundedEight.maximumAudibleLatenessNanos / 1_000_000) ms")
+        print("Direct bounded packets delivered per peer: \(directBoundedEight.minimumPacketsReceived) / 200; maximum dropped: \(200 - directBoundedEight.minimumPacketsReceived)")
         print("Shaped 1-peer final packet age: \(shapedOne.maximumFinalAgeNanos / 1_000_000) ms")
         print("Unbounded 8-peer final packet age: \(unboundedEight.maximumFinalAgeNanos / 1_000_000) ms")
         print("Bounded 8-peer final packet age: \(boundedEight.maximumFinalAgeNanos / 1_000_000) ms")
@@ -382,6 +390,15 @@ struct LoopbackRoomScaleTests {
         #expect(directEight.maximumFinalAgeNanos < 100_000_000)
         #expect(directEight.maximumAudibleLatenessNanos < 50_000_000)
         #expect(directEight.minimumPacketsReceived >= 190)
+
+        // Preserve the production bounded-8 guarantee on normal uncongested
+        // capture. Under injected late wakes, catch-up bursts may exceed eight
+        // packets before sends complete; keep latency bounded and report loss.
+        #expect(directBoundedEight.maximumFinalAgeNanos < 100_000_000)
+        #expect(directBoundedEight.maximumAudibleLatenessNanos < 50_000_000)
+        if schedulerOversleep == 0 {
+            #expect(directBoundedEight.minimumPacketsReceived >= 190)
+        }
 
         // Reproduction: the same real host and peers stay current with one stream, but
         // eight unicast streams exceed the shared 4 Mb/s link and accumulate delay.
@@ -1125,7 +1142,8 @@ struct LoopbackRoomScaleTests {
     private func runRoom(
         peerCount: Int,
         linkBitsPerSecond: UInt64?,
-        policy: HostServer.AudioBackpressurePolicy
+        policy: HostServer.AudioBackpressurePolicy,
+        schedulerOversleep: TimeInterval
     ) throws -> RoomMeasurements {
         let hostReady = DispatchSemaphore(value: 0)
         let state = PortState()
@@ -1179,16 +1197,25 @@ struct LoopbackRoomScaleTests {
                     * Int(AudioPacket.channelCount)
             )
 
+            // Keep the offered source at 48 kHz even if a runner wakes late.
+            // Capture timestamps follow the nominal 20 ms sample timeline;
+            // missed callback deadlines catch up without another relative sleep.
+            let captureAnchorNanos = MonotonicClock.nowNanos()
+            let callbackDurationNanos: UInt64 = 20_000_000
             for callbackIndex in 0..<(expectedPacketCount / packetsPerCallback) {
+                let callbackDeadlineNanos = captureAnchorNanos + UInt64(callbackIndex) * callbackDurationNanos
                 let now = MonotonicClock.nowNanos()
+                if now < callbackDeadlineNanos {
+                    let remaining = Double(callbackDeadlineNanos - now) / 1_000_000_000
+                    Thread.sleep(forTimeInterval: remaining + schedulerOversleep)
+                }
                 host.acceptAudio(
                     samples: samples,
-                    captureTimeNanos: now - 20_000_000
+                    captureTimeNanos: callbackDeadlineNanos - callbackDurationNanos
                 )
                 if callbackIndex.isMultiple(of: 5) {
                     peers.forEach { $0.sendPing() }
                 }
-                Thread.sleep(forTimeInterval: 0.020)
             }
 
             let receivedEnough = waitUntil(timeout: 5) {
