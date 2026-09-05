@@ -236,10 +236,6 @@ final class HostSession {
         host?.setParticipantLevel(id: id, volume: volume, muted: muted)
     }
 
-    func setLocalPlaybackMuted(_ muted: Bool) {
-        localReceiver?.setLocalPlaybackMuted(muted)
-    }
-
     @discardableResult
     func sendRoomMediaCommand(_ command: RoomMediaCommand) -> Bool {
         host?.sendRoomMediaCommand(command) ?? false
