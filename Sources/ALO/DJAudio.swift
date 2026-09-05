@@ -317,6 +317,8 @@ final class DJAudioRelay: @unchecked Sendable {
     private var owner: UUID?
     private var handler: AudioSource.AudioHandler?
     private var peak: Float = 0
+    private var liveOverlay = false
+
     init(automaticDrain: Bool = true) {
         ring = ALOTapAudioRingCreate()
         guard automaticDrain else { return }
@@ -329,6 +331,9 @@ final class DJAudioRelay: @unchecked Sendable {
     deinit {
         timer?.cancel()
         if let ring { ALOTapAudioRingDestroy(ring) }
+    }
+    func setLiveOverlay(_ enabled: Bool) {
+        deliveryQueue.sync { liveOverlay = enabled }
     }
     func install(owner: UUID, handler: @escaping AudioSource.AudioHandler) throws {
         try deliveryQueue.sync {
@@ -386,6 +391,7 @@ final class DJAudioRelay: @unchecked Sendable {
             samples[index] = Int16(max(-1, min(1, value)) * Float(Int16.max))
         }
         levelLock.withLock { peak = maximum }
+        if liveOverlay { DJLiveAudio.shared.offerOverlay(samples) }
         guard owner != nil else { return }
         let stamp = firstHostTime == 0
             ? MonotonicClock.nowNanos()
@@ -405,7 +411,8 @@ final class DJStudio: ObservableObject {
         instance = studio
         return studio
     }
-    static func stopIfCreated() { instance?.stopAll() }
+    static func stopIfCreated() { instance?.setLiveStage(nil); instance?.stopAll() }
+    static func endLiveIfCreated() { instance?.setLiveStage(nil) }
     static var isSharingIfCreated: Bool { instance?.sharing ?? false }
     let engine = AVAudioEngine()
     let mixer = AVAudioMixerNode()
@@ -413,7 +420,10 @@ final class DJStudio: ObservableObject {
     let a: DJDeck
     let b: DJDeck
     @Published var crossfade: Double = 0.5 { didSet { updateGains() } }
-    @Published var master: Float = 0.75 { didSet { mixer.outputVolume = master } }
+    @Published var master: Float = 0.75 { didSet { mixer.outputVolume = master; updateLiveMix() } }
+    @Published private(set) var liveSnapshot = DJLiveAudio.shared.snapshot()
+    @Published var liveLoopBeats = 4
+    var liveEnabled: Bool { liveSnapshot.stage != nil }
     @Published var padGain: Float = 0.65
     @Published private(set) var level: Float = 0
     @Published private(set) var sharing = false
@@ -446,6 +456,11 @@ final class DJStudio: ObservableObject {
             guard let self else { return }
             let (x, y) = DJMixMath.gains(crossfade: self.crossfade)
             self.a.player.volume = left * x; self.b.player.volume = right * y
+            if self.liveEnabled { DJLiveAudio.shared.setMix(gain: left * x * self.master, low: self.a.low, mid: self.a.mid, high: self.a.high) }
+        }.store(in: &gainSubscriptions)
+        a.$low.combineLatest(a.$mid, a.$high).sink { [weak self] low, mid, high in
+            guard let self, self.liveEnabled else { return }
+            DJLiveAudio.shared.setMix(gain: self.a.gain * DJMixMath.gains(crossfade: self.crossfade).0 * self.master, low: low, mid: mid, high: high)
         }.store(in: &gainSubscriptions)
         updateGains()
         configurationObserver = NotificationCenter.default.addObserver(
@@ -481,7 +496,10 @@ final class DJStudio: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.a.tick(); self.b.tick()
-                let nextLevel = self.engine.isRunning ? self.relay.level : 0
+                self.refreshLive()
+                let nextLevel = self.liveEnabled
+                    ? ((self.liveSnapshot.secondsSinceInput ?? 2) < 1 ? self.liveSnapshot.outputPeak : 0)
+                    : (self.engine.isRunning ? self.relay.level : 0)
                 if self.level != nextLevel { self.level = nextLevel }
             }
         }
@@ -497,6 +515,38 @@ final class DJStudio: ObservableObject {
     func updateGains() {
         let (left, right) = DJMixMath.gains(crossfade: crossfade)
         a.player.volume = a.gain * left; b.player.volume = b.gain * right
+        updateLiveMix()
+    }
+    func updateLiveMix() {
+        guard liveEnabled else { return }
+        DJLiveAudio.shared.setMix(gain: a.gain * DJMixMath.gains(crossfade: crossfade).0 * master, low: a.low, mid: a.mid, high: a.high)
+    }
+    func refreshLive() {
+        let snapshot = DJLiveAudio.shared.snapshot()
+        if liveEnabled || snapshot.stage != nil { liveSnapshot = snapshot }
+    }
+    func setLiveStage(_ stage: DJLiveStage?) {
+        guard stage != liveSnapshot.stage else { return }
+        if stage != nil && sharing { error = "Stop sharing the file mix before selecting a live input."; return }
+        relay.setLiveOverlay(false)
+        stopAll()
+        if stage != nil {
+            // Opening the live setup starts at unity with neutral EQ, so the
+            // existing broadcast sounds unchanged until the user moves a control.
+            crossfade = 0; master = 1; a.gain = 1
+            a.low = 0; a.mid = 0; a.high = 0
+        }
+        DJLiveAudio.shared.configure(stage: stage)
+        liveSnapshot = DJLiveAudio.shared.snapshot()
+        engine.mainMixerNode.outputVolume = stage != nil || sharing ? 0 : 1
+        relay.setLiveOverlay(stage != nil)
+        updateLiveMix()
+    }
+    func toggleLivePlayback() {
+        DJLiveAudio.shared.setMuted(!liveSnapshot.muted); refreshLive()
+    }
+    func toggleLiveLoop() throws {
+        try DJLiveAudio.shared.toggleLoop(beats: liveLoopBeats, bpm: a.bpm); refreshLive()
     }
     func sync(_ deck: DJDeck, to other: DJDeck) {
         guard let rate = DJMixMath.syncRate(sourceBPM: deck.bpm, targetBPM: other.bpm, targetRate: other.rate) else {
@@ -558,12 +608,19 @@ final class DJStudio: ObservableObject {
         buffers[index] = output; padNames[index] = url.deletingPathExtension().lastPathComponent
     }
     func stopAll() {
+        if liveEnabled {
+            DJLiveAudio.shared.setMuted(true)
+            try? DJLiveAudio.shared.clearLoop()
+            DJLiveAudio.shared.clearOverlay()
+            refreshLive()
+        }
         a.stop(); b.stop()
         for index in pads.indices { padTokens[index] = UUID(); pads[index].stop() }
         activePads.removeAll(); level = 0
         if !sharing { engine.pause() }
     }
     func beginSharing(owner: UUID, handler: @escaping AudioSource.AudioHandler, failure: @escaping @Sendable (Error) -> Void = { _ in }) throws {
+        setLiveStage(nil)
         try relay.install(owner: owner, handler: handler)
         sharingFailure = failure
         // The room renderer supplies the synchronized local copy; avoid doubling it.

@@ -19,7 +19,7 @@ Replace the duplicate People-header settings control with a launchpad icon; keep
 Dark native performance window, cyan deck A and violet deck B, center mixer, colored 4×4 pads. Song files stream from disk. Tempo sync matches user-entered BPM, not an inferred beat grid. Loops use beat lengths or manual In/Out regions and native PCM repetition. Sharing uses the existing room transport and synchronized local renderer. Settings remain in the main settings entry point.
 
 ## Explicit limits
-No streaming-service/DRM track extraction, automatic beat analysis, hardware MIDI mapping, or separate headphone device routing in this version. Local files and imported short samples are the supported sources.
+No streaming-service/DRM track extraction, automatic beat analysis, hardware MIDI mapping, or separate headphone device routing in this version. Local files, imported short samples, and the current room broadcast are supported sources.
 
 
 ## Verification — completed
@@ -35,7 +35,7 @@ No streaming-service/DRM track extraction, automatic beat analysis, hardware MID
 Open People → grid icon. The Room Song card controls the current broadcast using existing source capabilities. Load local files on Deck A/B for mixing. Click pads or use their displayed keys; right-click to import or restore samples. Stop the current broadcast before selecting Share DJ mix.
 
 ## Remaining live validation and product limits
-A physical two-Mac listening test and output-device hot-swap have not been performed. Tests validate rendered PCM and existing transport regressions, not live network/audio hardware behavior. Deck processing applies to loaded files; current room-song controls are previous/play/pause/next plus progress, subject to the source's capabilities. There is no automatic beat-grid sync, separate headphone routing, recording, or MIDI mapping. These should not be presented as supported features.
+A physical two-Mac listening test and output-device hot-swap have not been performed. Tests validate rendered PCM and existing transport regressions, not live network/audio hardware behavior. Deck A can process live broadcast PCM; source transport remains previous/play/pause/next plus progress, subject to source capabilities. There is no automatic beat-grid sync, separate headphone routing, recording, or MIDI mapping. These should not be presented as supported features.
 
 
 ## Follow-up: performance controls and main delivery
@@ -64,3 +64,26 @@ A physical two-Mac listening test and output-device hot-swap have not been perfo
 - Integrated current main through `d9dd3e1`, preserving its screen-sharing, icon, and Arena changes without conflicts.
 - Final optimized integration run after that merge and the selected-loop UI polish: **83 tests in 22 suites passed** (36.722 seconds), including native waveform readiness and layout.
 - Storage measurement: current arm64 testable release executable ~25 MiB and existing app-icon resource bundle ~19 MiB. Estimated packaged arm64 app 45–50 MB; no signed distribution was produced or measured. DJ code adds no sound pack, media cache, or new dependency. Optional downloadable media packs and further Apple-style visual polish remain product recommendations, not features claimed by this delivery.
+
+
+## Live broadcast extension — feat/dj-live-broadcast
+- [x] Put the current live broadcast on deck A without requiring a song file.
+- [x] Add 32-second RAM history, waveform/rewind, beat and In/Out loops, cue, EQ and gain.
+- [x] Blend deck B and pads into the selected live path; avoid duplicate monitoring and voice processing.
+- [x] Process broadcaster PCM before fan-out, and listener PCM after existing ordering/admission.
+- [x] Show whole-room versus this-Mac scope; route existing keys to the live deck.
+- [x] Document use and bounded RAM/no disk storage.
+- [x] Verify actual DSP, transport lifecycle, overlay, native UI and final screenshot.
+- [x] Integrate latest main, push authorized changes, and render the resulting image for delivery.
+
+### Live extension validation
+- Targeted Debug run: 27 tests in 8 suites passed.
+- Full optimized run: 763 tests in 125 suites passed (138.372 seconds), using the existing CI release flags.
+- Offline audio verifies live gain, EQ, cue/rewind, loop repetition, pad overlay, mute, bounded memory, stale timestamps, receiver ordering and stage isolation.
+- Native live-deck screenshot rendered with synthetic test audio and visually checked; final preview is `dist/previews/dj-studio.png` (not included in the app).
+- Main executable measured 26,155,904 bytes, with ~19 MiB existing icon resources. No new dependencies or bundled audio.
+- Physical two-Mac listening and device hot-swap remain untested. Live processing advances with incoming media packets, and pauses when the source sends none.
+
+- Integrated upstream through `b14ea56` (room attachments, lyrics and settings consolidation); merged Debug integration run passed 76 tests in 14 suites (40.237 seconds). No conflicts or dropped DJ entry point.
+
+- Main delivery verified: `8b4b14e` pushed successfully, preserving upstream `b14ea56`. Preview: `dist/previews/dj-studio.png`.
