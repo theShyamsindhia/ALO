@@ -282,6 +282,7 @@ struct RoomChatPanel: View {
 
     private func messageRow(_ message: RoomChatMessage, showsSender: Bool) -> some View {
         let own = message.senderID == currentParticipantID
+        let localAttachmentURL = message.attachment == nil ? nil : attachmentURL(message)
         return HStack(alignment: .bottom) {
             if own { Spacer(minLength: 36) }
             else {
@@ -300,7 +301,7 @@ struct RoomChatPanel: View {
                         .foregroundStyle(message.deleted ? .secondary : .primary)
                 }
                 if !message.deleted, let attachment = message.attachment {
-                    attachmentCard(attachment, localURL: attachmentURL(message))
+                    attachmentCard(attachment, localURL: localAttachmentURL)
                 }
                 if !message.deleted {
                     ForEach(RoomChatPresentation.links(in: message.text), id: \.absoluteString) { url in
@@ -349,6 +350,15 @@ struct RoomChatPanel: View {
                     if own {
                         Button("Edit", systemImage: "pencil") { editing = message.id; replyTo = nil; pendingAttachment = nil; draft = message.text; chosenMentionIDs = Set(message.mentionedParticipantIDs ?? []); focused = true }
                         Button("Delete message", systemImage: "trash", role: .destructive) { _ = send(.init(kind: .delete, target: message.id)) }
+                    }
+                    if let localAttachmentURL {
+                        Divider()
+                        Button("Open attachment", systemImage: "arrow.up.right.square") {
+                            NSWorkspace.shared.open(localAttachmentURL)
+                        }
+                        Button("Show in Finder", systemImage: "folder") {
+                            NSWorkspace.shared.activateFileViewerSelecting([localAttachmentURL])
+                        }
                     }
                 }
             }
@@ -428,29 +438,45 @@ struct RoomChatPanel: View {
     }
 
     private func attachmentCard(_ attachment: RoomChatAttachment, localURL: URL?) -> some View {
-        Button {
-            if let localURL { NSWorkspace.shared.open(localURL) }
-        } label: {
-            HStack(spacing: 9) {
-                filePreview(url: localURL, contentType: attachment.contentType,
-                            allowsImagePreview: false)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(attachment.fileName).font(.system(size: 11, weight: .semibold)).lineLimit(1)
-                    Text(localURL == nil
-                         ? "Waiting for file…"
-                         : ByteCountFormatter.string(fromByteCount: Int64(attachment.byteCount), countStyle: .file))
-                        .font(.system(size: 9)).foregroundStyle(.secondary)
+        HStack(spacing: 4) {
+            Button {
+                if let localURL { NSWorkspace.shared.open(localURL) }
+            } label: {
+                HStack(spacing: 9) {
+                    filePreview(url: localURL, contentType: attachment.contentType,
+                                allowsImagePreview: false)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(attachment.fileName).font(.system(size: 11, weight: .semibold)).lineLimit(1)
+                        Text(localURL == nil
+                             ? "Waiting for file…"
+                             : ByteCountFormatter.string(fromByteCount: Int64(attachment.byteCount), countStyle: .file))
+                            .font(.system(size: 9)).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: localURL == nil ? "arrow.down.circle" : "arrow.up.right.square")
+                        .font(.system(size: 11)).foregroundStyle(accent)
                 }
-                Spacer(minLength: 0)
-                Image(systemName: localURL == nil ? "arrow.down.circle" : "arrow.up.right.square")
-                    .font(.system(size: 11)).foregroundStyle(accent)
+                .contentShape(Rectangle())
             }
-            .padding(8).frame(minWidth: 190)
-            .background(accent.opacity(0.09), in: RoundedRectangle(cornerRadius: 9))
+            .buttonStyle(.plain)
+            .disabled(localURL == nil)
+            .help(localURL == nil ? "The sender must be connected for this file to transfer" : "Open attachment")
+            if let localURL {
+                Button {
+                    NSWorkspace.shared.activateFileViewerSelecting([localURL])
+                } label: {
+                    Image(systemName: "folder")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(accent)
+                        .frame(width: 26, height: 30)
+                }
+                .buttonStyle(.plain)
+                .help("Show in Finder")
+                .accessibilityLabel("Show \(attachment.fileName) in Finder")
+            }
         }
-        .buttonStyle(.plain)
-        .disabled(localURL == nil)
-        .help(localURL == nil ? "The sender must be connected for this file to transfer" : "Open attachment")
+        .padding(8).frame(minWidth: 190)
+        .background(accent.opacity(0.09), in: RoundedRectangle(cornerRadius: 9))
     }
 
     @ViewBuilder
