@@ -510,28 +510,27 @@ final class ArenaSession: ObservableObject {
             simulation.tick(inputs); accumulator -= ArenaSimulation.step; steps += 1
         }
         if steps > 0 { bufferedActions = ArenaInput() }
-        reportResultIfNeeded()
+        let finished = reportResultIfNeeded()
+        if finished && mode == .host { sendRoster() }
         if tickCount % 3 == 0 { revision += 1; playImpacts(); if mode == .host { sendRoster() } }
     }
-    private func reportResultIfNeeded() {
-        guard [.host, .guest, .spectator].contains(mode), let winner = simulation.winner, reportedRound != round else { return }
+    @discardableResult
+    private func reportResultIfNeeded() -> Bool {
+        guard [.host, .guest, .spectator].contains(mode), let winner = simulation.winner, reportedRound != round else { return false }
         let resultKey = sessionID + "/" + String(round)
-        guard !reportedResultKeys.contains(resultKey) else { return }
+        guard !reportedResultKeys.contains(resultKey) else { return false }
         let ids: [String?]
         if mode == .host {
             ids = simulation.fighters.indices.map { slot in slot == 0 ? localParticipantID : members.first(where: { $0.value.slot == slot })?.key }
         } else {
-            guard let remoteParticipantIDs, remoteParticipantIDs.count == simulation.fighters.count else { return }
+            guard let remoteParticipantIDs, remoteParticipantIDs.count == simulation.fighters.count else { return false }
             ids = remoteParticipantIDs
         }
         reportedRound = round
         if reportedResultKeys.count >= 2048 { reportedResultKeys.removeAll() }
         reportedResultKeys.insert(resultKey)
-        // A coalesced timer may not reach the periodic three-tick state send.
-        // Publish the terminal snapshot once when the result is first known,
-        // before a local result observer can leave or begin another round.
-        if mode == .host { sendRoster() }
         onMatchFinished?(ArenaMatchResult(sessionID: sessionID, round: round, participantIDs: ids, playerNames: playerNames, winner: winner, botSlots: botSlots))
+        return true
     }
     func openExpanded() {
         guard window == nil else {
