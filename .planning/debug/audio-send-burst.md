@@ -1,12 +1,12 @@
 ---
-status: resolved
+status: verifying
 trigger: "User authorized investigating and fixing the audio-delivery release blocker before publishing 0.13.49."
 ---
 
 ## Current Focus
 
 - hypothesis: A single latest-only pending slot drops fresh audio when capture callbacks briefly outpace completion dispatch, even without link congestion.
-- next_action: Rerun the signed release gate and publish only after verified downloads exist.
+- next_action: Verify monotonic capture-fixture pacing on CI, then complete the signed release gate.
 
 ## Evidence
 
@@ -28,3 +28,11 @@ trigger: "User authorized investigating and fixing the audio-delivery release bl
 - Fixed focused suite: 16 tests passed; fast eight-peer delivery 200/200, original delivery/latency thresholds unchanged.
 - Full serial suite: 313 tests passed in 183.7 seconds. Log: /tmp/alo-0.13.49-all-tests.log.
 - The release remains unpublished pending CI, signing and notarization. No installed app or physical multi-Mac session was altered.
+
+## Release-gate follow-up
+
+- CI 33965227394 passes deterministic sender tests but its live timing probe also fails the unconstrained-link control (129 ms vs 100 ms), pointing to fixture scheduling as a separate issue.
+- Existing instrumented run 33961973819 records simulated capture waking 100–200 ms late, before outbound admission; it uses Foundation relative sleeps. Normal run-to-run local tests pass.
+- Replace the fixture's relative sleep with absolute mach_wait_until deadlines on the same monotonic timebase as its capture stamps; use production-equivalent user-interactive priorities for capture and peer queues. Preserve 48 kHz offered load, explicit 35 ms wake injection, all delivery/latency limits, and actual transport drainage.
+- An optimization-only test experiment hit the existing SwiftPM executable-target test-entry issue (ALO receives --test-bundle-path). No compiler flag or workflow change was retained.
+- Monotonic fixture checks: 14 targeted sender/fanout tests pass; normal capture wake delay stays within 12 ms and deliberate 35 ms oversleep remains exercised. All 23 real-loopback tests pass with unchanged packet and latency thresholds.
