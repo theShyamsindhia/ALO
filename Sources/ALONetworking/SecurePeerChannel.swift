@@ -171,7 +171,7 @@ public final class SecurePeerChannel: @unchecked Sendable {
         completion: @escaping (Result<NWEndpoint, Error>) -> Void) {
         let action = {
             guard self.state == .authenticated, let credentials = self.credentials,
-                  credentials.isActive, credentials.channelRole == .mediaControl,
+                  credentials.isActive, credentials.channelRole == .mediaControl || credentials.channelRole == .voiceControl,
                   case .ready = self.connection.state, port.rawValue != 0,
                   let remote = self.connection.currentPath?.remoteEndpoint,
                   case .hostPort(let host, _) = remote else {

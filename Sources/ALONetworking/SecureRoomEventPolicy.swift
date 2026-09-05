@@ -97,6 +97,10 @@ final class SecureRoomEventPolicy: @unchecked Sendable {
 
     func accepts(_ event: MeshRoomEvent) -> Bool {
         guard event.roomID == roomID, let signer = Self.verifiedSigner(event) else { return false }
+        // A signature authenticates its key, not an arbitrary claimed chat
+        // author. Rich edits/deletes/reactions must use that authenticated author.
+        if event.kind == .chat, let sender = event.senderID,
+           sender != event.version.nodeID { return false }
         if event.kind == .broadcaster || event.kind == .video {
             guard event.broadcasterID == event.version.nodeID else { return false }
         }

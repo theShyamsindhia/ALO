@@ -134,22 +134,20 @@ struct ContentView: View {
             if model.replica.videoEnabled || model.videoImage != nil {
                 Section("Shared screen") {
                     if let image = model.videoImage {
-                        Image(decorative: image, scale: 1)
-                            .resizable().aspectRatio(contentMode: .fit)
-                            .frame(maxWidth: .infinity)
-                            .background(.black)
-                            .accessibilityLabel("Live screen shared by the broadcaster")
+                        MobileAnnotationVideoView(image: image, scene: model.annotationScene)
                     } else {
                         ProgressView().frame(maxWidth: .infinity, minHeight: 120)
                     }
                     Text(model.videoStatus).font(.caption).foregroundStyle(.secondary)
                 }
             }
+            MobileVoiceControls(controller: model.voice,
+                participants: model.participants.filter { $0.id != model.localID })
             Section {
                 AudioLevelControl(title: "Media", muted: $model.levels.mediaMuted, volume: $model.levels.mediaVolume)
                 AudioLevelControl(title: "Voice", muted: $model.levels.voiceMuted, volume: $model.levels.voiceVolume)
             } header: { Text("On this device") } footer: {
-                Text("These preferences affect only your device when audio is connected. Incoming voice does not lower media volume. The microphone is off.")
+                Text("These preferences affect only your device. Incoming voice does not lower media volume. Talk and Open Line request microphone access only after your action.")
             }
         }.listStyle(.insetGrouped)
     }
@@ -234,29 +232,131 @@ private struct ChatView: View {
     @ObservedObject var model: MobileRoomModel
     @State private var message = ""
     @State private var validation: String?
+    @State private var replyingTo: RoomChatMessage?
+    @State private var editing: RoomChatMessage?
     var body: some View {
         List {
             Section {
-                if model.replica.chatEvents.isEmpty { Text("No messages yet.").foregroundStyle(.secondary) }
-                ForEach(model.replica.chatEvents.suffix(500)) { event in
+                if model.chatMessages.isEmpty { Text("No messages yet.").foregroundStyle(.secondary) }
+                ForEach(model.chatMessages) { item in
                     VStack(alignment: .leading, spacing: 5) {
-                        Text(event.sender ?? "Room member").font(.subheadline.weight(.semibold))
-                        Text(event.text ?? "").textSelection(.enabled)
+                        HStack {
+                            Text(item.sender).font(.subheadline.weight(.semibold))
+                            if item.pinned { Image(systemName: "pin.fill").accessibilityLabel("Pinned") }
+                            if item.edited && !item.deleted { Text("Edited").font(.caption).foregroundStyle(.secondary) }
+                        }
+                        if let reply = item.replyTo,
+                           let parent = model.chatMessages.first(where: { $0.id == reply }) {
+                            Text("Reply to \(parent.sender): \(parent.text)")
+                                .font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                        }
+                        Text(item.text).foregroundStyle(item.deleted ? .secondary : .primary).textSelection(.enabled)
+                        if !item.deleted {
+                            HStack {
+                                ForEach(item.reactions.keys.sorted(), id: \.self) { emoji in
+                                    if let users = item.reactions[emoji], !users.isEmpty {
+                                        Text("\(emoji) \(users.count)").font(.caption)
+                                    }
+                                }
+                            }
+                        }
                     }.padding(.vertical, 4).accessibilityElement(children: .combine)
+                        .contextMenu {
+                            if !item.deleted {
+                                Button("Reply") { replyingTo = item; editing = nil }
+                                if item.senderID == model.localID {
+                                    Button("Edit") { editing = item; replyingTo = nil; message = item.text }
+                                    Button("Delete", role: .destructive) {
+                                        _ = model.sendChatOperation(.init(kind: .delete, target: item.id))
+                                    }
+                                }
+                                Menu("React") {
+                                    ForEach(RoomChatOperation.emoji, id: \.self) { emoji in
+                                        Button(emoji) {
+                                            _ = model.sendChatOperation(.init(kind: .reaction, target: item.id, text: emoji,
+                                                enabled: !(item.reactions[emoji]?.contains(model.localID) ?? false)))
+                                        }
+                                    }
+                                }
+                                Button(item.pinned ? "Unpin" : "Pin") {
+                                    _ = model.sendChatOperation(.init(kind: .pin, target: item.id, enabled: !item.pinned))
+                                }
+                            }
+                        }
                 }
             } footer: {
-                if model.replica.chatEvents.count > 500 { Text("Showing the latest 500 messages.") }
+                Text("Showing up to 500 messages with shared edits, replies and reactions.")
             }
             Section("Message the room") {
+                if editing != nil {
+                    HStack { Text("Editing your message"); Spacer(); Button("Cancel") { self.editing = nil; message = "" } }
+                } else if let replyingTo {
+                    HStack { Text("Replying to \(replyingTo.sender)"); Spacer(); Button("Cancel") { self.replyingTo = nil } }
+                }
                 TextField("Message", text: $message, axis: .vertical).lineLimit(1...6)
                 if let validation { Text(validation).foregroundStyle(.secondary) }
                 Button("Send message") {
-                    if model.sendChat(message) { message = ""; validation = nil }
-                    else { validation = "Enter a message of at most 4,096 UTF-8 bytes." }
+                    let operation = RoomChatOperation(kind: editing == nil ? .message : .edit,
+                        target: editing?.id ?? replyingTo?.id,
+                        text: message.trimmingCharacters(in: .whitespacesAndNewlines))
+                    if model.sendChatOperation(operation) { message = ""; validation = nil; editing = nil; replyingTo = nil }
+                    else { validation = "Use a nonempty message of at most 700 characters (4 KB including formatting)." }
                 }.disabled(!model.connected).frame(minHeight: 44)
                 if !model.connected { Text("Reconnect to send messages.").foregroundStyle(.secondary) }
             }
         }.navigationTitle("Room chat").navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct MobileVoiceControls: View {
+    @ObservedObject var controller: MobileVoiceController
+    let participants: [RoomParticipant]
+    var body: some View {
+        Section {
+            Label(controller.status, systemImage: controller.transmitting ? "mic.fill" : "mic.slash")
+            if controller.requesting || controller.transmitting {
+                Button(controller.requesting ? "Cancel microphone request" : "Stop talking", role: .destructive) {
+                    if controller.openLine == .idle { controller.endTransmission() } else { controller.endOpenLine() }
+                }.frame(minHeight: 44)
+            }
+            switch controller.openLine {
+            case .invited(let invitation):
+                Text("\(invitation.callerName) is calling. You can hear them before picking up.")
+                Button("Pick up · turn microphone on") { Task { await controller.respond(accept: true) } }
+                    .disabled(controller.requesting).frame(minHeight: 44)
+                Button("Decline", role: .cancel) { Task { await controller.respond(accept: false) } }.frame(minHeight: 44)
+            case .inviting:
+                Text("Calling · your microphone is on for this peer")
+                Button("End Open Line", role: .destructive) { controller.endOpenLine() }.frame(minHeight: 44)
+            case .connected:
+                Text("Open Line connected · both directions use encrypted voice")
+                Button("End Open Line", role: .destructive) { controller.endOpenLine() }.frame(minHeight: 44)
+            case .idle:
+                ForEach(participants) { participant in
+                    if let id = UUID(uuidString: participant.id) {
+                        VStack(alignment: .leading) {
+                            Toggle(participant.name, isOn: Binding(
+                                get: { controller.selectedRecipients.contains(id) },
+                                set: { selected in
+                                    if selected { controller.selectedRecipients.insert(id) }
+                                    else { controller.selectedRecipients.remove(id) }
+                                }))
+                                .disabled(controller.requesting || controller.transmitting)
+                            Button("Open Line with \(participant.name)") { Task { await controller.invite(id) } }
+                                .disabled(!controller.ready || controller.requesting || controller.transmitting)
+                                .frame(minHeight: 44)
+                        }
+                    }
+                }
+                Button("Talk to selected people") { Task { await controller.beginTalk() } }
+                    .disabled(!controller.ready || controller.requesting || controller.transmitting || controller.selectedRecipients.isEmpty)
+                    .frame(minHeight: 44)
+            }
+        } header: {
+            Text("Talk and Open Line")
+        } footer: {
+            Text("Choose up to eight people. Invite turns your microphone on for that person; Pick up starts voice back. Rejoining, interruptions and route changes turn it off. New room members are never added to an active microphone session.")
+        }
     }
 }
 

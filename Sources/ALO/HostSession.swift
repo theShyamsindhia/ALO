@@ -288,9 +288,16 @@ final class HostSession {
                 if videoPicker === picker { videoPicker = nil }
                 throw error
             }
-            let encoder = VideoEncoder { frame in host.acceptVideo(frame) }
-            host.setVideoKeyframeHandler { [weak encoder] in encoder?.requestKeyframe() }
             let capture = ScreenVideoCapture()
+            let encoder = VideoEncoder(failureHandler: { [weak self, weak capture] message in
+                Task { @MainActor in
+                    guard let self, let capture else { return }
+                    let error = ALOError(message)
+                    let handled = await self.handleVideoCaptureStopped(capture, error: error)
+                    if handled { self.videoStoppedHandler(error) }
+                }
+            }) { frame in host.acceptVideo(frame) }
+            host.setVideoKeyframeHandler { [weak encoder] in encoder?.requestKeyframe() }
             videoEncoder = encoder
             videoCapture = capture
             do {

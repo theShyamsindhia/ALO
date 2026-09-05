@@ -54,7 +54,7 @@ public final class VideoDecoder {
     private var hasDecodedFrame = false
     private let timingLock = NSLock()
     private var clockOffsetNanos: Int64?
-    private var targetLatencyNanos = RoomTiming.defaultPlayoutDelayNanos
+    private var playoutDelays = CapturePlayoutDelayTimeline()
     private let resyncGate = VideoPresentationResyncGate()
 
     var clockOffsetNanosForTesting: Int64? {
@@ -80,7 +80,14 @@ public final class VideoDecoder {
 
     public func setTargetLatencyNanos(_ nanos: UInt64) {
         timingLock.lock()
-        targetLatencyNanos = RoomTiming.clampedPlayoutDelay(nanos)
+        playoutDelays.reset(delayNanos: nanos)
+        timingLock.unlock()
+    }
+
+    /// Only stage an irrevocably committed audio anchor, never a proposal.
+    public func stagePlayoutAnchor(captureTimeNanos: UInt64, delayNanos: UInt64) {
+        timingLock.lock()
+        playoutDelays.stage(captureTimeNanos: captureTimeNanos, delayNanos: delayNanos)
         timingLock.unlock()
     }
 
@@ -129,6 +136,7 @@ public final class VideoDecoder {
     public func resetTiming() {
         timingLock.lock()
         clockOffsetNanos = nil
+        playoutDelays.reset()
         timingLock.unlock()
         forceResync()
     }
@@ -268,9 +276,9 @@ public final class VideoDecoder {
     private func presentationDeadline(for capture: UInt64) -> UInt64? {
         timingLock.lock()
         let offset = clockOffsetNanos
-        let delay = targetLatencyNanos
+        let delay = playoutDelays.delay(forCapture: capture)
         timingLock.unlock()
-        guard let offset else { return nil }
+        guard let offset, let delay else { return nil }
         return VideoPresentationQueue<CGImage>.deadline(capture: capture, offset: offset,
             delay: delay, now: MonotonicClock.nowNanos())
     }

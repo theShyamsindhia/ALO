@@ -56,7 +56,8 @@ public final class AuthenticatedChannelCredentials: @unchecked Sendable {
         try validateLocked(ticket: ticket, subscriber: subscriber)
     }
     private func validateLocked(ticket: MediaSubscriptionTicket, subscriber: Bool) throws {
-        guard active, channelRole == .mediaControl, ticket.roomID == roomID,
+        let validRole = channelRole == .mediaControl || (channelRole == .voiceControl && ticket.channels == [.voice])
+        guard active, validRole, ticket.roomID == roomID,
               ticket.senderID == (subscriber ? remotePeerID : localPeerID),
               ticket.receiverID == (subscriber ? localPeerID : remotePeerID) else { throw SecureTransportError.wrongContext }
         if subscriber, let highestReceivedSequence, ticket.subscriptionSequence <= highestReceivedSequence {

@@ -1411,6 +1411,8 @@ final class ALOViewModel: ObservableObject {
     @Published var savedRooms = [RoomConfiguration]()
     @Published var selectedRoomID: String?
     @Published var roomsRefreshing = false
+    @Published private(set) var completedRoomScans = Set<RoomTransportPolicy>()
+    var roomScanFinished: Bool { completedRoomScans.count == 2 }
     @Published var roomsRefreshError: String?
     @Published var availableUpdateVersion: String?
     @Published var createPrivateRoom = false
@@ -1573,7 +1575,10 @@ final class ALOViewModel: ObservableObject {
                 DispatchQueue.main.async {
                     self?.roomsRefreshing = false
                     self?.roomsRefreshError = nil
+                    self?.completedRoomScans.remove(.legacyOnly)
                 }
+            }, scanFinishedHandler: { [weak self] in
+                DispatchQueue.main.async { self?.completedRoomScans.insert(.legacyOnly) }
             }
         )
         secureRoomBrowser = MeshRoomBrowser(
@@ -1589,7 +1594,10 @@ final class ALOViewModel: ObservableObject {
                 DispatchQueue.main.async {
                     self?.roomsRefreshing = false
                     self?.roomsRefreshError = nil
+                    self?.completedRoomScans.remove(.secureV2)
                 }
+            }, scanFinishedHandler: { [weak self] in
+                DispatchQueue.main.async { self?.completedRoomScans.insert(.secureV2) }
             })
         if discoverRooms { roomBrowser.start(); secureRoomBrowser.start() }
     }
@@ -2083,6 +2091,7 @@ final class ALOViewModel: ObservableObject {
     }
 
     func setParticipantVolume(_ participant: RoomParticipant, volume: Double) {
+        guard canControl(participant), volume.isFinite else { return }
         updateParticipant(participant.id, volume: volume, muted: participant.isMuted)
         if isHost {
             meshSession?.setParticipantLevel(id: participant.id, volume: volume, muted: participant.isMuted)
@@ -2092,6 +2101,7 @@ final class ALOViewModel: ObservableObject {
     }
 
     func toggleParticipantMute(_ participant: RoomParticipant) {
+        guard canControl(participant) else { return }
         let muted = !participant.isMuted
         updateParticipant(participant.id, volume: participant.volume, muted: muted)
         if isHost {
@@ -2707,7 +2717,13 @@ final class ALOViewModel: ObservableObject {
     }
 
     func canControl(_ participant: RoomParticipant) -> Bool {
-        isHost || participant.id == currentParticipantID
+        ParticipantMediaControlPolicy.allows(policy: activeRoomConfiguration?.transportPolicy,
+            isBroadcaster: isHost, isLocal: participant.id == currentParticipantID)
+    }
+
+    func participantMediaControlHelp(_ participant: RoomParticipant) -> String {
+        canControl(participant) ? "Adjust this device’s room media output"
+            : "Remote media volume control is unavailable in this room. Each person controls their own media; received voice volume remains local."
     }
 
     func sendMessage() {
@@ -2903,6 +2919,7 @@ final class ALOViewModel: ObservableObject {
         legacyNearbyRooms = []
         secureNearbyRooms = []
         roomsRefreshing = true
+        completedRoomScans.removeAll()
         roomsRefreshError = nil
         statusText = "Looking for rooms"
         roomBrowser.restart()
@@ -3589,7 +3606,7 @@ struct ALOView: View {
                 .buttonStyle(.bordered)
                 .buttonBorderShape(.circle)
                 .disabled(model.roomsRefreshing)
-                .help(model.roomsRefreshing ? "Looking for nearby spaces…" : "Sync saved and nearby spaces")
+                .help(model.roomsRefreshing ? "Looking for nearby spaces…" : model.roomScanFinished ? "Scan finished. Refresh to check nearby spaces again." : "Sync saved and nearby spaces")
                 .accessibilityLabel("Sync spaces")
                 Button {
                     withAnimation(reduceMotion ? nil : .smooth(duration: 0.28)) {
@@ -3611,15 +3628,14 @@ struct ALOView: View {
                 List(selection: $focusedRoomID) {
                     if model.roomChoices.isEmpty {
                         VStack(alignment: .leading, spacing: 3) {
-                            Text("Looking nearby")
+                            Text(model.roomScanFinished ? "No nearby spaces found" : "Looking nearby")
                                 .font(.body)
-                            Text("Open ALO on another Mac to see its spaces.")
+                            Text(model.roomScanFinished ? "Open ALO on another device, then refresh." : "Open ALO on another device to see its spaces.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
                         .frame(maxWidth: .infinity, minHeight: 54, alignment: .leading)
-                        .help("Looking for rooms on your network")
-                        .accessibilityLabel("Looking for rooms on your network")
+                        .help(model.roomScanFinished ? "Scan finished. Refresh to search again." : "Looking for nearby spaces")
                     } else {
                         ForEach(model.roomChoices) { room in
                             roomCard(room)
@@ -3719,7 +3735,8 @@ struct ALOView: View {
                         Text(room.name)
                             .font(.body)
                             .lineLimit(1)
-                        Text(nearby?.detail ?? (room.isPrivate ? "Private · Saved on this Mac" : "Saved on this Mac"))
+                        Text(nearby.map { model.completedRoomScans.contains($0.transportPolicy) ? "Recently seen · Refresh to check" : $0.detail }
+                            ?? (room.isPrivate ? "Private · Saved on this Mac" : "Saved on this Mac"))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
@@ -4869,6 +4886,7 @@ struct FloatingRoomView: View {
             .controlSize(.mini)
             .tint(Palette.controlAccent)
             .disabled(!controllable)
+            .help(model.participantMediaControlHelp(participant))
             Text("\(Int(participant.volume * 100))")
                 .font(.system(size: 10, weight: .medium, design: .monospaced))
                 .foregroundStyle(Palette.secondary)
@@ -4881,7 +4899,8 @@ struct FloatingRoomView: View {
             }
             .buttonStyle(FlatToolButtonStyle(active: participant.isMuted))
             .disabled(!controllable)
-            .help(participant.isMuted ? "Unmute \(participant.name)" : "Mute \(participant.name)")
+            .help(controllable ? (participant.isMuted ? "Unmute \(participant.name)" : "Mute \(participant.name)")
+                  : model.participantMediaControlHelp(participant))
             .accessibilityLabel(participant.isMuted ? "Unmute \(participant.name)" : "Mute \(participant.name)")
             Button { model.syncParticipant(participant) } label: {
                 Image(systemName: "arrow.triangle.2.circlepath")

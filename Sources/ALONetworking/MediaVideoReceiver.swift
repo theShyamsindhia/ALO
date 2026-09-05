@@ -34,7 +34,12 @@ final class MediaVideoConnection {
                     if state == .cancelled { connection?.failed?() }
                 }
                 completion(.success(connection))
-            } catch { channel.cancel(); completion(.failure(error)) }
+            } catch {
+                channel.cancel()
+                // A mismatched channel executes this closure on its own queue.
+                // Never mutate the video receiver from that foreign executor.
+                queue.async { completion(.failure(error)) }
+            }
         }
     }
 }

@@ -1,4 +1,5 @@
-import AppKit
+import CoreGraphics
+import Foundation
 import SwiftUI
 import ALOCore
 
@@ -583,6 +584,13 @@ struct AnnotationToolbarView: View {
     @ObservedObject var model: AnnotationSceneModel
     @State private var showsStickers = false
     @State private var search = ""
+    private var buttonSide: CGFloat {
+        #if os(iOS)
+        44
+        #else
+        34
+        #endif
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -596,7 +604,7 @@ struct AnnotationToolbarView: View {
                         if tool == .sticker { showsStickers = true }
                     } label: {
                         Image(systemName: tool.symbol).font(.system(size: 15, weight: .medium))
-                            .frame(width: 34, height: 34)
+                            .frame(width: buttonSide, height: buttonSide)
                             .background(model.tool == tool ? Color.accentColor.opacity(0.2) : .clear,
                                         in: RoundedRectangle(cornerRadius: 7))
                     }
@@ -608,13 +616,13 @@ struct AnnotationToolbarView: View {
                     .keyboardShortcut(KeyEquivalent(tool.shortcut), modifiers: [])
                 }
                 Divider().frame(height: 24)
-                Button { model.undo() } label: { Image(systemName: "arrow.uturn.backward").frame(width: 30, height: 34) }
+                Button { model.undo() } label: { Image(systemName: "arrow.uturn.backward").frame(width: buttonSide, height: buttonSide) }
                     .help("Undo your last annotation (⌘Z)").accessibilityLabel("Undo your last annotation")
                     .keyboardShortcut("z", modifiers: .command).disabled(!model.canAnnotate)
-                Button { model.deleteSelection() } label: { Image(systemName: "trash").frame(width: 30, height: 34) }
+                Button { model.deleteSelection() } label: { Image(systemName: "trash").frame(width: buttonSide, height: buttonSide) }
                     .help("Remove selected annotation (Delete)").accessibilityLabel("Remove selected annotation")
                     .keyboardShortcut(.delete, modifiers: []).disabled(model.selectedObjectID == nil || !model.canAnnotate)
-                Button { model.escape() } label: { Image(systemName: "xmark").frame(width: 30, height: 34) }
+                Button { model.escape() } label: { Image(systemName: "xmark").frame(width: buttonSide, height: buttonSide) }
                     .help("Stop annotating (Escape)").accessibilityLabel("Stop annotating")
                     .keyboardShortcut(.escape, modifiers: [])
             }

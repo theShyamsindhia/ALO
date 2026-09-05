@@ -7,6 +7,36 @@ import ALOCore
 @testable import ALO
 
 @Suite struct VideoCodecLoopbackTests {
+    private final class EncodedOutput: @unchecked Sendable {
+        private let lock = NSLock()
+        private var frames: [UInt64] = []
+        func accept(_ frame: VideoFrame) { lock.withLock { frames.append(frame.captureTimeNanos) } }
+        var count: Int { lock.withLock { frames.count } }
+    }
+
+    @Test("Continuous capture drains the production encoder without a fixture flush")
+    func continuousCaptureDoesNotWaitForItsOwnNextOutput() async throws {
+        let output = EncodedOutput()
+        let encoder = VideoEncoder { output.accept($0) }
+        defer { encoder.stop() }
+        var created: CVPixelBuffer?
+        let status = CVPixelBufferCreate(kCFAllocatorDefault, 64, 64, kCVPixelFormatType_32BGRA,
+            [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary, &created)
+        try #require(status == kCVReturnSuccess)
+        let buffer = try #require(created)
+        try #require(CVPixelBufferLockBaseAddress(buffer, []) == kCVReturnSuccess)
+        let address = try #require(CVPixelBufferGetBaseAddress(buffer))
+        address.initializeMemory(as: UInt8.self, repeating: 127,
+            count: CVPixelBufferGetBytesPerRow(buffer) * CVPixelBufferGetHeight(buffer))
+        CVPixelBufferUnlockBaseAddress(buffer, [])
+        for _ in 0..<20 {
+            encoder.encode(buffer, captureTimeNanos: MonotonicClock.nowNanos())
+            try await Task.sleep(for: .milliseconds(33))
+        }
+        // Deliberately no flushForTesting/stop before this assertion: capture
+        // and callback-driven admission must make forward progress themselves.
+        #expect(output.count >= 10, "Continuous capture must not deadlock behind a single hardware output callback")
+    }
     private final class Output: @unchecked Sendable {
         let lock = NSLock()
         private var dimensions: CGSize?

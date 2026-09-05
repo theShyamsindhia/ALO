@@ -10,13 +10,14 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
     private let mesh: MeshControlPlane
     private let selection: MediaReceiverSession.Selection
     private let queue = DispatchQueue(label: "alo.secure-media.playback", qos: .userInteractive)
-    private let player: SynchronizedPlayer
+    private let player: SecureMacPlaybackTimeline
     private let status: (MediaReceiverSession.State) -> Void
     private let annotations: SecureMacAnnotationViewer?
     private let videoDecoder: VideoDecoder
     private var videoEnabled = false
     private var screenTiming = ReceiverScreenTiming()
     private let videoGate = VideoGate()
+    private let attachmentGate = MediaAttachmentGate()
     private final class VideoGate: @unchecked Sendable {
         private let lock = NSLock()
         private var token: TransportToken?
@@ -31,6 +32,7 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
     private var started = false
     private var lastTimingReportNanos: UInt64 = 0
     private var committed: MediaStreamAnchor?
+    private var localRepairPending = false
     private var clock: MediaReceiverSession.ClockSnapshot?
     private let jitter = NetworkJitterEstimator()
     private let inbox = PacketInbox()
@@ -75,7 +77,7 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
         self.mesh = mesh; self.selection = selection; self.status = status
         self.annotations = annotations
         videoDecoder = VideoDecoder(imageHandler: videoHandler)
-        player = try SynchronizedPlayer(audioOutput: audioOutput, playbackActivityChanged: playbackActivity)
+        player = try SecureMacPlaybackTimeline(audioOutput: audioOutput, playbackActivity: playbackActivity)
     }
 
     private var now: TimeInterval { Double(MonotonicClock.nowNanos()) / 1_000_000_000 }
@@ -103,6 +105,7 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
         queue.async {
             guard !self.stopped else { return }
             self.stopped = true
+            self.attachmentGate.set(nil)
             self.perform(self.supervisor.stop())
             self.timer?.cancel(); self.timer = nil
             self.receiver?.stop(); self.receiver = nil
@@ -116,6 +119,9 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
 
     func setLevel(volume: Double, muted: Bool) {
         queue.async { self.player.setLevel(volume: volume, muted: muted) }
+    }
+    func setMusicDucked(_ ducked: Bool) {
+        queue.async { self.player.setDuckingGain(ducked ? 0.3 : 1) }
     }
 
     func resynchronize() { queue.async { self.receiver?.resynchronize() } }
@@ -182,10 +188,12 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
             case .connect(let token): connect(token)
             case .cancel(let cancelled):
                 if token == cancelled {
+                    attachmentGate.set(nil)
                     receiver?.stop(); receiver = nil; token = nil
                     annotations?.disconnect()
                     videoGate.set(nil); videoDecoder.resetTiming()
-                    committed = nil; clock = nil; jitter.reset()
+                    videoDecoder.resetTiming()
+                    committed = nil; localRepairPending = false; clock = nil; jitter.reset()
                     _ = inbox.take()
                     // Only a terminal control failure reaches this action.
                     // UDP ticket renewal does not: it keeps the live renderer.
@@ -202,8 +210,12 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
     private func connect(_ attempt: TransportToken) {
         guard !stopped else { return }
         token = attempt
+        attachmentGate.set(attempt)
         mesh.openMediaChannel(to: selection.broadcasterPeerID, role: .mediaControl) { [weak self] result in
-            guard let self else { return }
+            guard let self, self.attachmentGate.accepts(attempt) else {
+                if case .success(let (channel, _)) = result { channel.cancel() }
+                return
+            }
             switch result {
             case .failure:
                 self.queue.async { self.failed(attempt) }
@@ -212,7 +224,7 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
                 // it to MainActor would lose coalesced early channel payloads.
                 MediaReceiverSession.attach(channel: channel, expected: self.selection,
                     callbacks: self.callbacks(for: attempt)) { result in
-                    if case .success(let receiver) = result {
+                    if case .success(let receiver) = result, self.attachmentGate.accepts(attempt) {
                         self.annotations?.attach(channel: channel, receiver: receiver)
                     }
                     self.queue.async {
@@ -237,6 +249,7 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
 
     private func failed(_ attempt: TransportToken) {
         guard !stopped, token == attempt else { return }
+        attachmentGate.set(nil)
         perform(supervisor.fail(attempt, now: now, jitterUnit: Double.random(in: 0...1)))
     }
 
@@ -245,26 +258,37 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
             self?.queue.async { [weak self] in
                 guard let self, !self.stopped, self.token == attempt else { return }
                 // Preparation must not reset, stop, or mute the predecessor.
-                let anchor = preparation.anchor
                 self.reportTiming(force: true)
-                let valid = anchor.hostPlaybackTimeNanos >= anchor.captureTimeNanos
-                    && anchor.hostPlaybackTimeNanos - anchor.captureTimeNanos <= RoomTiming.maximumPlayoutDelayNanos
-                    && anchor.hostPlaybackTimeNanos - anchor.captureTimeNanos >= RoomTiming.outputLatencyFloor(
-                        self.player.outputLatencyForTimingNanos,
-                        renderSchedulingHeadroomNanos: self.player.renderSchedulingHeadroomForTimingNanos)
-                self.receiver?.completePreparation(id: preparation.id, ready: valid)
+                do {
+                    try self.player.prepare(id: preparation.id, anchor: preparation.anchor,
+                        clockOffsetNanos: preparation.clock.offsetNanos)
+                    self.receiver?.completePreparation(id: preparation.id, ready: true)
+                } catch {
+                    self.player.cancelPreparation(id: preparation.id)
+                    let repair = (error as? SecureMacPlaybackTimeline.PreparationError) == .missedCutover
+                        && self.player.repairMissedCutover(preparation.anchor)
+                    if repair {
+                        self.localRepairPending = true
+                        self.committed = nil
+                        _ = self.inbox.take()
+                        self.status(.recovering)
+                    }
+                    self.receiver?.completePreparation(id: preparation.id, ready: false)
+                    if repair { self.receiver?.resynchronize() }
+                }
             }
         }, anchorCommitted: { [weak self] preparation in
             self?.queue.async { [weak self] in
                 guard let self, !self.stopped, self.token == attempt else { return }
                 let anchor = preparation.anchor
-                self.player.clockOffsetNanos = preparation.clock.offsetNanos
+                do { try self.player.commit(id: preparation.id) }
+                catch { self.receiver?.resynchronize(); return }
                 self.clock = preparation.clock
                 self.videoDecoder.updateClockOffsetNanos(preparation.clock.offsetNanos)
-                self.videoDecoder.setTargetLatencyNanos(anchor.hostPlaybackTimeNanos - anchor.captureTimeNanos)
-                self.player.setTargetLatencyNanos(anchor.hostPlaybackTimeNanos - anchor.captureTimeNanos)
-                self.player.setRoomPlayback(playing: anchor.state == .running)
+                self.videoDecoder.stagePlayoutAnchor(captureTimeNanos: anchor.captureTimeNanos,
+                    delayNanos: anchor.hostPlaybackTimeNanos - anchor.captureTimeNanos)
                 self.committed = anchor
+                self.localRepairPending = false
                 self.perform(self.supervisor.synchronized(attempt, madeProgress: true, now: self.now))
             }
         }, audio: { [weak self] packet, _, _ in
@@ -276,7 +300,7 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
             self?.queue.async { [weak self] in
                 guard let self, !self.stopped, self.token == attempt else { return }
                 if state == .failed { self.failed(attempt) }
-                else { self.status(state) }
+                else { self.status(self.localRepairPending && state == .active ? .recovering : state) }
             }
         }, clock: { [weak self] clock in
             self?.queue.async { [weak self] in
@@ -288,6 +312,7 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
         }, paused: { [weak self] _, _ in
             self?.queue.async { [weak self] in
                 guard let self, !self.stopped, self.token == attempt else { return }
+                self.localRepairPending = false
                 self.player.setRoomPlayback(playing: false)
             }
         }, annotation: { [weak self] in self?.annotations?.receiveAnnotation($0) ?? false },
@@ -298,8 +323,7 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
         let batch = inbox.take()
         guard !stopped else { return }
         for item in batch where item.token == token {
-            guard let committed, item.packet.frameIndex >= committed.frameIndex,
-                  item.packet.captureTimeNanos >= committed.captureTimeNanos else { continue }
+            guard committed != nil else { continue }
             if let clock {
                 jitter.observe(captureTimeNanos: item.packet.captureTimeNanos,
                     receivedAt: item.receivedAt, clockOffsetNanos: clock.offsetNanos)
@@ -318,8 +342,14 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
         let network = jitter.recommendedPlayoutDelayNanos(roundTripNanos: freshClock?.roundTripNanos,
             outputLatencyNanos: player.outputLatencyForTimingNanos,
             renderSchedulingHeadroomNanos: player.renderSchedulingHeadroomForTimingNanos)
+        let rendered = player.syncReport()
+        let playback = PlaybackSyncReport(measuredAtNanos: 0, latenessNanos: rendered.latenessNanos,
+            latePacketCount: rendered.latePacketCount, resyncCount: rendered.resyncCount,
+            driftNanos: rendered.driftNanos, driftSampleAgeNanos: rendered.driftSampleAgeNanos,
+            screenTiming: screenTiming.presentationSnapshot(videoDecoder.presentationTimingSnapshot).relativeTimingReport)
         guard let report = try? MediaReceiverTimingReport(hardwareOutputFloorNanos: floor,
-            networkRecommendedDelayNanos: max(floor, network), roundTripNanos: freshClock?.roundTripNanos) else { return }
+            networkRecommendedDelayNanos: max(floor, network), roundTripNanos: freshClock?.roundTripNanos,
+            playback: playback) else { return }
         receiver.updateTiming(report)
         lastTimingReportNanos = now
     }

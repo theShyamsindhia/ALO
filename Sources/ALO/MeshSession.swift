@@ -9,6 +9,7 @@ struct IncomingAudioMuteRouting: Equatable {
 
     var publishedParticipantMediaMuted: Bool { participantMediaMuted }
     var localMediaPlaybackMuted: Bool { participantMediaMuted || incomingMediaMuted }
+    var localBroadcastPlaybackMuted: Bool { participantMediaMuted }
     var voicePlaybackMuted: Bool { incomingVoiceMuted }
 }
 
@@ -36,6 +37,7 @@ final class MeshSession {
     private let openLineStateHandler: (OpenLineState) -> Void
     private let walkieTalkieMicrophone = WalkieTalkieMicrophone()
     private let walkieTalkiePlayer: WalkieTalkiePlayer
+    private let secureVoice: SecureMacVoiceBridge
     private let audioOutput: RoomAudioOutputEngine
     private final class WalkieTransmissionState: @unchecked Sendable {
         struct Active {
@@ -140,6 +142,11 @@ final class MeshSession {
     }
 
     func sampleTimingDiagnostics() async -> SessionTimingDiagnostics? {
+        if let sampled = secureHost {
+            let snapshot = await sampled.sampleTimingDiagnostics()
+            guard secureHost === sampled else { return nil }
+            return snapshot
+        }
         if let sampled = secureReceiver {
             let snapshot = await Task.detached(priority: .utility) { sampled.diagnosticsSnapshot() }.value
             guard secureReceiver === sampled else { return nil }
@@ -165,6 +172,7 @@ final class MeshSession {
         var participants: ([RoomParticipant]) -> Void = { _ in }
         var openLine: (OpenLineMessage) -> Void = { _ in }
         var walkieTalkie: (String, String, String, Bool, Double) -> Void = { _, _, _, _, _ in }
+        var voiceFailure: (Error) -> Void = { _ in }
     }
     private let callbackRelay: CallbackRelay
 
@@ -272,6 +280,9 @@ final class MeshSession {
         )
         self.audioOutput = audioOutput
         self.walkieTalkiePlayer = walkieTalkiePlayer
+        let secureVoice = SecureMacVoiceBridge(player: walkieTalkiePlayer, localID: nodeID,
+            failure: { relay.voiceFailure($0) })
+        self.secureVoice = secureVoice
         self.replicaPersistenceHandler = replicaPersistenceHandler
         self.control = MeshControlPlane(
             room: room,
@@ -301,7 +312,8 @@ final class MeshSession {
                 mediaRelay.handleResync(targetID, broadcasterID: broadcasterID, epoch: broadcasterEpoch)
             },
             walkieTalkieHandler: { message in
-                walkieTalkiePlayer.accept(message)
+                if room.transportPolicy == .secureV2 { secureVoice.receive(message) }
+                else { walkieTalkiePlayer.accept(message) }
             },
             openLineHandler: { message in
                 DispatchQueue.main.async { relay.openLine(message) }
@@ -313,16 +325,32 @@ final class MeshSession {
             installationIdentity: installationIdentity,
             peerPins: peerPins,
             incomingMediaChannelHandler: { [secureMediaAdmission] channel, peer in
-                secureMediaAdmission.receive(channel, peer: peer)
+                if peer.channelRole == .voiceControl { secureVoice.admit(channel) }
+                else { secureMediaAdmission.receive(channel, peer: peer) }
             }
         )
         relay.replica = { [weak self] in self?.apply($0) }
         relay.participants = { [weak self] participants in
             participantsHandler(participants)
-            self?.currentParticipants = participants
-            self?.secureAnnotations?.updateParticipants(Dictionary(participants.map { ($0.id, $0.name) }, uniquingKeysWith: { _, new in new }))
+            guard let self else { return }
+            let departed = Set(self.currentParticipants.map(\.id)).subtracting(participants.map(\.id))
+            self.currentParticipants = participants
+            self.secureAnnotations?.updateParticipants(Dictionary(participants.map { ($0.id, $0.name) }, uniquingKeysWith: { _, new in new }))
+            if !departed.isEmpty {
+                self.walkieTalkieTargets.subtract(departed)
+                if !self.effectiveVoiceTargets().isDisjoint(with: departed) { self.endOpenLine() }
+                self.reconcileExistingVoiceCapture()
+                self.secureVoice.removeDeparted(departed)
+            }
         }
         relay.openLine = { [weak self] in self?.receiveOpenLine($0) }
+        relay.voiceFailure = { [weak self] error in
+            guard let self, !self.isStopped else { return }
+            self.endOpenLine()
+            self.endWalkieTalkie()
+            self.statusHandler("Voice connection stopped. Click Talk to reconnect.")
+            self.walkieTalkieTransmissionEndedHandler(error)
+        }
         relay.walkieTalkie = { [weak self] in
             self?.updateIncomingVoiceActivity(
                 sessionID: $0,
@@ -338,6 +366,7 @@ final class MeshSession {
         do {
             try control.start()
             isStopped = false
+            if room.transportPolicy == .secureV2 { secureVoice.start(mesh: control) }
         } catch {
             isStopped = true
             throw error
@@ -409,11 +438,9 @@ final class MeshSession {
                 [targetID], generation: generation, inputDeviceUID: inputDeviceUID
             )
         }
-        // Compatibility for the old call site. New UI should pass an explicit
-        // snapshot to updateWalkieTalkieTargets(_:generation:inputDeviceUID:).
-        return try await beginVoiceCapture(
-            targetIDs: nil, generation: generation, inputDeviceUID: inputDeviceUID
-        )
+        // Even older call sites use a fixed currently-present recipient set.
+        return try await updateWalkieTalkieTargets(Set(currentParticipants.map(\.id)).subtracting([nodeID]),
+            generation: generation, inputDeviceUID: inputDeviceUID)
     }
 
     func updateWalkieTalkieTargets(
@@ -421,7 +448,15 @@ final class MeshSession {
         generation: Int,
         inputDeviceUID: String? = nil
     ) async throws -> String? {
-        walkieTalkieTargets = targetIDs.subtracting([nodeID])
+        let requested = targetIDs.subtracting([nodeID])
+        let effective = Self.effectiveVoiceTargets(talkTargetIDs: requested,
+            openLineState: openLineSessionState.state, localID: nodeID)
+        guard VoiceCaptureIntent.acceptsAudience(effective) else {
+            throw ALOError("Talk supports up to 32 selected devices at once.")
+        }
+        // Rejected expansions leave both the selected audience and the current
+        // microphone/wire session intact.
+        walkieTalkieTargets = requested
         return try await reconcileVoiceCapture(
             generation: generation, inputDeviceUID: inputDeviceUID
         )
@@ -448,14 +483,22 @@ final class MeshSession {
         generation: Int,
         inputDeviceUID: String?
     ) async throws -> String? {
-        if let targetIDs, targetIDs.isEmpty { return nil }
+        let targetIDs = targetIDs ?? Set(currentParticipants.map(\.id)).subtracting([nodeID])
+        guard !targetIDs.isEmpty else { return nil }
+        guard VoiceCaptureIntent.acceptsAudience(targetIDs) else { throw ALOError("Talk supports up to 32 selected devices at once.") }
+        if room.transportPolicy == .secureV2, !secureVoice.isReady {
+            if secureVoice.needsRestart { secureVoice.start(mesh: control) }
+            throw ALOError("Voice is still connecting. Try Talk again in a moment.")
+        }
         walkieStartGeneration = generation
         guard await WalkieTalkieMicrophone.requestAccess() else {
             throw ALOError(
                 "Microphone access is needed for Talk and Open Line. Enable ALO in Privacy & Security → Microphone."
             )
         }
-        guard walkieStartGeneration == generation else { throw CancellationError() }
+        guard VoiceCaptureIntent.isCurrent(requested: targetIDs, effective: effectiveVoiceTargets(),
+            present: Set(currentParticipants.map(\.id)), requestedGeneration: generation,
+            currentGeneration: walkieStartGeneration) else { throw CancellationError() }
         if let active = walkieTransmissionState.current() {
             endWalkieTalkie(sessionID: active.id)
         }
@@ -465,6 +508,8 @@ final class MeshSession {
         let transmissionState = walkieTransmissionState
         let controlPlane = control
         let localNodeID = nodeID
+        let secureVoice = self.secureVoice
+        let secure = room.transportPolicy == .secureV2
         do {
             try await walkieTalkieMicrophone.start(
                 sessionID: sessionID,
@@ -475,7 +520,8 @@ final class MeshSession {
                         sessionID: sessionID,
                         data: data
                     ) {
-                        controlPlane.publishWalkieTalkie(message)
+                        if secure { secureVoice.publish(message, mesh: controlPlane) }
+                        else { controlPlane.publishWalkieTalkie(message) }
                     }
                 },
                 failureHandler: { [weak self] error in
@@ -490,14 +536,16 @@ final class MeshSession {
                     }
                 }
             )
-            guard walkieStartGeneration == generation,
+            guard VoiceCaptureIntent.isCurrent(requested: targetIDs, effective: effectiveVoiceTargets(),
+                      present: Set(currentParticipants.map(\.id)), requestedGeneration: generation,
+                      currentGeneration: walkieStartGeneration),
                   walkieTransmissionState.activeID() == sessionID
             else {
                 walkieTalkieMicrophone.stop(sessionID: sessionID)
                 endWalkieTalkie(sessionID: sessionID)
                 throw CancellationError()
             }
-            control.publishWalkieTalkie(WalkieTalkieMessage(
+            publishVoice(WalkieTalkieMessage(
                 kind: .began,
                 senderID: nodeID,
                 senderName: senderName,
@@ -544,6 +592,9 @@ final class MeshSession {
         inputDeviceUID: String?
     ) async throws -> String? {
         let targets = effectiveVoiceTargets()
+        guard VoiceCaptureIntent.acceptsAudience(targets) else {
+            throw ALOError("Talk supports up to 32 selected devices at once.")
+        }
         guard !targets.isEmpty else {
             forceEndVoiceCapture()
             return nil
@@ -559,6 +610,10 @@ final class MeshSession {
 
     private func reconcileExistingVoiceCapture() {
         let targets = effectiveVoiceTargets()
+        guard VoiceCaptureIntent.acceptsAudience(targets) else {
+            statusHandler("Talk supports up to 32 selected devices at once.")
+            return
+        }
         guard !targets.isEmpty else {
             forceEndVoiceCapture()
             return
@@ -572,7 +627,7 @@ final class MeshSession {
         _ update: (active: WalkieTransmissionState.Active, removed: Set<String>, added: Set<String>)
     ) {
         if !update.removed.isEmpty {
-            control.publishWalkieTalkie(WalkieTalkieMessage(
+            publishVoice(WalkieTalkieMessage(
                 kind: .ended,
                 senderID: nodeID,
                 senderName: update.active.name,
@@ -584,7 +639,7 @@ final class MeshSession {
             ))
         }
         if !update.added.isEmpty {
-            control.publishWalkieTalkie(WalkieTalkieMessage(
+            publishVoice(WalkieTalkieMessage(
                 kind: .began,
                 senderID: nodeID,
                 senderName: update.active.name,
@@ -680,7 +735,7 @@ final class MeshSession {
         let active = walkieTransmissionState.take(expectedID: sessionID)
         guard let active else { return }
         walkieTalkieMicrophone.stop(sessionID: active.id)
-        control.publishWalkieTalkie(WalkieTalkieMessage(
+        publishVoice(WalkieTalkieMessage(
             kind: .ended,
             senderID: nodeID,
             senderName: active.name,
@@ -690,6 +745,10 @@ final class MeshSession {
             sequence: active.sequence,
             sampleRate: UInt32(WalkieTalkieMicrophone.sampleRate)
         ))
+    }
+    private func publishVoice(_ message: WalkieTalkieMessage) {
+        if room.transportPolicy == .secureV2 { secureVoice.publish(message, mesh: control) }
+        else { control.publishWalkieTalkie(message) }
     }
     @discardableResult
     func sendMediaCommand(_ command: RoomMediaCommand) -> Bool {
@@ -733,14 +792,14 @@ final class MeshSession {
         receiver?.setLocalLevel(volume: localVolume, muted: routing.publishedParticipantMediaMuted)
         receiver?.setLocalPlaybackMuted(routing.incomingMediaMuted)
         secureReceiver?.setLevel(volume: localVolume, muted: routing.localMediaPlaybackMuted)
-        secureHost?.setLevel(volume: localVolume, muted: routing.localMediaPlaybackMuted)
+        secureHost?.setLevel(volume: localVolume, muted: routing.localBroadcastPlaybackMuted)
     }
     func setParticipantLevel(id: String, volume: Double, muted: Bool) {
         if id == nodeID {
             localVolume = min(max(volume, 0), 1)
             localParticipantMuted = muted
             secureReceiver?.setLevel(volume: localVolume, muted: incomingAudioMuteRouting.localMediaPlaybackMuted)
-            secureHost?.setLevel(volume: localVolume, muted: incomingAudioMuteRouting.localMediaPlaybackMuted)
+            secureHost?.setLevel(volume: localVolume, muted: incomingAudioMuteRouting.localBroadcastPlaybackMuted)
         }
         hostSession?.setParticipantLevel(
             id: id,
@@ -756,7 +815,7 @@ final class MeshSession {
         // source return and its direct-source fallback independently.
         receiver?.setLocalPlaybackMuted(incomingAudioMuteRouting.incomingMediaMuted)
         secureReceiver?.setLevel(volume: localVolume, muted: incomingAudioMuteRouting.localMediaPlaybackMuted)
-        secureHost?.setLevel(volume: localVolume, muted: incomingAudioMuteRouting.localMediaPlaybackMuted)
+        secureHost?.setLevel(volume: localVolume, muted: incomingAudioMuteRouting.localBroadcastPlaybackMuted)
     }
     private var musicDuckingEnabled = false
     private var appliedMusicDucking = false
@@ -772,6 +831,8 @@ final class MeshSession {
         appliedMusicDucking = ducked
         receiver?.setMusicDucked(ducked)
         hostSession?.setMusicDucked(ducked)
+        secureReceiver?.setMusicDucked(ducked)
+        secureHost?.setMusicDucked(ducked)
     }
 
     func setVoiceVolume(_ volume: Double, for participantID: String) {
@@ -848,6 +909,7 @@ final class MeshSession {
         isStopped = true
         endOpenLine()
         endWalkieTalkie()
+        secureVoice.stop()
         walkieTalkiePlayer.stop()
         intendsToBroadcast = false
         intendsToBroadcastVideo = false
@@ -882,6 +944,7 @@ final class MeshSession {
         isStopped = true
         endOpenLine()
         endWalkieTalkie()
+        secureVoice.stop()
         walkieTalkiePlayer.stop()
         intendsToBroadcast = false
         intendsToBroadcastVideo = false
@@ -1005,7 +1068,8 @@ final class MeshSession {
                             }
                             return true
                         })
-                        host.setLevel(volume: localVolume, muted: incomingAudioMuteRouting.localMediaPlaybackMuted)
+                        host.setLevel(volume: localVolume, muted: incomingAudioMuteRouting.localBroadcastPlaybackMuted)
+                        host.setMusicDucked(appliedMusicDucking)
                         if intendsToBroadcastVideo { try await setVideoEnabled(true) }
                         return
                     }
@@ -1129,6 +1193,7 @@ final class MeshSession {
                         secureReceiver = secure
                         let routing = incomingAudioMuteRouting
                         secure.setLevel(volume: localVolume, muted: routing.localMediaPlaybackMuted)
+                        secure.setMusicDucked(appliedMusicDucking)
                         secure.start()
                         secure.setVideoEnabled(replica.videoEnabled)
                         return

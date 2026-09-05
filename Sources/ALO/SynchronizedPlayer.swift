@@ -118,6 +118,11 @@ final class SynchronizedPlayer {
     private var nodesAreAttached = false
     private var outputLeaseHeld = false
     private var observedOutputStartGeneration: UInt64 = 0
+    private let scheduledCompletions = PlaybackBufferCompletions()
+
+    /// Includes hardware-buffered PCM, not just the receive-side jitter queue.
+    var outstandingPlaybackBufferCount: Int { scheduledCompletions.count }
+    var pendingPlaybackPacketCount: Int { pending.count }
 
     var expectedSequenceForTesting: UInt32? { expectedSequence }
     var outputLatencyForTimingNanos: UInt64 { outputLatencyNanos }
@@ -320,7 +325,7 @@ final class SynchronizedPlayer {
                 expectedSequence = sequence &+ 1
                 continue
             }
-            player.scheduleBuffer(buffer)
+            scheduleTrackedBuffer(buffer)
 
             if !hasStarted {
                 anchorFrameIndex = packet.frameIndex
@@ -336,6 +341,7 @@ final class SynchronizedPlayer {
     }
 
     func stop() {
+        scheduledCompletions.invalidate()
         player.stop()
         pending.removeAll()
         expectedSequence = nil
@@ -374,6 +380,7 @@ final class SynchronizedPlayer {
         roomPlaybackIsPlaying = playing
         guard !playing else { return }
 
+        scheduledCompletions.invalidate()
         player.stop()
         pending.removeAll()
         expectedSequence = nil
@@ -434,6 +441,7 @@ final class SynchronizedPlayer {
         // not reuse any receiver-local backlog. Clear both already-scheduled
         // and pending audio, then ignore the live stream until the broadcaster's
         // shared future cutover timestamp arrives.
+        scheduledCompletions.invalidate()
         player.stop()
         pending.removeAll()
         expectedSequence = nil
@@ -457,6 +465,7 @@ final class SynchronizedPlayer {
     /// sequence, timeline, or watchdog state across a control reconnect would
     /// make every packet from the new stream look stale.
     func resetStream() {
+        scheduledCompletions.invalidate()
         player.stop()
         pending.removeAll()
         expectedSequence = nil
@@ -573,6 +582,7 @@ final class SynchronizedPlayer {
         }
 
         guard nodesAreAttached else { return }
+        scheduledCompletions.invalidate()
         player.stop()
         hardResynchronize()
         do {
@@ -755,6 +765,7 @@ final class SynchronizedPlayer {
     private func detachOutputNodes() {
         audioOutput.withGraph { engine in
             guard nodesAreAttached else { return }
+            scheduledCompletions.invalidate()
             player.stop()
             engine.disconnectNodeOutput(player)
             engine.disconnectNodeOutput(varispeed)
@@ -821,6 +832,7 @@ final class SynchronizedPlayer {
     }
 
     private func hardResynchronize() {
+        scheduledCompletions.invalidate()
         player.stop()
         smoothedCorrection = 0
         varispeed.rate = 1
@@ -857,7 +869,7 @@ final class SynchronizedPlayer {
             count: Int(AudioPacket.framesPerPacket) * Int(AudioPacket.channelCount)
         )
         if let buffer = makeBuffer(silence) {
-            player.scheduleBuffer(buffer)
+            scheduleTrackedBuffer(buffer)
         }
         expectedSequence = sequence &+ 1
         drain()
@@ -879,6 +891,33 @@ final class SynchronizedPlayer {
         return buffer
     }
 
+    private func scheduleTrackedBuffer(_ buffer: AVAudioPCMBuffer) {
+        let completions = scheduledCompletions
+        let generation = completions.scheduled()
+        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { _ in
+            completions.completed(generation: generation)
+        }
+    }
+
+}
+
+/// The native completion can run outside the playback executor. Resetting a
+/// player retires its generation before AVFoundation releases old callbacks.
+final class PlaybackBufferCompletions: @unchecked Sendable {
+    private let lock = NSLock()
+    private var generation = UUID()
+    private var outstanding = 0
+    var count: Int { lock.withLock { outstanding } }
+    func scheduled() -> UUID {
+        lock.withLock { outstanding += 1; return generation }
+    }
+    func completed(generation: UUID) {
+        lock.withLock {
+            guard generation == self.generation, outstanding > 0 else { return }
+            outstanding -= 1
+        }
+    }
+    func invalidate() { lock.withLock { generation = UUID(); outstanding = 0 } }
 }
 
 struct PlaybackDriftRecovery {

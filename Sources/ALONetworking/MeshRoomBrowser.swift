@@ -117,6 +117,7 @@ public final class MeshRoomBrowser {
     private let updateHandler: ([NearbyRoom]) -> Void
     private let errorHandler: (String) -> Void
     private let readyHandler: () -> Void
+    private let scanFinishedHandler: () -> Void
     private var browser: NWBrowser?
     private let transportPolicy: RoomTransportPolicy
     private var scanGeneration: UInt64 = 0
@@ -128,12 +129,14 @@ public final class MeshRoomBrowser {
         updateHandler: @escaping ([NearbyRoom]) -> Void,
         errorHandler: @escaping (String) -> Void = { _ in },
         transportPolicy: RoomTransportPolicy = .legacyOnly,
-        readyHandler: @escaping () -> Void = {}
+        readyHandler: @escaping () -> Void = {},
+        scanFinishedHandler: @escaping () -> Void = {}
     ) {
         self.updateHandler = updateHandler
         self.errorHandler = errorHandler
         self.transportPolicy = transportPolicy
         self.readyHandler = readyHandler
+        self.scanFinishedHandler = scanFinishedHandler
     }
 
     public func start() {
@@ -149,6 +152,7 @@ public final class MeshRoomBrowser {
         let expiration = DispatchWorkItem { [weak self] in
             guard let self, self.scanGeneration == generation else { return }
             self.stopOnQueue()
+            self.scanFinishedHandler()
         }
         self.expiration = expiration
         queue.asyncAfter(deadline: .now() + 15, execute: expiration)

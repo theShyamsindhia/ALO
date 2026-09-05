@@ -17,6 +17,7 @@ struct ClientPlaybackReliabilityTests {
         for muted in [true, false, true] {
             routing.incomingMediaMuted = muted
             #expect(routing.localMediaPlaybackMuted == (participantMuted || muted))
+            #expect(routing.localBroadcastPlaybackMuted == participantMuted)
             #expect(routing.publishedParticipantMediaMuted == participantMuted)
             #expect(routing.voicePlaybackMuted == voiceMuted)
         }

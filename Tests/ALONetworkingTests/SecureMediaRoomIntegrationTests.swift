@@ -75,7 +75,7 @@ struct SecureMediaRoomIntegrationTests {
     }
 }
 
-private final class LiveMediaBox<Value>: @unchecked Sendable {
+final class LiveMediaBox<Value>: @unchecked Sendable {
     private let lock = NSLock()
     private var value: Value
     init(_ value: Value) { self.value = value }
@@ -83,7 +83,7 @@ private final class LiveMediaBox<Value>: @unchecked Sendable {
     func update(_ body: (inout Value) -> Void) { lock.withLock { body(&value) } }
 }
 
-private final class LiveMediaNode {
+final class LiveMediaNode {
     struct State { var port: NWEndpoint.Port?; var peers: Set<String> = []; var epoch: UInt64? }
     let id: UUID
     let mesh: MeshControlPlane
@@ -115,7 +115,7 @@ private final class LiveMediaNode {
     }
 }
 
-private final class LiveMediaSink: @unchecked Sendable {
+final class LiveMediaSink: @unchecked Sendable {
     struct State {
         var receiver: MediaReceiverSession?
         var frames = Set<UInt64>()
@@ -156,7 +156,7 @@ private final class LiveMediaSink: @unchecked Sendable {
     }
 }
 
-private final class LiveMediaCapture: @unchecked Sendable {
+final class LiveMediaCapture: @unchecked Sendable {
     private let queue = DispatchQueue(label: "alo.test.live-capture", qos: .userInteractive)
     private let count = LiveMediaBox<UInt32>(0)
     private let host: MediaHostSession
@@ -179,7 +179,7 @@ private final class LiveMediaCapture: @unchecked Sendable {
     func stop() { timer?.cancel(); timer = nil }
 }
 
-private func liveMediaEventually(_ condition: () -> Bool) async throws {
+func liveMediaEventually(_ condition: () -> Bool) async throws {
     for _ in 0..<500 {
         if condition() { return }
         try await Task.sleep(for: .milliseconds(20))

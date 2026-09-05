@@ -19,6 +19,10 @@ public final class iOSAudioSessionCoordinator {
     /// when a route, interruption, or suspension revokes transmission intent.
     public var onLifecycleChanged: (@MainActor (AudioLifecycle) -> Void)?
     public var levels = AudioMixLevels() { didSet { applyLevels() } }
+    public var hasScheduledMediaPlayback: Bool {
+        lifecycle.canRender && !lifecycle.needsResynchronization && engine.isRunning
+            && levels.effectiveMediaVolume > 0 && mediaTransition.hasScheduledAudio
+    }
     public var onNeedsResynchronization: (@MainActor (UInt64) -> Void)?
     public var onMicrophoneChunk: (@MainActor (VoicePCMChunk) -> Void)?
     public var onError: (@MainActor (Error) -> Void)?
@@ -37,6 +41,7 @@ public final class iOSAudioSessionCoordinator {
     private var observers: [NSObjectProtocol] = []
     private var pumpTask: Task<Void, Never>?
     private var microphone: MicrophonePCMConverter?
+    private var microphoneOutput: BoundedMediaEventBridge<VoicePCMChunk>?
     private var inputTapInstalled = false
     private var reconfiguring = false
     private var outputFormatSignature = ""
@@ -66,15 +71,19 @@ public final class iOSAudioSessionCoordinator {
     }
 
     public func prepareMediaAnchor(id: UUID, anchor: AudioPlaybackAnchor, clockOffsetNanos: Int64,
-                                   generation: UInt64) throws {
+                                   generation: UInt64, preserveCurrentTimeline: Bool = false) throws {
         guard lifecycle.canRender, engine.isRunning, generation == lifecycle.generation else { throw AppleMediaError.invalidState }
         try mediaTransition.prepare(id: id, anchor: anchor, offsetNanos: clockOffsetNanos,
-                                    outputLatencyNanos: outputLatencyNanos, nowNanos: MonotonicClock.nowNanos())
+                                    outputLatencyNanos: outputLatencyNanos, nowNanos: MonotonicClock.nowNanos(),
+                                    preserveCurrentTimeline: preserveCurrentTimeline)
     }
 
     public func commitMediaAnchor(id: UUID, generation: UInt64) throws {
         guard lifecycle.canRender, engine.isRunning, generation == lifecycle.generation else { throw AppleMediaError.invalidState }
         try mediaTransition.commit(id: id, nowNanos: MonotonicClock.nowNanos())
+        guard mediaTransition.trackIDs.contains(id) else {
+            lifecycle.resynchronized(generation: generation); return
+        }
         // At most the live and committed successor exist. A proposal creates no
         // hardware work, and committing never stops the live predecessor.
         let player = AVAudioPlayerNode()
@@ -220,7 +229,7 @@ public final class iOSAudioSessionCoordinator {
         if transmitting {
             try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth, .defaultToSpeaker])
         } else {
-            try session.setCategory(.playback, mode: .default, options: [])
+            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
         }
         try session.setPreferredSampleRate(48_000)
         try session.setPreferredIOBufferDuration(0.01)
@@ -232,11 +241,26 @@ public final class iOSAudioSessionCoordinator {
             input.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: false, duckingLevel: .min)
             let actualFormat = input.outputFormat(forBus: 0)
             let generation = lifecycle.generation
-            let converter = try MicrophonePCMConverter(inputFormat: actualFormat) { [weak self] chunk in
-                Task { @MainActor [weak self] in
+            let output = BoundedMediaEventBridge<VoicePCMChunk>(maximumEvents: 8, maximumBytes: 7_680,
+                schedule: { DispatchQueue.main.async(execute: $0) }, receive: { [weak self] chunks in
+                    MainActor.assumeIsolated {
                     guard let self, self.lifecycle.generation == generation, self.lifecycle.isMicrophoneActive else { return }
-                    self.onMicrophoneChunk?(chunk)
-                }
+                        let now = MonotonicClock.nowNanos()
+                        for chunk in chunks where now >= chunk.captureTimeNanos && now - chunk.captureTimeNanos <= 80_000_000 {
+                            self.onMicrophoneChunk?(chunk)
+                        }
+                    }
+                }, overflow: { [weak self] in
+                    MainActor.assumeIsolated {
+                        guard let self, self.lifecycle.generation == generation else { return }
+                        do { try self.stopMicrophone() }
+                        catch { self.onError?(error) }
+                        self.onError?(AppleMediaError.capacity)
+                    }
+                })
+            microphoneOutput = output
+            let converter = try MicrophonePCMConverter(inputFormat: actualFormat) { chunk in
+                output.submit(chunk, byteCount: chunk.samples.count * 2)
             }
             microphone = converter
             input.installTap(onBus: 0, bufferSize: 480, format: actualFormat) { buffer, time in converter.accept(buffer, time: time) }
@@ -256,6 +280,7 @@ public final class iOSAudioSessionCoordinator {
     private func stopHardware() {
         if inputTapInstalled { engine.inputNode.removeTap(onBus: 0); inputTapInstalled = false }
         microphone?.cancel(); microphone = nil
+        microphoneOutput?.close(); microphoneOutput = nil
         engine.stop()
     }
 

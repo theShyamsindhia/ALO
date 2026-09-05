@@ -671,6 +671,14 @@ struct VoiceJitterBuffer {
         return drain(force: false)
     }
 
+    mutating func configurePacketFramesBeforeFirstAudio(_ frames: Int) {
+        guard frames > 0, frames <= 4_096, !isStarted, pending.isEmpty,
+              concealmentFrames != frames else { return }
+        self = VoiceJitterBuffer(startupPacketCount: startupPacketCount,
+            maximumGapPackets: maximumGapPackets, maximumPendingPackets: maximumPendingPackets,
+            concealmentFrames: frames)
+    }
+
     mutating func finish() -> [Output] {
         guard !pending.isEmpty else { return [] }
         if expectedSequence == nil { expectedSequence = pending.keys.min() }
@@ -885,6 +893,9 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
             let session = beginSession(message)
             guard let session else { return }
             session.senderName = message.senderName
+            // Secure voice uses 10 ms datagrams; legacy voice uses 20 ms.
+            // Conceal exactly one packet's duration, not a fixed legacy chunk.
+            session.jitter.configurePacketFramesBeforeFirstAudio(data.count / 2)
             let output = session.jitter.insert(sequence: message.sequence, data: data)
             schedule(output, for: session)
             armTimeout(for: session)

@@ -9,6 +9,15 @@ protocol AnnotationOverlayPresenting: AnyObject {
     func close()
 }
 
+#if os(iOS)
+/// iOS renders annotations inside the received image, never in a desktop panel.
+@MainActor private final class ViewerOnlyAnnotationOverlay: AnnotationOverlayPresenting {
+    func update(metadata: CapturedFrameMetadata) {}
+    func hide() {}
+    func close() {}
+}
+#endif
+
 /// Main-thread presentation owner for one admitted broadcaster connection.
 /// The session supplies authenticated coordinator callbacks and owns `close()`.
 @MainActor
@@ -34,7 +43,12 @@ final class AnnotationPresentationController {
          send: @escaping (AnnotationCommand) -> Void,
          requestSnapshot: @escaping () -> Void,
          makeOverlay: @escaping @MainActor (AnnotationSceneModel) -> any AnnotationOverlayPresenting = {
+             #if os(macOS)
              AnnotationOverlayController(model: $0)
+             #else
+             _ = $0
+             return ViewerOnlyAnnotationOverlay()
+             #endif
          }) {
         self.presenterID = presenterID
         self.makeOverlay = makeOverlay

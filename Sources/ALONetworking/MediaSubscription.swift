@@ -151,6 +151,23 @@ public final class MediaSubscriptionRegistry {
         lifetime: TimeInterval = 30) throws -> MediaSubscriptionTicket {
         guard credentials.isActive, credentials.channelRole == .mediaControl, credentials.localRole == .responder,
               credentials.negotiated.wireVersion == 2 else { throw SecureTransportError.invalidCredentials }
+        return try reserveAdmitted(credentials: credentials, broadcasterEpoch: broadcasterEpoch, generation: generation,
+            channels: channels, now: now, lifetime: lifetime)
+    }
+
+    /// The voice adapter must separately validate the ongoing explicit local
+    /// transmission and its fixed recipient snapshot before calling this factory.
+    func reserveVoiceSubscription(credentials: AuthenticatedChannelCredentials, session: VoiceSessionIdentifier,
+                                  generation: UInt64, now: TimeInterval) throws -> MediaSubscriptionTicket {
+        guard credentials.isActive, credentials.channelRole == .voiceControl, credentials.localRole == .responder,
+              credentials.negotiated.wireVersion == 2, session.isValid else { throw SecureTransportError.invalidCredentials }
+        return try reserveAdmitted(credentials: credentials, broadcasterEpoch: session.generation,
+            generation: generation, channels: [.voice], now: now, lifetime: 30)
+    }
+
+    private func reserveAdmitted(credentials: AuthenticatedChannelCredentials, broadcasterEpoch: UInt64,
+                                 generation: UInt64, channels: Set<DatagramChannel>, now: TimeInterval,
+                                 lifetime: TimeInterval) throws -> MediaSubscriptionTicket {
         guard now.isFinite, lifetime.isFinite, lifetime > 0, lifetime <= 300 else { throw SecureTransportError.malformed }
         let requester = credentials.negotiated.initiatorCapabilities
         let publisher = credentials.negotiated.responderCapabilities

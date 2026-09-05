@@ -16,7 +16,7 @@ public struct PeerCapabilities: OptionSet, Codable, Equatable, Sendable {
     public static let desktop: Self = [.mobile, .broadcast, .editQueue, .playbackControl]
 }
 
-public enum ReliableChannelRole: UInt8, Codable, CaseIterable, Sendable { case roomControl = 1, mediaControl = 2, video = 3 }
+public enum ReliableChannelRole: UInt8, Codable, CaseIterable, Sendable { case roomControl = 1, mediaControl = 2, video = 3, voiceControl = 4 }
 public enum RoomAdmissionKind: UInt8, Codable, Sendable { case publicRoom = 1, privateRoom = 2 }
 
 public struct ProtocolOffer: Equatable, Sendable {

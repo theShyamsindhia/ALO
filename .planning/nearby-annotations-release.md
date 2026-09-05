@@ -1,6 +1,6 @@
 # Integrated nearby + screen annotations release
 
-Status: implementation in progress, **not released**. Upstream is now 0.13.44.
+Status: full 0.14.0 integration in progress, **not released**. Latest published release is 0.13.49. Historical checkpoints below are append-only; see the latest runtime checkpoint for current verification.
 
 Requested sources: latest **Explain AirDrop in airplane mode** plan (5 September
 2026) and **Design realtime screenshare UX** plan, plus the report that one M4
@@ -561,3 +561,39 @@ local signing or production installation is authorized by this progress file.
   acceptance and final review remain mandatory before 0.14.0. The verification
   workflow now runs the integration branch with pinned Xcode 26.3 and the same
   optimized tests/live-timing requirements as release CI.
+
+### Runtime wave 4 integration verification
+
+- Wave 3 was committed and pushed as ba3c19b after 603 tests passed locally.
+  Its CI failed one unchanged live fanout final-age assertion (119 ms against
+  100 ms). The fixture now avoids sorting/render simulation on receiver queues
+  until transport drainage, and awaits actual cancellation before reusing native
+  socket resources. Local live runs passed at 8 ms nominal / 44 ms injected;
+  the corrected checkpoint still requires CI. No threshold was relaxed.
+- Directed encrypted Mac/iOS voice, consent revalidation after each microphone
+  await, independent media mute, and shared iOS annotation scenes are wired.
+  Genuine scheduled mobile media permits background listening; empty engines
+  and silence do not justify keeping the room alive in background.
+- Future hardware-floor cutovers preserve established playback; a receiver that
+  missed the cutover repairs only itself. Focused tests cover completed output
+  retirement, renewal continuity, stale telemetry and missed-boundary recovery.
+- Unsigned iOS simulator build passed after fixing a SwiftUI Section initializer:
+  `ios-runtime-wave4-build-retry.log`. Both targets are 0.14.0/build 81. No local
+  signing or installed production/development Mac data was changed.
+- The 50-test focused gate found four codec failures caused by rejecting this
+  Mac's read-only effective zero-delay encoder property. The failure is retained
+  in `/tmp/alo-video-lookahead-after.log`. The effective numeric zero-delay
+  contract is now verified before and after encoder preparation even on a
+  backend that rejects its setter. The corrected focused gate passed 54 tests
+  in 6 suites (`/tmp/alo-video-lookahead-final.log`), including continuous real
+  encoding without fixture flushing, playback recovery, mute and voice consent.
+- Remote media-level controls have no secure wire command and now explicitly
+  remain unavailable in secure rooms rather than optimistically changing UI.
+  Local media and per-person received voice levels remain available. This is a
+  documented capability limit, not a completed remote mixer implementation.
+- Full suite, latest remote merge, clean final Fable review, strict CI and device
+  acceptance remain outstanding. No 0.14.0 tag or release has been created.
+- Updated unsigned iOS app launched in the isolated simulator with the explicit
+  temporary-identity banner; no scan, room join or microphone request occurred.
+  The simulator was shut down afterward. A newly identified host pause/resume
+  versus queued cutover race is being isolated in its own regression/fix.

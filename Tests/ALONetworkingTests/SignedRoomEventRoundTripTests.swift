@@ -5,6 +5,17 @@ import ALOCore
 
 @Suite("Signed room event Codable compatibility")
 struct SignedRoomEventRoundTripTests {
+    @Test func signedChatCannotImpersonateAnotherAuthor() throws {
+        let identity = try InstallationIdentity.ephemeral()
+        let author = identity.publicIdentity.nodeID.uuidString
+        let policy = SecureRoomEventPolicy(roomID: "chat", identity: identity, capabilities: .chat)
+        for claimedAuthor in [author, UUID().uuidString] {
+            let event = MeshRoomEvent(roomID: "chat", version: .init(counter: 1, nodeID: author),
+                kind: .chat, senderID: claimedAuthor, text: "Authenticated operation")
+            let signed = try #require(policy.sign(event))
+            #expect(policy.accepts(signed) == (claimedAuthor == author))
+        }
+    }
     @Test func signaturesSurviveChatAndLegacyCompatibleQueueOrderEncoding() throws {
         let identity = try InstallationIdentity.ephemeral()
         let author = identity.publicIdentity.nodeID.uuidString

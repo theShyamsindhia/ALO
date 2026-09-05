@@ -500,16 +500,16 @@ struct LoopbackRoomScaleTests {
         #expect(released == nil)
     }
 
-    @Test("Observational A/B separates colocated receiver PCM work from capture scheduling")
-    func receiverPCMPlacementCaptureAB() throws {
+    @Test("Observational A/B separates colocated receiver PCM work from capture scheduling", arguments: [0.0, 0.035])
+    func receiverPCMPlacementCaptureAB(schedulerOversleep: TimeInterval) throws {
         let inline = try runRoom(peerCount: 8, linkBitsPerSecond: nil, policy: .unbounded,
-            schedulerOversleep: 0, deferredPCM: false)
+            schedulerOversleep: schedulerOversleep, deferredPCM: false)
         let deferred = try runRoom(peerCount: 8, linkBitsPerSecond: nil, policy: .unbounded,
-            schedulerOversleep: 0, deferredPCM: true)
+            schedulerOversleep: schedulerOversleep, deferredPCM: true)
         #expect(inline.minimumPacketsReceived >= 190 && deferred.minimumPacketsReceived >= 190)
         // This comparison does not change or replace the existing live gate.
         // Compare source ages, not a pass flag based on a cheaper receive path.
-        print("Receiver PCM A/B capture ages: inline [\(inline.captureCallbackAgeSummary)]; deferred [\(deferred.captureCallbackAgeSummary)]")
+        print("Receiver PCM A/B injectedWake=\(schedulerOversleep * 1_000)ms capture ages: inline [\(inline.captureCallbackAgeSummary)]; deferred [\(deferred.captureCallbackAgeSummary)]")
         print("Receiver PCM A/B maximum callback-entry ages: inline \(inline.maximumReceiveEntryAgeNanos / 1_000_000)ms; deferred \(deferred.maximumReceiveEntryAgeNanos / 1_000_000)ms")
     }
 
@@ -1500,7 +1500,6 @@ struct LoopbackRoomScaleTests {
             let sourceResult = try #require(source.wait(timeout: .now() + 5), "Capture source did not complete")
             try #require(!sourceResult.cancelled && sourceResult.samples.count == expectedPacketCount / packetsPerCallback)
             let captureAnchorNanos = sourceResult.anchor
-            print("Capture wake delay: peers=\(peerCount), policy=\(policy), injected=\(schedulerOversleep * 1_000)ms, \(captureWakeDelays.summary)")
 
             let expectedIDs = Set((0..<peerCount).map { "loopback-peer-\($0)" })
             let peerPorts = try peers.map { try #require($0.audioPort) }
@@ -1518,13 +1517,28 @@ struct LoopbackRoomScaleTests {
                     && senders.allSatisfy { $0.inFlight == 0 && $0.pending == 0 }
                     && submissions.snapshot.isComplete
             }
-            print("Audio send completion latency: peers=\(peerCount), link=\(linkBitsPerSecond.map(String.init) ?? "unshaped"), policy=\(policy), \(completionLatencies.summary)")
             guard senderDrained else {
                 print("Audio sender drain timeout: \(host.audioSenderSnapshot()); ledger=\(submissions.snapshot)")
                 throw LoopbackTestError.audioDidNotDrain(peers.map(\.packetCount))
             }
             let submitted = submissions.snapshot
             let drainedSenders = host.audioSenderSnapshot()
+            let receivedEnough = waitUntil(timeout: max(0, drainDeadline.timeIntervalSinceNow)) {
+                let received = Dictionary(uniqueKeysWithValues: zip(peerPorts, peers).map {
+                    ($0.0, $0.1.receivedSequencesForDrain())
+                })
+                return submitted.matchesReceived(received)
+            }
+            guard receivedEnough else {
+                print("Audio receiver drain timeout: submitted=\(submitted); received=\(zip(peerPorts, peers).map { ($0.0, $0.1.receivedSequencesForDrain().sorted()) })")
+                throw LoopbackTestError.audioDidNotDrain(peers.map(\.packetCount))
+            }
+
+            // All submitted PCM has now reached its original post-decode age
+            // timestamp. Formatting diagnostics, assertions and virtual output
+            // simulation must not compete with the terminal receive callbacks.
+            print("Capture wake delay: peers=\(peerCount), policy=\(policy), injected=\(schedulerOversleep * 1_000)ms, \(captureWakeDelays.summary)")
+            print("Audio send completion latency: peers=\(peerCount), link=\(linkBitsPerSecond.map(String.init) ?? "unshaped"), policy=\(policy), \(completionLatencies.summary)")
             print("Audio sender drained: \(drainedSenders)")
             for sender in drainedSenders {
                 #expect(sender.enqueued == UInt64(expectedPacketCount))
@@ -1535,17 +1549,6 @@ struct LoopbackRoomScaleTests {
                 #expect(sender.discardedBoundary == 0,
                     "This steady capture scenario must not hide an accidental timeline reset")
             }
-            let receivedEnough = waitUntil(timeout: max(0, drainDeadline.timeIntervalSinceNow)) {
-                let received = Dictionary(uniqueKeysWithValues: zip(peerPorts, peers).map {
-                    ($0.0, Set($0.1.snapshot().arrivals.keys))
-                })
-                return submitted.matchesReceived(received)
-            }
-            guard receivedEnough else {
-                print("Audio receiver drain timeout: submitted=\(submitted); received=\(zip(peerPorts, peers).map { ($0.0, $0.1.snapshot().arrivals.keys.sorted()) })")
-                throw LoopbackTestError.audioDidNotDrain(peers.map(\.packetCount))
-            }
-
             if deferredPCM {
                 for peer in peers {
                     // Copy only bounded raw receipts across the queue barrier;
@@ -1581,6 +1584,14 @@ struct LoopbackRoomScaleTests {
                 return arrival
             }
             let finalAges = finalArrivals.map { $0.arrivedNanos - $0.captureNanos }
+            let finalEntryAges = finalArrivals.compactMap { arrival in
+                arrival.receiveEntryNanos.map { $0 - arrival.captureNanos }
+            }
+            let finalDecodeTimes = finalArrivals.compactMap { arrival in
+                arrival.receiveEntryNanos.map { arrival.arrivedNanos - $0 }
+            }
+            let terminalSourceWake = sourceResult.samples.last.map { $0.wokeAt - $0.deadline } ?? 0
+            print("Terminal age partition: sourceWake=\(terminalSourceWake)ns, callbackEntryAges=\(finalEntryAges)ns, callbackPCMWork=\(finalDecodeTimes)ns, postDecodeAges=\(finalAges)ns")
             let maximumPacketAge = snapshots.flatMap { $0.arrivals.values }.map {
                 $0.arrivedNanos - $0.captureNanos
             }.max() ?? 0
@@ -1673,6 +1684,7 @@ private final class HeadlessLoopbackPeer {
     private var receivedPlayoutDelays = [UInt64]()
     private var receivedLevels = [(volume: Double, muted: Bool)]()
     private var corruptedPackets = 0
+    private var stopping = false
 
     init(index: Int, participantID: String? = nil, expectedSample: Int16? = nil, deferredPCM: Bool = false) {
         self.index = index
@@ -1693,6 +1705,10 @@ private final class HeadlessLoopbackPeer {
     var playoutDelays: [UInt64] { queue.sync { receivedPlayoutDelays } }
     var levels: [(volume: Double, muted: Bool)] { queue.sync { receivedLevels } }
     func deferredPCMReceipts() -> DeferredPCMReceipts { queue.sync { deferredReceipts } }
+
+    /// Quiescence polling must not sort/replay a virtual audio timeline on the
+    /// same queue that is still receiving the packets being timed.
+    func receivedSequencesForDrain() -> Set<UInt32> { queue.sync { Set(arrivals.keys) } }
 
     func start(hostPort: NWEndpoint.Port) throws {
         let udp = try NWListener(using: .udp, on: .any)
@@ -1822,40 +1838,67 @@ private final class HeadlessLoopbackPeer {
     }
 
     func snapshot() -> PeerSnapshot {
-        queue.sync {
-            PeerSnapshot(
-                arrivals: arrivals,
-                lastSequence: arrivals.keys.max(),
-                packetCount: arrivals.count,
-                clockOffsetNanos: clock.offsetNanos,
-                audibleLatenessNanos: VirtualAudioSink.audibleLateness(
-                    for: arrivals,
-                    clockOffsetNanos: clock.offsetNanos ?? 0
-                )
-            )
-        }
+        let state = queue.sync { (arrivals, clock.offsetNanos) }
+        return PeerSnapshot(
+            arrivals: state.0,
+            lastSequence: state.0.keys.max(),
+            packetCount: state.0.count,
+            clockOffsetNanos: state.1,
+            audibleLatenessNanos: VirtualAudioSink.audibleLateness(
+                for: state.0, clockOffsetNanos: state.1 ?? 0))
     }
 
     func stop() {
-        queue.sync {
-            control?.cancel()
-            udpListener?.cancel()
-            videoListener?.cancel()
-            acceptedAudio.forEach { $0.cancel() }
-            acceptedVideo.forEach { $0.cancel() }
+        let cancelled = DispatchGroup()
+        let retired = queue.sync { () -> ([NWConnection], [NWListener]) in
+            guard !stopping else { return ([], []) }
+            stopping = true
+            let connections = [control].compactMap { $0 } + acceptedAudio + acceptedVideo
+            let listeners = [udpListener, videoListener].compactMap { $0 }
+            for connection in connections {
+                guard case .cancelled = connection.state else {
+                    cancelled.enter()
+                    connection.stateUpdateHandler = { state in
+                        if case .cancelled = state { cancelled.leave() }
+                    }
+                    connection.cancel()
+                    continue
+                }
+            }
+            for listener in listeners {
+                listener.newConnectionHandler = nil
+                guard case .cancelled = listener.state else {
+                    cancelled.enter()
+                    listener.stateUpdateHandler = { state in
+                        if case .cancelled = state { cancelled.leave() }
+                    }
+                    listener.cancel()
+                    continue
+                }
+            }
             control = nil
             udpListener = nil
             videoListener = nil
             acceptedAudio.removeAll()
             acceptedVideo.removeAll()
+            return (connections, listeners)
+        }
+        // cancel() is an asynchronous request, not proof that the native
+        // listeners/flows from this room have released their resources. Keep
+        // them alive until cancellation is observed, outside their own queue.
+        #expect(cancelled.wait(timeout: .now() + 3) == .success,
+            "Loopback fixture did not finish native connection/listener cancellation")
+        queue.sync {
+            retired.0.forEach { $0.stateUpdateHandler = nil }
+            retired.1.forEach { $0.stateUpdateHandler = nil }
         }
     }
 
     private func start(_ listener: NWListener, kind: String) throws -> NWEndpoint.Port {
         let ready = DispatchSemaphore(value: 0)
         let portState = PortState()
-        listener.stateUpdateHandler = { state in
-            if case .ready = state, let port = listener.port {
+        listener.stateUpdateHandler = { [weak listener] state in
+            if case .ready = state, let port = listener?.port {
                 portState.set(port)
                 ready.signal()
             }
@@ -1906,6 +1949,7 @@ private final class HeadlessLoopbackPeer {
     }
 
     private func acceptAudio(_ connection: NWConnection) {
+        guard !stopping else { connection.cancel(); return }
         acceptedAudio.append(connection)
         connection.start(queue: queue)
 
@@ -1935,6 +1979,7 @@ private final class HeadlessLoopbackPeer {
     }
 
     private func acceptVideo(_ connection: NWConnection) {
+        guard !stopping else { connection.cancel(); return }
         acceptedVideo.append(connection)
         connection.start(queue: queue)
 

@@ -2,7 +2,7 @@ import Foundation
 import ALOCore
 
 public enum AppleMediaError: Error, Equatable {
-    case invalidPCM, invalidAnchor, clockNotReady, late, tooFarAhead, capacity, duplicate, invalidState
+    case invalidPCM, invalidAnchor, missedCutover, clockNotReady, late, tooFarAhead, capacity, duplicate, invalidState
     case microphoneDenied, unavailableInput, audioConfiguration, generationExhausted
 }
 

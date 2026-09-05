@@ -57,16 +57,21 @@ final class SecureMacMediaHost {
                     resync: { _, _, _ in },
                     requestKeyframe: { _, _, minimum in ingress.requestKeyframe(minimum) },
                     annotation: { credentials, bytes in ingress.annotationHost?.receive(credentials: credentials, bytes) ?? false },
-                    peerDetached: { ingress.annotationHost?.removePeer(connectionID: $0) })) {
+                    peerDetached: { ingress.detachMediaPeer(connectionID: $0) },
+                    timingReport: { peer, stream, report, now in
+                        ingress.receiveTiming(peer: peer, stream: stream, report: report, now: now)
+                    })) {
                         continuation.resume(with: $0)
                     }
             }
             guard lifecycle == token, !Task.isCancelled, ingress.isActive else { host.stop(); throw CancellationError() }
             guard host.localPeerID == peerID else { host.stop(); throw SecureTransportError.invalidCredentials }
-            let renderer = try LocalRenderer(audioOutput: audioOutput, timeline: ingress.timeline)
+            let renderer = try LocalRenderer(audioOutput: audioOutput, timeline: ingress.timeline,
+                epoch: owner.epoch, timing: { floor in ingress.receiveLocalFloor(floor) })
             guard ingress.install(host: host, renderer: renderer) else {
                 host.stop(); renderer.stop(); throw CancellationError()
             }
+            ingress.receiveLocalFloor(renderer.initialOutputFloor)
             renderer.start()
             playbackController = SystemPlaybackController()
             let monitor = NowPlayingMonitor { [weak self] media in
@@ -114,6 +119,7 @@ final class SecureMacMediaHost {
                 if peer.channelRole == .video { try host.attachVideo(channel: channel, credentials: credentials) }
                 else {
                     try host.attach(channel: channel, credentials: credentials)
+                    self.ingress.noteMediaPeer(credentials)
                     self.ingress.annotationHost?.attach(credentials: credentials, mediaHost: host)
                 }
             } catch { channel.cancel() }
@@ -152,6 +158,14 @@ final class SecureMacMediaHost {
     }
 
     func setLevel(volume: Double, muted: Bool) { ingress.renderer?.setLevel(volume: volume, muted: muted) }
+    func setMusicDucked(_ ducked: Bool) { ingress.renderer?.setMusicDucked(ducked) }
+    func sampleTimingDiagnostics() async -> SessionTimingDiagnostics? {
+        guard let renderer = ingress.renderer else { return nil }
+        let token = lifecycle
+        let local = await renderer.diagnostics()
+        guard lifecycle == token, ingress.isActive else { return nil }
+        return SessionTimingDiagnostics(receiver: local, host: ingress.diagnostics())
+    }
     func performMediaCommand(_ command: RoomMediaCommand) -> Bool {
         guard ingress.isActive else { return false }
         return playbackController?.perform(command) ?? false
@@ -201,7 +215,14 @@ final class SecureMacMediaHost {
             }
             decoder.updateClockOffsetNanos(0)
             decoder.setTargetLatencyNanos(ingress.timeline.playoutDelayNanos)
-            let encoder = VideoEncoder { frame in ingress.acceptVideo(frame, generation: videoToken) }
+            let encoder = VideoEncoder(failureHandler: { [weak self] message in
+                Task { @MainActor [weak self] in
+                    guard let self, self.lifecycle == token,
+                          self.videoGeneration == videoToken, self.ingress.isActive else { return }
+                    try? await self.setVideoEnabled(false)
+                    stopped(ALOError(message))
+                }
+            }) { frame in ingress.acceptVideo(frame, generation: videoToken) }
             let capture = ScreenVideoCapture()
             videoEncoder = encoder; videoDecoder = decoder; videoCapture = capture
             ingress.configureVideo(encoder: encoder, decoder: decoder, generation: videoToken)
@@ -252,12 +273,57 @@ final class SecureMacMediaHost {
         private var preview: VideoDecoder?
         private var videoGeneration: UUID?
         private var annotations: SecureMacAnnotationHost?
+        private var timingPolicy = SecureRoomTimingPolicy()
+        private var localFloor = RoomTiming.defaultPlayoutDelayNanos
+        private var mediaPeers: [UUID: UUID] = [:]
+        private var roomTimingChangeCount: UInt64 = 0
+        func noteMediaPeer(_ credentials: AuthenticatedChannelCredentials) {
+            lock.withLock { mediaPeers[credentials.connectionID] = credentials.remotePeerID }
+        }
+        func detachMediaPeer(connectionID: UUID) {
+            let annotations = lock.withLock { () -> SecureMacAnnotationHost? in
+                if let peer = mediaPeers.removeValue(forKey: connectionID), !mediaPeers.values.contains(peer) {
+                    timingPolicy.remove(peer: peer)
+                }
+                return self.annotations
+            }
+            annotations?.removePeer(connectionID: connectionID)
+        }
         var annotationHost: SecureMacAnnotationHost? { lock.withLock { annotations } }
         func setAnnotations(_ annotations: SecureMacAnnotationHost) { lock.withLock { self.annotations = annotations } }
         var isActive: Bool { lock.withLock { owner != nil } }
         var currentBroadcaster: MediaHostSession.Broadcaster? { lock.withLock { owner } }
         var currentHost: MediaHostSession? { lock.withLock { host } }
         var renderer: LocalRenderer? { lock.withLock { local } }
+        func diagnostics() -> HostTimingDiagnostics {
+            lock.withLock {
+                let now = MonotonicClock.nowNanos()
+                let measured = timingPolicy.measurements(at: now)
+                let peers = Set(mediaPeers.values)
+                let listeners = peers.sorted { $0.uuidString < $1.uuidString }.map { peer in
+                    let sample = measured.first { $0.peerID == peer }
+                    let playback = sample?.report.playback
+                    let elapsed = sample?.receivedElapsedNanos ?? 0
+                    return HostListenerTimingDiagnostics(peerID: peer.uuidString,
+                        isTimingEligible: sample?.isNetworkTimingEligible ?? false,
+                        reportAgeMilliseconds: sample.map { Double($0.ageNanos) / 1_000_000 },
+                        recommendedBufferMilliseconds: sample.map { Double($0.report.networkRecommendedDelayNanos) / 1_000_000 } ?? 0,
+                        hardwareFloorMilliseconds: sample.map { Double($0.report.hardwareOutputFloorNanos) / 1_000_000 } ?? 0,
+                        driftMilliseconds: playback?.driftNanos.map { Double($0) / 1_000_000 },
+                        driftSampleAgeMilliseconds: playback?.driftSampleAgeNanos.map { Double($0 + elapsed) / 1_000_000 },
+                        playbackReportAgeMilliseconds: playback == nil ? nil : Double(elapsed) / 1_000_000,
+                        screenTiming: playback?.screenTiming)
+                }
+                return HostTimingDiagnostics(listenerCount: peers.count, reportingListenerCount: listeners.filter { $0.reportAgeMilliseconds != nil }.count,
+                    groupBufferMilliseconds: Double(timeline.playoutDelayNanos) / 1_000_000,
+                    maximumLatenessMilliseconds: measured.compactMap { $0.report.playback }.map { Double($0.latenessNanos) / 1_000_000 }.max() ?? 0,
+                    totalResyncCount: measured.compactMap { $0.report.playback }.reduce(UInt64(0)) { sum, report in
+                        let added = sum.addingReportingOverflow(report.resyncCount)
+                        return added.overflow ? .max : added.partialValue
+                    },
+                    roomTimingChangeCount: roomTimingChangeCount, videoEnabled: videoGeneration != nil, listeners: listeners)
+            }
+        }
         var sourcePlaying: Bool? { lock.withLock { playing } }
         func begin(owner: MediaHostSession.Broadcaster) { lock.withLock { self.owner = owner } }
         func install(host: MediaHostSession, renderer: LocalRenderer) -> Bool {
@@ -277,12 +343,15 @@ final class SecureMacMediaHost {
                    captureTimeNanos < expected && expected - captureTimeNanos > 5_000_000
                     || captureTimeNanos > expected && captureTimeNanos - expected > 5_000_000 {
                     packetizer.discardPendingSamples()
-                    timeline.invalidateCaptureReference()
+                    // Drop only the partial PCM chunk. Complete packets retain
+                    // their real capture timestamps and monotonic frame index;
+                    // a tap gap must not re-prepare every healthy subscriber.
                 }
                 expectedNextCapture = end.partialValue
                 // Packetization happens once, before local/remote fan-out. Both
                 // consumers see identical frame indices and capture timestamps.
                 let packets = packetizer.append(samples: samples, captureTimeNanos: captureTimeNanos)
+                if !packets.isEmpty { timingPolicy.captureStarted(at: captureTimeNanos) }
                 let needsRefresh = timeline.observe(packets)
                 host.submitAudio(packets)
                 local?.append(packets)
@@ -300,11 +369,59 @@ final class SecureMacMediaHost {
             }
             host?.refreshTimeline()
         }
+        func receiveTiming(peer: UUID, stream: MediaStreamIdentifier, report: MediaReceiverTimingReport, now: UInt64) {
+            lock.withLock {
+                guard owner?.epoch == stream.broadcasterEpoch else { return }
+                timingPolicy.record(peer: peer, report: report, receivedAt: now)
+            }
+            updateTiming(now: now)
+        }
+        func receiveLocalFloor(_ floor: UInt64) {
+            lock.withLock { localFloor = floor }
+            updateTiming(now: MonotonicClock.nowNanos())
+        }
+        private func updateTiming(now: UInt64) {
+            let work = lock.withLock { () -> (LocalRenderer, MediaHostSession, CapturedMediaTimeline.PlayoutCutover?)? in
+                guard owner != nil, let host, let local else { return nil }
+                let current = timeline.requestedPlayoutDelayNanos
+                let desired = timingPolicy.desiredDelay(now: now, current: current,
+                    localHardwareFloor: localFloor, playing: playing != false)
+                guard desired != current else { return nil }
+                let cutover = timeline.schedulePlayoutDelay(desired, now: now)
+                // A pending proposal cannot be overwritten by another report.
+                guard cutover != nil || (timeline.requestedPlayoutDelayNanos == timeline.playoutDelayNanos
+                    && timeline.playoutDelayNanos != current) else { return nil }
+                if cutover == nil { roomTimingChangeCount &+= 1 }
+                return (local, host, cutover)
+            }
+            guard let (local, host, cutover) = work else { return }
+            guard let cutover else { host.refreshTimeline(); return }
+            local.stage(cutover) { [weak self, weak host] accepted in
+                guard let self, let host else { return }
+                let announce = self.lock.withLock { () -> Bool in
+                    guard accepted, self.owner != nil, self.host === host else {
+                        self.timeline.cancelUnannounced(cutover); return false
+                    }
+                    guard self.timeline.announce(cutover) else { return false }
+                    self.roomTimingChangeCount &+= 1
+                    self.preview?.stagePlayoutAnchor(captureTimeNanos: cutover.captureTimeNanos,
+                        delayNanos: cutover.playoutDelayNanos)
+                    return true
+                }
+                if announce { host.refreshTimeline() }
+            }
+        }
         func requestKeyframe(_ minimum: UInt64?) { lock.withLock { keyframe }?(minimum) }
         func configureVideo(encoder: VideoEncoder?, decoder: VideoDecoder?, generation: UUID? = nil) {
             let host = lock.withLock { () -> MediaHostSession? in
                 keyframe = encoder.map { encoder in { _ in encoder.requestKeyframe() } }
                 preview = decoder
+                decoder?.setTargetLatencyNanos(timeline.playoutDelayNanos)
+                if let owner, let anchor = timeline.anchor(for: .init(sessionID: owner.peerID,
+                    broadcasterEpoch: owner.epoch, generation: 1), issuedAtHostNanos: MonotonicClock.nowNanos()) {
+                    decoder?.stagePlayoutAnchor(captureTimeNanos: anchor.captureTimeNanos,
+                        delayNanos: anchor.hostPlaybackTimeNanos - anchor.captureTimeNanos)
+                }
                 videoGeneration = generation
                 return owner == nil ? nil : self.host
             }
@@ -325,6 +442,7 @@ final class SecureMacMediaHost {
                 let previous = (host, local, annotations)
                 host = nil; local = nil; keyframe = nil; preview = nil; videoGeneration = nil
                 annotations = nil
+                mediaPeers.removeAll()
                 packetizer.discardPendingSamples(); expectedNextCapture = nil
                 return previous
             }
@@ -335,20 +453,30 @@ final class SecureMacMediaHost {
     private final class LocalRenderer: @unchecked Sendable {
         private let queue = DispatchQueue(label: "alo.secure-host.local-playback", qos: .userInteractive)
         private let lock = NSLock()
-        private let player: SynchronizedPlayer
+        private let player: SecureMacPlaybackTimeline
         private let timeline: CapturedMediaTimeline
+        private let stream: MediaStreamIdentifier
+        private let timing: (UInt64) -> Void
+        private var lastTimingReport: UInt64 = 0
         private var pending: [AudioPacket] = []
         private var stopped = false, playing = true
         private var timer: DispatchSourceTimer?
-        init(audioOutput: RoomAudioOutputEngine, timeline: CapturedMediaTimeline) throws {
-            player = try SynchronizedPlayer(audioOutput: audioOutput)
+        /// Read only before start(), while the creating executor owns the player.
+        var initialOutputFloor: UInt64 {
+            RoomTiming.outputLatencyFloor(player.outputLatencyForTimingNanos,
+                renderSchedulingHeadroomNanos: player.renderSchedulingHeadroomForTimingNanos)
+        }
+        init(audioOutput: RoomAudioOutputEngine, timeline: CapturedMediaTimeline, epoch: UInt64,
+             timing: @escaping (UInt64) -> Void) throws {
+            player = try SecureMacPlaybackTimeline(audioOutput: audioOutput)
             self.timeline = timeline
+            self.timing = timing
+            stream = .init(sessionID: UUID(), broadcasterEpoch: epoch, generation: 1)
         }
         func start() {
             queue.async {
                 guard !self.lock.withLock({ self.stopped }) else { return }
                 self.player.clockOffsetNanos = 0
-                self.player.setTargetLatencyNanos(self.timeline.playoutDelayNanos)
                 let timer = DispatchSource.makeTimerSource(queue: self.queue)
                 timer.schedule(deadline: .now(), repeating: .milliseconds(5))
                 timer.setEventHandler { [weak self] in self?.drain() }
@@ -370,6 +498,23 @@ final class SecureMacMediaHost {
         func setLevel(volume: Double, muted: Bool) {
             queue.async { self.player.setLevel(volume: volume, muted: muted) }
         }
+        func setMusicDucked(_ ducked: Bool) {
+            queue.async { self.player.setDuckingGain(ducked ? 0.3 : 1) }
+        }
+        func stage(_ change: CapturedMediaTimeline.PlayoutCutover, completion: @escaping (Bool) -> Void) {
+            queue.async {
+                guard !self.lock.withLock({ self.stopped }) else { completion(false); return }
+                let id = UUID()
+                let anchor = MediaStreamAnchor(stream: self.stream, captureTimeNanos: change.captureTimeNanos,
+                    frameIndex: change.frameIndex, hostPlaybackTimeNanos: change.captureTimeNanos + change.playoutDelayNanos,
+                    issuedAtHostNanos: MonotonicClock.nowNanos())
+                do {
+                    try self.player.prepare(id: id, anchor: anchor, clockOffsetNanos: 0)
+                    try self.player.commit(id: id)
+                    completion(true)
+                } catch { self.player.cancelPreparation(id: id); completion(false) }
+            }
+        }
         private func drain() {
             let batch = lock.withLock { () -> ([AudioPacket], Bool, Bool) in
                 let batch = pending; pending.removeAll(keepingCapacity: true)
@@ -377,9 +522,22 @@ final class SecureMacMediaHost {
             }
             guard !batch.2 else { return }
             player.setRoomPlayback(playing: batch.1)
-            player.setTargetLatencyNanos(timeline.playoutDelayNanos)
+            let now = MonotonicClock.nowNanos()
+            if batch.1, !batch.0.isEmpty, player.committedAnchor?.state != .running,
+               let anchor = timeline.anchor(for: stream, issuedAtHostNanos: now) {
+                let id = UUID()
+                do {
+                    try player.prepare(id: id, anchor: anchor, clockOffsetNanos: 0)
+                    try player.commit(id: id)
+                } catch { player.cancelPreparation(id: id) }
+            }
             for packet in batch.0 { player.accept(packet) }
             player.maintainSync()
+            if now >= lastTimingReport, now - lastTimingReport >= 1_000_000_000 {
+                lastTimingReport = now
+                timing(RoomTiming.outputLatencyFloor(player.outputLatencyForTimingNanos,
+                    renderSchedulingHeadroomNanos: player.renderSchedulingHeadroomForTimingNanos))
+            }
         }
         func stop() {
             lock.withLock { stopped = true; pending.removeAll() }
@@ -389,6 +547,25 @@ final class SecureMacMediaHost {
             await withCheckedContinuation { continuation in
                 queue.async {
                     continuation.resume(returning: self.lock.withLock({ self.stopped }) ? nil : self.player.syncReport())
+                }
+            }
+        }
+        func diagnostics() async -> ReceiverTimingDiagnostics? {
+            await withCheckedContinuation { continuation in
+                queue.async {
+                    guard !self.lock.withLock({ self.stopped }) else { continuation.resume(returning: nil); return }
+                    let report = self.player.syncReport()
+                    let format = self.player.outputHardwareFormatForDiagnostics
+                    continuation.resume(returning: ReceiverTimingDiagnostics(
+                        roundTripMilliseconds: 0, clockOffsetMilliseconds: 0, jitterMilliseconds: 0,
+                        recommendedBufferMilliseconds: Double(self.player.targetLatencyNanos) / 1_000_000,
+                        outputLatencyMilliseconds: Double(self.player.outputLatencyForTimingNanos) / 1_000_000,
+                        renderHeadroomMilliseconds: Double(self.player.renderSchedulingHeadroomForTimingNanos) / 1_000_000,
+                        outputSampleRate: format?.sampleRate, outputChannelCount: format?.channelCount,
+                        latenessMilliseconds: Double(report.latenessNanos) / 1_000_000,
+                        latePacketCount: report.latePacketCount, resyncCount: report.resyncCount,
+                        currentDriftMilliseconds: report.driftNanos.map { Double($0) / 1_000_000 },
+                        driftMeasurementAgeMilliseconds: report.driftSampleAgeNanos.map { Double($0) / 1_000_000 }))
                 }
             }
         }

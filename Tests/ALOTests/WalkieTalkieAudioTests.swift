@@ -529,6 +529,20 @@ struct WalkieTalkieAudioTests {
         #expect(jitter.lateDropCount == 1)
     }
 
+    @Test("Directed voice conceals one 10 ms packet rather than a legacy 20 ms chunk")
+    func directedVoiceConcealsTenMillisecondsWithoutChangingLivePacketDuration() {
+        var jitter = VoiceJitterBuffer(startupPacketCount: 1)
+        jitter.configurePacketFramesBeforeFirstAudio(480)
+        let packet = Data(count: 960)
+        #expect(jitter.insert(sequence: 0, data: packet) == [.audio(packet)])
+        jitter.configurePacketFramesBeforeFirstAudio(960)
+        #expect(jitter.concealmentFrames == 480)
+        #expect(jitter.insert(sequence: 2, data: packet).isEmpty)
+        #expect(jitter.insert(sequence: 3, data: packet) == [.silence(frames: 480), .audio(packet), .audio(packet)])
+        jitter.resetForRouteChange()
+        #expect(jitter.concealmentFrames == 480)
+    }
+
     @Test("A route change rebuilds the voice startup cushion")
     func routeChangeReprimesVoiceJitterBuffer() {
         let packet = Data([0, 0])

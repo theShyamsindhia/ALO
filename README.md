@@ -31,12 +31,17 @@ queue state are stored locally.
 - Macs that can discover and reach each other locally. The same Wi-Fi/LAN is the
   recommended setup; client isolation or firewall rules can block connections.
 
-ALO enables Apple's peer-to-peer networking for discovery and media/control
-connections where macOS makes those paths available. It does not require an
-internet connection for room traffic. However, 0.14.0 does **not** yet guarantee
-AirDrop-style, router-free operation between Macs on different networks. The
-expanded nearby/iOS transport and shared-annotation integrations are still in
-development and are not included in this Mac release.
+ALO enables Apple's peer-to-peer networking for discovery and authenticated
+connections where the operating system makes those paths available. Room traffic
+does not require an internet connection or a cloud relay. Wi-Fi hardware must
+remain available for nearby wireless paths; this is not Bluetooth audio transport
+between room members. Router-free reachability depends on devices, radio
+conditions and OS policy—it is not guaranteed by turning on airplane mode.
+
+The 0.14 integration includes an iPhone/iPad receiver and voice client for iOS 17+
+in [the iOS project](iOS/README.md). Device installation requires its own signing
+setup; the Mac download does not install an iOS app. Legacy rooms remain an
+explicit compatibility mode and cannot silently downgrade a secure room.
 
 ## Run the Mac app
 
@@ -188,13 +193,19 @@ new ALO build does not silently become a different app in macOS privacy settings
 ALO separates room coordination from the high-rate media stream:
 
 - Every member advertises and discovers the room over Bonjour and maintains direct
-  TCP control links to the other members. A deterministic peer-ID rule prevents two
-  duplicate links between the same pair of Macs.
+  authenticated TLS control links in secure-v2 rooms. A deterministic peer-ID rule
+  prevents duplicate links. Nearby paths use the same protocol as LAN paths.
 - Durable chat and queue state synchronize through **Automerge**, with a separate
   sync session for each reliable peer connection. A replacement connection starts
   with fresh sync knowledge; older peers use the bounded legacy event-sync path.
-- Presence, playback commands, broadcaster ownership, video state, and voice stay
-  on ALO's realtime control plane. Automerge is not the audio clock or media transport.
+- Presence, playback commands, broadcaster ownership and voice consent use the
+  realtime control plane. Automerge is not the audio clock or media transport.
+- Audio and directed voice use independent, authenticated UDP subscriptions.
+  Voice carries 10 ms of 48 kHz mono PCM per packet to a fixed, explicitly selected
+  recipient set. Receiving voice never opens the recipient's microphone.
+- Video has a separate authenticated reliable connection. Shared annotations are
+  presenter-authoritative vector events, not pixels burned into video or
+  Automerge documents. Their bounded lifecycle is independent of audio.
 - The current broadcaster sends timestamped audio and video directly to all listeners.
   This keeps one shared media timeline without making the room creator a permanent
   server. If the broadcaster leaves, the room stays connected and silent until any
@@ -206,13 +217,12 @@ ALO separates room coordination from the high-rate media stream:
 - Each Mac retains durable queue state and up to 500 chat events, including edits
   and reactions. This count-based cache is not a permanent archive. Transient broadcaster ownership is deliberately not restored after relaunch.
 
-Public rooms are discoverable and joinable on reachable local links. Private rooms
-require the same room ID and invite key, proved during the control handshake.
-Private broadcast media uses room-key TLS for media control and video, and AES-GCM
-with replay protection for audio datagrams. These protections do not provide forward
-secrecy or the future nearby transport's installation-identity model. Room coordination
-(chat, queue, presence, activities, and Talk/Open Line voice) still uses unencrypted
-TCP even in private rooms; public media is also unencrypted. Use trusted local links.
+Secure-v2 public rooms are discoverable and joinable on reachable local links;
+private rooms additionally require the room's 32-byte invite secret. Both use
+installation identities, pinned peer keys, TLS 1.3 admission and session-bound
+AES-GCM datagrams with replay protection. A public room is encrypted in transit,
+but is not access-restricted. First-contact trust is not independent verification
+of a person's identity. Legacy rooms retain their older, weaker channel protection.
 See the [channel-by-channel audit](docs/room-privacy.md).
 
 Per-person **Voice on this Mac** levels persist independently of media volume. Room
@@ -225,9 +235,10 @@ routing details. Status dots in People show per-device state; hover for details.
 - Eight rapid clock samples are taken when a Mac joins, followed by a continuous sample
   every second. A low-latency clock model estimates both offset and drift while rejecting
   Wi-Fi spikes.
-- The room establishes one shared playout target before audio begins. Once streaming starts,
-  that timeline is locked, so a joining Mac adopts the room's timing instead of interrupting
-  everyone already listening.
+- The room establishes one shared playout target before audio begins. A joining
+  device adopts that timing; a slow late joiner's network estimate cannot retime
+  healthy listeners. A larger hardware-output floor uses one announced future
+  capture boundary, with bounded old/new playback ownership rather than a room restart.
 - Output-device latency and render headroom are measured per Mac. Remaining error is
   corrected 20 times per second with a smoothed varispeed adjustment capped at 1%.
 - Each receiver watches the audio render clock while packets are still arriving. If a

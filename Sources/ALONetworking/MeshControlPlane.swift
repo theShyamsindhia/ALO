@@ -428,7 +428,7 @@ public final class MeshControlPlane: @unchecked Sendable {
         completion: @escaping (Result<(SecurePeerChannel, AuthenticatedPeer), Error>) -> Void) {
         queue.async { [weak self] in
             guard let self, !self.isStopped, self.room.transportPolicy == .secureV2,
-                  role == .mediaControl || role == .video,
+                  role == .mediaControl || role == .video || role == .voiceControl,
                   let identity = self.installationIdentity, let pins = self.peerPins,
                   let roomID = UUID(uuidString: self.room.id),
                   let peer = self.peers[peerID.uuidString], peer.authenticated,
@@ -491,6 +491,32 @@ public final class MeshControlPlane: @unchecked Sendable {
             do {
                 let host = try MediaHostSession(roomID: roomID, localPeerID: peerID, queue: self.queue, callbacks: callbacks)
                 host.start(); completion(.success(host))
+            } catch { completion(.failure(error)) }
+        }
+    }
+
+    /// The voice runtime shares the room executor, so beginTransmitting followed
+    /// by publishWalkieTalkie(.began) preserves authorization-before-offer order.
+    public func makeVoiceSession(callbacks: DirectedVoiceSession.Callbacks,
+                                 completion: @escaping (Result<DirectedVoiceSession, Error>) -> Void) {
+        queue.async {
+            guard !self.isStopped, self.room.transportPolicy == .secureV2, self.localPermits(.voice),
+                  let roomID = UUID(uuidString: self.room.id), let peerID = UUID(uuidString: self.nodeID) else {
+                completion(.failure(SecureTransportError.invalidState)); return
+            }
+            do {
+                let ownerQueue = self.queue
+                let session = try DirectedVoiceSession(roomID: roomID, localPeerID: peerID, queue: ownerQueue,
+                    callbacks: callbacks, open: { [weak self] remoteID, reply in
+                        guard let self else { reply(.failure(SecureTransportError.invalidState)); return }
+                        self.openMediaChannel(to: remoteID, role: .voiceControl) { result in
+                            switch result {
+                            case .success(let value): VoiceControlConnection.attach(value.0, queue: ownerQueue, completion: reply)
+                            case .failure(let error): reply(.failure(error))
+                            }
+                        }
+                    })
+                session.start(); completion(.success(session))
             } catch { completion(.failure(error)) }
         }
     }
@@ -709,6 +735,7 @@ public final class MeshControlPlane: @unchecked Sendable {
         queue.async { [weak self] in
             guard let self,
                   message.senderID == nodeID,
+                  room.transportPolicy != .secureV2 || message.kind != .audio,
                   isValidWalkieTalkie(message)
             else { return }
             for wireMessage in Self.legacySafeWalkieTalkieMessages(message) {
@@ -1004,7 +1031,7 @@ public final class MeshControlPlane: @unchecked Sendable {
         guard let installationIdentity, let peerPins, let roomID = UUID(uuidString: room.id) else { cancel(link); return }
         do {
             let admission: SecureRoomAdmission = room.isPrivate ? .privateRoom(secret: room.secureJoinSecret ?? Data()) : .publicRoom
-            let roles: Set<ReliableChannelRole> = incomingMediaChannelHandler == nil ? [.roomControl] : [.roomControl, .mediaControl, .video]
+            let roles: Set<ReliableChannelRole> = incomingMediaChannelHandler == nil ? [.roomControl] : [.roomControl, .mediaControl, .video, .voiceControl]
             let configuration = try SecurePeerConfiguration(roomID: roomID, incarnationID: incarnationID, admission: admission,
                 offer: ProtocolOffer(wireVersions: [2], stateSyncVersions: [1], capabilities: secureCapabilities),
                 direction: link.initiated ? .initiator(.roomControl) : .responder(allowedChannelRoles: roles))
@@ -1539,6 +1566,7 @@ public final class MeshControlPlane: @unchecked Sendable {
             guard permitsTransient(envelope, from: link, capability: .voice) else { return }
             let hopCount = envelope.walkieTalkieHopCount ?? 0
             guard let message = envelope.walkieTalkie,
+                  room.transportPolicy != .secureV2 || message.kind != .audio,
                   isValidWalkieTalkie(message),
                   Self.isValidWalkieTalkieOrigin(
                       senderID: message.senderID,

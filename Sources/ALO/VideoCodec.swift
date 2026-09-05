@@ -10,10 +10,12 @@ final class VideoEncoder {
 
     private let queue = DispatchQueue(label: "in.werai.video.encode", qos: .userInteractive)
     private let frameHandler: FrameHandler
+    private let failureHandler: (String) -> Void
     private var session: VTCompressionSession?
     private var dimensions: (width: Int32, height: Int32)?
     private var hasEncodedFrame = false
     private var forceNextKeyframe = false
+    private var configurationUnavailable = false
     private struct Capture { let buffer: CVPixelBuffer; let time: UInt64 }
     private let admission = VideoEncodeAdmission<Capture>()
 
@@ -21,8 +23,9 @@ final class VideoEncoder {
         queue.async { [weak self] in self?.forceNextKeyframe = true }
     }
 
-    init(frameHandler: @escaping FrameHandler) {
+    init(failureHandler: @escaping (String) -> Void = { _ in }, frameHandler: @escaping FrameHandler) {
         self.frameHandler = frameHandler
+        self.failureHandler = failureHandler
     }
 
     func encode(_ pixelBuffer: CVPixelBuffer, captureTimeNanos: UInt64) {
@@ -58,6 +61,7 @@ final class VideoEncoder {
 
     private func encodeOnQueue(_ work: VideoEncodeAdmission<Capture>.Work) {
         guard admission.accepts(work.id) else { return }
+        guard !configurationUnavailable else { finish(work.id); return }
         let pixelBuffer = work.frame.buffer, captureTimeNanos = work.frame.time
         let width = Int32(CVPixelBufferGetWidth(pixelBuffer))
         let height = Int32(CVPixelBufferGetHeight(pixelBuffer))
@@ -100,44 +104,70 @@ final class VideoEncoder {
         }
     }
 
+    /// VT's documented M-frame delay contract guarantees frame N-M is emitted
+    /// before encode(N) returns. RealTime is only a hint. One-slot admission
+    /// therefore requires a readable effective zero-delay value. Some hardware
+    /// derives this property from no-reordering mode but does not accept a setter.
+    static func configureImmediateOutput(setDelay: (Int) -> OSStatus, readDelay: () -> Int?) -> Bool {
+        let status = setDelay(0)
+        return (status == noErr || status == kVTPropertyNotSupportedErr) && readDelay() == 0
+    }
+
     private func configure(width: Int32, height: Int32) -> Bool {
         if let session {
             VTCompressionSessionInvalidate(session)
         }
-
-        var created: VTCompressionSession?
-        let encoderSpecification = [
-            kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String: true
-        ] as CFDictionary
-        let status = VTCompressionSessionCreate(
-            allocator: kCFAllocatorDefault,
-            width: width,
-            height: height,
-            codecType: kCMVideoCodecType_H264,
-            encoderSpecification: encoderSpecification,
-            imageBufferAttributes: nil,
-            compressedDataAllocator: nil,
-            outputCallback: nil,
-            refcon: nil,
-            compressionSessionOut: &created
-        )
-        guard status == noErr, let created else {
-            fputs("Could not start the hardware video encoder: \(status)\n", stderr)
-            return false
+        session = nil; dimensions = nil
+        // Prefer hardware; at most one software-only fallback. Never grow the
+        // submitted-frame window to accommodate an unbounded backend lookahead.
+        for enableHardware in [true, false] {
+            var created: VTCompressionSession?
+            let encoderSpecification = [
+                kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder as String: enableHardware
+            ] as CFDictionary
+            let status = VTCompressionSessionCreate(
+                allocator: kCFAllocatorDefault, width: width, height: height,
+                codecType: kCMVideoCodecType_H264, encoderSpecification: encoderSpecification,
+                imageBufferAttributes: nil, compressedDataAllocator: nil,
+                outputCallback: nil, refcon: nil, compressionSessionOut: &created)
+            guard status == noErr, let created else { continue }
+            VTSessionSetProperty(created, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+            VTSessionSetProperty(created, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
+            VTSessionSetProperty(created, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Main_AutoLevel)
+            VTSessionSetProperty(created, key: kVTCompressionPropertyKey_AverageBitRate, value: 4_000_000 as CFNumber)
+            VTSessionSetProperty(created, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: 30 as CFNumber)
+            VTSessionSetProperty(created, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 60 as CFNumber)
+            VTSessionSetProperty(created, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 2 as CFNumber)
+            var readStatus: OSStatus = noErr
+            let readDelay: () -> Int? = {
+                // This C API uses an untyped out pointer and returns a +1 CF
+                // value. Unmanaged is the correct storage/ownership bridge.
+                var copied: Unmanaged<CFTypeRef>?
+                readStatus = VTSessionCopyProperty(created, key: kVTCompressionPropertyKey_MaxFrameDelayCount,
+                    allocator: kCFAllocatorDefault, valueOut: &copied)
+                let value = copied?.takeRetainedValue()
+                guard readStatus == noErr, let value, CFGetTypeID(value) == CFNumberGetTypeID() else { return nil }
+                return (value as? NSNumber)?.intValue
+            }
+            var setStatus: OSStatus = noErr
+            let immediate = Self.configureImmediateOutput(setDelay: {
+                setStatus = VTSessionSetProperty(created, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: $0 as CFNumber)
+                return setStatus
+            }, readDelay: readDelay)
+            let prepareStatus = VTCompressionSessionPrepareToEncodeFrames(created)
+            let preparedDelay = readDelay()
+            guard immediate, prepareStatus == noErr, preparedDelay == 0 else {
+                fputs("H.264 output contract unavailable: hardware=\(enableHardware) set=\(setStatus) read=\(readStatus) delay=\(String(describing: preparedDelay)) prepare=\(prepareStatus)\n", stderr)
+                VTCompressionSessionInvalidate(created); continue
+            }
+            session = created; dimensions = (width, height); return true
         }
-
-        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
-        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
-        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Main_AutoLevel)
-        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_AverageBitRate, value: 4_000_000 as CFNumber)
-        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: 30 as CFNumber)
-        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 60 as CFNumber)
-        VTSessionSetProperty(created, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 2 as CFNumber)
-        VTCompressionSessionPrepareToEncodeFrames(created)
-
-        session = created
-        dimensions = (width, height)
-        return true
+        // A failed backend stays disabled for this encoder generation rather
+        // than recreating two sessions for every incoming capture frame.
+        configurationUnavailable = true
+        let message = "Screen sharing encoder cannot provide bounded zero-delay H.264 output."
+        fputs(message + "\n", stderr); failureHandler(message)
+        return false
     }
 
     private func emit(
@@ -180,7 +210,7 @@ final class VideoEncoder {
         ))
         if !hasEncodedFrame {
             hasEncodedFrame = true
-            print("Screen sharing started (hardware H.264, \(width)×\(height), 30 fps).")
+            print("Screen sharing started (H.264, \(width)×\(height), 30 fps).")
         }
     }
 

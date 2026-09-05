@@ -4,6 +4,46 @@ import ALOCore
 @testable import ALOAppleMedia
 
 struct MediaPlaybackTransitionTests {
+    @Test func missedLargerDelayCutoverRequestsLocalRepairWithoutMutatingLiveTrack() throws {
+        var output = MediaPlaybackTransition()
+        let old = UUID(), next = UUID()
+        try output.prepare(id: old, anchor: .init(captureTimeNanos: 0, hostPlaybackTimeNanos: 100_000_000),
+                           offsetNanos: 0, outputLatencyNanos: 0, nowNanos: 0)
+        try output.commit(id: old, nowNanos: 0)
+        try output.enqueue(packet(2_400, 50_000_000), nowNanos: 60_000_000)
+        _ = output.drain(nowNanos: 60_000_000)
+        let anchor = AudioPlaybackAnchor(captureTimeNanos: 50_000_000, hostPlaybackTimeNanos: 250_000_000)
+        #expect(throws: AppleMediaError.missedCutover) {
+            try output.prepare(id: next, anchor: anchor, offsetNanos: 0, outputLatencyNanos: 0,
+                               nowNanos: 60_000_000, preserveCurrentTimeline: true)
+        }
+        #expect(output.trackIDs == [old])
+        // Reset is an explicit caller decision after detecting a missed room
+        // boundary, never an incidental effect of reversible preparation.
+        output.reset()
+        try output.prepare(id: next, anchor: anchor, offsetNanos: 0, outputLatencyNanos: 0,
+                           nowNanos: 60_000_000)
+        try output.commit(id: next, nowNanos: 60_000_000)
+        #expect(output.trackIDs == [next])
+    }
+    @Test func sameTimelineRenewalPreservesPlayerAndAlreadyScheduledTail() throws {
+        var output = MediaPlaybackTransition()
+        let old = UUID(), renewed = UUID()
+        try output.prepare(id: old, anchor: .init(captureTimeNanos: 0, hostPlaybackTimeNanos: 100_000_000),
+                           offsetNanos: 0, outputLatencyNanos: 0, nowNanos: 0)
+        try output.commit(id: old, nowNanos: 0)
+        try output.enqueue(packet(2_400, 50_000_000), nowNanos: 60_000_000)
+        _ = output.drain(nowNanos: 60_000_000)
+        // The prior scheduler already owns this boundary. A subscription-only
+        // renewal must not demand another predecessor or reject that overlap.
+        try output.prepare(id: renewed, anchor: .init(captureTimeNanos: 50_000_000, hostPlaybackTimeNanos: 150_000_000),
+                           offsetNanos: 0, outputLatencyNanos: 0, nowNanos: 60_000_000,
+                           preserveCurrentTimeline: true)
+        try output.commit(id: renewed, nowNanos: 70_000_000)
+        #expect(output.trackIDs == [old])
+        try output.enqueue(packet(2_640, 55_000_000), nowNanos: 70_000_000)
+        #expect(output.drain(nowNanos: 70_000_000).map(\.trackID) == [old])
+    }
     private func packet(_ frame: UInt64, _ capture: UInt64) -> AudioPacket {
         .init(sequence: UInt32(frame / 240), frameIndex: frame, captureTimeNanos: capture,
               samples: Array(repeating: 1, count: 480))
@@ -17,7 +57,8 @@ struct MediaPlaybackTransitionTests {
         try output.prepare(id: new, anchor: .init(captureTimeNanos: 50_000_000, hostPlaybackTimeNanos: 150_000_000),
                            offsetNanos: 0, outputLatencyNanos: 0, nowNanos: 0)
         try output.enqueue(packet(0, 0), nowNanos: 0)
-        #expect(output.drain(nowNanos: 0).map(\.trackID) == [old])
+        let first = output.drain(nowNanos: 0)
+        #expect(first.map(\.trackID) == [old])
         #expect(output.trackIDs == [old])
         try output.commit(id: new, nowNanos: 10_000_000)
         try output.enqueue(packet(240, 5_000_000), nowNanos: 10_000_000)
@@ -27,6 +68,10 @@ struct MediaPlaybackTransitionTests {
         #expect(scheduled.map { $0.buffer.renderTimeNanos } == [105_000_000, 150_000_000])
         #expect(output.activeID == old)
         _ = output.drain(nowNanos: 150_000_000)
+        #expect(output.trackIDs == [old, new])
+        for delivery in first + scheduled where delivery.trackID == old {
+            output.completed(trackID: old, token: delivery.buffer.token)
+        }
         #expect(output.trackIDs == [new])
     }
     @Test func failedOrExpiredProposalNeverStopsPredecessor() throws {

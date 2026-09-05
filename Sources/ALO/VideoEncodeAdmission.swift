@@ -2,6 +2,8 @@ import Foundation
 
 /// At most one submitted hardware frame and one newest waiting capture. Dropping
 /// an unencoded frame needs no H.264 dependency repair: it never entered the GOP.
+/// The backend MUST enforce MaxFrameDelayCount == 0: an output cannot require
+/// the next input, because the next input waits for this work's completion.
 final class VideoEncodeAdmission<Frame>: @unchecked Sendable {
     struct Work { let id: UUID; let frame: Frame }
     private let lock = NSLock()

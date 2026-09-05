@@ -4,6 +4,23 @@ import Testing
 
 @Suite("Bounded authenticated receiver timing wire")
 struct MediaReceiverTimingReportTests {
+    @Test func playbackTelemetryUsesRelativeFreshnessAndPreservesStaticScreenAge() throws {
+        let playback = PlaybackSyncReport(measuredAtNanos: 900_000_000_000,
+            latenessNanos: 10_000_000, latePacketCount: 3, resyncCount: 4,
+            driftNanos: 40_000_000, driftSampleAgeNanos: 1_500_000_000,
+            screenTiming: .init(latestHandoffAgeNanos: 90_000_000_000, latestDeadlineMissNanos: 0,
+                oldestPendingDeadlineMissNanos: 30_000_000))
+        let report = try MediaReceiverTimingReport(hardwareOutputFloorNanos: 250_000_000,
+            networkRecommendedDelayNanos: 300_000_000, playback: playback)
+        #expect(report.playback?.measuredAtNanos == 0)
+        #expect(report.playback?.driftNanos == 40_000_000)
+        let aged = try #require(report.aged(by: 1_000_000_000))
+        #expect(aged.sampleAgeNanos == 1_000_000_000)
+        #expect(aged.playback?.driftNanos == nil && aged.playback?.driftSampleAgeNanos == nil)
+        #expect(aged.playback?.screenTiming?.latestHandoffAgeNanos == 60_000_000_000)
+        #expect(aged.playback?.screenTiming?.oldestPendingDeadlineMissNanos == 30_000_000)
+        #expect(aged.playback?.latePacketCount == 3)
+    }
     @Test func wirePreservesIndependentHardwareFloorAndNetworkMeasurement() throws {
         let stream = MediaStreamIdentifier(sessionID: UUID(), broadcasterEpoch: 7, generation: 8)
         let report = try MediaReceiverTimingReport(hardwareOutputFloorNanos: 300_000_000,
