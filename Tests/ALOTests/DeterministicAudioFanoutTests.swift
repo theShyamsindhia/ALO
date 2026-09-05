@@ -9,6 +9,14 @@ import ALOCore
 /// its queue policy, and the TCP join/report/resync path are production code.
 @Suite("Deterministic real-host audio fan-out", .serialized)
 struct DeterministicAudioFanoutTests {
+    @Test(arguments: [UInt64(70_000_000), 110_000_000])
+    func delayedCaptureStillFitsTheSharedLinkBudget(wakeOversleep: UInt64) throws {
+        let room = try simulate(peers: 8, rate: 4_000_000,
+            policy: .boundedLatest(maxInFlight: 8), oversleep: wakeOversleep)
+        #expect(room.maximumAge < SynchronizedPlayer.targetLatencyNanos)
+        #expect(room.minimumPackets >= 50)
+    }
+
     @Test(arguments: [UInt64(0), 35_000_000])
     func realSenderPreservesFastLinksAndBoundsSharedLinkDelay(wakeOversleep: UInt64) throws {
         let bounded = HostServer.AudioBackpressurePolicy.boundedLatest(maxInFlight: 8)
