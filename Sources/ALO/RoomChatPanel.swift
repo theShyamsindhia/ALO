@@ -410,7 +410,8 @@ struct RoomChatPanel: View {
 
     private func pendingAttachmentPreview(_ attachment: PendingChatAttachment) -> some View {
         HStack(spacing: 9) {
-            filePreview(url: attachment.url, contentType: attachment.metadata.contentType)
+            filePreview(url: attachment.url, contentType: attachment.metadata.contentType,
+                        allowsImagePreview: true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(attachment.metadata.fileName).lineLimit(1)
                 Text(ByteCountFormatter.string(fromByteCount: Int64(attachment.metadata.byteCount), countStyle: .file))
@@ -431,7 +432,8 @@ struct RoomChatPanel: View {
             if let localURL { NSWorkspace.shared.open(localURL) }
         } label: {
             HStack(spacing: 9) {
-                filePreview(url: localURL, contentType: attachment.contentType)
+                filePreview(url: localURL, contentType: attachment.contentType,
+                            allowsImagePreview: false)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(attachment.fileName).font(.system(size: 11, weight: .semibold)).lineLimit(1)
                     Text(localURL == nil
@@ -452,8 +454,9 @@ struct RoomChatPanel: View {
     }
 
     @ViewBuilder
-    private func filePreview(url: URL?, contentType: String?) -> some View {
-        if let url, contentType.flatMap(UTType.init)?.conforms(to: .image) == true,
+    private func filePreview(url: URL?, contentType: String?, allowsImagePreview: Bool) -> some View {
+        if allowsImagePreview, let url,
+           contentType.flatMap(UTType.init)?.conforms(to: .image) == true,
            let image = Self.boundedThumbnail(at: url) {
             Image(nsImage: image).resizable().scaledToFill()
                 .frame(width: 34, height: 34).clipShape(RoundedRectangle(cornerRadius: 7))
