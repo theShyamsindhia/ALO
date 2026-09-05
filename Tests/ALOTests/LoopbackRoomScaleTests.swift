@@ -427,6 +427,49 @@ struct LoopbackRoomScaleTests {
         #expect(original.packetCount == 0)
     }
 
+    @Test("Observational A/B separates colocated receiver PCM work from capture scheduling")
+    func receiverPCMPlacementCaptureAB() throws {
+        let inline = try runRoom(peerCount: 8, linkBitsPerSecond: nil, policy: .unbounded,
+            schedulerOversleep: 0, deferredPCM: false)
+        let deferred = try runRoom(peerCount: 8, linkBitsPerSecond: nil, policy: .unbounded,
+            schedulerOversleep: 0, deferredPCM: true)
+        #expect(inline.minimumPacketsReceived >= 190 && deferred.minimumPacketsReceived >= 190)
+        // This comparison does not change or replace the existing live gate.
+        // Compare source ages, not a pass flag based on a cheaper receive path.
+        print("Receiver PCM A/B capture ages: inline [\(inline.captureCallbackAgeSummary)]; deferred [\(deferred.captureCallbackAgeSummary)]")
+        print("Receiver PCM A/B maximum callback-entry ages: inline \(inline.maximumReceiveEntryAgeNanos / 1_000_000)ms; deferred \(deferred.maximumReceiveEntryAgeNanos / 1_000_000)ms")
+    }
+
+    @Test("Deferred PCM validation rejects malformed, corrupt, duplicate and overflowing input")
+    func deferredPCMValidationIsBoundedAndDoesNotAcceptInvalidAudio() {
+        func packet(_ sequence: UInt32, sample: Int16 = 0) -> Data {
+            AudioPacket(sequence: sequence, frameIndex: UInt64(sequence) * 240,
+                captureTimeNanos: 1, samples: [Int16](repeating: sample, count: 480)).encoded()
+        }
+        var valid = DeferredPCMReceipts()
+        #expect(valid.append(packet(0), arrivedAt: 2) != nil)
+        #expect(valid.validate(expectedSample: 0).isValid)
+        #expect(valid.validate(expectedSample: 1).invalidPCM == 1,
+            "A valid header does not prove the expected PCM payload")
+        var corrupted = DeferredPCMReceipts()
+        _ = corrupted.append(packet(0, sample: 7), arrivedAt: 2)
+        #expect(corrupted.validate(expectedSample: 0).invalidPCM == 1)
+        #expect(!corrupted.validate(expectedSample: 0).isValid)
+        var malformed = DeferredPCMReceipts()
+        #expect(malformed.append(packet(0).dropLast(), arrivedAt: 2) == nil)
+        #expect(malformed.validate(expectedSample: 0).malformed == 1)
+        #expect(!malformed.validate(expectedSample: 0).isValid)
+        var duplicate = valid
+        _ = duplicate.append(packet(0), arrivedAt: 3)
+        #expect(duplicate.validate(expectedSample: 0).duplicates == 1)
+        #expect(!duplicate.validate(expectedSample: 0).isValid)
+        var overflow = DeferredPCMReceipts()
+        for sequence in UInt32(0)...200 { _ = overflow.append(packet(sequence), arrivedAt: 2) }
+        #expect(overflow.count == 200)
+        #expect(overflow.validate(expectedSample: 0).overflow == 1)
+        #expect(!overflow.validate(expectedSample: 0).isValid)
+    }
+
     @Test("Bounded fan-out prevents live room latency growth", arguments: [0.0, 0.035])
     func boundedFanoutPreventsRoomScaleDelay(schedulerOversleep: TimeInterval) throws {
         let boundedPolicy = HostServer.AudioBackpressurePolicy.boundedLatest(maxInFlight: 8)
@@ -1263,7 +1306,8 @@ struct LoopbackRoomScaleTests {
         peerCount: Int,
         linkBitsPerSecond: UInt64?,
         policy: HostServer.AudioBackpressurePolicy,
-        schedulerOversleep: TimeInterval
+        schedulerOversleep: TimeInterval,
+        deferredPCM: Bool = false
     ) throws -> RoomMeasurements {
         let hostReady = DispatchSemaphore(value: 0)
         let state = PortState()
@@ -1272,7 +1316,7 @@ struct LoopbackRoomScaleTests {
         let captureCallbackAges = AudioCompletionLatencies()
         let captureToAdmissionAges = AudioCompletionLatencies()
         defer {
-            print("Fixture scheduler: peers=\(peerCount), link=\(linkBitsPerSecond.map(String.init) ?? "unshaped"), policy=\(policy), injectedWake=\(schedulerOversleep * 1_000)ms; capture callback age [\(captureCallbackAges.summary)]; capture-to-outbound-admission age [\(captureToAdmissionAges.summary)]; shaper dispatch lateness [\(shaper?.dispatchLatenessSummary ?? "not shaped")]")
+            print("Fixture scheduler: peers=\(peerCount), link=\(linkBitsPerSecond.map(String.init) ?? "unshaped"), policy=\(policy), deferredPCM=\(deferredPCM), injectedWake=\(schedulerOversleep * 1_000)ms; capture callback age [\(captureCallbackAges.summary)]; capture-to-outbound-admission age [\(captureToAdmissionAges.summary)]; shaper dispatch lateness [\(shaper?.dispatchLatenessSummary ?? "not shaped")]")
         }
         let submissions = AudioSubmissionLedger()
         let host = HostServer(
@@ -1330,7 +1374,7 @@ struct LoopbackRoomScaleTests {
         var peers = [HeadlessLoopbackPeer]()
         do {
             for index in 0..<peerCount {
-                let peer = HeadlessLoopbackPeer(index: index)
+                let peer = HeadlessLoopbackPeer(index: index, deferredPCM: deferredPCM)
                 try peer.start(hostPort: hostPort)
                 peers.append(peer)
             }
@@ -1424,6 +1468,18 @@ struct LoopbackRoomScaleTests {
                 throw LoopbackTestError.audioDidNotDrain(peers.map(\.packetCount))
             }
 
+            if deferredPCM {
+                for peer in peers {
+                    // Copy only bounded raw receipts across the queue barrier;
+                    // all PCM decoding and validation runs on this test worker,
+                    // after capture and delivery, never on a network queue.
+                    let receipts = peer.deferredPCMReceipts()
+                    let validation = receipts.validate(expectedSample: 0)
+                    print("Deferred PCM validation: \(validation)")
+                    try #require(validation.isValid, "Invalid deferred audio must never be accepted")
+                    try #require(validation.decoded == peer.packetCount)
+                }
+            }
             let snapshots = peers.map { $0.snapshot() }
             let finalArrivals = try snapshots.map { snapshot in
                 guard let lastSequence = snapshot.lastSequence,
@@ -1449,6 +1505,9 @@ struct LoopbackRoomScaleTests {
             let finalAges = finalArrivals.map { $0.arrivedNanos - $0.captureNanos }
             let maximumPacketAge = snapshots.flatMap { $0.arrivals.values }.map {
                 $0.arrivedNanos - $0.captureNanos
+            }.max() ?? 0
+            let maximumReceiveEntryAge = snapshots.flatMap { $0.arrivals.values }.compactMap { arrival in
+                arrival.receiveEntryNanos.map { $0 - arrival.captureNanos }
             }.max() ?? 0
             print("Audio actual final sequences: \(snapshots.compactMap(\.lastSequence)); maximum packet age: \(maximumPacketAge / 1_000_000)ms")
             let offsets = snapshots.compactMap(\.clockOffsetNanos)
@@ -1486,7 +1545,9 @@ struct LoopbackRoomScaleTests {
                 maximumAudibleLatenessNanos: snapshots.map(\.audibleLatenessNanos).max() ?? 0,
                 clockOffsetSpreadNanos: offsetSpread(offsets),
                 minimumPacketsReceived: snapshots.map(\.packetCount).min() ?? 0,
-                resyncCommandsReceived: resyncCommandsReceived
+                resyncCommandsReceived: resyncCommandsReceived,
+                captureCallbackAgeSummary: captureCallbackAges.summary,
+                maximumReceiveEntryAgeNanos: maximumReceiveEntryAge
             )
         } catch {
             peers.forEach { $0.stop() }
@@ -1515,6 +1576,8 @@ private final class HeadlessLoopbackPeer {
     private let index: Int
     private let participantID: String
     private let expectedSample: Int16?
+    private let deferredPCM: Bool
+    private var deferredReceipts = DeferredPCMReceipts()
     private let joined = DispatchSemaphore(value: 0)
     private let pongReceived = DispatchSemaphore(value: 0)
     private let clock = ClockSynchronizer()
@@ -1533,10 +1596,11 @@ private final class HeadlessLoopbackPeer {
     private var receivedLevels = [(volume: Double, muted: Bool)]()
     private var corruptedPackets = 0
 
-    init(index: Int, participantID: String? = nil, expectedSample: Int16? = nil) {
+    init(index: Int, participantID: String? = nil, expectedSample: Int16? = nil, deferredPCM: Bool = false) {
         self.index = index
         self.participantID = participantID ?? "loopback-peer-\(index)"
         self.expectedSample = expectedSample
+        self.deferredPCM = deferredPCM
         self.queue = DispatchQueue(label: "in.werai.tests.loopback-peer.\(index)", qos: .userInteractive)
     }
 
@@ -1550,6 +1614,7 @@ private final class HeadlessLoopbackPeer {
     var roomPlaybackStates: [Bool] { queue.sync { receivedRoomPlaybackStates } }
     var playoutDelays: [UInt64] { queue.sync { receivedPlayoutDelays } }
     var levels: [(volume: Double, muted: Bool)] { queue.sync { receivedLevels } }
+    func deferredPCMReceipts() -> DeferredPCMReceipts { queue.sync { deferredReceipts } }
 
     func start(hostPort: NWEndpoint.Port) throws {
         let udp = try NWListener(using: .udp, on: .any)
@@ -1768,15 +1833,22 @@ private final class HeadlessLoopbackPeer {
 
         func receiveNext() {
             connection.receiveMessage { [weak self] data, _, _, error in
-                if let self, let data, let packet = AudioPacket(data: data) {
-                    if let expected = self.expectedSample,
-                       packet.samples.isEmpty || packet.samples.contains(where: { $0 != expected }) {
-                        self.corruptedPackets += 1
+                let enteredAt = MonotonicClock.nowNanos()
+                if let self, let data {
+                    if self.deferredPCM {
+                        if let receipt = self.deferredReceipts.append(data, arrivedAt: enteredAt) {
+                            self.arrivals[receipt.sequence] = receipt.arrival
+                        }
+                    } else if let packet = AudioPacket(data: data) {
+                        if let expected = self.expectedSample,
+                           packet.samples.isEmpty || packet.samples.contains(where: { $0 != expected }) {
+                            self.corruptedPackets += 1
+                        }
+                        self.arrivals[packet.sequence] = PacketArrival(
+                            captureNanos: packet.captureTimeNanos,
+                            arrivedNanos: MonotonicClock.nowNanos(), receiveEntryNanos: enteredAt
+                        )
                     }
-                    self.arrivals[packet.sequence] = PacketArrival(
-                        captureNanos: packet.captureTimeNanos,
-                        arrivedNanos: MonotonicClock.nowNanos()
-                    )
                 }
                 if error == nil { receiveNext() }
             }
@@ -1942,6 +2014,59 @@ private final class CaptureTimeline: @unchecked Sendable {
     }
 }
 
+/// At most 200 full datagrams per peer. Header admission is provisional: the
+/// completed batch must pass full PCM validation before a run can be accepted.
+private struct DeferredPCMReceipts {
+    struct Validation: CustomStringConvertible {
+        let decoded: Int
+        let malformed: Int
+        let invalidPCM: Int
+        let duplicates: Int
+        let overflow: Int
+        var isValid: Bool { decoded > 0 && malformed == 0 && invalidPCM == 0 && duplicates == 0 && overflow == 0 }
+        var description: String {
+            "decoded=\(decoded), malformed=\(malformed), invalidPCM=\(invalidPCM), duplicates=\(duplicates), overflow=\(overflow)"
+        }
+    }
+    private struct Raw {
+        let data: Data
+        let header: AudioProbeHeader
+    }
+    private var raw: [Raw] = []
+    private var sequences: Set<UInt32> = []
+    private var malformed = 0
+    private var duplicates = 0
+    private var overflow = 0
+    var count: Int { raw.count }
+
+    mutating func append(_ data: Data, arrivedAt: UInt64) -> (sequence: UInt32, arrival: PacketArrival)? {
+        guard let header = AudioProbeHeader.read(in: data) else { malformed += 1; return nil }
+        guard raw.count < 200 else { overflow += 1; return nil }
+        raw.append(Raw(data: data, header: header))
+        guard sequences.insert(header.sequence).inserted else { duplicates += 1; return nil }
+        return (header.sequence, PacketArrival(captureNanos: header.captureTimeNanos,
+            arrivedNanos: arrivedAt, receiveEntryNanos: arrivedAt))
+    }
+
+    func validate(expectedSample: Int16) -> Validation {
+        var invalid = 0
+        var decoded = 0
+        for receipt in raw {
+            guard let packet = AudioPacket(data: receipt.data),
+                  packet.sequence == receipt.header.sequence,
+                  packet.captureTimeNanos == receipt.header.captureTimeNanos,
+                  !packet.samples.isEmpty,
+                  packet.samples.allSatisfy({ $0 == expectedSample }) else {
+                invalid += 1
+                continue
+            }
+            decoded += 1
+        }
+        return Validation(decoded: decoded, malformed: malformed, invalidPCM: invalid,
+            duplicates: duplicates, overflow: overflow)
+    }
+}
+
 private struct AudioProbeHeader {
     let sequence: UInt32
     let captureTimeNanos: UInt64
@@ -2042,6 +2167,8 @@ private final class PortState: @unchecked Sendable {
 private struct PacketArrival {
     let captureNanos: UInt64
     let arrivedNanos: UInt64
+    // Callback entry is observable; this is not a kernel wire-arrival timestamp.
+    var receiveEntryNanos: UInt64? = nil
 }
 
 private struct PeerSnapshot {
@@ -2060,6 +2187,8 @@ private struct RoomMeasurements {
     let clockOffsetSpreadNanos: UInt64
     let minimumPacketsReceived: Int
     let resyncCommandsReceived: Int
+    let captureCallbackAgeSummary: String
+    let maximumReceiveEntryAgeNanos: UInt64
 }
 
 private enum VirtualAudioSink {
