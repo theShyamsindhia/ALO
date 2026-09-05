@@ -6,7 +6,7 @@ trigger: "User authorized investigating and fixing the audio-delivery release bl
 ## Current Focus
 
 - hypothesis: A single latest-only pending slot drops fresh audio when capture callbacks briefly outpace completion dispatch, even without link congestion.
-- next_action: Verify monotonic capture-fixture pacing on CI, then complete the signed release gate.
+- next_action: Test a scoped latency-critical activity for the headless live fixture, then complete the signed release gate.
 
 ## Evidence
 
@@ -36,3 +36,5 @@ trigger: "User authorized investigating and fixing the audio-delivery release bl
 - Replace the fixture's relative sleep with absolute mach_wait_until deadlines on the same monotonic timebase as its capture stamps; use production-equivalent user-interactive priorities for capture and peer queues. Preserve 48 kHz offered load, explicit 35 ms wake injection, all delivery/latency limits, and actual transport drainage.
 - An optimization-only test experiment hit the existing SwiftPM executable-target test-entry issue (ALO receives --test-bundle-path). No compiler flag or workflow change was retained.
 - Monotonic fixture checks: 14 targeted sender/fanout tests pass; normal capture wake delay stays within 12 ms and deliberate 35 ms oversleep remains exercised. All 23 real-loopback tests pass with unchanged packet and latency thresholds.
+- CI 33966074758 still shows 135/200 direct bounded delivery and capture wake delays up to 195 ms with the absolute timer. It also failed two connection setup checks. Precise sleep alone does not prevent runner scheduling/throttling.
+- Next falsifiable check: scope Foundation's latency-critical user activity to runRoom, paired with defer on all paths. The headless fixture opens no real audio device; unlike an active audio session it otherwise provides no process activity assertion. Local SDK NSProcessInfo.h documents this option for precise audio/video timers and I/O. No production power policy or threshold change.

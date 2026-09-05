@@ -1198,6 +1198,15 @@ struct LoopbackRoomScaleTests {
         policy: HostServer.AudioBackpressurePolicy,
         schedulerOversleep: TimeInterval
     ) throws -> RoomMeasurements {
+        // This headless fixture has no active audio device. Request precise
+        // scheduling only while measuring live capture/transport, as a real
+        // audio session would; do not let background throttling become network
+        // delay. End the activity on success and on every error path.
+        let activity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
+            reason: "Measure live room audio delivery at the capture rate"
+        )
+        defer { ProcessInfo.processInfo.endActivity(activity) }
         let hostReady = DispatchSemaphore(value: 0)
         let state = PortState()
         let shaper = linkBitsPerSecond.map(FluidLinkShaper.init(bitsPerSecond:))
