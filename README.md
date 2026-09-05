@@ -1,6 +1,8 @@
-<p align="center">
-  <img src="docs/brand/alo-social.png" alt="ALO — Listen together." width="720">
-</p>
+<img src="Resources/ALOLogo-1024.png" alt="ALO app icon" width="96" height="96">
+
+# ALO
+
+Listen together.
 
 Share what’s playing on your Mac. Hear it together, in sync.
 
