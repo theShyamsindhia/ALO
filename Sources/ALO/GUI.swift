@@ -1476,13 +1476,8 @@ final class ALOViewModel: ObservableObject {
     @Published var currentDeviceColorHex = DeviceAppearance.colors[0]
     @Published var currentDeviceProfileImageData: Data?
     @Published var currentParticipantID: String?
-    /// Menu-bar selections remain live until they are clicked again. The
-    /// floating bar keeps a separate, momentary push-to-talk selection.
-    @Published private(set) var latchedTalkTargetIDs = Set<String>()
+    /// Talk recipients exist only for the duration of a press.
     @Published private(set) var pushToTalkTargetIDs = Set<String>()
-    /// Tracks only the audience selected from the compact menu-bar controls.
-    /// The target set remains the source of truth for transport routing.
-    @Published private(set) var compactTalkSelection: String?
     @Published private(set) var walkieTalking = false
     @Published private(set) var walkieStarting = false
     @Published private(set) var incomingWalkieSpeakerIDs = Set<String>()
@@ -1536,7 +1531,6 @@ final class ALOViewModel: ObservableObject {
     @Published private(set) var musicDuckingEnabled = UserDefaults.standard.bool(forKey: "musicDuckingEnabled")
     @Published private var participantVoiceLevels = VoiceLevelStore().levels
     private let voiceLevelStore = VoiceLevelStore()
-    private var voiceVolumesBeforeMute = [String: Double]()
     private let roomStore = RoomStore()
     private let lastJoinedRoomStore = LastJoinedRoomStore()
     private let nodeID: String
@@ -1989,7 +1983,6 @@ final class ALOViewModel: ObservableObject {
                 self.walkieGeneration += 1
                 self.walkieTalking = false
                 self.walkieStarting = false
-                self.latchedTalkTargetIDs.removeAll()
                 self.pushToTalkTargetIDs.removeAll()
                 self.globalShortcutTalkTargets.removeAll()
                 self.errorMessage = self.readable(error)
@@ -2184,23 +2177,6 @@ final class ALOViewModel: ObservableObject {
         participantVoiceLevels[participantID] = level
         voiceLevelStore.set(level, for: participantID)
         meshSession?.setVoiceVolume(level, for: participantID)
-    }
-
-    func voiceIsMuted(for participantID: String) -> Bool {
-        voiceVolume(for: participantID) <= 0.001
-    }
-
-    /// Per-person voice muting is local to this Mac and restores the listener's
-    /// previous level when unmuted.
-    func toggleVoiceMute(for participantID: String) {
-        let current = voiceVolume(for: participantID)
-        if current > 0.001 {
-            voiceVolumesBeforeMute[participantID] = current
-            setVoiceVolume(0, for: participantID)
-        } else {
-            setVoiceVolume(voiceVolumesBeforeMute.removeValue(forKey: participantID) ?? 1,
-                           for: participantID)
-        }
     }
 
     func setParticipantVolume(_ participant: RoomParticipant, volume: Double) {
@@ -2418,98 +2394,6 @@ final class ALOViewModel: ObservableObject {
         }
     }
 
-    func isTalkTargetSelected(_ targetID: String?) -> Bool {
-        let remoteIDs = currentRemoteParticipantIDs
-        guard !remoteIDs.isEmpty else { return false }
-        if let targetID { return latchedTalkTargetIDs.contains(targetID) }
-        return remoteIDs.isSubset(of: latchedTalkTargetIDs)
-    }
-
-    /// Menu-bar behavior: click once to keep talking to a device, and click
-    /// again to stop. "Everyone" captures the devices that are present now.
-    func toggleTalkTarget(_ targetID: String?) {
-        compactTalkSelection = nil
-        let remoteIDs = currentRemoteParticipantIDs
-        guard !remoteIDs.isEmpty else {
-            statusText = "No other device is available for Talk"
-            return
-        }
-        latchedTalkTargetIDs = Self.toggledTalkTargets(
-            latchedTalkTargetIDs,
-            targetID: targetID,
-            currentlyPresent: remoteIDs
-        )
-        reconcileTalkTargets()
-    }
-
-    /// Compact controls intentionally allow one unambiguous audience at a
-    /// time: either the whole room or exactly one person. Selecting the active
-    /// audience again turns Talk off.
-    func toggleCompactTalkTarget(_ targetID: String?) {
-        guard compactTalkCanChangeAudience else {
-            statusText = "Close the open line before changing the Talk audience"
-            return
-        }
-        let remoteIDs = currentRemoteParticipantIDs
-        guard !remoteIDs.isEmpty else {
-            statusText = "No other device is available for Talk"
-            return
-        }
-        let roomToken = Self.compactRoomTalkToken
-        let requested = targetID ?? roomToken
-        if compactTalkSelection == requested, !latchedTalkTargetIDs.isEmpty {
-            compactTalkSelection = nil
-            latchedTalkTargetIDs.removeAll()
-        } else if let targetID {
-            guard remoteIDs.contains(targetID) else { return }
-            compactTalkSelection = targetID
-            latchedTalkTargetIDs = [targetID]
-        } else {
-            compactTalkSelection = roomToken
-            latchedTalkTargetIDs = remoteIDs
-        }
-        reconcileTalkTargets()
-    }
-
-    var compactRoomTalkIsSelected: Bool {
-        compactTalkSelection == Self.compactRoomTalkToken
-            && !latchedTalkTargetIDs.isEmpty
-            && currentRemoteParticipantIDs.isSubset(of: latchedTalkTargetIDs)
-    }
-
-    var compactPrivateTalkTargetID: String? {
-        guard let compactTalkSelection,
-              compactTalkSelection != Self.compactRoomTalkToken,
-              latchedTalkTargetIDs == [compactTalkSelection],
-              currentRemoteParticipantIDs.contains(compactTalkSelection)
-        else { return nil }
-        return compactTalkSelection
-    }
-
-    var compactTalkCanChangeAudience: Bool {
-        if case .idle = openLineState { return true }
-        return false
-    }
-
-    private static let compactRoomTalkToken = "__alo_room__"
-
-    static func toggledTalkTargets(
-        _ selected: Set<String>,
-        targetID: String?,
-        currentlyPresent: Set<String>
-    ) -> Set<String> {
-        var result = selected.intersection(currentlyPresent)
-        if let targetID {
-            guard currentlyPresent.contains(targetID) else { return result }
-            if result.remove(targetID) == nil { result.insert(targetID) }
-        } else if currentlyPresent.isSubset(of: result) {
-            result.subtract(currentlyPresent)
-        } else {
-            result.formUnion(currentlyPresent)
-        }
-        return result
-    }
-
     /// Floating-bar behavior: the selected recipients exist only while the
     /// pointer is held down. It never changes menu-bar selections.
     func setPushToTalkPressed(_ pressed: Bool, targetID: String?) {
@@ -2665,7 +2549,9 @@ final class ALOViewModel: ObservableObject {
                     statusText = "Line open with \(openLinePeerName(invitation))"
                 } else {
                     let names = participants.filter { talkTargets.contains($0.id) }.map(\.name)
-                    statusText = talkAudienceStatus(targets: talkTargets, names: names)
+                    statusText = talkTargets == currentRemoteParticipantIDs
+                        ? "Talking to everyone"
+                        : "Talking to \(ListFormatter.localizedString(byJoining: names))"
                 }
             } catch is CancellationError {
                 return
@@ -2685,7 +2571,7 @@ final class ALOViewModel: ObservableObject {
 
     private var effectiveTalkTargetIDs: Set<String> {
         globalShortcutTalkTargets.values.reduce(
-            latchedTalkTargetIDs.union(pushToTalkTargetIDs),
+            pushToTalkTargetIDs,
             { $0.union($1) }
         )
     }
@@ -2714,7 +2600,6 @@ final class ALOViewModel: ObservableObject {
             guard microphoneAllowed else {
                 walkieStarting = false
                 walkieTalking = false
-                latchedTalkTargetIDs.removeAll()
                 pushToTalkTargetIDs.removeAll()
                 globalShortcutTalkTargets.removeAll()
                 presentMicrophoneAccessHelp()
@@ -2732,29 +2617,21 @@ final class ALOViewModel: ObservableObject {
                 let names = participants
                     .filter { targets.contains($0.id) }
                     .map(\.name)
-                statusText = talkAudienceStatus(targets: targets, names: names)
+                statusText = targets == currentRemoteParticipantIDs
+                    ? "Talking to everyone"
+                    : "Talking to \(ListFormatter.localizedString(byJoining: names))"
             } catch is CancellationError {
                 return
             } catch {
                 guard generation == walkieGeneration else { return }
                 walkieStarting = false
                 walkieTalking = false
-                latchedTalkTargetIDs.removeAll()
                 pushToTalkTargetIDs.removeAll()
                 globalShortcutTalkTargets.removeAll()
                 errorMessage = readable(error)
                 statusText = "Unable to start Talk"
             }
         }
-    }
-
-    private func talkAudienceStatus(targets: Set<String>, names: [String]) -> String {
-        if compactPrivateTalkTargetID != nil {
-            return "Talking privately to \(ListFormatter.localizedString(byJoining: names))"
-        }
-        return targets == currentRemoteParticipantIDs
-            ? "Talking to everyone"
-            : "Talking to \(ListFormatter.localizedString(byJoining: names))"
     }
 
     private func presentMicrophoneAccessHelp() {
@@ -2775,7 +2652,6 @@ final class ALOViewModel: ObservableObject {
         walkieGeneration += 1
         walkieStarting = false
         walkieTalking = false
-        latchedTalkTargetIDs.removeAll()
         pushToTalkTargetIDs.removeAll()
         globalShortcutTalkTargets.removeAll()
         meshSession?.endWalkieTalkie()
@@ -2852,7 +2728,6 @@ final class ALOViewModel: ObservableObject {
     }
 
     func silenceMicrophone() {
-        latchedTalkTargetIDs.removeAll()
         pushToTalkTargetIDs.removeAll()
         globalShortcutTalkTargets.removeAll()
         endOpenLine()
@@ -3400,7 +3275,6 @@ final class ALOViewModel: ObservableObject {
                 self.incomingWalkieSpeakerIDs.formIntersection(liveIDs)
                 self.incomingWalkieLevels = self.incomingWalkieLevels.filter { liveIDs.contains($0.key) }
                 let previousTargets = self.effectiveTalkTargetIDs
-                self.latchedTalkTargetIDs.formIntersection(liveIDs)
                 self.pushToTalkTargetIDs.formIntersection(liveIDs)
                 for action in Array(self.globalShortcutTalkTargets.keys) {
                     self.globalShortcutTalkTargets[action]?.formIntersection(liveIDs)
@@ -3568,7 +3442,6 @@ final class ALOViewModel: ObservableObject {
         openLineState = .idle
         incomingWalkieSpeakerIDs.removeAll()
         incomingWalkieLevels.removeAll()
-        latchedTalkTargetIDs.removeAll()
         pushToTalkTargetIDs.removeAll()
         globalShortcutTalkTargets.removeAll()
         participants = []
@@ -5621,11 +5494,6 @@ private struct DeviceAvatar: View {
     }
 }
 
-private enum TalkTargetInteraction: Equatable {
-    case toggle
-    case hold
-}
-
 extension OpenLineState {
     var isSendingMicrophone: Bool {
         switch self {
@@ -5642,49 +5510,32 @@ private struct WalkieTalkieTargetIcon: View {
     let icon: String
     let colorHex: String
     let profileImageData: Data?
-    let interaction: TalkTargetInteraction
     @State private var isPressed = false
-    @State private var showsPersonControls = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        let selected = interaction == .toggle ? model.isTalkTargetSelected(id) : isPushToTalkSelected
+        let selected = isPushToTalkSelected
         let incoming = id.map(model.incomingWalkieSpeakerIDs.contains) ?? false
         let incomingLevel = id.flatMap { model.incomingWalkieLevels[$0] } ?? 0
         let outgoing = model.walkieTalking && selected
         let linePeer = id.map(model.isOpenLinePeer) ?? false
-        Group {
-            if interaction == .toggle {
-                if id != nil {
-                    Button { showsPersonControls.toggle() } label: { avatar }
-                        .buttonStyle(.plain)
-                        .popover(isPresented: $showsPersonControls, arrowEdge: .bottom) {
-                            personControls
-                        }
-                } else {
-                    Button { model.toggleCompactTalkTarget(nil) } label: { avatar }
-                        .buttonStyle(.plain)
+        avatar
+            .onLongPressGesture(
+                minimumDuration: .infinity,
+                maximumDistance: 18,
+                pressing: { pressed in
+                    guard pressed != isPressed else { return }
+                    isPressed = pressed
+                    model.setPushToTalkPressed(pressed, targetID: id)
+                },
+                perform: {}
+            )
+            .onDisappear {
+                if isPressed {
+                    isPressed = false
+                    model.setPushToTalkPressed(false, targetID: id)
                 }
-            } else {
-                avatar
-                    .onLongPressGesture(
-                        minimumDuration: .infinity,
-                        maximumDistance: 18,
-                        pressing: { pressed in
-                            guard pressed != isPressed else { return }
-                            isPressed = pressed
-                            model.setPushToTalkPressed(pressed, targetID: id)
-                        },
-                        perform: {}
-                    )
-                    .onDisappear {
-                        if isPressed {
-                            isPressed = false
-                            model.setPushToTalkPressed(false, targetID: id)
-                        }
-                    }
             }
-        }
         .overlay {
             ZStack {
                 Circle().stroke(
@@ -5718,19 +5569,17 @@ private struct WalkieTalkieTargetIcon: View {
         .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: incoming)
         .contextMenu {
             if let id {
-                if interaction == .toggle {
-                    switch model.openLineState {
-                    case .idle:
-                        Button("Open line with \(name)") { model.inviteToOpenLine(id) }
-                    case .invited(let invitation) where model.isOpenLinePeer(id):
-                        Button("Join line") { model.respondToOpenLine(invitation, accept: true) }
-                        Button("Decline") { model.respondToOpenLine(invitation, accept: false) }
-                    case .inviting, .invited, .connected:
-                        Button("Close line") { model.endOpenLine() }
-                            .disabled(!model.isOpenLinePeer(id))
-                    }
-                    Divider()
+                switch model.openLineState {
+                case .idle:
+                    Button("Open line with \(name)") { model.inviteToOpenLine(id) }
+                case .invited(let invitation) where model.isOpenLinePeer(id):
+                    Button("Join line") { model.respondToOpenLine(invitation, accept: true) }
+                    Button("Decline") { model.respondToOpenLine(invitation, accept: false) }
+                case .inviting, .invited, .connected:
+                    Button("Close line") { model.endOpenLine() }
+                        .disabled(!model.isOpenLinePeer(id))
                 }
+                Divider()
                 Button("Sync \(name)") {
                     if let participant = model.participants.first(where: { $0.id == id }) {
                         model.syncParticipant(participant)
@@ -5738,74 +5587,9 @@ private struct WalkieTalkieTargetIcon: View {
                 }
             }
         }
-        .help(helpText(selected: selected, incoming: incoming))
-        .accessibilityLabel(interaction == .toggle && id != nil ? "Open controls for \(name)" : interaction == .toggle ? "Talk to everyone" : "Hold to talk to \(name)")
+        .help(helpText(incoming: incoming))
+        .accessibilityLabel("Hold to talk to \(name)")
         .accessibilityValue(accessibilityValue(selected: selected, incoming: incoming, linePeer: linePeer))
-    }
-
-    @ViewBuilder
-    private var personControls: some View {
-        if let id {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 10) {
-                    avatar
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(name).font(.system(size: 13, weight: .semibold))
-                        Text(personStatus)
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(Palette.secondary)
-                    }
-                    Spacer(minLength: 16)
-                }
-
-                HStack(spacing: 8) {
-                    Image(systemName: model.voiceIsMuted(for: id) ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(Palette.controlIcon)
-                    Slider(value: Binding(
-                        get: { model.voiceVolume(for: id) },
-                        set: { model.setVoiceVolume($0, for: id) }
-                    ), in: 0...1)
-                    .controlSize(.mini)
-                    .accessibilityLabel("\(name) voice volume on this Mac")
-                    Text("\(Int(model.voiceVolume(for: id) * 100))%")
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(Palette.secondary)
-                        .frame(width: 30, alignment: .trailing)
-                }
-
-                HStack(spacing: 8) {
-                    Button {
-                        model.toggleCompactTalkTarget(id)
-                        showsPersonControls = false
-                    } label: {
-                        Label(model.compactPrivateTalkTargetID == id ? "Stop private talk" : "Talk privately",
-                              systemImage: model.compactPrivateTalkTargetID == id ? "mic.slash.fill" : "mic.fill")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!model.compactTalkCanChangeAudience)
-
-                    Button(model.voiceIsMuted(for: id) ? "Unmute" : "Mute") {
-                        model.toggleVoiceMute(for: id)
-                    }
-                    .buttonStyle(.bordered)
-                }
-                .controlSize(.small)
-            }
-            .padding(14)
-            .frame(width: 250)
-            .background(Palette.opaqueSurface)
-        }
-    }
-
-    private var personStatus: String {
-        guard let id else { return "In room" }
-        if model.incomingWalkieSpeakerIDs.contains(id) { return "Talking" }
-        if model.compactPrivateTalkTargetID == id && (model.walkieTalking || model.walkieStarting) {
-            return model.walkieStarting ? "Connecting private talk…" : "Private talk active"
-        }
-        if model.isOpenLinePeer(id) { return "Open line" }
-        return "In room"
     }
 
     @ViewBuilder
@@ -5844,11 +5628,9 @@ private struct WalkieTalkieTargetIcon: View {
         }
     }
 
-    private func helpText(selected: Bool, incoming: Bool) -> String {
-        if incoming { return "\(name) is speaking · \(interaction == .toggle ? "Click for controls" : "Hold to talk back")" }
-        if interaction == .hold { return "Hold to talk to \(name)" }
-        if id == nil { return selected ? "Click to stop talking to the room" : "Click to talk to everyone in the room" }
-        return selected ? "Private talk active · Click for controls" : "Click for \(name)'s voice controls"
+    private func helpText(incoming: Bool) -> String {
+        if incoming { return "\(name) is speaking · Hold to talk back" }
+        return "Hold to talk to \(name)"
     }
 
     private func accessibilityValue(selected: Bool, incoming: Bool, linePeer: Bool) -> String {
@@ -5944,6 +5726,7 @@ struct WalkieTalkieBar: View {
     var onRoomSettings: (() -> Void)? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showsSettings = false
+    @State private var roomPushToTalkPressed = false
 
     var body: some View {
         Group {
@@ -5997,43 +5780,40 @@ struct WalkieTalkieBar: View {
     }
 
     private var voiceState: some View {
-        Button { model.toggleCompactTalkTarget(nil) } label: {
-            ZStack {
-                Circle().fill(model.compactRoomTalkIsSelected ? model.roomAccentColor.opacity(0.28) : model.roomAccentColor.opacity(0.14))
-                Image(systemName: model.compactRoomTalkIsSelected ? "waveform.badge.mic" : "waveform")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(model.compactRoomTalkIsSelected ? Palette.voiceBlue : model.roomAccentColor)
-            }
-            .frame(width: 27, height: 27)
+        ZStack {
+            Circle().fill(roomPushToTalkPressed ? model.roomAccentColor.opacity(0.28) : model.roomAccentColor.opacity(0.14))
+            Image(systemName: roomPushToTalkPressed ? "waveform.badge.mic" : "waveform")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(roomPushToTalkPressed ? Palette.voiceBlue : model.roomAccentColor)
         }
-        .buttonStyle(.plain)
-        .disabled(!model.compactTalkCanChangeAudience)
-        .overlay(alignment: .bottomTrailing) {
-            if let targetID = model.compactPrivateTalkTargetID,
-               let participant = model.participants.first(where: { $0.id == targetID }) {
-                let appearance = DeviceAppearance.generated(from: participant.id)
-                DeviceAvatar(
-                    emoji: participant.icon ?? appearance.icon,
-                    colorHex: participant.colorHex ?? appearance.colorHex,
-                    profileImageData: participant.profileImageData,
-                    size: 14
-                )
-                .overlay(Circle().stroke(Palette.voiceBlue, lineWidth: 1.5))
-                .offset(x: 4, y: 4)
-            } else {
-                Circle()
-                    .fill(voiceStateColor)
-                    .frame(width: 7, height: 7)
-                    .overlay(Circle().stroke(Palette.opaqueSurface, lineWidth: 1.5))
+        .frame(width: 27, height: 27)
+        .onLongPressGesture(
+            minimumDuration: .infinity,
+            maximumDistance: 18,
+            pressing: { pressed in
+                guard pressed != roomPushToTalkPressed else { return }
+                roomPushToTalkPressed = pressed
+                model.setPushToTalkPressed(pressed, targetID: nil)
+            },
+            perform: {}
+        )
+        .onDisappear {
+            if roomPushToTalkPressed {
+                roomPushToTalkPressed = false
+                model.setPushToTalkPressed(false, targetID: nil)
             }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            Circle()
+                .fill(voiceStateColor)
+                .frame(width: 7, height: 7)
+                .overlay(Circle().stroke(Palette.opaqueSurface, lineWidth: 1.5))
         }
         .frame(width: 32, height: 40)
         .contentShape(Rectangle())
-        .help(model.compactPrivateTalkTargetID == nil
-              ? (model.compactRoomTalkIsSelected ? "Stop talking to everyone" : "Talk to everyone in the room")
-              : "Private talk is active · Click to switch to everyone")
+        .help("Hold to talk to everyone")
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(model.compactRoomTalkIsSelected ? "Stop talking to everyone" : "Talk to everyone in the room")
+        .accessibilityLabel("Hold to talk to everyone")
         .accessibilityValue(voiceStateLabel)
     }
 
@@ -6231,8 +6011,7 @@ struct WalkieTalkieBar: View {
             name: name,
             icon: icon,
             colorHex: colorHex,
-            profileImageData: profileImageData,
-            interaction: showsCloseButton ? .hold : .toggle
+            profileImageData: profileImageData
         )
     }
 

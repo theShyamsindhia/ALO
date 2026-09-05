@@ -62,38 +62,8 @@ struct ClientPlaybackReliabilityTests {
         #expect(message.muted == true)
     }
 
-    @Test("Talk selection is additive and Everyone is a present-device snapshot") @MainActor
-    func talkTargetSelection() {
-        let initial: Set<String> = ["mac-a", "mac-b"]
-        var selected = ALOViewModel.toggledTalkTargets(
-            [], targetID: nil, currentlyPresent: initial
-        )
-        #expect(selected == initial)
-
-        // A device that arrives later is not silently added to a live route.
-        let afterJoin: Set<String> = ["mac-a", "mac-b", "mac-c"]
-        #expect(selected == initial)
-        selected = ALOViewModel.toggledTalkTargets(
-            selected, targetID: "mac-c", currentlyPresent: afterJoin
-        )
-        #expect(selected == afterJoin)
-        selected = ALOViewModel.toggledTalkTargets(
-            selected, targetID: "mac-b", currentlyPresent: afterJoin
-        )
-        #expect(selected == ["mac-a", "mac-c"])
-
-        selected = ALOViewModel.toggledTalkTargets(
-            selected, targetID: nil, currentlyPresent: afterJoin
-        )
-        #expect(selected == afterJoin)
-        selected = ALOViewModel.toggledTalkTargets(
-            selected, targetID: nil, currentlyPresent: afterJoin
-        )
-        #expect(selected.isEmpty)
-    }
-
-    @Test("Compact Talk chooses either the room or one person and clicking an avatar alone has no side effect") @MainActor
-    func compactTalkAudienceIsExclusive() {
+    @Test("Push-to-talk targets exist only while the control is held") @MainActor
+    func pushToTalkTargetsAreMomentary() {
         let model = ALOViewModel(discoverRooms: false)
         model.currentParticipantID = "local"
         model.participants = [
@@ -102,23 +72,15 @@ struct ClientPlaybackReliabilityTests {
             RoomParticipant(id: "mac-b", name: "Sam"),
         ]
 
-        // Avatar presentation reads state only; transmission begins through
-        // the explicit room/private action below.
-        #expect(model.latchedTalkTargetIDs.isEmpty)
-        #expect(model.compactPrivateTalkTargetID == nil)
+        model.setPushToTalkPressed(true, targetID: "mac-a")
+        #expect(model.pushToTalkTargetIDs == ["mac-a"])
+        model.setPushToTalkPressed(false, targetID: "mac-a")
+        #expect(model.pushToTalkTargetIDs.isEmpty)
 
-        model.toggleCompactTalkTarget(nil)
-        #expect(model.latchedTalkTargetIDs == ["mac-a", "mac-b"])
-        #expect(model.compactRoomTalkIsSelected)
-
-        model.toggleCompactTalkTarget("mac-a")
-        #expect(model.latchedTalkTargetIDs == ["mac-a"])
-        #expect(model.compactPrivateTalkTargetID == "mac-a")
-        #expect(!model.compactRoomTalkIsSelected)
-
-        model.toggleCompactTalkTarget("mac-a")
-        #expect(model.latchedTalkTargetIDs.isEmpty)
-        #expect(model.compactPrivateTalkTargetID == nil)
+        model.setPushToTalkPressed(true, targetID: nil)
+        #expect(model.pushToTalkTargetIDs == ["mac-a", "mac-b"])
+        model.setPushToTalkPressed(false, targetID: nil)
+        #expect(model.pushToTalkTargetIDs.isEmpty)
     }
 
     @Test("Voice input restart preserves Talk and Open Line recipients")
