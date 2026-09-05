@@ -30,9 +30,15 @@ jobs:
         run: test "$(uname -m)" = "arm64"
 
       - name: Verify Mac regressions, room network and lifecycle scenarios
-        # The transport timing probe reads packet headers only; full PCM decode
-        # remains on receivers instead of adding test-only sender queue load.
-        run: swift test --no-parallel
+        # Exercise optimized media code, as shipped, with all timing limits intact.
+        # Apple Swift can give the executable and test runner's async-main thunks
+        # the same optimized symbol. Exempt only C main from CapturePropagation
+        # during test compilation; media optimization and the separate package
+        # build below are unchanged. Do not apply these flags to package.sh.
+        run: |
+          swift test -c release --no-parallel \
+            -Xswiftc -Xllvm -Xswiftc -sil-disable-pass=CapturePropagation \
+            -Xswiftc -Xllvm -Xswiftc -sil-disable-pass-only-function=main
 
       - name: Install Developer ID Application certificate
         id: import-application-certificate
