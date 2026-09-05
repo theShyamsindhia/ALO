@@ -125,6 +125,10 @@ for built_resource_bundle in .build/${architectures[1]}-apple-macosx/release/*.b
 done
 
 notices="dist/ThirdPartyNotices"
+if [[ -d "$notices" ]]; then
+    chmod -R u+w "$notices"
+    rm -r "$notices"
+fi
 mkdir -p "$notices"
 cp LICENSE "$notices/ALO-MIT.txt"
 cp Vendor/DynamicNotch/LICENSE "$notices/DynamicNotch-GPL-3.0.txt"

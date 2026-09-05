@@ -23,7 +23,7 @@ they are not presented as enabled controls until their services and permissions 
 The original DynamicNotch app entry point, updater feed, identity, and permission startup
 are not used by ALO.
 
-## Active settings
+## Initial room-only implementation (superseded by full integration below)
 
 Talk settings → Notch: Show room in notch; Expand on hover; Floating island style;
 Prefer built-in display; Motion (Snappy/Fast/Balanced/Slow/Relaxed).
@@ -40,7 +40,7 @@ The notch is off by default, visible only in a live room, and reuses existing ro
 
 Manual follow-up: exercise pointer movement, physical display changes/full-screen Spaces,
 and multi-Mac room playback on hardware. Native render tests do not establish those outcomes.
-No production app was replaced and no branch was pushed.
+At the initial room-only checkpoint, no production app was replaced and no branch was pushed.
 
 ## Full feature integration (requested follow-up)
 

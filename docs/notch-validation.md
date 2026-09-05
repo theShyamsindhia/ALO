@@ -8,6 +8,11 @@ enable. Settings alone do not grant system permissions.
 
 ## Automated checks
 
+Final local release suite: **255 XCTest feature tests + 757 Swift Testing tests
+in 125 suites = 1,012 passing tests**, with no failures. The latter includes ALO’s
+room, networking, UI layout and newly merged DJ Studio regression tests.
+
+
 - Original and adapted feature tests cover animation, geometry, settings persistence,
   fake system events, temporary database watchers, cancellation, downloads, and
   file conversion. Fixtures use temporary data and fake Contacts authorization.
@@ -15,8 +20,8 @@ enable. Settings alone do not grant system permissions.
   room surfaces. Resource tests require localized labels, images, sounds and the
   media adapter to resolve from the packaged resource bundle.
 - An idle check enables the master with all features off and asserts no service is
-  running. A full-suite sample used 0.022 seconds of process CPU over 2 seconds and
-  added 64 KiB to peak RSS. This measures the test process and inert feature engine,
+  running. A final full-suite sample used 0.023 seconds of process CPU over 2 seconds with
+  no increase in peak RSS. This measures the test process and inert feature engine,
   not whole-app energy use or enabled camera/conversion workloads.
 - Local release testing uses the repository's existing Swift test-entrypoint
   optimizer workaround. Release packaging retains normal optimization.
@@ -29,6 +34,12 @@ files are not included in the installed app. Lottie and the original updater are
 excluded. Release packaging preserves a separate dSYM and strips debug/local
 symbols from the distributed executable while retaining exports and Swift
 reflection metadata. Original license and provenance notices are packaged.
+
+Lyrics use 128-entry in-memory LRU caches per provider with no HTTP disk cache.
+Artwork caching is limited to 64 images / 8 MiB; screenshot path history is released
+on stop. Tray, temporary sharing and screenshot staging use ALO-specific directories
+and do not share cleanup folders with DynamicNotch. Files intentionally copied into
+the tray and conversion exports are user-owned storage and are retained until removed.
 
 Final package measurement and CI results are recorded after verification.
 
@@ -46,3 +57,8 @@ framework. This is an environment failure before application compilation. The
 repository's CI uses pinned Xcode 26.3 and runs an unsigned iOS simulator build.
 
 No installed production app is replaced by these checks.
+
+Full XCTest discovery on this machine emits Apple Contacts/CoreData initialization
+errors. A debugger trace identified XCTest's `allSubclasses` enumeration loading
+ContactsUI metadata, rather than an application resolver call. Isolated Mail (11)
+and Messages watcher (8) tests pass without these errors and use denied fake resolvers.

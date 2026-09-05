@@ -20,6 +20,20 @@ struct DeterministicAudioFanoutTests {
             "Batched callbacks must retain the same strict per-listener floor as the live timing gate")
     }
 
+    @Test func callbackBatchingDoesNotDependOnMachineUptime() throws {
+        var elapsedDeliveries: [UInt64] = []
+        for origin in [UInt64(1_000_000_000), 1_000_012_345, 1_024_000_000] {
+            let wire = SimulatedAudioWire(bitsPerSecond: 4_000_000, callbackQuantumNanos: 25_000_000)
+            wire.setNow(origin)
+            let packet = AudioPacket(sequence: 0, frameIndex: 0, captureTimeNanos: origin, samples: [1, -1])
+            wire.submit(packet: packet, byteCount: 100,
+                        endpoint: .hostPort(host: "127.0.0.1", port: 12345), completion: { _ in })
+            let event = try #require(wire.takeNext(through: origin + 25_000_000))
+            elapsedDeliveries.append(event.time - origin)
+        }
+        #expect(elapsedDeliveries == [25_000_000, 25_000_000, 25_000_000])
+    }
+
     @Test func lateJoinerDoesNotStarveExistingListeners() throws {
         let room = try simulate(peers: 8, rate: 4_000_000,
             policy: .boundedLatest(maxInFlight: 8), oversleep: 0,
@@ -246,6 +260,7 @@ private final class SimulatedAudioWire: @unchecked Sendable {
     private let bitsPerSecond: UInt64?
     private let callbackQuantumNanos: UInt64?
     private var current = MonotonicClock.nowNanos()
+    private var callbackEpoch: UInt64?
     private var linkAvailable: UInt64 = 0
     private var nextOrder = 0
     private var events: [Event] = []
@@ -257,7 +272,13 @@ private final class SimulatedAudioWire: @unchecked Sendable {
         self.callbackQuantumNanos = callbackQuantumNanos
     }
     var now: UInt64 { lock.withLock { current } }
-    func setNow(_ value: UInt64) { lock.withLock { current = value } }
+    func setNow(_ value: UInt64) { lock.withLock {
+        // Batch phase belongs to this virtual run, never to machine uptime.
+        // Quantizing absolute monotonic time silently randomized the 25ms
+        // callback phase on each run and changed established-listener counts.
+        if callbackEpoch == nil { callbackEpoch = value }
+        current = value
+    } }
     var snapshot: Snapshot { lock.withLock {
         Snapshot(submitted: submitted, arrivals: arrivals, eventsRemaining: events.count,
             invalidEndpoints: invalidEndpoints)
@@ -274,7 +295,9 @@ private final class SimulatedAudioWire: @unchecked Sendable {
                 linkAvailable = max(current, linkAvailable) + duration
                 let serializedDelivery = linkAvailable + 1_000_000
                 if let quantum = callbackQuantumNanos {
-                    delivery = ((serializedDelivery + quantum - 1) / quantum) * quantum
+                    let epoch = callbackEpoch ?? current
+                    let elapsed = serializedDelivery - epoch
+                    delivery = epoch + ((elapsed + quantum - 1) / quantum) * quantum
                 } else {
                     delivery = serializedDelivery
                 }
