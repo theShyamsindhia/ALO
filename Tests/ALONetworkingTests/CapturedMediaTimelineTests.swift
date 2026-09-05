@@ -49,4 +49,21 @@ import ALOCore
         #expect(timeline.anchor(for: stream(), issuedAtHostNanos: 1_200_000_000) == nil)
         #expect(timeline.anchor(for: stream(), issuedAtHostNanos: 900_000_000) == nil)
     }
+
+    @Test func firstFreshCaptureRequestsResumeAnchorExactlyOnce() {
+        let timeline = CapturedMediaTimeline()
+        #expect(timeline.observe([packet()]))
+        timeline.setPlaying(false)
+        #expect(timeline.anchor(for: stream(), issuedAtHostNanos: 2_000_000_000)?.state == .paused)
+        timeline.setPlaying(true)
+        // Control arrives before new capture. Do not invent an anchor or wait
+        // until ticket renewal: the first actual PCM reference requests refresh.
+        #expect(timeline.anchor(for: stream(), issuedAtHostNanos: 2_000_000_000) == nil)
+        #expect(!timeline.observe([]))
+        #expect(timeline.observe([packet(480, time: 2_000_000_000)]))
+        #expect(timeline.anchor(for: stream(), issuedAtHostNanos: 2_010_000_000)?.state == .running)
+        #expect(!timeline.observe([packet(720, time: 2_005_000_000)]))
+        timeline.invalidateCaptureReference()
+        #expect(timeline.observe([packet(960, time: 3_000_000_000)]))
+    }
 }

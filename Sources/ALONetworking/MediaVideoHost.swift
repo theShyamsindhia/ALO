@@ -15,10 +15,15 @@ final class MediaVideoHost {
         var sequence: UInt64 = 0
         var inFlight: (data: Data, offset: Int, deadline: UInt64)?
         var operation: UUID?
+        var controlDeadline: UInt64?
+        var heartbeatSequence: UInt64 = 0
+        var pendingHeartbeat: (nonce: UInt64, deadline: UInt64)?
+        var nextHeartbeat: UInt64
         var lastKeyframeRequest: UInt64?
         init(credentials: AuthenticatedChannelCredentials, send: @escaping Send, close: @escaping () -> Void, now: UInt64) {
             self.credentials = credentials; self.send = send; self.close = close
             deadline = now + MediaVideoWire.frameDeadlineNanos
+            nextHeartbeat = now + MediaVideoWire.heartbeatIntervalNanos
         }
     }
     private let authorize: (AuthenticatedChannelCredentials, MediaStreamIdentifier) -> UInt64?
@@ -60,15 +65,23 @@ final class MediaVideoHost {
     func receive(_ data: Data, from id: UUID) {
         guard let peer = peers[id] else { return }
         do {
+            if peer.stream != nil {
+                guard let pending = peer.pendingHeartbeat, pending.deadline > now(),
+                      MediaVideoWire.heartbeatNonce(data, reply: true) == pending.nonce else {
+                    throw SecureTransportError.wrongContext
+                }
+                peer.pendingHeartbeat = nil; return
+            }
             guard peer.stream == nil, peer.deadline > now() else { throw SecureTransportError.invalidState }
             let stream = try MediaVideoWire.decodeBinding(data, accepted: false)
             guard authorize(peer.credentials, stream) != nil else { throw SecureTransportError.invalidCredentials }
             peer.stream = stream
             let operation = UUID(); peer.operation = operation
+            peer.controlDeadline = peer.deadline
             peer.send(try MediaVideoWire.binding(stream, accepted: true)) { [weak self, weak peer] result in
                 guard let self, let peer, self.peers[id] === peer, peer.operation == operation else { return }
                 guard case .success = result, peer.deadline > self.now() else { self.remove(id); return }
-                peer.operation = nil; self.requestIDR(peer); self.drain(peer)
+                peer.operation = nil; peer.controlDeadline = nil; self.requestIDR(peer); self.drain(peer)
             }
         } catch { remove(id) }
     }
@@ -86,10 +99,27 @@ final class MediaVideoHost {
         for peer in Array(peers.values) {
             let invalid = !peer.credentials.isActive ||
                 (peer.stream == nil && time >= peer.deadline) ||
-                (peer.operation != nil && peer.inFlight == nil && time >= peer.deadline) ||
+                peer.controlDeadline.map({ time >= $0 }) == true ||
+                peer.pendingHeartbeat.map({ time >= $0.deadline }) == true ||
                 peer.stream.map({ authorize(peer.credentials, $0) == nil }) == true ||
                 peer.inFlight.map({ time >= $0.deadline }) == true
-            if invalid { remove(peer.credentials.connectionID) }
+            if invalid { remove(peer.credentials.connectionID); continue }
+            if peer.stream != nil, peer.operation == nil, peer.pendingHeartbeat == nil, time >= peer.nextHeartbeat {
+                heartbeat(peer)
+            }
+        }
+    }
+    private func heartbeat(_ peer: Peer) {
+        guard peer.heartbeatSequence < .max else { remove(peer.credentials.connectionID); return }
+        peer.heartbeatSequence += 1
+        let deadline = now() + MediaVideoWire.frameDeadlineNanos
+        peer.pendingHeartbeat = (peer.heartbeatSequence, deadline)
+        peer.nextHeartbeat = now() + MediaVideoWire.heartbeatIntervalNanos
+        let operation = UUID(); peer.operation = operation; peer.controlDeadline = deadline
+        peer.send(MediaVideoWire.heartbeat(peer.heartbeatSequence, reply: false)) { [weak self, weak peer] result in
+            guard let self, let peer, self.peers[peer.credentials.connectionID] === peer, peer.operation == operation else { return }
+            guard case .success = result, deadline > self.now() else { self.remove(peer.credentials.connectionID); return }
+            peer.operation = nil; peer.controlDeadline = nil; self.drain(peer)
         }
     }
     private func requestIDR(_ peer: Peer) {

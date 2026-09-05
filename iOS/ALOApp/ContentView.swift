@@ -127,8 +127,23 @@ struct ContentView: View {
                     Text(title).font(.headline)
                     if let artist = model.replica.nowPlaying.artist { Text(artist).foregroundStyle(.secondary) }
                 }
-                Label("Playback unavailable", systemImage: "speaker.slash")
+                Label(model.audioConnected ? "Encrypted audio connected" : "Waiting for audio",
+                      systemImage: model.audioConnected ? "speaker.wave.2" : "speaker.slash")
                 Text(model.mediaAvailability).font(.subheadline).foregroundStyle(.secondary)
+            }
+            if model.replica.videoEnabled || model.videoImage != nil {
+                Section("Shared screen") {
+                    if let image = model.videoImage {
+                        Image(decorative: image, scale: 1)
+                            .resizable().aspectRatio(contentMode: .fit)
+                            .frame(maxWidth: .infinity)
+                            .background(.black)
+                            .accessibilityLabel("Live screen shared by the broadcaster")
+                    } else {
+                        ProgressView().frame(maxWidth: .infinity, minHeight: 120)
+                    }
+                    Text(model.videoStatus).font(.caption).foregroundStyle(.secondary)
+                }
             }
             Section {
                 AudioLevelControl(title: "Media", muted: $model.levels.mediaMuted, volume: $model.levels.mediaVolume)

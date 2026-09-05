@@ -11,8 +11,11 @@ public final class CapturedMediaTimeline: @unchecked Sendable {
 
     public init() {}
 
-    public func observe(_ packets: [AudioPacket]) {
+    /// True only when a missing running reference becomes available. The owner
+    /// refreshes waiting anchors once after this call, outside its capture lock.
+    @discardableResult public func observe(_ packets: [AudioPacket]) -> Bool {
         lock.withLock {
+            let lackedReference = latest == nil
             for packet in packets {
                 guard !packet.samples.isEmpty,
                       packet.samples.count <= Int(AudioPacket.framesPerPacket) * Int(AudioPacket.channelCount),
@@ -22,8 +25,11 @@ public final class CapturedMediaTimeline: @unchecked Sendable {
                 else { continue }
                 latest = packet
             }
+            return playing && lackedReference && latest != nil
         }
     }
+
+    public func invalidateCaptureReference() { lock.withLock { latest = nil } }
 
     public func setPlaying(_ value: Bool) {
         lock.withLock {

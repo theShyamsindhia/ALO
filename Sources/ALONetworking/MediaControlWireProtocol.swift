@@ -106,6 +106,7 @@ public enum MediaControlWireMessage: Sendable {
     case pause(stream: MediaStreamIdentifier, atCaptureTimeNanos: UInt64)
     case resync(requestID: UUID, stream: MediaStreamIdentifier, minimumCaptureTimeNanos: UInt64?)
     case requestKeyframe(requestID: UUID, stream: MediaStreamIdentifier, minimumCaptureTimeNanos: UInt64?)
+    case timingReport(stream: MediaStreamIdentifier, report: MediaReceiverTimingReport)
     case rejected(requestID: UUID, reason: Rejection)
 
     public enum Rejection: String, Codable, Sendable {
@@ -137,6 +138,7 @@ public enum MediaControlWireMessage: Sendable {
         case pause(stream: MediaStreamIdentifier, atCaptureTimeNanos: UInt64)
         case resync(requestID: UUID, stream: MediaStreamIdentifier, minimumCaptureTimeNanos: UInt64?)
         case requestKeyframe(requestID: UUID, stream: MediaStreamIdentifier, minimumCaptureTimeNanos: UInt64?)
+        case timingReport(stream: MediaStreamIdentifier, report: MediaReceiverTimingReport)
         case rejected(requestID: UUID, reason: Rejection)
     }
 
@@ -183,6 +185,9 @@ public enum MediaControlWireMessage: Sendable {
         case let .requestKeyframe(id, stream, time):
             try stream.validate(); if let time { try Self.validateTime(time) }
             payload = .requestKeyframe(requestID: id, stream: stream, minimumCaptureTimeNanos: time)
+        case let .timingReport(stream, report):
+            try stream.validate(); try report.validate()
+            payload = .timingReport(stream: stream, report: report)
         case let .rejected(id, reason): payload = .rejected(requestID: id, reason: reason)
         }
         let encoder = JSONEncoder()
@@ -221,6 +226,7 @@ public enum MediaControlWireMessage: Sendable {
         case let .pause(stream, time): self = .pause(stream: stream, atCaptureTimeNanos: time)
         case let .resync(id, stream, time): self = .resync(requestID: id, stream: stream, minimumCaptureTimeNanos: time)
         case let .requestKeyframe(id, stream, time): self = .requestKeyframe(requestID: id, stream: stream, minimumCaptureTimeNanos: time)
+        case let .timingReport(stream, report): self = .timingReport(stream: stream, report: report)
         case let .rejected(id, reason): self = .rejected(requestID: id, reason: reason)
         }
         _ = try encoded() // Exactly the same structural checks for inbound and outbound values.

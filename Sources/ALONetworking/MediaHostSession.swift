@@ -23,19 +23,26 @@ public final class MediaHostSession: @unchecked Sendable {
         public var resync: (UUID, MediaStreamIdentifier, UInt64?) -> Void
         public var requestKeyframe: (UUID, MediaStreamIdentifier, UInt64?) -> Void
         /// Only structurally valid, bounded AnnotationWireMessage payloads arrive here.
-        /// Return false when unsupported; the connection then closes explicitly.
+        /// Return false when unsupported; only this optional extension is disabled.
         public var annotation: (AuthenticatedChannelCredentials, Data) -> Bool
         public var peerDetached: (UUID) -> Void
+        /// A fresh, structurally valid measurement bound to this admitted peer's
+        /// validated audio lease. Receipt time is host monotonic time. A caller
+        /// may retain its hardware floor for at most 2s minus sampleAgeNanos,
+        /// including after ticket replacement, but never after peer detachment.
+        public var timingReport: (UUID, MediaStreamIdentifier, MediaReceiverTimingReport, UInt64) -> Void
 
         public init(currentBroadcaster: @escaping () -> Broadcaster?,
                     currentAnchor: @escaping (UUID, MediaStreamIdentifier, UInt64) -> MediaStreamAnchor?,
                     resync: @escaping (UUID, MediaStreamIdentifier, UInt64?) -> Void = { _, _, _ in },
                     requestKeyframe: @escaping (UUID, MediaStreamIdentifier, UInt64?) -> Void = { _, _, _ in },
                     annotation: @escaping (AuthenticatedChannelCredentials, Data) -> Bool = { _, _ in false },
-                    peerDetached: @escaping (UUID) -> Void = { _ in }) {
+                    peerDetached: @escaping (UUID) -> Void = { _ in },
+                    timingReport: @escaping (UUID, MediaStreamIdentifier, MediaReceiverTimingReport, UInt64) -> Void = { _, _, _, _ in }) {
             self.currentBroadcaster = currentBroadcaster; self.currentAnchor = currentAnchor
             self.resync = resync; self.requestKeyframe = requestKeyframe
             self.annotation = annotation; self.peerDetached = peerDetached
+            self.timingReport = timingReport
         }
     }
 
@@ -54,8 +61,11 @@ public final class MediaHostSession: @unchecked Sendable {
         var validated = false
         var anchorSending = false
         var refreshNeeded = false
+        var nextAnchorAttempt: UInt64 = 0
         var cutover: UInt64?
         var proposedAnchor: MediaStreamAnchor?
+        var committedAnchor: MediaStreamAnchor?
+        var acknowledgedAnchor: MediaStreamAnchor?
         var audioInFlight = false
         var pendingAudio: [PendingAudio] = []
         init(_ ticket: MediaSubscriptionTicket, now: TimeInterval) {
@@ -79,6 +89,9 @@ public final class MediaHostSession: @unchecked Sendable {
         var recentRequests: [UUID: TimeInterval] = [:]
         var controlTimes: [TimeInterval] = [], pingTimes: [TimeInterval] = [], annotationTimes: [TimeInterval] = []
         var annotationBytes: [(time: TimeInterval, count: Int)] = []
+        var annotationDisabled = false
+        var rawTraffic = RawMediaTrafficBudget()
+        var timingTimes: [TimeInterval] = []
         init(credentials: AuthenticatedChannelCredentials, send: @escaping ControlSend, close: @escaping () -> Void) {
             self.credentials = credentials; self.send = send; self.close = close
         }
@@ -260,7 +273,7 @@ public final class MediaHostSession: @unchecked Sendable {
               peer.credentials.isActive, peer.credentials.negotiated.initiatorCapabilities.contains(.receiveVideo),
               let lease = validatedLease(stream, peer: peer),
               registry.containsLiveSubscription(sessionID: stream.sessionID, now: now),
-              let anchor = lease.proposedAnchor, anchor.state == .running else { return nil }
+              let anchor = lease.proposedAnchor else { return nil }
         return anchor.captureTimeNanos
     }
 
@@ -308,19 +321,30 @@ public final class MediaHostSession: @unchecked Sendable {
     func receive(_ bytes: Data, connectionID: UUID) {
         assertQueue(); tick()
         guard let peer = peers[connectionID] else { return }
+        guard peer.rawTraffic.accept(bytes.count, now: nowNanos()) else { detach(connectionID: connectionID); return }
         let message: MediaControlWireMessage
         do { message = try MediaControlWireMessage(encoded: bytes) }
         catch {
-            guard bytes.count <= AnnotationWireMessage.maximumWireBytes,
-                  (try? AnnotationWireMessage(encoded: bytes)) != nil,
-                  annotationBudget(peer, bytes: bytes.count), callbacks.annotation(peer.credentials, bytes) else {
-                detach(connectionID: connectionID); return
+            guard let kind = MediaOptionalExtension.classify(bytes) else { detach(connectionID: connectionID); return }
+            if kind == .annotation, !peer.annotationDisabled {
+                guard bytes.count <= AnnotationWireMessage.maximumWireBytes,
+                      (try? AnnotationWireMessage(encoded: bytes)) != nil,
+                      annotationBudget(peer, bytes: bytes.count), callbacks.annotation(peer.credentials, bytes) else {
+                    peer.annotationDisabled = true; return
+                }
             }
             return
         }
         if case let .clockPing(id, clientTime) = message {
             guard budget(&peer.pingTimes, maximum: 8) else { return }
             send(.clockPong(id: id, clientTimeNanos: clientTime, hostTimeNanos: nowNanos()), to: peer)
+            return
+        }
+        if case let .timingReport(stream, report) = message {
+            guard budget(&peer.timingTimes, maximum: 4), validatedLease(stream, peer: peer) != nil,
+                  registry.containsLiveSubscription(sessionID: stream.sessionID, now: now),
+                  report.sampleAgeNanos < MediaReceiverTimingReport.maximumAgeNanos else { return }
+            callbacks.timingReport(peer.credentials.remotePeerID, stream, report, nowNanos())
             return
         }
         guard budget(&peer.controlTimes, maximum: 8) else { detach(connectionID: connectionID); return }
@@ -338,13 +362,17 @@ public final class MediaHostSession: @unchecked Sendable {
             grant(id, channels: active.ticket.channels, epoch: stream.broadcasterEpoch, peer: peer)
         case let .anchorReady(stream, frameIndex, captureTime, playbackTime):
             let time = nowNanos()
-            guard let lease = peer.pending, lease.stream == stream, lease.validated,
+            guard let lease = validatedLease(stream, peer: peer),
                   let anchor = lease.proposedAnchor, anchor.frameIndex == frameIndex,
                   anchor.captureTimeNanos == captureTime, anchor.hostPlaybackTimeNanos == playbackTime,
-                  lease.deadline > now, localEpoch == stream.broadcasterEpoch,
+                  (peer.active === lease || lease.deadline > now), localEpoch == stream.broadcasterEpoch,
                   playbackTime >= time || time - playbackTime <= MediaControlWireMessage.maximumAnchorAgeNanos,
-                  peer.active == nil || playbackTime > time else { return }
-            lease.cutover = playbackTime
+                  peer.active == nil || peer.active === lease || playbackTime > time else { return }
+            if peer.active === lease {
+                if anchor.state == .paused { lease.committedAnchor = anchor; lease.acknowledgedAnchor = nil }
+                else { lease.acknowledgedAnchor = anchor }
+            }
+            else { lease.cutover = playbackTime }
             advance(peer)
         case .cancel(let stream):
             if peer.pending?.stream == stream { revoke(peer.pending); peer.pending = nil }
@@ -426,7 +454,7 @@ public final class MediaHostSession: @unchecked Sendable {
             for lease in [peer.active, peer.pending].compactMap({ $0 }) {
                 // A validated pending path needs startup data before the receiver
                 // can acknowledge readiness. Its predecessor remains live until ACK.
-                guard lease.validated, let anchor = lease.proposedAnchor,
+                guard lease.validated, let anchor = audioAnchor(lease),
                       anchor.state == .running, packet.frameIndex >= anchor.frameIndex, packet.captureTimeNanos >= anchor.captureTimeNanos,
                       lease.ticket.channels.contains(.audio) else { continue }
                 pruneAudio(lease)
@@ -444,7 +472,7 @@ public final class MediaHostSession: @unchecked Sendable {
     private func pruneAudio(_ lease: Lease) {
         let time = nowNanos()
         lease.pendingAudio.removeAll { item in
-            guard let anchor = lease.proposedAnchor, anchor.state == .running,
+            guard let anchor = audioAnchor(lease), anchor.state == .running,
                   item.packet.frameIndex >= anchor.frameIndex, item.packet.captureTimeNanos >= anchor.captureTimeNanos,
                   time >= item.enqueuedAt, time - item.enqueuedAt < Self.maximumAudioWait else { return true }
             let delay = anchor.hostPlaybackTimeNanos - anchor.captureTimeNanos
@@ -549,14 +577,19 @@ public final class MediaHostSession: @unchecked Sendable {
             if peer.active === lease { lease.refreshNeeded = true }
             return
         }
+        if let acknowledged = lease.acknowledgedAnchor, acknowledged.hostPlaybackTimeNanos > nowNanos() {
+            lease.refreshNeeded = true; lease.nextAnchorAttempt = acknowledged.hostPlaybackTimeNanos; return
+        }
         // Do not move an already announced pending cutover while its predecessor is live.
         if peer.pending === lease, lease.proposedAnchor != nil { return }
         let time = nowNanos()
+        lease.nextAnchorAttempt = time + 100_000_000
         guard let anchor = callbacks.currentAnchor(peer.credentials.remotePeerID, lease.stream, time),
               anchor.stream == lease.stream, anchor.issuedAtHostNanos <= time,
               time - anchor.issuedAtHostNanos <= MediaControlWireMessage.maximumAnchorAgeNanos,
               peer.active == nil || peer.active === lease || anchor.hostPlaybackTimeNanos > time,
-              let bytes = try? MediaControlWireMessage.anchor(anchor).encoded() else { return }
+              let bytes = try? MediaControlWireMessage.anchor(anchor).encoded() else { lease.refreshNeeded = true; return }
+        lease.refreshNeeded = false
         lease.anchorSending = true; lease.proposedAnchor = anchor
         enqueue(bytes, peer: peer) { [weak self, weak peer, weak lease] result in
             guard case .success = result else { return }
@@ -570,9 +603,23 @@ public final class MediaHostSession: @unchecked Sendable {
         }
     }
     private func advance(_ peer: Peer) {
+        if let active = peer.active, let anchor = active.acknowledgedAnchor,
+           anchor.hostPlaybackTimeNanos <= nowNanos() {
+            active.committedAnchor = anchor; active.acknowledgedAnchor = nil
+        }
         guard let pending = peer.pending, let cutover = pending.cutover,
               peer.active == nil || nowNanos() >= cutover else { return }
+        pending.committedAnchor = pending.proposedAnchor
         revoke(peer.active); peer.active = pending; peer.pending = nil
+    }
+    private func audioAnchor(_ lease: Lease) -> MediaStreamAnchor? {
+        guard let proposed = lease.proposedAnchor else { return nil }
+        // Local pause is authoritative immediately. A running replacement must
+        // not prune the predecessor while the receiver prepares/ACKs a future
+        // cutover. Resuming from pause still needs proposed-anchor warmup.
+        if proposed.state == .paused { return proposed }
+        if let committed = lease.committedAnchor, committed.state == .running { return committed }
+        return proposed
     }
     private func revoke(_ lease: Lease?) {
         guard let lease else { return }
@@ -597,7 +644,12 @@ public final class MediaHostSession: @unchecked Sendable {
                 revoke(pending); peer.pending = nil
             }
             advance(peer)
-            for lease in [peer.active, peer.pending].compactMap({ $0 }) { pruneAudio(lease) }
+            for lease in [peer.active, peer.pending].compactMap({ $0 }) {
+                pruneAudio(lease)
+                if lease.refreshNeeded, !lease.anchorSending, nowNanos() >= lease.nextAnchorAttempt {
+                    sendAnchor(peer, lease: lease)
+                }
+            }
         }
         registry.expire(now: time)
         videoHost.tick()

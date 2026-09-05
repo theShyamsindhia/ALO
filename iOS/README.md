@@ -2,9 +2,9 @@
 
 Open `ALO.xcodeproj` and select the shared **ALO** scheme. It links the repository's local `ALOCore`, `ALONetworking`, and `ALOAppleMedia` products. Signing is disabled; configuring a developer team and device signing is a separate step.
 
-Implemented: explicit nearby scans, first-contact privacy explanation, secure-only room admission, Keychain installation identity/pins/private invite persistence, mesh room state and chat, participants, read-only queue, local media/voice level preferences, background disconnect and foreground rejoin without microphone activation. Only the chat capability is advertised.
+Implemented in the integration branch: explicit nearby scans, first-contact privacy explanation, secure-only room admission, Keychain installation identity/pins/private invite persistence, mesh room state and chat, participants, read-only queue, local media/voice level preferences, encrypted audio/video receiving, and background disconnect/foreground rejoin without microphone activation. The app advertises chat, receive-audio and receive-video capabilities. Video uses a separate authenticated connection and the audio clock; pending capture and presentation work is bounded.
 
-Not release ready: secure audio/video and voice transports are not connected to this app yet. The UI reports that limitation and does not start an audio session, request microphone access, advertise media capabilities, or run silent background audio. `UIBackgroundModes=audio` must only be added with genuine integrated media playback. There are no broadcast, queue editing, or shared playback controls on mobile.
+Not release ready: directed voice, shared hardware-latency cutovers, annotation interaction and device acceptance remain incomplete. Unsupported annotation capabilities are explicitly declined without closing media. Receiving media does not request microphone access or run silent background audio. `UIBackgroundModes=audio` must only be added with genuine integrated media playback and validated lifecycle behavior. There are no broadcast, queue editing, or shared playback controls on mobile.
 
 Unsigned simulator build (coordinate with other repository builds):
 

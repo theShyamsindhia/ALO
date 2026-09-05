@@ -4,6 +4,51 @@ import Testing
 
 @Suite("Media host authorization and lifecycle")
 struct MediaHostSessionTests {
+    @Test func futureActiveAnchorKeepsCommittedAudioUntilAcknowledgedCutover() throws {
+        let h = try MediaHostHarness()
+        try h.queue.sync {
+            h.host.publisherReady(port: 54321); _ = try h.activate()
+            h.anchorCaptureOffset = 100_000_000
+            h.host.refreshTimeline()
+            let proposal = try #require(h.anchors.last)
+            #expect(proposal.captureTimeNanos > h.time)
+            h.host.publishAudio(h.packet)
+            #expect(h.datagrams.count == 1) // New output is still preparing.
+            h.ack(proposal)
+            h.host.publishAudio(h.packet(index: 1))
+            #expect(h.datagrams.count == 2) // ACK does not immediately discard old capture.
+            h.time = proposal.hostPlaybackTimeNanos
+            h.host.tick()
+            h.host.publishAudio(h.packet(index: 2))
+            #expect(h.datagrams.count == 3 && h.closed.isEmpty)
+        }
+    }
+    @Test func missingCaptureRetriesBoundedAnchorWithoutNewSubscription() throws {
+        let h = try MediaHostHarness()
+        try h.queue.sync {
+            h.host.publisherReady(port: 54321); h.captureAvailable = false
+            let ticket = try h.subscribe(); try h.validate(ticket)
+            #expect(h.anchors.isEmpty)
+            let calls = h.snapshotCalls
+            for _ in 0..<100 { h.host.tick() }
+            #expect(h.snapshotCalls == calls)
+            h.captureAvailable = true; h.time += 100_000_000; h.host.tick()
+            #expect(h.anchors.count == 1 && h.anchors.first?.stream.sessionID == ticket.sessionID)
+            h.ack(try #require(h.anchors.last)); h.host.publishAudio(h.packet)
+            #expect(h.datagrams.count == 1)
+        }
+    }
+
+    @Test func malformedRecognizedAnnotationQuarantinesOnlyExtension() throws {
+        let h = try MediaHostHarness()
+        try h.queue.sync {
+            h.host.publisherReady(port: 54321); _ = try h.activate()
+            let bad = try JSONSerialization.data(withJSONObject: ["protocolName": AnnotationWireMessage.capability, "message": "invalid"])
+            h.host.receive(bad, connectionID: h.publisher.connectionID)
+            h.host.publishAudio(h.packet)
+            #expect(h.closed.isEmpty && h.datagrams.count == 1)
+        }
+    }
     @Test func publisherQueuePressureRetriesWithoutLosingHealthyBurst() throws {
         let h = try MediaHostHarness()
         try h.queue.sync {
@@ -337,7 +382,10 @@ struct MediaHostSessionTests {
             #expect(h.annotationPayloads.count == 30 && h.closed.isEmpty)
             h.acceptAnnotations = false
             h.host.receive(annotation, connectionID: h.publisher.connectionID)
-            #expect(h.closed == [h.publisher.connectionID])
+            #expect(h.closed.isEmpty)
+            let before = h.annotationPayloads.count
+            h.host.receive(annotation, connectionID: h.publisher.connectionID)
+            #expect(h.annotationPayloads.count == before) // Optional extension quarantined.
         }
     }
 
@@ -391,6 +439,8 @@ final class MediaHostHarness {
     var flows: [UUID: UUID] = [:]
     var closed: [UUID] = []
     var snapshotCalls = 0
+    var captureAvailable = true
+    var anchorCaptureOffset: UInt64 = 0
     var anchorState: MediaStreamAnchor.State = .running
     var holdNextAnchor = false
     var heldAnchorCompletion: ((Result<Void, Error>) -> Void)?
@@ -419,8 +469,10 @@ final class MediaHostHarness {
         host = MediaHostSession(roomID: NetworkFixture.room, localPeerID: NetworkFixture.sender, queue: queue,
             callbacks: .init(currentBroadcaster: { [weak self] in self?.owner }, currentAnchor: { [weak self] _, stream, time in
                 self?.snapshotCalls += 1
-                return MediaStreamAnchor(stream: stream, captureTimeNanos: time, frameIndex: 0,
-                    hostPlaybackTimeNanos: time + 200_000_000, issuedAtHostNanos: time, state: self?.anchorState ?? .paused)
+                guard self?.captureAvailable == true else { return nil }
+                let capture = time + (self?.anchorCaptureOffset ?? 0)
+                return MediaStreamAnchor(stream: stream, captureTimeNanos: capture, frameIndex: 0,
+                    hostPlaybackTimeNanos: capture + 200_000_000, issuedAtHostNanos: time, state: self?.anchorState ?? .paused)
             }, requestKeyframe: { [weak self] _, _, _ in self?.keyframeRequests += 1 }, annotation: { [weak self] credentials, bytes in
                 guard let self, credentials === self.publisher else { return false }
                 self.annotationPayloads.append(bytes); return self.acceptAnnotations

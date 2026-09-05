@@ -14,6 +14,8 @@ final class VideoEncoder {
     private var dimensions: (width: Int32, height: Int32)?
     private var hasEncodedFrame = false
     private var forceNextKeyframe = false
+    private struct Capture { let buffer: CVPixelBuffer; let time: UInt64 }
+    private let admission = VideoEncodeAdmission<Capture>()
 
     func requestKeyframe() {
         queue.async { [weak self] in self?.forceNextKeyframe = true }
@@ -24,12 +26,14 @@ final class VideoEncoder {
     }
 
     func encode(_ pixelBuffer: CVPixelBuffer, captureTimeNanos: UInt64) {
+        guard let work = admission.offer(Capture(buffer: pixelBuffer, time: captureTimeNanos)) else { return }
         queue.async { [weak self] in
-            self?.encodeOnQueue(pixelBuffer, captureTimeNanos: captureTimeNanos)
+            self?.encodeOnQueue(work)
         }
     }
 
     func stop() {
+        admission.stop()
         queue.sync {
             if let session {
                 VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
@@ -42,13 +46,25 @@ final class VideoEncoder {
         }
     }
 
-    private func encodeOnQueue(_ pixelBuffer: CVPixelBuffer, captureTimeNanos: UInt64) {
+    /// Finite codec fixtures have no following capture frames to drain hardware.
+    /// Unlike stop(), this preserves the current output generation deliberately.
+    func flushForTesting() {
+        queue.sync {
+            if let session { VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid) }
+        }
+        // Completion handlers enqueue emission on this same owner executor.
+        queue.sync {}
+    }
+
+    private func encodeOnQueue(_ work: VideoEncodeAdmission<Capture>.Work) {
+        guard admission.accepts(work.id) else { return }
+        let pixelBuffer = work.frame.buffer, captureTimeNanos = work.frame.time
         let width = Int32(CVPixelBufferGetWidth(pixelBuffer))
         let height = Int32(CVPixelBufferGetHeight(pixelBuffer))
         if session == nil || dimensions?.width != width || dimensions?.height != height {
-            guard configure(width: width, height: height) else { return }
+            guard configure(width: width, height: height) else { finish(work.id); return }
         }
-        guard let session else { return }
+        guard let session else { finish(work.id); return }
 
         let presentationTime = CMTime(value: Int64(clamping: captureTimeNanos), timescale: 1_000_000_000)
         let duration = CMTime(value: 1, timescale: 30)
@@ -63,11 +79,24 @@ final class VideoEncoder {
             frameProperties: properties,
             infoFlagsOut: nil
         ) { [weak self] status, _, sampleBuffer in
-            guard status == noErr, let sampleBuffer else { return }
-            self?.emit(sampleBuffer, captureTimeNanos: captureTimeNanos, width: width, height: height)
+            guard let self else { return }
+            self.queue.async { [weak self] in
+                guard let self, self.admission.accepts(work.id) else { return }
+                if status == noErr, let sampleBuffer {
+                    self.emit(sampleBuffer, captureTimeNanos: captureTimeNanos, width: width, height: height)
+                }
+                self.finish(work.id)
+            }
         }
         if status != noErr {
             fputs("Video encode failed: \(status)\n", stderr)
+            finish(work.id)
+        }
+    }
+
+    private func finish(_ id: UUID) {
+        if let next = admission.finish(id) {
+            queue.async { [weak self] in self?.encodeOnQueue(next) }
         }
     }
 

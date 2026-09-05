@@ -127,6 +127,11 @@ public final class MediaReceiverSession: @unchecked Sendable {
     private var retiredFrameFloor: UInt64?
     private var controlTimes: [UInt64] = [], auxiliaryTimes: [UInt64] = [], requestTimes: [UInt64] = []
     private var annotationTraffic = AnnotationTrafficBudget()
+    private var rawTraffic = RawMediaTrafficBudget()
+    private var annotationDisabled = false, metadataDisabled = false
+    private var timingSample: (report: MediaReceiverTimingReport, sampledAt: UInt64)?
+    private var lastTimingSent: UInt64?
+    private var timingSentStreams = Set<UUID>()
     private var videoReceiver: MediaVideoReceiver?
     private var videoPreparation: Preparation?
 
@@ -182,6 +187,28 @@ public final class MediaReceiverSession: @unchecked Sendable {
     public func completePreparation(id: UUID, ready: Bool) { queue.async { self.completePreparationOnQueue(id: id, ready: ready) } }
     public func resynchronize(minimumCaptureTimeNanos: UInt64? = nil) { queue.async { self.requestRecovery(keyframe: false, minimum: minimumCaptureTimeNanos) } }
     public func requestKeyframe(minimumCaptureTimeNanos: UInt64? = nil) { queue.async { self.requestRecovery(keyframe: true, minimum: minimumCaptureTimeNanos) } }
+    /// Capture a fresh output/route sample before startup, or during the first
+    /// preparation before rejecting insufficient lead. First-lease reports send
+    /// immediately; later measurements coalesce to at most one per second.
+    public func updateTiming(_ report: MediaReceiverTimingReport) {
+        queue.async { self.updateTimingOnQueue(report) }
+    }
+    func updateTimingOnQueue(_ report: MediaReceiverTimingReport) {
+        assertQueue(); guard !stopped, (try? report.validate()) != nil else { return }
+        timingSample = (report, nowNanos()); sendTimingIfReady()
+    }
+    private func sendTimingIfReady(preferred: Lease? = nil) {
+        guard !stopped, let sample = timingSample else { return }
+        let time = nowNanos()
+        guard time >= sample.sampledAt, let report = sample.report.aged(by: time - sample.sampledAt),
+              let lease = preferred ?? [pending, active].compactMap({ $0 }).first(where: { $0.preparation != nil }),
+              live(lease), lease.preparation != nil else { return }
+        let first = !timingSentStreams.contains(lease.ticket.sessionID)
+        guard first || (lastTimingSent.map({ time >= $0 && time - $0 >= 1_000_000_000 }) ?? true) else { return }
+        timingSentStreams = timingSentStreams.intersection(Set([active, pending].compactMap { $0?.ticket.sessionID }))
+        timingSentStreams.insert(lease.ticket.sessionID); lastTimingSent = time
+        send(.timingReport(stream: lease.stream, report: report))
+    }
     /// The opener must return the admitted `.video` channel inline from
     /// MeshControlPlane.openMediaChannel's completion, before hopping executors.
     /// Video owns its retry/decoder path; its failures never stop audio.
@@ -191,19 +218,20 @@ public final class MediaReceiverSession: @unchecked Sendable {
                 callbacks.state(.stopped); return
             }
             self.videoReceiver?.stop()
+            let mediaQueue = self.queue
             let video = MediaVideoReceiver(credentials: self.credentials, open: { reply in
                 openChannel { result in
                     switch result {
-                    case .success(let channel): MediaVideoConnection.attach(channel, queue: self.queue, completion: reply)
-                    case .failure(let error): self.queue.async { reply(.failure(error)) }
+                    case .success(let channel): MediaVideoConnection.attach(channel, queue: mediaQueue, completion: reply)
+                    case .failure(let error): mediaQueue.async { reply(.failure(error)) }
                     }
                 }
             }, callbacks: callbacks, authorized: { [weak self] stream in
                 guard let self, !self.stopped, let lease = self.lease(stream) else { return false }
-                return lease.expires > self.nowNanos() && lease.committedPreparation?.anchor.state == .running
+                return lease.expires > self.nowNanos() && lease.pathValidated
             }, requestIDR: { [weak self] floor in self?.requestRecovery(keyframe: true, minimum: floor) }, now: self.nowNanos)
             self.videoReceiver = video
-            if let preparation = self.videoPreparation, preparation.anchor.state == .running {
+            if let preparation = self.videoPreparation {
                 video.select(stream: preparation.anchor.stream, captureFloor: preparation.anchor.captureTimeNanos,
                              generation: preparation.lifecycleGeneration)
             }
@@ -236,6 +264,7 @@ public final class MediaReceiverSession: @unchecked Sendable {
         assertQueue(); guard !stopped else { return }
         stopped = true; generation &+= 1; timer?.cancel(); timer = nil
         videoReceiver?.stop(); videoReceiver = nil; videoPreparation = nil
+        timingSample = nil; timingSentStreams.removeAll(); lastTimingSent = nil
         retire(active); retire(pending); active = nil; pending = nil
         let abandoned = outputs; outputs.removeAll()
         request = nil; extraRequests.removeAll(); probes.removeAll(); recentFrames.removeAll(); annotationTraffic = AnnotationTrafficBudget()
@@ -258,6 +287,7 @@ public final class MediaReceiverSession: @unchecked Sendable {
         guard credentials.isActive, outputs.first.map({ $0.deadline > now }) ?? true else { stopOnQueue(failed: true); return }
         probes = probes.filter { now >= $0.value && now - $0.value < 2_000_000_000 }
         extraRequests = extraRequests.filter { $0.value > now }
+        sendTimingIfReady()
         let progress = lastPong ?? startedAt
         if now >= progress, now - progress > 10_000_000_000 { stopOnQueue(failed: true); return }
         if (request?.deadline ?? .max) <= now { request = nil; nextAttempt = now + 1_000_000_000; transition(.recovering) }
@@ -303,26 +333,30 @@ public final class MediaReceiverSession: @unchecked Sendable {
     func receive(_ bytes: Data) {
         assertQueue(); guard !stopped else { return }
         guard credentials.isActive else { stopOnQueue(failed: true); return }
+        guard rawTraffic.accept(bytes.count, now: nowNanos()) else { stopOnQueue(failed: true); return }
         let message: MediaControlWireMessage
         do { message = try MediaControlWireMessage(encoded: bytes) }
         catch {
-            if bytes.count <= AnnotationWireMessage.maximumWireBytes,
-              let annotation = try? AnnotationWireMessage(encoded: bytes) {
+            guard let kind = MediaOptionalExtension.classify(bytes) else { stopOnQueue(failed: true); return }
+            if kind == .annotation {
+                guard !annotationDisabled else { return }
+                guard bytes.count <= AnnotationWireMessage.maximumWireBytes,
+                      let annotation = try? AnnotationWireMessage(encoded: bytes) else { annotationDisabled = true; return }
                 let now = nowNanos()
                 // Up to 32 participants can each publish a 30 Hz gesture. Byte
                 // and message bounds also cover snapshot/control overhead.
                 let isSnapshot: Bool
                 if case .snapshotChunk = annotation { isSnapshot = true } else { isSnapshot = false }
                 guard annotationTraffic.accept(bytes: bytes.count, snapshot: isSnapshot, now: now) else {
-                    stopOnQueue(failed: true); return
+                    annotationDisabled = true; return
                 }
                 if callbacks.annotation(bytes) { return }
-                stopOnQueue(failed: true); return
+                annotationDisabled = true; return
             }
-            guard budget(&auxiliaryTimes, limit: 16) else { stopOnQueue(failed: true); return }
-            if bytes.count <= 4_096, let root = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
-               root["protocolName"] as? String == "alo.capture-metadata", callbacks.metadata(bytes) { return }
-            stopOnQueue(failed: true); return
+            guard !metadataDisabled else { return }
+            guard bytes.count <= CaptureMetadataWireMessage.maximumWireBytes,
+                  budget(&auxiliaryTimes, limit: 16), callbacks.metadata(bytes) else { metadataDisabled = true; return }
+            return
         }
         guard budget(&controlTimes, limit: 32) else { stopOnQueue(failed: true); return }
         switch message {
@@ -336,7 +370,7 @@ public final class MediaReceiverSession: @unchecked Sendable {
         case let .pause(stream, capture):
             guard let lease = lease(stream) else { return }
             lease.startup.removeAll(); lease.prepared = false; lease.acknowledged = false; lease.preparation = nil
-            lease.committedPreparation = nil; videoPreparation = nil; videoReceiver?.suspend()
+            lease.committedPreparation = nil
             callbacks.paused(stream, capture); transition(.paused)
         case let .rejected(id, _):
             if request?.id == id { request = nil; nextAttempt = nowNanos() + 1_000_000_000; transition(active == nil ? .recovering : .active) }
@@ -388,6 +422,7 @@ public final class MediaReceiverSession: @unchecked Sendable {
         lease.preparation = Preparation(id: UUID(), lifecycleGeneration: generation, anchor: anchor, clock: snapshot)
         lease.prepared = false; lease.acknowledged = false
         lease.startup = lease.startup.filter { $0.value.frameIndex >= anchor.frameIndex && $0.value.captureTimeNanos >= anchor.captureTimeNanos }
+        sendTimingIfReady(preferred: lease)
         if let preparation = lease.preparation { callbacks.prepareAnchor(preparation) }
     }
     func completePreparationOnQueue(id: UUID, ready: Bool) {
@@ -427,9 +462,7 @@ public final class MediaReceiverSession: @unchecked Sendable {
         send(.anchorReady(stream: lease.stream, frameIndex: anchor.frameIndex, captureTimeNanos: anchor.captureTimeNanos, hostPlaybackTimeNanos: anchor.hostPlaybackTimeNanos))
         guard !stopped else { return }
         videoPreparation = preparation
-        if anchor.state == .running {
-            videoReceiver?.select(stream: lease.stream, captureFloor: anchor.captureTimeNanos, generation: generation)
-        } else { videoReceiver?.suspend() }
+        videoReceiver?.select(stream: lease.stream, captureFloor: anchor.captureTimeNanos, generation: generation)
         callbacks.anchorCommitted(preparation)
         if anchor.state == .paused { callbacks.paused(lease.stream, anchor.captureTimeNanos) }
         else {

@@ -536,3 +536,28 @@ local signing or production installation is authorized by this progress file.
   restricted to the explicitly approved isolated Debug simulator flag. No local
   signing or installed app/data changes were made. All live timing CI gates
   remain mandatory; local timing does not replace them.
+
+### Runtime wave 3 checkpoint
+
+- a5a4129 merged main 1732660 and is pushed. The renamed origin is
+  `theShyamsindhia/ALO`. Merge regressions fixed: secure signature Codable
+  preservation and arena framing; 27 focused tests passed.
+- Wave 3 adds mobile encrypted video, Mac presenter annotations, authenticated
+  hardware-floor reports, paused-media video independence, bounded video ingress,
+  optional-extension quarantine and active-anchor ACK preservation.
+- A real TLS/UDP fixture now starts capture before any listener exists, joins a
+  healthy listener, then joins/leaves/rejoins the same second identity twice.
+  Healthy playback retains one commit and receives no duplicate frames. This is
+  synthetic capture on real sockets, not a claim of acoustic/radio validation.
+- Focused 60-test run passed; unsigned iOS simulator build passed. Full run ran
+  603 tests and found only three finite-codec fixtures using stop as flush.
+  Explicit generation-preserving fixture flushing fixes those; focused 5-codec
+  tests pass. A complete rerun is required for this checkpoint.
+- Fable low reviewed committed a188231..a5a4129: new follow-ups are chat author
+  binding, mobile rich-chat projection, stale annotation attachment guard,
+  opt-in secure ducking wiring, video failure executor, and scan-expiry UX.
+  They are not yet claimed resolved or cleanly re-reviewed.
+- Directed mobile/Mac v2 voice, coordinated hardware-floor cutovers, lifecycle
+  acceptance and final review remain mandatory before 0.14.0. The verification
+  workflow now runs the integration branch with pinned Xcode 26.3 and the same
+  optimized tests/live-timing requirements as release CI.

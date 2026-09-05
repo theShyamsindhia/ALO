@@ -5,6 +5,72 @@ import Testing
 
 @Suite("Media receiver bootstrap and replacement")
 struct MediaReceiverSessionTests {
+    @Test func firstHardwareFloorPrecedesRejectedPreparationAndSurvivesTicketCancel() throws {
+        let h = try MediaReceiverHarness()
+        try h.queue.sync {
+            h.rejectPreparations = true
+            h.receiver.updateTimingOnQueue(try .init(hardwareOutputFloorNanos: 450_000_000,
+                networkRecommendedDelayNanos: 500_000_000, roundTripNanos: 20_000_000))
+            try h.synchronize()
+            #expect(h.preparationSawTimingQueued)
+            let received = try #require(h.timingReports.first)
+            #expect(received.1.hardwareOutputFloorNanos == 450_000_000)
+            #expect(received.1.roundTripNanos == 20_000_000)
+            #expect(h.cancelled.contains(received.0.sessionID))
+            #expect(!h.registry.containsLiveSubscription(sessionID: received.0.sessionID, now: h.seconds))
+        }
+    }
+
+    @Test func timingReportsCoalesceAndRejectStaleOrUnissuedStreams() throws {
+        let h = try MediaReceiverHarness()
+        try h.queue.sync {
+            try h.activate()
+            let report = try MediaReceiverTimingReport(hardwareOutputFloorNanos: 250_000_000,
+                networkRecommendedDelayNanos: 350_000_000, roundTripNanos: 200_000_000)
+            for _ in 0..<100 { h.receiver.updateTimingOnQueue(report) }
+            try h.pump(); #expect(h.timingReports.count == 1)
+            h.time += 1_000_000_000; h.receiver.tick(); try h.pump()
+            #expect(h.timingReports.count == 2)
+            #expect(h.timingReports.last?.1.sampleAgeNanos == 1_000_000_000)
+            h.time += 2_000_000_001; h.receiver.tick(); try h.pump()
+            #expect(h.timingReports.count == 2)
+            let unissued = MediaStreamIdentifier(sessionID: UUID(), broadcasterEpoch: 7, generation: 1)
+            h.host.receive(try MediaControlWireMessage.timingReport(stream: unissued, report: report).encoded(), connectionID: h.publisher.connectionID)
+            #expect(h.timingReports.count == 2 && h.states.last == .active)
+        }
+    }
+    @Test func recognizedBrokenOrUnsupportedExtensionsNeverStopAudio() throws {
+        for proto in [AnnotationWireMessage.capability, CaptureMetadataWireMessage.protocolName] {
+            let h = try MediaReceiverHarness()
+            try h.queue.sync {
+                try h.activate()
+                let bad = try JSONSerialization.data(withJSONObject: ["protocolName": proto, "message": "invalid"])
+                h.receiver.receive(bad)
+                h.receiver.receive(try AnnotationWireMessage.hello(capabilities: [AnnotationWireMessage.capability]).encoded())
+                try h.publishPackets(4)
+                #expect(h.states.last == .active && h.audio.count == 8)
+            }
+        }
+    }
+
+    @Test func unknownProtocolStillFailsClosed() throws {
+        let h = try MediaReceiverHarness()
+        try h.queue.sync {
+            try h.activate()
+            h.receiver.receive(Data("{\"protocolName\":\"unknown\"}".utf8))
+            #expect(h.states.last == .failed)
+        }
+    }
+
+    @Test func quarantinedExtensionCannotBypassRawChannelBudget() throws {
+        let h = try MediaReceiverHarness()
+        try h.queue.sync {
+            try h.activate()
+            let bad = Data("{\"protocolName\":\"\(AnnotationWireMessage.capability)\"}".utf8)
+            for _ in 0..<4_100 { h.receiver.receive(bad) }
+            #expect(h.states.last == .failed)
+        }
+    }
     @Test func annotationTrafficExpiresWithIndependentSnapshotAndGestureBudgets() {
         var budget = AnnotationTrafficBudget()
         let initial = budget.accept(bytes: 8 * 1_024 * 1_024, snapshot: true, now: 0)
@@ -201,6 +267,9 @@ private final class MediaReceiverHarness {
     var readiness: [MediaControlWireMessage] = []
     var deferEndpoint = false
     var endpointReplies: [(Result<NWEndpoint, Error>) -> Void] = []
+    var timingReports: [(MediaStreamIdentifier, MediaReceiverTimingReport, UInt64)] = []
+    var rejectPreparations = false
+    var preparationSawTimingQueued = false
 
     init() throws {
         let offer = try ProtocolOffer(wireVersions: [2], stateSyncVersions: [1], capabilities: .desktop)
@@ -217,6 +286,8 @@ private final class MediaReceiverHarness {
                     guard let self else { return nil }
                     return .init(stream: stream, captureTimeNanos: now, frameIndex: self.nextFrame,
                         hostPlaybackTimeNanos: now + 200_000_000, issuedAtHostNanos: now, state: self.anchorState)
+                }, timingReport: { [weak self] _, stream, report, time in
+                    self?.timingReports.append((stream, report, time))
                 }), registry: registry, nowNanos: { [weak self] in self?.time ?? 0 },
             sendDatagram: { [weak self] data, session, done in
                 guard let self, let flow = self.flows[session],
@@ -227,7 +298,14 @@ private final class MediaReceiverHarness {
         receiver = try MediaReceiverSession(expected: .init(roomID: NetworkFixture.room,
             localPeerID: NetworkFixture.receiver, broadcasterPeerID: NetworkFixture.sender, broadcasterEpoch: 7),
             credentials: subscriber, queue: queue,
-            callbacks: .init(prepareAnchor: { [weak self] in self?.preparations.append($0) },
+            callbacks: .init(prepareAnchor: { [weak self] preparation in
+                guard let self else { return }
+                self.preparations.append(preparation)
+                self.preparationSawTimingQueued = self.toHost.contains {
+                    if case .timingReport = try? MediaControlWireMessage(encoded: $0) { return true }; return false
+                }
+                if self.rejectPreparations { self.receiver.completePreparationOnQueue(id: preparation.id, ready: false) }
+            },
                 anchorCommitted: { [weak self] in self?.committed.append($0) },
                 audio: { [weak self] packet, _, _ in self?.audio.append(packet) },
                 state: { [weak self] in self?.states.append($0) }),

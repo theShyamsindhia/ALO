@@ -5,6 +5,19 @@ enum MediaVideoWire {
     static let maximumFrameBytes = 4 * 1_024 * 1_024
     static let chunkBytes = 192 * 1_024
     static let frameDeadlineNanos: UInt64 = 5_000_000_000
+    static let openDeadlineNanos: UInt64 = 25_000_000_000
+    static let heartbeatIntervalNanos: UInt64 = 2_000_000_000
+    static func heartbeat(_ nonce: UInt64, reply: Bool) -> Data {
+        var wire = WireBytes()
+        wire.append(UInt32(reply ? 0x414C_5651 : 0x414C_5650)); wire.append(nonce)
+        return wire.data
+    }
+    static func heartbeatNonce(_ data: Data, reply: Bool) -> UInt64? {
+        guard data.count == 12 else { return nil }
+        var reader = WireReader(data: data)
+        guard (try? reader.integer(UInt32.self)) == (reply ? 0x414C_5651 : 0x414C_5650) else { return nil }
+        return try? reader.integer(UInt64.self)
+    }
     struct Binding: Codable {
         let protocolName: String
         let version: UInt16
@@ -65,6 +78,11 @@ struct MediaVideoAssembler {
         // The existing frame decoder remains the codec wire implementation, but
         // strict header checks prevent its permissive reset behavior hiding errors.
         guard bytes[4] == 1, bytes[5] <= 1, bytes[6] == 0, bytes[7] == 0 else { throw SecureTransportError.malformed }
+        var lengths = WireReader(data: bytes, offset: 24)
+        let first = Int(try lengths.integer(UInt32.self)), second = Int(try lengths.integer(UInt32.self))
+        let payload = Int(try lengths.integer(UInt32.self))
+        guard first <= 65_536, second <= 65_536, payload > 0,
+              36 + first + second + payload == bytes.count else { throw SecureTransportError.malformed }
         let frames = VideoFrameStreamDecoder().append(bytes)
         guard frames.count == 1, let frame = frames.first, MediaVideoWire.validate(frame), sequence < .max else {
             throw SecureTransportError.malformed

@@ -39,7 +39,7 @@ import ALOCore
         encoder.encode(buffer, captureTimeNanos: MonotonicClock.nowNanos())
         // Flush the finite synthetic input; unlike a real capture stream there
         // will be no following frames to prompt the encoder to drain.
-        encoder.stop()
+        encoder.flushForTesting()
         let deadline = ContinuousClock.now.advanced(by: .seconds(5))
         while output.size == nil && ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(20))
@@ -135,7 +135,7 @@ import ALOCore
             count: CVPixelBufferGetBytesPerRow(buffer) * CVPixelBufferGetHeight(buffer))
         CVPixelBufferUnlockBaseAddress(buffer, [])
         encoder.encode(buffer, captureTimeNanos: MonotonicClock.nowNanos())
-        encoder.stop()
+        encoder.flushForTesting()
         return try #require(frames.lock.withLock { frames.values.first })
     }
 }

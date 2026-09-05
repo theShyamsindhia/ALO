@@ -54,10 +54,12 @@ final class MediaVideoReceiver {
         var bound = false
         var awaitingIDR = true
         var assembler = MediaVideoAssembler()
-        var lastFrame: UInt64
+        var lastProgress: UInt64
+        var heartbeatSequence: UInt64 = 0
+        var pongInFlight = false
         init(selection: Selection, connection: MediaVideoConnection, now: UInt64) {
             self.selection = selection; self.connection = connection
-            deadline = now + MediaVideoWire.frameDeadlineNanos; lastFrame = now
+            deadline = now + MediaVideoWire.frameDeadlineNanos; lastProgress = now
         }
     }
     private let credentials: AuthenticatedChannelCredentials
@@ -69,6 +71,7 @@ final class MediaVideoReceiver {
     private var selection: Selection?
     private var active: Link?, candidate: Link?
     private var opening: UUID?
+    private var openingDeadline: UInt64 = 0
     private var retryAt: UInt64 = 0
     private var attempts = 0
     private var stopped = false
@@ -100,16 +103,18 @@ final class MediaVideoReceiver {
         guard !stopped, credentials.isActive, let selection else { return }
         if !authorized(selection.stream) { suspend(); return }
         let time = now()
-        if let active, !active.connection.credentials.isActive || !authorized(active.selection.stream) || active.assembler.expired(now: time) {
+        if opening != nil, time >= openingDeadline { opening = nil; retry() }
+        if let active, !active.connection.credentials.isActive || !authorized(active.selection.stream) || active.assembler.expired(now: time) ||
+            (time >= active.lastProgress && time - active.lastProgress >= MediaVideoWire.frameDeadlineNanos) {
             fail(active)
         }
         if let candidate, time >= candidate.deadline || !candidate.connection.credentials.isActive || candidate.assembler.expired(now: time) {
             fail(candidate)
         }
-        let needsConnection = active == nil || active?.selection != selection ||
-            active.map({ time >= $0.lastFrame && time - $0.lastFrame >= MediaVideoWire.frameDeadlineNanos }) == true
+        let needsConnection = active == nil || active?.selection != selection
         guard needsConnection, candidate == nil, opening == nil, time >= retryAt else { return }
         let operation = UUID(); opening = operation
+        openingDeadline = time + MediaVideoWire.openDeadlineNanos
         callbacks.state(active == nil ? (attempts == 0 ? .connecting : .recovering) : .active)
         open { [weak self] result in
             guard let self, !self.stopped, self.opening == operation, self.selection == selection,
@@ -141,15 +146,26 @@ final class MediaVideoReceiver {
         do {
             if !link.bound {
                 guard try MediaVideoWire.decodeBinding(data, accepted: true) == link.selection.stream else { throw SecureTransportError.wrongContext }
-                link.bound = true; requestKeyframe(link); return
+                link.bound = true; link.lastProgress = now(); requestKeyframe(link); return
             }
-            guard let frame = try link.assembler.append(data, now: now()) else { return }
+            if let nonce = MediaVideoWire.heartbeatNonce(data, reply: false) {
+                guard nonce > link.heartbeatSequence, !link.pongInFlight else { throw SecureTransportError.replay }
+                link.heartbeatSequence = nonce; link.lastProgress = now(); link.pongInFlight = true
+                link.connection.send(MediaVideoWire.heartbeat(nonce, reply: true)) { [weak self, weak link] result in
+                    guard let self, let link, self.active === link || self.candidate === link else { return }
+                    link.pongInFlight = false
+                    if case .failure = result { self.fail(link) }
+                }
+                return
+            }
+            let assembled = try link.assembler.append(data, now: now())
+            link.lastProgress = now()
+            guard let frame = assembled else { return }
             guard frame.captureTimeNanos >= link.selection.captureFloor else { return }
             if link.awaitingIDR {
                 guard frame.isKeyframe, !frame.parameterSet1.isEmpty, !frame.parameterSet2.isEmpty else { requestKeyframe(link); return }
                 link.awaitingIDR = false
             }
-            link.lastFrame = now()
             if candidate === link {
                 let old = active; active = link; candidate = nil; attempts = 0
                 old?.connection.close(); callbacks.state(.active)

@@ -4,6 +4,61 @@ import Testing
 
 @Suite("Admitted independent video transport")
 struct MediaVideoSessionTests {
+    @Test func pausedAudioStillAuthorizesIndependentScreenFrames() throws {
+        let h = try MediaVideoHarness()
+        try h.audio.queue.sync {
+            h.audio.anchorState = .paused
+            try h.start()
+            h.audio.host.submitVideo(h.frame())
+        }
+        try h.audio.queue.sync {
+            try h.pump()
+            #expect(h.frames.count == 1 && h.states.last == .active)
+            h.audio.host.publishAudio(h.audio.packet)
+            #expect(h.audio.datagrams.isEmpty && h.audio.closed.isEmpty)
+        }
+    }
+
+    @Test func idleVideoUsesAuthenticatedHeartbeatWithoutReconnectChurn() throws {
+        let h = try MediaVideoHarness()
+        try h.audio.queue.sync { try h.start(); h.audio.host.submitVideo(h.frame()) }
+        try h.audio.queue.sync {
+            try h.pump()
+            for _ in 0..<4 {
+                h.audio.time += 2_000_000_000
+                h.audio.host.tick(); try h.pump(); h.video.tick()
+            }
+            #expect(h.connections.count == 1 && h.states.last == .active)
+            #expect(h.frames.count == 1 && h.audio.closed.isEmpty)
+            // A lost heartbeat/half-open video link still repairs independently.
+            h.audio.time += 6_000_000_000; h.video.tick()
+            #expect(h.states.last == .recovering)
+            #expect(h.audio.closed.isEmpty)
+        }
+    }
+
+    @Test func openerTimeoutRetiresLateCompletionAndRetries() throws {
+        let h = try MediaVideoHarness()
+        try h.audio.queue.sync {
+            h.deferOpens = true; try h.start()
+            #expect(h.connections.isEmpty && h.openReplies.count == 1)
+            h.audio.time += MediaVideoWire.openDeadlineNanos; h.video.tick()
+            #expect(h.states.last == .recovering)
+            h.audio.time += 500_000_000; h.video.tick()
+            #expect(h.openReplies.count == 2)
+            h.openReplies.removeFirst()(.failure(SecurePeerChannelError.timedOut))
+            #expect(h.states.last == .recovering)
+        }
+    }
+
+    @Test func outerFrameCannotHideTrailingBytes() throws {
+        let frame = VideoFrame(captureTimeNanos: 10, width: 64, height: 64, isKeyframe: true,
+            parameterSet1: Data([1]), parameterSet2: Data([2]), payload: Data([9])).encoded() + Data([0])
+        var assembler = MediaVideoAssembler()
+        #expect(throws: SecureTransportError.self) {
+            try assembler.append(MediaVideoWire.chunk(frame, sequence: 1, offset: 0), now: 0)
+        }
+    }
     @Test func videoBindsActualAudioLeaseAndAssemblesConfigurationBearingIDR() throws {
         let h = try MediaVideoHarness()
         try h.audio.queue.sync {
@@ -108,6 +163,8 @@ private final class MediaVideoHarness {
     var states: [VideoReceiverState] = []
     var holdFrameSends = false
     var heldSends: [(Result<Void, Error>) -> Void] = []
+    var deferOpens = false
+    var openReplies: [(Result<MediaVideoConnection, Error>) -> Void] = []
     init() throws { audio = try MediaHostHarness() }
     func start() throws {
         audio.host.publisherReady(port: 54321)
@@ -115,6 +172,7 @@ private final class MediaVideoHarness {
         audio.host.setVideoEnabled(true)
         video = MediaVideoReceiver(credentials: audio.receiver, open: { [weak self] reply in
             guard let self else { reply(.failure(SecureTransportError.invalidState)); return }
+            if self.deferOpens { self.openReplies.append(reply); return }
             do {
                 let peer = try MediaHostHarness.credentials(role: .video, initiatorID: self.audio.receiver.localPeerID)
                 let connection = MediaVideoConnection(credentials: peer.receiver,

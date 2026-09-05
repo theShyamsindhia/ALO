@@ -980,6 +980,9 @@ final class MeshSession {
                                     self.statusHandler("Broadcast stopped: \(error.localizedDescription)")
                                     self.errorHandler(error)
                                 }
+                            }, annotationScene: { [weak self] scene in
+                                guard let self, self.transitionGeneration == generation else { return }
+                                self.annotationSceneHandler(scene)
                             })
                         guard !Task.isCancelled, generation == transitionGeneration,
                               replica.broadcaster == broadcaster else { await host.stop(); return }

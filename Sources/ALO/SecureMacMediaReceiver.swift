@@ -29,6 +29,7 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
     private var timer: DispatchSourceTimer?
     private var stopped = true
     private var started = false
+    private var lastTimingReportNanos: UInt64 = 0
     private var committed: MediaStreamAnchor?
     private var clock: MediaReceiverSession.ClockSnapshot?
     private let jitter = NetworkJitterEstimator()
@@ -89,6 +90,7 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
             timer.setEventHandler { [weak self] in
                 guard let self, !self.stopped else { return }
                 self.player.maintainSync()
+                self.reportTiming()
                 self.perform(self.supervisor.advance(lifecycle: self.supervisor.lifecycle, now: self.now,
                                                      jitterUnit: Double.random(in: 0...1)))
             }
@@ -221,6 +223,7 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
                         switch result {
                         case .success(let receiver):
                             self.receiver = receiver
+                            self.reportTiming(force: true)
                             self.configureVideo()
                             self.perform(self.supervisor.ready(attempt, now: self.now))
                             self.perform(self.supervisor.authenticated(attempt, now: self.now))
@@ -243,8 +246,12 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
                 guard let self, !self.stopped, self.token == attempt else { return }
                 // Preparation must not reset, stop, or mute the predecessor.
                 let anchor = preparation.anchor
+                self.reportTiming(force: true)
                 let valid = anchor.hostPlaybackTimeNanos >= anchor.captureTimeNanos
                     && anchor.hostPlaybackTimeNanos - anchor.captureTimeNanos <= RoomTiming.maximumPlayoutDelayNanos
+                    && anchor.hostPlaybackTimeNanos - anchor.captureTimeNanos >= RoomTiming.outputLatencyFloor(
+                        self.player.outputLatencyForTimingNanos,
+                        renderSchedulingHeadroomNanos: self.player.renderSchedulingHeadroomForTimingNanos)
                 self.receiver?.completePreparation(id: preparation.id, ready: valid)
             }
         }, anchorCommitted: { [weak self] preparation in
@@ -299,5 +306,21 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
             }
             player.accept(item.packet)
         }
+    }
+
+    private func reportTiming(force: Bool = false) {
+        guard let receiver else { return }
+        let now = MonotonicClock.nowNanos()
+        guard force || now >= lastTimingReportNanos && now - lastTimingReportNanos >= 1_000_000_000 else { return }
+        let floor = RoomTiming.outputLatencyFloor(player.outputLatencyForTimingNanos,
+            renderSchedulingHeadroomNanos: player.renderSchedulingHeadroomForTimingNanos)
+        let freshClock = clock.flatMap { now >= $0.sampledAtLocalNanos && now - $0.sampledAtLocalNanos <= MediaReceiverTimingReport.maximumAgeNanos ? $0 : nil }
+        let network = jitter.recommendedPlayoutDelayNanos(roundTripNanos: freshClock?.roundTripNanos,
+            outputLatencyNanos: player.outputLatencyForTimingNanos,
+            renderSchedulingHeadroomNanos: player.renderSchedulingHeadroomForTimingNanos)
+        guard let report = try? MediaReceiverTimingReport(hardwareOutputFloorNanos: floor,
+            networkRecommendedDelayNanos: max(floor, network), roundTripNanos: freshClock?.roundTripNanos) else { return }
+        receiver.updateTiming(report)
+        lastTimingReportNanos = now
     }
 }

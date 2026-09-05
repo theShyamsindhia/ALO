@@ -3,11 +3,14 @@ name: Verify Mac tests and iOS app
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, codex/full-nearby-integration]
   workflow_dispatch:
 
 permissions:
   contents: read
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
 
 concurrency:
   group: verify-${{ github.ref }}
@@ -19,8 +22,21 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Verify pinned toolchain
+        run: |
+          xcodebuild -version
+          swift --version
+          test "$(xcodebuild -version | head -n 1)" = "Xcode 26.3"
       - name: Run tests without installing or signing an app
-        run: swift test --no-parallel
+        # Same optimized test-only entrypoint workaround and strict live timing
+        # gates as the release workflow; packaging flags remain unchanged.
+        run: |
+          set -euo pipefail
+          swift test -c release --no-parallel \
+            -Xswiftc -Xllvm -Xswiftc -sil-disable-pass=CapturePropagation \
+            -Xswiftc -Xllvm -Xswiftc -sil-disable-pass-only-function=main \
+            2>&1 | tee "$RUNNER_TEMP/alo-tests.log"
+          grep -Eq 'Test run with [1-9][0-9]* tests?( in [0-9]+ suites)? passed' "$RUNNER_TEMP/alo-tests.log"
       - name: Run repeatable room scenarios
         run: bash Scripts/test_room_scenarios.sh
 

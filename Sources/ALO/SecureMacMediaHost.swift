@@ -3,6 +3,7 @@ import ALOCore
 import ALONetworking
 import ALOAppleMedia
 import CoreGraphics
+import CoreVideo
 import ScreenCaptureKit
 
 /// Secure rooms never construct HostServer or a reverse/plaintext local receiver.
@@ -24,15 +25,17 @@ final class SecureMacMediaHost {
     private var videoEncoder: VideoEncoder?
     private var videoDecoder: VideoDecoder?
     private var videoGeneration = UUID()
+    private var annotations: SecureMacAnnotationHost?
 
     init() {}
     deinit { ingress.revoke() }
 
     func start(mesh: MeshControlPlane, room: RoomConfiguration, broadcaster: MeshBroadcaster,
                audioOutput: RoomAudioOutputEngine, nowPlaying: @escaping (NowPlayingMedia) -> Void,
-               status: @escaping (String) -> Void, stopped: @escaping @Sendable (Error) -> Void) async throws {
+               status: @escaping (String) -> Void, stopped: @escaping @Sendable (Error) -> Void,
+               annotationScene: @escaping (AnnotationSceneModel?) -> Void = { _ in }) async throws {
         guard !started, cleanup == nil, room.transportPolicy == .secureV2,
-              UUID(uuidString: room.id) != nil, let peerID = UUID(uuidString: broadcaster.nodeID),
+              let roomID = UUID(uuidString: room.id), let peerID = UUID(uuidString: broadcaster.nodeID),
               broadcaster.epoch < .max else { throw SecureTransportError.invalidState }
         guard #available(macOS 14.2, *) else { throw ALOError("Synchronized broadcasting requires macOS 14.2 or newer.") }
         started = true
@@ -40,6 +43,11 @@ final class SecureMacMediaHost {
         let owner = MediaHostSession.Broadcaster(peerID: peerID, epoch: broadcaster.epoch)
         let ingress = self.ingress
         ingress.begin(owner: owner)
+        let annotations = SecureMacAnnotationHost(roomID: roomID, presenterID: peerID,
+                                                  isPublic: !room.isPrivate, onScene: annotationScene)
+        annotations.start(mesh: mesh)
+        self.annotations = annotations
+        ingress.setAnnotations(annotations)
         do {
             let host: MediaHostSession = try await withCheckedThrowingContinuation { continuation in
                 mesh.makeMediaHost(callbacks: .init(
@@ -47,7 +55,9 @@ final class SecureMacMediaHost {
                     currentAnchor: { _, stream, now in ingress.timeline.anchor(for: stream, issuedAtHostNanos: now) },
                     // Remote recovery never resets our local output or capture clock.
                     resync: { _, _, _ in },
-                    requestKeyframe: { _, _, minimum in ingress.requestKeyframe(minimum) })) {
+                    requestKeyframe: { _, _, minimum in ingress.requestKeyframe(minimum) },
+                    annotation: { credentials, bytes in ingress.annotationHost?.receive(credentials: credentials, bytes) ?? false },
+                    peerDetached: { ingress.annotationHost?.removePeer(connectionID: $0) })) {
                         continuation.resume(with: $0)
                     }
             }
@@ -102,7 +112,10 @@ final class SecureMacMediaHost {
                 guard credentials.connectionID == peer.connectionID, credentials.remotePeerID == peer.nodeID,
                       self.ingress.currentHost === host else { throw SecureTransportError.invalidCredentials }
                 if peer.channelRole == .video { try host.attachVideo(channel: channel, credentials: credentials) }
-                else { try host.attach(channel: channel, credentials: credentials) }
+                else {
+                    try host.attach(channel: channel, credentials: credentials)
+                    self.ingress.annotationHost?.attach(credentials: credentials, mediaHost: host)
+                }
             } catch { channel.cancel() }
         }
     }
@@ -117,6 +130,7 @@ final class SecureMacMediaHost {
     func stop() async {
         if let cleanup { await cleanup.value; return }
         lifecycle = UUID()
+        annotations?.endSource(); annotations?.stop(); annotations = nil
         ingress.revoke()
         if shouldPauseSourceOnStop { _ = playbackController?.perform(.pause) }
         shouldPauseSourceOnStop = false
@@ -153,6 +167,7 @@ final class SecureMacMediaHost {
                          stopped: @escaping (Error) -> Void = { _ in }) async throws {
         if !enabled {
             videoGeneration = UUID()
+            annotations?.endSource()
             ingress.configureVideo(encoder: nil, decoder: nil)
             videoPicker?.deactivate(); videoPicker = nil
             let capture = videoCapture, encoder = videoEncoder, decoder = videoDecoder
@@ -172,6 +187,9 @@ final class SecureMacMediaHost {
             try Task.checkCancellation()
             guard lifecycle == token, videoGeneration == videoToken, ingress.isActive else { throw CancellationError() }
             let ingress = self.ingress
+            let annotationSource = annotations?.beginSource()
+            let annotations = self.annotations
+            let geometry = CapturedSurfaceMetadataJoin()
             let decoder = VideoDecoder { [weak self] image in
                 // VideoPresentationQueue admits this handoff on main directly;
                 // do not add a second unbounded asynchronous UI queue.
@@ -190,8 +208,16 @@ final class SecureMacMediaHost {
             try await capture.start(filter: filter, metadata: { metadata in
                 guard ingress.isCurrentVideo(videoToken) else { return }
                 metadataHandler(metadata)
+                if let joined = geometry.metadata(metadata), let annotationSource {
+                    annotations?.captureMetadata(joined.metadata, frameSize: joined.size, generation: annotationSource)
+                }
             }) { pixelBuffer, captureTime in
                 guard ingress.isCurrentVideo(videoToken) else { return }
+                if let joined = geometry.surface(size: CGSize(width: CVPixelBufferGetWidth(pixelBuffer),
+                                                               height: CVPixelBufferGetHeight(pixelBuffer)),
+                                                 captureTimeNanos: captureTime), let annotationSource {
+                    annotations?.captureMetadata(joined.metadata, frameSize: joined.size, generation: annotationSource)
+                }
                 encoder.encode(pixelBuffer, captureTimeNanos: captureTime)
             } stopped: { [weak self, weak capture] error in
                 Task { @MainActor [weak self, weak capture] in
@@ -225,6 +251,9 @@ final class SecureMacMediaHost {
         private var keyframe: ((UInt64?) -> Void)?
         private var preview: VideoDecoder?
         private var videoGeneration: UUID?
+        private var annotations: SecureMacAnnotationHost?
+        var annotationHost: SecureMacAnnotationHost? { lock.withLock { annotations } }
+        func setAnnotations(_ annotations: SecureMacAnnotationHost) { lock.withLock { self.annotations = annotations } }
         var isActive: Bool { lock.withLock { owner != nil } }
         var currentBroadcaster: MediaHostSession.Broadcaster? { lock.withLock { owner } }
         var currentHost: MediaHostSession? { lock.withLock { host } }
@@ -238,25 +267,28 @@ final class SecureMacMediaHost {
             }
         }
         func accept(_ samples: [Int16], captureTimeNanos: UInt64) {
-            lock.withLock {
+            let refresh = lock.withLock { () -> MediaHostSession? in
                 guard owner != nil, let host, playing != false, !samples.isEmpty,
-                      samples.count <= 96_000, samples.count.isMultiple(of: 2), captureTimeNanos <= UInt64(Int64.max) else { return }
+                      samples.count <= 96_000, samples.count.isMultiple(of: 2), captureTimeNanos <= UInt64(Int64.max) else { return nil }
                 let duration = UInt64(samples.count / 2) * 1_000_000_000 / 48_000
                 let end = captureTimeNanos.addingReportingOverflow(duration)
-                guard !end.overflow else { return }
+                guard !end.overflow else { return nil }
                 if let expected = expectedNextCapture,
                    captureTimeNanos < expected && expected - captureTimeNanos > 5_000_000
                     || captureTimeNanos > expected && captureTimeNanos - expected > 5_000_000 {
                     packetizer.discardPendingSamples()
+                    timeline.invalidateCaptureReference()
                 }
                 expectedNextCapture = end.partialValue
                 // Packetization happens once, before local/remote fan-out. Both
                 // consumers see identical frame indices and capture timestamps.
                 let packets = packetizer.append(samples: samples, captureTimeNanos: captureTimeNanos)
-                timeline.observe(packets)
+                let needsRefresh = timeline.observe(packets)
                 host.submitAudio(packets)
                 local?.append(packets)
+                return needsRefresh ? host : nil
             }
+            refresh?.refreshTimeline()
         }
         func setPlaying(_ value: Bool?) {
             guard let value else { return }
@@ -288,14 +320,15 @@ final class SecureMacMediaHost {
             outputs?.1.accept(frame)
         }
         func revoke() {
-            let previous = lock.withLock { () -> (MediaHostSession?, LocalRenderer?) in
+            let previous = lock.withLock { () -> (MediaHostSession?, LocalRenderer?, SecureMacAnnotationHost?) in
                 owner = nil
-                let previous = (host, local)
+                let previous = (host, local, annotations)
                 host = nil; local = nil; keyframe = nil; preview = nil; videoGeneration = nil
+                annotations = nil
                 packetizer.discardPendingSamples(); expectedNextCapture = nil
                 return previous
             }
-            previous.0?.stop(); previous.1?.stop()
+            previous.0?.stop(); previous.1?.stop(); previous.2?.stop()
         }
     }
 
