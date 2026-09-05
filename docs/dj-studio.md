@@ -2,7 +2,19 @@
 
 Open **People → grid icon**. **Keys** and **Guide** are in the DJ Studio header. The regular room settings remain in the bottom toolbar.
 
-## Load a song and find the scrubber
+## Record the playing broadcast — no imported file needed
+
+1. Start or join a room broadcast with music playing, then open DJ Studio.
+2. Press the red **REC** beside deck A or B. It changes to **Stop** with an elapsed timer.
+3. Press **Stop** when you have the section you want. Capture also stops automatically at 32 seconds.
+4. On A, press **Play take** (or its Play key) to replace the live input with your recording. The live music keeps playing until you do this. On B, press **Play** and move the crossfader toward B to hear the take alongside A.
+5. Use the recorded take's waveform, cue, tempo, EQ and Looper. You can return A to **Live broadcast** at any time.
+
+Recording captures the original broadcast audio before this Mac's DJ effects and pads. It does not record voice chat or the microphone. An empty capture reports that no broadcast audio arrived. Only one deck records at a time; starting a new take replaces the prior take on that deck after capture succeeds.
+
+While the live route is active, recorded decks follow incoming room playback. For independent local playback, select **Recorded / file** (or **Play decks locally** when A is already a recorded take). To broadcast an independent recorded mix, stop the existing source and use **Share DJ mix**. No source file import is required.
+
+## Optionally load a song and find the scrubber
 
 Click **Load song** on Deck A or B, or drop an audio file onto a deck. Below the title is **WAVEFORM / SCRUB**. The waveform is generated in the background with a visible loading indicator. Drag anywhere across it to seek; the slider immediately underneath is also a scrubber. The white line marks the playhead. Playback starts only when you press Play.
 
@@ -39,6 +51,7 @@ Bindings work only while DJ Studio is the active window. Typing into fields and 
 | Pad row 2 | `Q W E R` |
 | Pad row 3 | `A S D F` |
 | Pad row 4 | `Z X C V` |
+| Deck A / B record-stop | `U` / `I` |
 | Deck A / B play-pause | `T` / `Y` |
 | Deck A / B return to cue | `G` / `H` |
 | Deck A / B toggle loop | `B` / `N` |
@@ -66,8 +79,8 @@ This version uses the Mac's current output. Separate headphone cue routing, hard
 
 ## Storage and performance
 
-Song files stream from their original locations; DJ Studio does not duplicate them, download sound packs, or write a waveform cache. Only keyboard preferences are persisted. Built-in pads are synthesized in memory (about 2.4 MB total). Each waveform contains at most 256 floating-point peaks; superseded analysis is cancelled.
+Song files stream from their original locations; DJ Studio does not duplicate them, download sound packs, or write a waveform cache. Only keyboard preferences are retained across normal app sessions. Explicit REC takes use temporary 16-bit WAV files, up to about 6.15 MB per deck; replacing/clearing a take, closing DJ Studio or leaving the room removes those files. Built-in pads are synthesized in memory (about 2.4 MB total). Each waveform contains at most 256 floating-point peaks; superseded analysis is cancelled.
 
 Loop PCM is limited to 16 MiB per deck and released by Stop all or window close. Imported pads are capped at 10 seconds of stereo 48 kHz audio (about 3.7 MiB per pad), with a 16 MiB limit on the temporary source decode buffer. High-resolution inputs over that budget are rejected with a shorter-sample suggestion. Engine buffers and file decoding add their own memory overhead; these are per-buffer limits, not a claim about the entire app's RAM usage.
 
-The engine initializes only when DJ Studio is used. UI updates run at 20 Hz while the window is open, avoid redundant idle-meter updates, and stop when it closes. The audio engine also stops when the window is closed and DJ sharing has ended. No broadcast PCM conversion buffer is allocated during file-only local rehearsal. Live processing is bypassed when disabled. Its dry history and loop together are capped at 12,288,000 PCM bytes (about 11.7 MiB), plus a 19,200-byte overlay queue and small waveform/filter state. These buffers are released when live input is disabled; nothing is saved to disk.
+The engine initializes only when DJ Studio is used. UI updates run at 20 Hz while the window is open, avoid redundant idle-meter updates, and stop when it closes. The audio engine also stops when the window is closed and DJ sharing has ended. No broadcast PCM conversion buffer is allocated during file-only local rehearsal. Live processing is bypassed when disabled. Its dry history and loop together are capped at 12,288,000 PCM bytes (about 11.7 MiB), plus a 19,200-byte overlay queue and small waveform/filter state. These live buffers are released when live input is disabled. Arming REC adds a fixed 6,144,000-byte PCM buffer, released after finishing or cancelling capture; only an explicit REC action creates a temporary deck file.

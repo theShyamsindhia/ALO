@@ -31,10 +31,12 @@ enum DJPCMStorage {
 
 @MainActor
 final class DJDeck: ObservableObject {
-    @Published private(set) var title = "Load a song"
+    @Published private(set) var title = "Record broadcast or load a song"
     @Published private(set) var duration: Double = 0
     @Published private(set) var position: Double = 0
     @Published private(set) var isPlaying = false
+    @Published private(set) var isRecordingClip = false
+    private(set) var recordingURL: URL?
     @Published private(set) var cue: Double = 0
     @Published var loops = false
     @Published private(set) var loopStart: Double?
@@ -84,8 +86,9 @@ final class DJDeck: ObservableObject {
               next.length <= Int64(UInt32.max) else {
             throw ALOError("Choose a non-empty mono or stereo audio file shorter than 24 hours.")
         }
+        guard let engine, let mixer else { throw ALOError("The deck audio engine is unavailable.") }
         stop()
-        guard let engine, let mixer else { return }
+        let previousRecording = recordingURL
         // Reconnect only this deck. AVAudioEngine converts at the mixer input.
         engine.disconnectNodeOutput(player)
         engine.disconnectNodeOutput(pitch)
@@ -94,6 +97,10 @@ final class DJDeck: ObservableObject {
         engine.connect(pitch, to: eq, format: next.processingFormat)
         engine.connect(eq, to: mixer, format: next.processingFormat)
         file = next
+        if previousRecording != url {
+            recordingURL = nil; isRecordingClip = false
+            if let previousRecording { try? FileManager.default.removeItem(at: previousRecording) }
+        }
         title = url.deletingPathExtension().lastPathComponent
         duration = Double(next.length) / next.processingFormat.sampleRate
         cue = 0; position = 0; rate = 1; loops = false
@@ -101,6 +108,57 @@ final class DJDeck: ObservableObject {
         suspendWaveformAnalysis()
         waveform = []
         resumeWaveformAnalysis()
+    }
+
+    /// Keep recorded clips in a temporary, 16-bit file so decks can stream them.
+    /// A 32-second stereo clip occupies at most 6,144,000 PCM bytes on disk.
+    func loadRecording(_ samples: [Int16], title: String) throws {
+        guard !samples.isEmpty, samples.count.isMultiple(of: 2), samples.count <= 48_000 * 2 * 32 else {
+            throw ALOError("Record between one frame and 32 seconds of stereo audio.")
+        }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("alo-dj-recording-\(UUID()).wav")
+        do {
+            try Self.writeRecording(samples, to: url)
+            try load(url)
+            recordingURL = url; isRecordingClip = true
+            self.title = title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Recorded broadcast" : title
+        } catch {
+            try? FileManager.default.removeItem(at: url)
+            throw error
+        }
+    }
+
+    private static func writeRecording(_ samples: [Int16], to url: URL) throws {
+        let settings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: 48_000,
+            AVNumberOfChannelsKey: 2, AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false, AVLinearPCMIsBigEndianKey: false
+        ]
+        let writer = try AVAudioFile(forWriting: url, settings: settings, commonFormat: .pcmFormatFloat32, interleaved: false)
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: writer.processingFormat, frameCapacity: 4096),
+              let channels = buffer.floatChannelData else { throw ALOError("Could not prepare the recorded clip.") }
+        let frameCount = samples.count / 2
+        var offset = 0
+        while offset < frameCount {
+            let count = min(4096, frameCount - offset)
+            buffer.frameLength = AVAudioFrameCount(count)
+            for frame in 0..<count {
+                channels[0][frame] = Float(samples[(offset + frame) * 2]) / 32768
+                channels[1][frame] = Float(samples[(offset + frame) * 2 + 1]) / 32768
+            }
+            try writer.write(from: buffer)
+            offset += count
+        }
+    }
+
+    /// Clear only an app-owned recording; a user-loaded file is never removed.
+    func clearRecording() {
+        guard let url = recordingURL else { return }
+        stop(); suspendWaveformAnalysis()
+        file = nil; recordingURL = nil; isRecordingClip = false
+        title = "Record broadcast or load a song"; duration = 0; position = 0; cue = 0
+        loopStart = nil; loopEnd = nil; loops = false; waveform = []
+        try? FileManager.default.removeItem(at: url)
     }
 
     func suspendWaveformAnalysis() {
@@ -121,7 +179,10 @@ final class DJDeck: ObservableObject {
         }
     }
 
-    deinit { waveformTask?.cancel() }
+    deinit {
+        waveformTask?.cancel()
+        if let recordingURL { try? FileManager.default.removeItem(at: recordingURL) }
+    }
 
     func toggle() throws {
         guard file != nil else { return }
@@ -366,7 +427,7 @@ final class DJStudio: ObservableObject {
         instance = studio
         return studio
     }
-    static func stopIfCreated() { instance?.setLiveStage(nil); instance?.stopAll() }
+    static func stopIfCreated() { instance?.setLiveStage(nil); instance?.stopAll(); instance?.clearRecordings() }
     static func endLiveIfCreated() { instance?.setLiveStage(nil) }
     static var isSharingIfCreated: Bool { instance?.sharing ?? false }
     let engine = AVAudioEngine()
@@ -378,6 +439,10 @@ final class DJStudio: ObservableObject {
     @Published var master: Float = 0.75 { didSet { mixer.outputVolume = master; updateLiveMix() } }
     @Published private(set) var liveSnapshot = DJLiveAudio.shared.snapshot()
     @Published var liveLoopBeats = 4
+    @Published private(set) var liveInputOnA = true
+    @Published private(set) var recordingDeck: String?
+    @Published private(set) var recordingMessage: String?
+    var usesLiveDeckA: Bool { liveEnabled && liveInputOnA }
     var liveEnabled: Bool { liveSnapshot.stage != nil }
     @Published var padGain: Float = 0.65
     @Published private(set) var level: Float = 0
@@ -411,11 +476,11 @@ final class DJStudio: ObservableObject {
             guard let self else { return }
             let (x, y) = DJMixMath.gains(crossfade: self.crossfade)
             self.a.player.volume = left * x; self.b.player.volume = right * y
-            if self.liveEnabled { DJLiveAudio.shared.setMix(gain: left * x * self.master, low: self.a.low, mid: self.a.mid, high: self.a.high) }
+            if self.liveEnabled { DJLiveAudio.shared.setMix(gain: self.liveInputOnA ? left * x * self.master : 0, low: self.a.low, mid: self.a.mid, high: self.a.high) }
         }.store(in: &gainSubscriptions)
         a.$low.combineLatest(a.$mid, a.$high).sink { [weak self] low, mid, high in
             guard let self, self.liveEnabled else { return }
-            DJLiveAudio.shared.setMix(gain: self.a.gain * DJMixMath.gains(crossfade: self.crossfade).0 * self.master, low: low, mid: mid, high: high)
+            DJLiveAudio.shared.setMix(gain: self.liveInputOnA ? self.a.gain * DJMixMath.gains(crossfade: self.crossfade).0 * self.master : 0, low: low, mid: mid, high: high)
         }.store(in: &gainSubscriptions)
         updateGains()
         configurationObserver = NotificationCenter.default.addObserver(
@@ -474,14 +539,22 @@ final class DJStudio: ObservableObject {
     }
     func updateLiveMix() {
         guard liveEnabled else { return }
-        DJLiveAudio.shared.setMix(gain: a.gain * DJMixMath.gains(crossfade: crossfade).0 * master, low: a.low, mid: a.mid, high: a.high)
+        DJLiveAudio.shared.setMix(gain: liveInputOnA ? a.gain * DJMixMath.gains(crossfade: crossfade).0 * master : 0, low: a.low, mid: a.mid, high: a.high)
     }
     func refreshLive() {
         let snapshot = DJLiveAudio.shared.snapshot()
         if liveEnabled || snapshot.stage != nil { liveSnapshot = snapshot }
+        if snapshot.recordingReady && recordingDeck != nil { perform { try finishDeckRecording() } }
     }
     func setLiveStage(_ stage: DJLiveStage?) {
-        guard stage != liveSnapshot.stage else { return }
+        guard stage != liveSnapshot.stage else {
+            if stage != nil && !liveInputOnA {
+                a.stop(); liveInputOnA = true
+                DJLiveAudio.shared.clearOverlay()
+                DJLiveAudio.shared.setMuted(false); updateLiveMix()
+            }
+            return
+        }
         if stage != nil && sharing { error = "Stop sharing the file mix before selecting a live input."; return }
         relay.setLiveOverlay(false)
         stopAll()
@@ -491,11 +564,47 @@ final class DJStudio: ObservableObject {
             crossfade = 0; master = 1; a.gain = 1
             a.low = 0; a.mid = 0; a.high = 0
         }
+        liveInputOnA = true
         DJLiveAudio.shared.configure(stage: stage)
         liveSnapshot = DJLiveAudio.shared.snapshot()
         engine.mainMixerNode.outputVolume = stage != nil || sharing ? 0 : 1
         relay.setLiveOverlay(stage != nil)
         updateLiveMix()
+    }
+    func toggleDeckRecording(_ label: String, stage: DJLiveStage?) throws {
+        guard label == "A" || label == "B" else { return }
+        if recordingDeck == label { try finishDeckRecording(); return }
+        guard recordingDeck == nil else { throw ALOError("Stop the other deck’s recording first.") }
+        guard let stage, !sharing else { throw ALOError("Start a room broadcast, then press REC to capture its playing audio.") }
+        if !liveEnabled { setLiveStage(stage) }
+        try DJLiveAudio.shared.startRecording()
+        recordingDeck = label; recordingMessage = nil
+        liveSnapshot = DJLiveAudio.shared.snapshot()
+    }
+    func finishDeckRecording() throws {
+        guard let label = recordingDeck else { return }
+        recordingDeck = nil
+        defer { liveSnapshot = DJLiveAudio.shared.snapshot() }
+        let samples = try DJLiveAudio.shared.finishRecording()
+        let deck = label == "A" ? a : b
+        try deck.loadRecording(samples, title: "Broadcast take · Deck \(label)")
+        recordingMessage = String(format: "Deck %@ · %.1fs captured. Press Play, then use the scrubber or Looper.", label, Double(samples.count) / 96_000)
+    }
+    func playRecordedA() throws {
+        guard a.isRecordingClip else { return }
+        let previous = liveInputOnA
+        if liveEnabled {
+            liveInputOnA = false
+            try? DJLiveAudio.shared.clearLoop()
+            DJLiveAudio.shared.clearOverlay()
+            updateLiveMix()
+        }
+        do { if !a.isPlaying { try a.toggle() } }
+        catch { liveInputOnA = previous; updateLiveMix(); throw error }
+    }
+    func clearRecordings() {
+        DJLiveAudio.shared.cancelRecording(); recordingDeck = nil; recordingMessage = nil
+        a.clearRecording(); b.clearRecording()
     }
     func toggleLivePlayback() {
         DJLiveAudio.shared.setMuted(!liveSnapshot.muted); refreshLive()
@@ -563,6 +672,7 @@ final class DJStudio: ObservableObject {
         buffers[index] = output; padNames[index] = url.deletingPathExtension().lastPathComponent
     }
     func stopAll() {
+        DJLiveAudio.shared.cancelRecording(); recordingDeck = nil
         if liveEnabled {
             DJLiveAudio.shared.setMuted(true)
             try? DJLiveAudio.shared.clearLoop()

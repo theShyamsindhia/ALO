@@ -21,10 +21,14 @@ struct DJLiveSnapshot: Sendable {
     let high: Float
     let bufferedPCMBytes: Int
     let secondsSinceInput: Double?
+    let recording: Bool
+    let recordingDuration: Double
+    let recordingReady: Bool
 }
 
 /// All PCM is stereo, interleaved, 48 kHz. The caller retains capture timestamps.
-/// History and loop each occupy at most 6,144,000 bytes; overlay is 19,200 bytes.
+/// History, loop, and an armed recording each occupy at most 6,144,000 bytes;
+/// overlay is 19,200 bytes. Recordings contain accepted dry broadcast input only.
 final class DJLiveAudio: @unchecked Sendable {
     static let shared = DJLiveAudio()
     static let sampleRate = 48_000
@@ -57,6 +61,9 @@ final class DJLiveAudio: @unchecked Sendable {
     private var high: Float = 0
     private var filters = [DJLiveBiquad](repeating: .init(), count: 6)
     private var neutralEQ = true
+    private var recordingStorage: [Int16] = []
+    private var recordedSamples = 0
+    private var recording = false
 
     func configure(stage next: DJLiveStage?) {
         lock.withLock {
@@ -65,6 +72,7 @@ final class DJLiveAudio: @unchecked Sendable {
             written = 0; delayFrames = 0; inputPeak = 0; outputPeak = 0
             lastCaptureTimeNanos = nil; lastInputUptime = nil
             loop = []; loopOffset = 0; loopIn = nil; cue = nil
+            recordingStorage = []; recordedSamples = 0; recording = false
             overlayRead = 0; overlayCount = 0; lastOverlayUptime = nil
             muted = false; gain = 1; low = 0; mid = 0; high = 0
             filters = [DJLiveBiquad](repeating: .init(), count: 6); neutralEQ = true
@@ -93,6 +101,38 @@ final class DJLiveAudio: @unchecked Sendable {
 
     func setMuted(_ muted: Bool) { lock.withLock { self.muted = muted } }
 
+    /// Allocate once on the control thread, never grow storage in the audio callback.
+    func startRecording() throws {
+        try lock.withLock {
+            try requireActive()
+            guard recordingStorage.isEmpty else {
+                throw ALOError("Finish or cancel the current recording before recording another deck.")
+            }
+            recordingStorage = [Int16](repeating: 0, count: Self.maximumFrames * 2)
+            recordedSamples = 0; recording = true
+        }
+    }
+
+    /// Stops capture and consumes the take. A full take remains ready until consumed.
+    func finishRecording() throws -> [Int16] {
+        try lock.withLock {
+            guard !recordingStorage.isEmpty else { throw ALOError("There is no recording to finish.") }
+            recording = false
+            guard recordedSamples > 0 else {
+                recordingStorage = []; recordedSamples = 0
+                throw ALOError("No broadcast audio was received. Let the music play, then record again.")
+            }
+            let take = recordedSamples == recordingStorage.count
+                ? recordingStorage : Array(recordingStorage.prefix(recordedSamples))
+            recordingStorage = []; recordedSamples = 0
+            return take
+        }
+    }
+
+    func cancelRecording() {
+        lock.withLock { recording = false; recordingStorage = []; recordedSamples = 0 }
+    }
+
     func process(_ samples: [Int16], stage requested: DJLiveStage, captureTimeNanos: UInt64? = nil) -> [Int16] {
         lock.withLock {
             guard stage == requested, !history.isEmpty, samples.count.isMultiple(of: 2), !samples.isEmpty else { return samples }
@@ -106,6 +146,16 @@ final class DJLiveAudio: @unchecked Sendable {
                     return samples.map { Int16(min(32767, max(-32768, Float($0) * gain))) }
                 }
                 lastCaptureTimeNanos = captureTimeNanos
+            }
+            if recording {
+                let count = min(samples.count, recordingStorage.count - recordedSamples)
+                recordingStorage.withUnsafeMutableBufferPointer { destination in
+                    samples.withUnsafeBufferPointer { source in
+                        destination.baseAddress!.advanced(by: recordedSamples).update(from: source.baseAddress!, count: count)
+                    }
+                }
+                recordedSamples += count
+                if recordedSamples == recordingStorage.count { recording = false }
             }
             let now = DispatchTime.now().uptimeNanoseconds
             lastInputUptime = now
@@ -251,8 +301,11 @@ final class DJLiveAudio: @unchecked Sendable {
                                   waveform: waveform, inputPeak: inputPeak, outputPeak: outputPeak, muted: muted,
                                   hasCue: cue.map { $0 >= oldestFrame && $0 <= written } ?? false,
                                   gain: gain, low: low, mid: mid, high: high,
-                                  bufferedPCMBytes: (history.count + loop.count + overlay.count) * MemoryLayout<Int16>.size,
-                                  secondsSinceInput: lastInputUptime.map { Double(DispatchTime.now().uptimeNanoseconds - $0) / 1_000_000_000 })
+                                  bufferedPCMBytes: (history.count + loop.count + overlay.count + recordingStorage.count) * MemoryLayout<Int16>.size,
+                                  secondsSinceInput: lastInputUptime.map { Double(DispatchTime.now().uptimeNanoseconds - $0) / 1_000_000_000 },
+                                  recording: recording,
+                                  recordingDuration: Double(recordedSamples / 2) / Double(Self.sampleRate),
+                                  recordingReady: !recording && recordedSamples > 0)
         }
     }
 

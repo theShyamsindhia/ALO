@@ -87,3 +87,14 @@ A physical two-Mac listening test and output-device hot-swap have not been perfo
 - Integrated upstream through `b14ea56` (room attachments, lyrics and settings consolidation); merged Debug integration run passed 76 tests in 14 suites (40.237 seconds). No conflicts or dropped DJ entry point.
 
 - Main delivery verified: `8b4b14e` pushed successfully, preserving upstream `b14ea56`. Preview: `dist/previews/dj-studio.png`.
+
+
+## Recording and downloadable release — feat/dj-record-broadcast
+- [x] Verify published v0.14.2 points to853dec5 and lacks the later live path.
+- [x] Add explicit32-second dry broadcast REC/Stop on both decks, with a timer and automatic completion.
+- [x] Stream captured takes from bounded temporary16-bit WAVs; clean up on replace, clear, close and room exit.
+- [x] Keep live audio playing after capture until Play take replaces A; B mixes alongside.
+- [x] Add configurable U/I recording keys and preserve older custom bindings.
+- [x] Correct CGFloat geometry for pinned Xcode26.3 release compiler.
+- [x] Verify final recorded-deck UI and audio regressions: 41 tests in 12 suites passed (7.389 seconds), including native preview, real captured PCM playback and key migration.
+- [ ] Push main, build signed/notarized0.14.3 at the exact commit and verify downloadable assets.

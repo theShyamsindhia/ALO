@@ -12,10 +12,12 @@ struct DJGuideView: View {
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
+                    step("Record playing music", "Press the red REC beside a deck while the room broadcast is playing. Stop captures the take, or capture stops at 32 seconds. On A choose Play take to replace live input; on B press Play and move the crossfader toward B. The take supports scrubbing, tempo, EQ, cue and loops without importing a file. Capture uses the original broadcast, excluding voice and your DJ pads. Only one deck records at a time. Recorded / file selects independent local deck playback; Share DJ mix can broadcast those takes after stopping the original source. Temporary takes are removed when you close DJ Studio.")
                     step("1 · Load and scrub", "Click Load song on a deck, or drop an audio file onto it. Its waveform loads below the song title. Drag across the waveform or use the slider to seek. The white line is your playhead; the colored region is your loop.")
                     step("2 · Set your loop", "Enter the song’s original BPM, choose 1, 2, 4, 8, or 16 beats, then press Loop at your desired starting point. Press Play if paused. For a custom region, press In, move or play forward, then press Out. Loops can be up to 32 seconds. Exit loop resumes the song from the current position; Clear also removes the markers. Seeking outside the region exits the loop.")
                     step("3 · Perform from the keyboard", "Keys work while DJ Studio is the active window. They pause while you type or use a dialog. Open Keys to change them; duplicate assignments are rejected and changes are saved.")
                     Grid(alignment: .leading, horizontalSpacing: 25, verticalSpacing: 7) {
+                        keyRow("Deck A / B record", .deckARecord, .deckBRecord)
                         keyRow("Deck A / B play", .deckAPlay, .deckBPlay)
                         keyRow("Deck A / B cue", .deckACue, .deckBCue)
                         keyRow("Deck A / B loop", .deckALoop, .deckBLoop)

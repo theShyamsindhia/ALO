@@ -26,13 +26,16 @@ final class DJStudioWindowController: NSObject, NSWindowDelegate {
             studio.perform {
                 switch action {
                 case .deckAPlay:
-                    if studio.liveEnabled { studio.toggleLivePlayback() } else { try studio.a.toggle() }
+                    if studio.usesLiveDeckA && studio.a.isRecordingClip { try studio.playRecordedA() }
+                    else if studio.usesLiveDeckA { studio.toggleLivePlayback() } else { try studio.a.toggle() }
                 case .deckBPlay: try studio.b.toggle()
+                case .deckARecord, .deckBRecord:
+                    try studio.toggleDeckRecording(action == .deckARecord ? "A" : "B", stage: model.hasBroadcaster ? (model.isHost ? .broadcast : .listening) : nil)
                 case .deckACue:
-                    if studio.liveEnabled { try DJLiveAudio.shared.returnToCue(); studio.refreshLive() } else { try studio.a.returnToCue() }
+                    if studio.usesLiveDeckA { try DJLiveAudio.shared.returnToCue(); studio.refreshLive() } else { try studio.a.returnToCue() }
                 case .deckBCue: try studio.b.returnToCue()
                 case .deckALoop:
-                    if studio.liveEnabled { try studio.toggleLiveLoop() } else { try studio.a.toggleBeatLoop() }
+                    if studio.usesLiveDeckA { try studio.toggleLiveLoop() } else { try studio.a.toggleBeatLoop() }
                 case .deckBLoop: try studio.b.toggleBeatLoop()
                 case .stopAll: studio.stopAll()
                 case .crossfadeLeft: studio.crossfade = 0
@@ -53,6 +56,7 @@ final class DJStudioWindowController: NSObject, NSWindowDelegate {
         DJStudio.shared.setLiveStage(nil)
         DJStudio.shared.stopAll()
         DJStudio.shared.stopUpdates()
+        DJStudio.shared.clearRecordings()
         window = nil
     }
 }
@@ -69,23 +73,30 @@ struct DJStudioView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 header
+                if let message = studio.recordingMessage {
+                    Label(message, systemImage: "waveform").font(.callout).foregroundStyle(.cyan)
+                }
                 HStack(alignment: .top, spacing: 14) {
                     VStack(spacing: 10) {
-                        Picker("Deck A source", selection: Binding(get: { studio.liveEnabled }, set: { live in
+                        Picker("Deck A source", selection: Binding(get: { studio.usesLiveDeckA }, set: { live in
                             guard !live || (model.hasBroadcaster && !studio.sharing) else { return }
                             studio.setLiveStage(live ? (model.isHost ? .broadcast : .listening) : nil)
                         })) {
                             Text("Live broadcast").tag(true).disabled(!model.hasBroadcaster || studio.sharing)
-                            Text("Audio file").tag(false)
+                            Text("Recorded / file").tag(false)
                         }.pickerStyle(.segmented).accessibilityLabel("Deck A source")
-                        if studio.liveEnabled {
+                        if studio.usesLiveDeckA {
                             DJLiveDeckView(studio: studio, deck: studio.a, bindings: bindings)
                         } else {
-                            DJDeckView(deck: studio.a, studio: studio, other: studio.b, bindings: bindings, label: "A", color: .cyan)
+                            DJDeckView(deck: studio.a, studio: studio, other: studio.b, bindings: bindings, label: "A", color: .cyan, recordingStage: recordingStage)
+                        }
+                        if studio.liveEnabled && !studio.liveInputOnA {
+                            Button("Play decks locally") { studio.setLiveStage(nil) }
+                                .font(.caption).help("Play recorded clips independently of the incoming broadcast")
                         }
                     }.frame(maxWidth: .infinity)
                     mixer.frame(width: 172)
-                    DJDeckView(deck: studio.b, studio: studio, other: studio.a, bindings: bindings, label: "B", color: .purple)
+                    DJDeckView(deck: studio.b, studio: studio, other: studio.a, bindings: bindings, label: "B", color: .purple, recordingStage: recordingStage)
                 }
                 HStack(alignment: .top, spacing: 20) {
                     launchpad
@@ -107,6 +118,10 @@ struct DJStudioView: View {
         .alert("DJ Studio", isPresented: Binding(get: { studio.error != nil }, set: { if !$0 { studio.error = nil } })) {
             Button("OK") { studio.error = nil }
         } message: { Text(studio.error ?? "") }
+    }
+
+    private var recordingStage: DJLiveStage? {
+        model.hasBroadcaster ? (model.isHost ? .broadcast : .listening) : studio.liveSnapshot.stage
     }
 
     private var header: some View {
@@ -253,11 +268,13 @@ private struct DJDeckView: View {
     @ObservedObject var bindings: DJKeyBindings
     var label: String
     var color: Color
+    var recordingStage: DJLiveStage?
     var body: some View {
         VStack(alignment: .leading, spacing: 13) {
             HStack {
                 Text("DECK \(label)").font(.caption.weight(.bold)).tracking(2).foregroundStyle(color)
                 Spacer()
+                DJRecordButton(studio: studio, label: label, stage: recordingStage, bindings: bindings)
                 Button { DJFilePicker.choose { url in studio.perform { try deck.load(url) } } } label: { Label("Load song", systemImage: "folder") }
                     .controlSize(.small)
             }
@@ -274,6 +291,13 @@ private struct DJDeckView: View {
                     Text("\(clock(deck.position)) / \(clock(deck.duration))").font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 0)
+            }
+            if deck.isRecordingClip {
+                HStack {
+                    Label("Recorded broadcast", systemImage: "waveform").font(.caption).foregroundStyle(color)
+                    Spacer()
+                    Button("Clear take") { deck.clearRecording() }.controlSize(.mini)
+                }
             }
             DJWaveformScrubber(deck: deck, studio: studio, color: color, label: label)
             HStack(spacing: 8) {
