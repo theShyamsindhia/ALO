@@ -1,9 +1,17 @@
+import AppKit
 import XCTest
 @testable import ALONotchRuntime
 
 @MainActor
 final class FeatureActivationTests: XCTestCase {
-    func testMasterSwitchStopsAndRestoresOnlyExplicitlyEnabledFeatures() {
+    override func setUp() async throws {
+        try await super.setUp()
+        // The lifecycle fixture includes AppKit services. Initialize the host on
+        // MainActor before constructing them, including on headless CI runners.
+        await MainActor.run { _ = NSApplication.shared }
+    }
+
+    func testMasterSwitchStopsAndRestoresOnlyExplicitlyEnabledFeatures() async {
         let name = "ALONotchRuntimeTests.Activation.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: name)!
         defer { defaults.removePersistentDomain(forName: name) }
@@ -37,7 +45,7 @@ final class FeatureActivationTests: XCTestCase {
         XCTAssertFalse(container.downloadViewModel.hasStartedMonitoring)
     }
 
-    func testAllActivitiesDefaultOffAndAllPagesOptIn() {
+    func testAllActivitiesDefaultOffAndAllPagesOptIn() async {
         let name = "ALONotchRuntimeTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: name)!
         defer { defaults.removePersistentDomain(forName: name) }
@@ -58,7 +66,7 @@ final class FeatureActivationTests: XCTestCase {
         XCTAssertEqual(settings.homePage.homePageDisabled, Set(HomePages.allCases))
     }
 
-    func testMonitorConstructionIsInert() {
+    func testMonitorConstructionIsInert() async {
         XCTAssertFalse(PowerService().isMonitoring)
         XCTAssertFalse(BluetoothService.shared.isMonitoring)
         XCTAssertFalse(CalendarViewModel().isMonitoring)
@@ -71,7 +79,7 @@ final class FeatureActivationTests: XCTestCase {
         XCTAssertTrue(camera.session.inputs.isEmpty)
     }
 
-    func testFeaturePreferenceSurvivesSettingsRecreation() {
+    func testFeaturePreferenceSurvivesSettingsRecreation() async {
         let name = "ALONotchRuntimeTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: name)!
         defer { defaults.removePersistentDomain(forName: name) }
@@ -83,7 +91,7 @@ final class FeatureActivationTests: XCTestCase {
 }
 
 extension FeatureActivationTests {
-    func testMasterSwitchLeavesEveryMonitorIdleUntilOptIn() {
+    func testMasterSwitchLeavesEveryMonitorIdleUntilOptIn() async {
         let name = "ALONotchRuntimeTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: name)!
         defer { defaults.removePersistentDomain(forName: name) }
@@ -103,7 +111,7 @@ extension FeatureActivationTests {
         XCTAssertTrue(activation.running.isEmpty)
     }
 
-    func testMasterStopsAndRestartsExplicitFeatureWithoutChangingPreference() {
+    func testMasterStopsAndRestartsExplicitFeatureWithoutChangingPreference() async {
         let name = "ALONotchRuntimeTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: name)!
         defer { defaults.removePersistentDomain(forName: name) }
@@ -130,7 +138,7 @@ extension FeatureActivationTests {
         activation.setEnabled(false)
     }
 
-    func testCameraCannotStartAfterPageWasDisabled() {
+    func testCameraCannotStartAfterPageWasDisabled() async {
         let camera = CameraViewModel()
         camera.stopSession()
         camera.startSession()

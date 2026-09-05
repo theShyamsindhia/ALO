@@ -184,6 +184,10 @@ final class ALONotchWindowController {
         if inside {
             outsideSince = nil
             if preferences.hoverToExpand && justEntered { state.expanded = true }
+        } else if model.notchHasOpenPopover {
+            // Popovers use a separate native window; leaving the surface to
+            // interact with them must not unmount their anchor after 0.65s.
+            outsideSince = nil
         } else if !menuTracking && !panel.isKeyWindow && model.floatingSection == .collapsed {
             if outsideSince == nil { outsideSince = Date() }
             if preferences.hoverToExpand, Date().timeIntervalSince(outsideSince!) > 0.65 {
@@ -232,7 +236,7 @@ struct ALONotchView: View {
                                 if model.phase == .live {
                                     FloatingRoomView(model: model, presentation: .notch)
                                     RoomPlaybackProgressDivider(model: model)
-                                    WalkieTalkieBar(model: model, showsCloseButton: false)
+                                    WalkieTalkieBar(model: model, showsCloseButton: false, presentation: .notch)
                                 } else {
                                     VStack(spacing: 12) {
                                         Text("Join a room to see room controls")

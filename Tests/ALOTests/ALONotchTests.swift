@@ -46,6 +46,23 @@ struct ALONotchTests {
         #expect(model.floatingSection == .collapsed)
     }
 
+    @Test func popoverHoldsRemainUntilEveryNotchPopoverCloses() {
+        let model = ALOViewModel(discoverRooms: false)
+        let lyrics = UUID(), settings = UUID()
+        #expect(!model.notchHasOpenPopover)
+        model.setNotchPopoverPresented(true, owner: lyrics)
+        model.setNotchPopoverPresented(true, owner: settings)
+        model.setNotchPopoverPresented(true, owner: lyrics)
+        #expect(model.notchPopoverHolds.count == 2)
+        model.setNotchPopoverPresented(false, owner: lyrics)
+        #expect(model.notchHasOpenPopover)
+        // Repeated teardown of one view must not release another view's hold.
+        model.setNotchPopoverPresented(false, owner: lyrics)
+        #expect(model.notchHasOpenPopover)
+        model.setNotchPopoverPresented(false, owner: settings)
+        #expect(!model.notchHasOpenPopover)
+    }
+
     @Test("Notch renders compact, room and chat states", arguments: ["compact", "room", "chat", "island"])
     func render(stateName: String) async throws {
         _ = NSApplication.shared

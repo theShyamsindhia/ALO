@@ -1516,6 +1516,19 @@ final class ALOViewModel: ObservableObject {
     @Published var floatingBarHidden: Bool
     @Published private(set) var menuBarPopoverVisible = false
     @Published var notchExpandedVisible = false
+    @Published private(set) var notchPopoverHolds = Set<UUID>()
+
+    var notchHasOpenPopover: Bool { !notchPopoverHolds.isEmpty }
+
+    func setNotchPopoverPresented(_ presented: Bool, owner: UUID) {
+        if presented {
+            guard !notchPopoverHolds.contains(owner) else { return }
+            notchPopoverHolds.insert(owner)
+        } else {
+            guard notchPopoverHolds.contains(owner) else { return }
+            notchPopoverHolds.remove(owner)
+        }
+    }
 
     private var roomBrowser: MeshRoomBrowser!
     private var secureRoomBrowser: MeshRoomBrowser!
@@ -4247,6 +4260,7 @@ struct FloatingRoomView: View {
     @State private var showsRoomInfo = false
     @State private var showsMediaMore = false
     @State private var showsLyrics = false
+    @State private var notchPopoverOwner = UUID()
 
     private var panelTransition: AnyTransition {
         reduceMotion
@@ -4368,6 +4382,13 @@ struct FloatingRoomView: View {
             RoomPreferencesView(model: model)
         }
         .animation(themeAnimation, value: model.roomArtworkPalette)
+        .onChange(of: showsLyrics || showsMediaMore || showsRoomInfo) { _, presented in
+            guard presentation == .notch else { return }
+            model.setNotchPopoverPresented(presented, owner: notchPopoverOwner)
+        }
+        .onDisappear {
+            model.setNotchPopoverPresented(false, owner: notchPopoverOwner)
+        }
     }
 
     private func roomContent(width: CGFloat, height: CGFloat) -> some View {
@@ -5927,10 +5948,12 @@ struct RoomPlaybackProgressDivider: View {
 struct WalkieTalkieBar: View {
     @ObservedObject var model: ALOViewModel
     var showsCloseButton = true
+    var presentation: RoomControlsPresentation = .floating
     var embeddedFloating = false
     var onRoomSettings: (() -> Void)? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showsSettings = false
+    @State private var notchPopoverOwner = UUID()
 
     var body: some View {
         Group {
@@ -5957,6 +5980,13 @@ struct WalkieTalkieBar: View {
         .onAppear(perform: model.refreshVoiceInputs)
         .environment(\.roomAccent, model.roomAccentColor)
         .animation(reduceMotion ? nil : .easeInOut(duration: 1.1), value: model.roomArtworkPalette)
+        .onChange(of: showsSettings) { _, presented in
+            guard presentation == .notch else { return }
+            model.setNotchPopoverPresented(presented, owner: notchPopoverOwner)
+        }
+        .onDisappear {
+            model.setNotchPopoverPresented(false, owner: notchPopoverOwner)
+        }
     }
 
     private var controls: some View {
