@@ -33,7 +33,7 @@ queue state are stored locally.
 
 ALO enables Apple's peer-to-peer networking for discovery and media/control
 connections where macOS makes those paths available. It does not require an
-internet connection for room traffic. However, 0.14.0 does **not** yet guarantee
+internet connection for room traffic. However, 0.14.1 does **not** yet guarantee
 AirDrop-style, router-free operation between Macs on different networks. The
 expanded nearby/iOS transport and shared-annotation integrations are still in
 development and are not included in this Mac release.
