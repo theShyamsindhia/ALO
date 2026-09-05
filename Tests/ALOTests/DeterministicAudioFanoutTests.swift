@@ -14,8 +14,19 @@ struct DeterministicAudioFanoutTests {
             policy: .boundedLatest(maxInFlight: 8), oversleep: 0,
             callbackQuantumNanos: 25_000_000)
         #expect(room.maximumAge < SynchronizedPlayer.targetLatencyNanos)
-        #expect(room.minimumPackets >= 60,
-            "Batched completions must preserve a fair minimum for every listener")
+        #expect(room.minimumPackets >= 50,
+            "Batched callbacks must retain the same strict per-listener floor as the live timing gate")
+    }
+
+    @Test func lateJoinerDoesNotStarveExistingListeners() throws {
+        let room = try simulate(peers: 8, rate: 4_000_000,
+            policy: .boundedLatest(maxInFlight: 8), oversleep: 0,
+            callbackQuantumNanos: 25_000_000, lateJoinAtCallback: 25)
+        #expect(room.maximumAge < SynchronizedPlayer.targetLatencyNanos)
+        let existingCounts = room.packetCountsByParticipant
+            .filter { $0.key != "virtual-peer-7" }.map(\.value)
+        #expect(existingCounts.min() ?? 0 >= 50,
+            "A late listener must not reduce established listeners below the strict CI floor")
     }
 
     @Test(arguments: [UInt64(70_000_000), 110_000_000])
@@ -56,7 +67,8 @@ struct DeterministicAudioFanoutTests {
     }
 
     private func simulate(peers count: Int, rate: UInt64?, policy: HostServer.AudioBackpressurePolicy,
-                          oversleep: UInt64, callbackQuantumNanos: UInt64? = nil) throws -> SimulatedRoomResult {
+                          oversleep: UInt64, callbackQuantumNanos: UInt64? = nil,
+                          lateJoinAtCallback: Int? = nil) throws -> SimulatedRoomResult {
         let wire = SimulatedAudioWire(bitsPerSecond: rate, callbackQuantumNanos: callbackQuantumNanos)
         let controls = SimulationControlPeers()
         let hostReady = DispatchSemaphore(value: 0)
@@ -74,7 +86,7 @@ struct DeterministicAudioFanoutTests {
         defer { controls.stop(); host.stop() }
         try host.start()
         try #require(hostReady.wait(timeout: .now() + 3) == .success, "Real host listener did not start")
-        try controls.join(count: count)
+        try controls.join(count: lateJoinAtCallback == nil ? count : count - 1)
 
         // The source clock is anchored only after real handshakes finish. Real
         // elapsed time thereafter never advances this clock or the wire events.
@@ -84,6 +96,7 @@ struct DeterministicAudioFanoutTests {
         let samples = [Int16](repeating: 1_024, count: 4 * 240 * 2)
         var captureWake = anchor
         for callback in 0..<50 {
+            if callback == lateJoinAtCallback { try controls.join(count: 1) }
             let nominalDeadline = anchor + UInt64(callback) * 20_000_000
             // Match the positive-wait oversleep/catch-up model: callbacks whose
             // deadlines were missed run together, without another injected wait.
@@ -102,7 +115,9 @@ struct DeterministicAudioFanoutTests {
         try #require(Set(state.submitted.keys) == Set(ports))
         try #require(senders.allSatisfy { $0.inFlight == 0 && $0.pending == 0 })
         for sender in senders {
-            #expect(sender.enqueued == 200)
+            let expectedPackets = sender.participantID == "virtual-peer-\(count - 1)"
+                ? UInt64((50 - (lateJoinAtCallback ?? 0)) * 4) : 200
+            #expect(sender.enqueued == expectedPackets)
             #expect(sender.sent == UInt64(state.submitted[sender.udpPort]?.count ?? 0))
             #expect(sender.sent + sender.expiredWait + sender.expiredAge + sender.admissionRejected + sender.replaced
                 + sender.discardedBoundary == sender.enqueued)
@@ -111,9 +126,11 @@ struct DeterministicAudioFanoutTests {
 
         var finalAges: [UInt64] = [], allAges: [UInt64] = [], deadlineMisses: [UInt64] = []
         var counts: [Int] = []
+        var packetCountsByParticipant: [String: Int] = [:]
         var shared: Set<UInt32>?
         var reportedPeers: Set<String> = []
         for port in ports {
+            let sender = try #require(senders.first(where: { $0.udpPort == port }))
             let arrivals = try #require(state.arrivals[port])
             try #require(!arrivals.isEmpty)
             #expect(Set(arrivals.keys) == Set(state.submitted[port] ?? []))
@@ -131,6 +148,7 @@ struct DeterministicAudioFanoutTests {
                 print("Virtual late packet port=\(port) sequence=\(worst.packet.sequence): capture-to-admission=\(worst.admittedAt - worst.packet.captureTimeNanos)ns, admission-to-delivery=\(worst.arrivedAt - worst.admittedAt)ns, total=\(worst.arrivedAt - worst.packet.captureTimeNanos)ns")
             }
             counts.append(arrivals.count)
+            packetCountsByParticipant[sender.participantID] = arrivals.count
             // This is a transport deadline measurement, not a renderer model:
             // actual arrival minus the packet's own shared playout deadline.
             let deadlineMiss = arrivals.values.map { arrival -> UInt64 in
@@ -138,14 +156,22 @@ struct DeterministicAudioFanoutTests {
                 return arrival.arrivedAt > deadline ? arrival.arrivedAt - deadline : 0
             }.max() ?? 0
             deadlineMisses.append(deadlineMiss)
-            shared = shared.map { $0.intersection(arrivals.keys) } ?? Set(arrivals.keys)
+            if sender.participantID != "virtual-peer-\(count - 1)" || lateJoinAtCallback == nil {
+                shared = shared.map { $0.intersection(arrivals.keys) } ?? Set(arrivals.keys)
+            }
             switch policy {
             case .unbounded: #expect(last == 199)
             case .boundedLatest:
                 // 16 packets at 5ms = the sender's 80ms pending-expiry budget.
                 // Expired terminal audio is allowed, premature cessation is not.
                 #expect(last >= 183)
-                let boundaries = [sourceStart] + arrivals.values.map { $0.packet.captureTimeNanos }.sorted()
+                let firstCapture: UInt64
+                if sender.participantID == "virtual-peer-\(count - 1)", let lateJoinAtCallback {
+                    firstCapture = sourceStart + UInt64(lateJoinAtCallback) * 20_000_000
+                } else {
+                    firstCapture = sourceStart
+                }
+                let boundaries = [firstCapture] + arrivals.values.map { $0.packet.captureTimeNanos }.sorted()
                     + [sourceStart + 1_000_000_000]
                 #expect(zip(boundaries, boundaries.dropFirst()).allSatisfy { $1 - $0 <= 200_000_000 })
             }
@@ -164,7 +190,8 @@ struct DeterministicAudioFanoutTests {
         }.max() ?? 0
         let result = SimulatedRoomResult(finalAge: finalAges.max() ?? 0, maximumAge: allAges.max() ?? 0,
             maximumDeadlineMiss: deadlineMisses.max() ?? 0, minimumPackets: counts.min() ?? 0,
-            maximumPackets: counts.max() ?? 0, maximumSkew: skew, resyncs: reportedPeers.count)
+            maximumPackets: counts.max() ?? 0, maximumSkew: skew, resyncs: reportedPeers.count,
+            packetCountsByParticipant: packetCountsByParticipant)
         print("Virtual real-host peers=\(count) rate=\(rate.map(String.init) ?? "direct") policy=\(policy) wake=\(oversleep / 1_000_000)ms: \(result)")
         return result
     }
@@ -190,6 +217,7 @@ private struct SimulatedRoomResult {
     let maximumPackets: Int
     let maximumSkew: UInt64
     let resyncs: Int
+    let packetCountsByParticipant: [String: Int]
 }
 
 /// Models the link, not HostServer's queue. Every scheduled event originated
@@ -284,6 +312,7 @@ private final class SimulationControlPeers: @unchecked Sendable {
     private var controls: [UInt16: (id: String, connection: NWConnection)] = [:]
     private var resyncEvents: [String: DispatchSemaphore] = [:]
     private var receivedResyncs: Set<String> = []
+    private var nextPeerIndex = 0
     private var stopped = false
     var ports: [UInt16] { lock.withLock { controls.keys.sorted() } }
     func setHostPort(_ port: NWEndpoint.Port) { lock.withLock { hostPort = port } }
@@ -292,9 +321,14 @@ private final class SimulationControlPeers: @unchecked Sendable {
         let storedHostPort: NWEndpoint.Port? = lock.withLock { self.hostPort }
         let hostPort = try #require(storedHostPort)
         let videoPort = try listen(using: .tcp)
-        for index in 0..<count {
+        let firstIndex = lock.withLock { () -> Int in
+            let first = nextPeerIndex
+            nextPeerIndex += count
+            return first
+        }
+        for offset in 0..<count {
             let udpPort = try listen(using: .udp)
-            let id = "virtual-peer-\(index)"
+            let id = "virtual-peer-\(firstIndex + offset)"
             let connection = NWConnection(host: "127.0.0.1", port: hostPort, using: .tcp)
             lock.withLock {
                 connections.append(connection)

@@ -67,6 +67,7 @@ final class HostServer {
         var audioBacklogCongested = false
         var audioEnqueued: UInt64 = 0
         var audioSent: UInt64 = 0
+        var audioFanoutEpochSent: UInt64 = 0
         var audioExpiredWait: UInt64 = 0
         var audioExpiredAge: UInt64 = 0
         var audioAdmissionRejected: UInt64 = 0
@@ -106,6 +107,7 @@ final class HostServer {
     /// Rotate first submission on every packet so a shared outbound link cannot
     /// permanently favor the same listener. Owned by `queue` with packetizer.
     private var audioFanoutOffset = 0
+    private var audioFanoutCohort: Set<ObjectIdentifier> = []
     private var listener: NWListener?
     private var clients = [ObjectIdentifier: Client]()
     private var videoEnabled = false
@@ -292,12 +294,19 @@ final class HostServer {
             let audioClients = audioClientEntries.map(\.value).sorted {
                 ($0.id ?? "") < ($1.id ?? "")
             }
+            let cohort = Set(audioClients.map { ObjectIdentifier($0.control) })
+            if cohort != self.audioFanoutCohort {
+                self.audioFanoutCohort = cohort
+                self.audioFanoutOffset = 0
+                for client in audioClients { client.audioFanoutEpochSent = client.audioSent }
+            }
             for packet in packets {
                 let data = packet.encoded()
                 let start = audioClients.isEmpty ? 0 : self.audioFanoutOffset % audioClients.count
                 let fairOrder = audioClients.indices.sorted { lhs, rhs in
-                    let left = audioClients[lhs], right = audioClients[rhs]
-                    if left.audioSent != right.audioSent { return left.audioSent < right.audioSent }
+                    let left = audioClients[lhs].audioSent - audioClients[lhs].audioFanoutEpochSent
+                    let right = audioClients[rhs].audioSent - audioClients[rhs].audioFanoutEpochSent
+                    if left != right { return left < right }
                     let leftRank = (lhs - start + audioClients.count) % audioClients.count
                     let rightRank = (rhs - start + audioClients.count) % audioClients.count
                     return leftRank < rightRank

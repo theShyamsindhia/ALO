@@ -7,15 +7,22 @@ final class RoomMentionNotifier: NSObject, UNUserNotificationCenterDelegate {
     static let shared = RoomMentionNotifier()
 
     private var openChat: (() -> Void)?
-    private let center = UNUserNotificationCenter.current()
+    private lazy var center: UNUserNotificationCenter? = {
+        // UNUserNotificationCenter raises an Objective-C exception when a
+        // developer launches the executable outside an application bundle.
+        guard Bundle.main.bundleIdentifier != nil else { return nil }
+        return .current()
+    }()
 
     func prepare(openChat: @escaping () -> Void) {
         self.openChat = openChat
+        guard let center else { return }
         center.delegate = self
         center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
     func notify(message: RoomMessage, roomTitle: String) {
+        guard let center else { return }
         let content = UNMutableNotificationContent()
         content.title = "\(message.sender) mentioned you"
         content.subtitle = roomTitle
