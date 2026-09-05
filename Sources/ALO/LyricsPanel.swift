@@ -7,6 +7,7 @@ struct LyricsPanel: View {
     var accent: Color = Color(red: 0.55, green: 0.59, blue: 0.75)
     var position: Double? = nil
     var expandedPresentation = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var expanded = false
 
     var body: some View {
@@ -67,8 +68,22 @@ struct LyricsPanel: View {
                                 Text(result.plain).font(.system(size: 12)).foregroundStyle(.secondary)
                                     .frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled)
                             }
-                        }.frame(maxHeight: 150)
-                            .onChange(of: active(result)) { _, id in if let id { proxy.scrollTo(id, anchor: .center) } }
+                        }
+                        .frame(maxHeight: 150)
+                        .onAppear {
+                            guard let id = active(result) else { return }
+                            DispatchQueue.main.async { proxy.scrollTo(id, anchor: .center) }
+                        }
+                        .onChange(of: active(result)) { _, id in
+                            guard let id else { return }
+                            if reduceMotion {
+                                proxy.scrollTo(id, anchor: .center)
+                            } else {
+                                withAnimation(.easeInOut(duration: 0.24)) {
+                                    proxy.scrollTo(id, anchor: .center)
+                                }
+                            }
+                        }
                     }
                     HStack {
                         if position == nil { Text("Timing unavailable").font(.system(size: 9)).foregroundStyle(.tertiary) }
@@ -94,30 +109,43 @@ struct LyricsPlayerLine: View {
         HStack(spacing: 4) {
             Image(systemName: "quote.bubble")
                 .font(.system(size: 8, weight: .medium))
-            Text(label)
+            Text(presentation.label)
                 .lineLimit(1)
                 .allowsTightening(true)
         }
         .font(.system(size: 9, weight: .medium))
         .foregroundStyle(.secondary)
-        .accessibilityLabel("Lyrics: \(label)")
+        .help(presentation.detail ?? presentation.label)
+        .accessibilityLabel("Lyrics: \(presentation.detail ?? presentation.label)")
     }
 
-    private var label: String {
-        switch controller.state {
-        case .disabled: return "Lyrics off"
-        case .missingTrack: return "Lyrics need a track title and artist"
-        case .loading: return "Finding lyrics…"
-        case .unavailable(let message), .failed(let message): return message
+    struct Presentation: Equatable {
+        let label: String
+        let detail: String?
+    }
+
+    static func presentation(for state: LyricsController.State, position: Double?) -> Presentation {
+        switch state {
+        case .disabled: return Presentation(label: "Lyrics off", detail: nil)
+        case .missingTrack:
+            return Presentation(label: "Lyrics unavailable", detail: "Lyrics need a track title and artist.")
+        case .loading: return Presentation(label: "Finding lyrics…", detail: nil)
+        case .unavailable(let message), .failed(let message):
+            return Presentation(label: "Lyrics unavailable", detail: message)
         case .ready(let result):
-            if result.instrumental { return "Instrumental · no lyrics" }
+            if result.instrumental { return Presentation(label: "Instrumental · no lyrics", detail: nil) }
             if let index = LyricsProvider.activeLine(in: result.lines, seconds: position),
                let line = result.lines.first(where: { $0.id == index }), !line.text.isEmpty {
-                return line.text
+                return Presentation(label: line.text, detail: nil)
             }
-            return result.lines.first(where: { !$0.text.isEmpty })?.text
+            let line = result.lines.first(where: { !$0.text.isEmpty })?.text
                 ?? result.plain.split(separator: "\n").first.map(String.init)
                 ?? "Lyrics available"
+            return Presentation(label: line, detail: nil)
         }
+    }
+
+    private var presentation: Presentation {
+        Self.presentation(for: controller.state, position: position)
     }
 }

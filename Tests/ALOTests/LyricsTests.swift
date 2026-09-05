@@ -53,6 +53,13 @@ struct LyricsTests {
         #expect(LyricsProvider.activeLine(in: lines, seconds: .nan) == nil)
     }
 
+    @MainActor @Test func compactPlayerDoesNotExposeLongProviderErrors() {
+        let detail = "Multiple versions found. Lyrics need a more specific track match."
+        let presentation = LyricsPlayerLine.presentation(for: .unavailable(detail), position: nil)
+        #expect(presentation.label == "Lyrics unavailable")
+        #expect(presentation.detail == detail)
+    }
+
     @Test func lyricRowsAndRetainedTextAreBounded() {
         let lrc = (0..<2100).map { "[00:01.00]Synthetic \($0)" }.joined(separator: "\n")
         let lines = LyricsProvider.parse(lrc)
