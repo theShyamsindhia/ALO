@@ -1286,8 +1286,15 @@ struct LoopbackRoomScaleTests {
             let callbackDurationNanos: UInt64 = 20_000_000
             let captureWakeDelays = AudioCompletionLatencies()
             let sourceQueue = DispatchQueue(label: "in.werai.tests.fanout-capture", qos: .userInteractive)
-            let captureAnchorNanos = sourceQueue.sync {
-                let anchor = MonotonicClock.nowNanos()
+            let sourceTimeline = CaptureTimeline()
+            let sourceFinished = DispatchSemaphore(value: 0)
+            let capturePeers = peers
+            // sync executes on the caller and does not observe the queue's
+            // QoS. Use a real capture worker, not Swift Testing's worker.
+            sourceQueue.async(qos: .userInteractive, flags: .enforceQoS) {
+                defer { sourceFinished.signal() }
+                #expect(qos_class_self() == QOS_CLASS_USER_INTERACTIVE)
+                let anchor = sourceTimeline.start()
                 for callbackIndex in 0..<(expectedPacketCount / packetsPerCallback) {
                     let deadline = anchor + UInt64(callbackIndex) * callbackDurationNanos
                     if MonotonicClock.nowNanos() < deadline {
@@ -1302,11 +1309,12 @@ struct LoopbackRoomScaleTests {
                     captureWakeDelays.record(wokeAt > deadline ? wokeAt - deadline : 0)
                     host.acceptAudio(samples: samples, captureTimeNanos: deadline - callbackDurationNanos)
                     if callbackIndex.isMultiple(of: 5) {
-                        peers.forEach { $0.sendPing() }
+                        capturePeers.forEach { $0.sendPing() }
                     }
                 }
-                return anchor
             }
+            sourceFinished.wait()
+            let captureAnchorNanos = sourceTimeline.anchorNanos
             print("Capture wake delay: peers=\(peerCount), policy=\(policy), injected=\(schedulerOversleep * 1_000)ms, \(captureWakeDelays.summary)")
 
             let expectedIDs = Set((0..<peerCount).map { "loopback-peer-\($0)" })
@@ -1852,6 +1860,15 @@ private final class LoopbackCaptureClock: @unchecked Sendable {
     var now: UInt64 { lock.withLock { value } }
     func advance(by nanos: UInt64) -> UInt64 {
         lock.withLock { value += nanos; return value }
+    }
+}
+
+private final class CaptureTimeline: @unchecked Sendable {
+    private let lock = NSLock()
+    private var anchor: UInt64 = 0
+    var anchorNanos: UInt64 { lock.withLock { anchor } }
+    func start() -> UInt64 {
+        lock.withLock { anchor = MonotonicClock.nowNanos(); return anchor }
     }
 }
 

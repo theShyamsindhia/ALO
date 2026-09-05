@@ -5,7 +5,7 @@ trigger: "User authorized investigating and fixing the audio-delivery release bl
 
 ## Current Focus
 
-- hypothesis: A single latest-only pending slot drops fresh audio when capture callbacks briefly outpace completion dispatch, even without link congestion.
+- root_cause: A single latest-only pending slot discarded fresh bursts; the replacement queue's initial admission estimate also understated growing in-flight work after delayed capture.
 - next_action: Verify the completion-rate admission regression fix in the full suite and signed CI release gate.
 
 ## Evidence
@@ -42,3 +42,5 @@ trigger: "User authorized investigating and fixing the audio-delivery release bl
 - Reproduced the remaining miss deterministically with 110ms capture oversleep: maximum age 274.184ms. Two early completions understate service for packets still in flight. A focused two-completion test also fails: old capture is admitted when six outstanding sends need another 112ms.
 - Add the recent mean completion interval times outstanding depth to admission budgeting, alongside the existing worst completed-send duration. Reset these samples on full idle and connection replacement. A maximum-interval experiment over-pruned live delivery and was rejected; the mean preserves throughput while accounting for backlog.
 - Both new regressions and all 38 focused sender/deterministic/real-loopback tests pass. Delayed deterministic maximum age is 234.424ms; fast real links deliver 200/200 per peer; stressed real final ages are 144–154ms. No delivery or latency limits changed. Logs: /tmp/alo-delayed-capture-budget.log, /tmp/alo-flight-rate-baseline.log, /tmp/alo-flight-rate-mean-fixed.log.
+- Final local full suite on bb809b0: 315 tests passed in 175.1 seconds. Log: /tmp/alo-0.13.49-rate-all-tests.log. Signed CI preflight: 33967509740.
+- CI 33967509740 still fails live metrics with source wakes up to 191ms. Found a concrete fixture error in the earlier pacing edit: dispatch_sync explicitly does not observe queue QoS (local SDK dispatch/queue.h lines 283–298). Reuse the asynchronous capture/timeline pattern from e585040, retain absolute deadlines/activity, and assert the actual worker QoS. No source deadline rebasing or assertion weakening.
