@@ -5,6 +5,7 @@ struct LyricsTrack: Hashable, Sendable {
     let title: String
     let artist: String
     let album: String?
+    let duration: TimeInterval?
     init?(media: NowPlayingMedia) {
         guard let title = media.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty,
               let artist = media.artist?.trimmingCharacters(in: .whitespacesAndNewlines), !artist.isEmpty,
@@ -12,6 +13,7 @@ struct LyricsTrack: Hashable, Sendable {
         self.title = title; self.artist = artist
         let album = media.album?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.album = album?.isEmpty == false ? String(album!.prefix(300)) : nil
+        self.duration = media.duration.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
     }
 }
 
@@ -35,9 +37,21 @@ struct LyricsRecord: Decodable, Sendable {
     let trackName: String
     let artistName: String
     let albumName: String?
+    let duration: TimeInterval?
     let instrumental: Bool
     let plainLyrics: String?
     let syncedLyrics: String?
+
+    init(trackName: String, artistName: String, albumName: String? = nil, duration: TimeInterval? = nil,
+         instrumental: Bool, plainLyrics: String?, syncedLyrics: String?) {
+        self.trackName = trackName
+        self.artistName = artistName
+        self.albumName = albumName
+        self.duration = duration
+        self.instrumental = instrumental
+        self.plainLyrics = plainLyrics
+        self.syncedLyrics = syncedLyrics
+    }
 }
 
 /// Read-only LRCLIB client. No room, identity, source URL or audio data is sent.
@@ -110,7 +124,22 @@ actor LyricsProvider {
         }
         guard !matches.isEmpty else { throw LyricsError.unavailable }
         guard matches.count <= 100 else { throw LyricsError.invalidResponse }
-        let results = try matches.map { record in
+        var preferred = matches
+        if let duration = track.duration {
+            let measured = matches.compactMap { record -> (LyricsRecord, TimeInterval)? in
+                guard let candidate = record.duration, candidate.isFinite, candidate > 0 else { return nil }
+                return (record, abs(candidate - duration))
+            }
+            if let closest = measured.map(\.1).min(), closest <= 10 {
+                // Duration separates studio, live, remastered and shortened
+                // versions without inferring a match from lyric text.
+                preferred = measured.filter { $0.1 <= closest + 0.75 }.map(\.0)
+            }
+        }
+        let synchronized = preferred.filter { !($0.syncedLyrics?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) }
+        if synchronized.count == 1 { preferred = synchronized }
+
+        let results = try preferred.map { record in
             guard (record.plainLyrics?.utf8.count ?? 0) <= 128_000,
                   (record.syncedLyrics?.utf8.count ?? 0) <= 128_000 else { throw LyricsError.invalidResponse }
             let lines = parse(record.syncedLyrics ?? "")

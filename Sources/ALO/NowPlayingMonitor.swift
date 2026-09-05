@@ -209,7 +209,8 @@ final class NowPlayingMonitor {
         guard media.sourceURL == "https://open.spotify.com/track/\(trackID)" else { return nil }
         return NowPlayingMedia(title: media.title, artist: media.artist, album: media.album,
             artworkData: artwork, sourceURL: media.sourceURL, isPlaying: media.isPlaying,
-            elapsedTime: media.elapsedTime, duration: media.duration)
+            elapsedTime: media.elapsedTime, duration: media.duration,
+            playbackControlsAvailable: media.playbackControlsAvailable)
     }
 
     private func publish(_ media: NowPlayingMedia) {
@@ -244,7 +245,8 @@ final class NowPlayingMonitor {
             sourceURL: media.sourceURL,
             isPlaying: media.isPlaying,
             elapsedTime: elapsedTime,
-            duration: media.duration ?? previous.duration
+            duration: media.duration ?? previous.duration,
+            playbackControlsAvailable: media.playbackControlsAvailable ?? previous.playbackControlsAvailable
         )
     }
 

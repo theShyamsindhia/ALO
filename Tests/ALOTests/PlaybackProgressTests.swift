@@ -82,6 +82,7 @@ struct PlaybackProgressTests {
         )
         #expect(legacy.elapsedTime == nil)
         #expect(legacy.duration == nil)
+        #expect(legacy.playbackControlsAvailable == nil)
 
         let current = NowPlayingMedia(
             title: "Yesterday",
@@ -94,5 +95,13 @@ struct PlaybackProgressTests {
             from: JSONEncoder().encode(current)
         )
         #expect(roundTrip == current)
+
+        let scoped = NowPlayingMedia(title: "Safari", artist: "Shared app audio",
+                                     playbackControlsAvailable: false)
+        let scopedRoundTrip = try JSONDecoder().decode(
+            NowPlayingMedia.self,
+            from: JSONEncoder().encode(scoped)
+        )
+        #expect(scopedRoundTrip.playbackControlsAvailable == false)
     }
 }

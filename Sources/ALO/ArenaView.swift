@@ -11,7 +11,7 @@ struct ArenaPanel: View {
     private let accent = ArenaAppearance.accent
     var body: some View {
         VStack(spacing: 0) {
-            if session.selectedGameID != nil || detached { toolbar }
+            if detached { toolbar }
             if session.expanded && !detached {
                 VStack(spacing: 10) {
                     Image(systemName: "macwindow").font(.system(size: 24)).foregroundStyle(accent)
@@ -191,20 +191,28 @@ struct ArenaPanel: View {
             VStack(spacing: 8) {
                 if session.mode == .picker {
                     HStack(spacing: 12) {
-                        Stepper("Bots: \(configuredBots)", value: $configuredBots, in: 0...3)
-                            .font(.system(size: 11)).fixedSize()
+                        Picker("Bots", selection: $configuredBots) {
+                            Text("No bots").tag(0)
+                            ForEach(1...3, id: \.self) { count in Text("\(count) bot\(count == 1 ? "" : "s")").tag(count) }
+                        }
+                        .pickerStyle(.menu)
+                        .font(.system(size: 11))
+                        .frame(width: 108)
+                        if configuredBots > 0 {
+                            Picker("Difficulty", selection: $session.botDifficulty) {
+                                ForEach(ArenaBotDifficulty.allCases, id: \.self) { difficulty in
+                                    Text(difficulty.rawValue.capitalized).tag(difficulty)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .font(.system(size: 11))
+                            .frame(width: 132)
+                        }
                         Spacer(minLength: 0)
                         Button { session.host(botCount: configuredBots) } label: {
                             Label("Create room match", systemImage: "person.2.fill")
                         }.buttonStyle(.borderedProminent).disabled(session.send == nil)
                             .help("Invites your room. Everyone readies up, then late joiners can replace bots.")
-                    }
-                    if configuredBots > 0 {
-                        Picker("Bot difficulty", selection: $session.botDifficulty) {
-                            ForEach(ArenaBotDifficulty.allCases, id: \.self) { difficulty in
-                                Text(difficulty.rawValue.capitalized).tag(difficulty)
-                            }
-                        }.font(.system(size: 11)).frame(maxWidth: 240)
                     }
                     if session.send == nil { Text("Join a live room to create a match.").font(.system(size: 10)).foregroundStyle(.secondary) }
                 } else if session.mode == .hosting || session.mode == .readyHost || session.mode == .readyGuest {

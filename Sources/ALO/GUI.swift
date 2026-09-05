@@ -481,6 +481,9 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         installTerminationSignalHandlers()
         installMainMenu()
+        RoomMentionNotifier.shared.prepare { [weak self] in
+            self?.model.showChatInFloatingBar()
+        }
         shortcutManager = GlobalShortcutManager { [weak self] action, pressed in
             self?.model.handleGlobalShortcut(action, pressed: pressed)
         }
@@ -1463,6 +1466,9 @@ final class ALOViewModel: ObservableObject {
     @Published private(set) var openLineState: OpenLineState = .idle
     @Published private(set) var voiceInputDevices = [VoiceInputDevice]()
     @Published var selectedVoiceInputUID: String?
+    @Published private(set) var audioSourceApplications = [SystemAudioApplication]()
+    @Published private(set) var selectedAudioSourceBundleID: String?
+    @Published private(set) var selectedAudioSourceName: String?
     @Published var walkieBarHidden: Bool
     @Published var incomingMediaMuted: Bool
     @Published var incomingCallsMuted: Bool
@@ -1527,6 +1533,8 @@ final class ALOViewModel: ObservableObject {
     private static let incomingMediaMutedKey = "incomingMediaMuted"
     private static let incomingCallsMutedKey = "incomingCallsMuted"
     private static let voiceInputUIDKey = "voiceInputUID"
+    private static let audioSourceBundleIDKey = "broadcastAudioSourceBundleID"
+    private static let audioSourceNameKey = "broadcastAudioSourceName"
     private static let deviceProfileImageKey = "meshDeviceProfileImageData"
 
     init(discoverRooms: Bool = true) {
@@ -1571,6 +1579,9 @@ final class ALOViewModel: ObservableObject {
         })
             ? savedVoiceInput
             : nil
+        selectedAudioSourceBundleID = defaults.string(forKey: Self.audioSourceBundleIDKey)
+        selectedAudioSourceName = defaults.string(forKey: Self.audioSourceNameKey)
+        audioSourceApplications = SystemAudioProcessCatalog.audibleApplications()
         selectedRoomID = nil
         roomBrowser = MeshRoomBrowser(
             updateHandler: { [weak self] rooms in
@@ -1671,6 +1682,15 @@ final class ALOViewModel: ObservableObject {
     func roomPlaybackProgress(at date: Date) -> Double? {
         nowPlaying.playbackProgress(elapsedSinceReceipt: date.timeIntervalSince(nowPlayingReceivedAt))
     }
+    func roomPlaybackPosition(at date: Date) -> Double? {
+        guard let elapsed = nowPlaying.elapsedTime, elapsed.isFinite, elapsed >= 0 else { return nil }
+        let advancement = nowPlaying.isPlaying == true ? max(0, date.timeIntervalSince(nowPlayingReceivedAt)) : 0
+        let position = elapsed + advancement
+        if let duration = nowPlaying.duration, duration.isFinite, duration > 0 {
+            return min(position, duration)
+        }
+        return position
+    }
     var canControlRoomPlayback: Bool {
         Self.playbackControlAvailable(
             isLive: phase == .live,
@@ -1678,7 +1698,15 @@ final class ALOViewModel: ObservableObject {
             isHost: isHost,
             hasMedia: !nowPlaying.isEmpty || audioIsRendering
         )
+            && nowPlaying.playbackControlsAvailable != false
     }
+    var selectedSystemAudioSource: SystemAudioSource {
+        guard let bundleIdentifier = selectedAudioSourceBundleID,
+              let name = selectedAudioSourceName, !bundleIdentifier.isEmpty, !name.isEmpty
+        else { return .allSystemAudio }
+        return .application(bundleIdentifier: bundleIdentifier, name: name)
+    }
+    var selectedAudioSourceTitle: String { selectedSystemAudioSource.title }
     var roomAccentColor: Color {
         roomAccentHex.map(Color.deviceIdentity) ?? Palette.controlAccent
     }
@@ -2070,7 +2098,10 @@ final class ALOViewModel: ObservableObject {
         statusText = hasBroadcaster
             ? "Taking over room audio and preparing full-screen sharing"
             : "Starting audio and video broadcast"
-        meshSession.beginBroadcasting(videoEnabled: true)
+        meshSession.beginBroadcasting(
+            videoEnabled: true,
+            audioSourceSelection: selectedSystemAudioSource
+        )
         videoBroadcastTimeoutTask?.cancel()
         videoBroadcastTimeoutTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 20_000_000_000)
@@ -2205,12 +2236,35 @@ final class ALOViewModel: ObservableObject {
             guard ensureScreenRecordingPermission() else { return }
             audioIsRendering = false
             stopLocalNowPlayingMonitor()
-            meshSession?.beginBroadcasting()
+            meshSession?.beginBroadcasting(audioSourceSelection: selectedSystemAudioSource)
         }
+    }
+
+    func refreshAudioSourceApplications() {
+        audioSourceApplications = SystemAudioProcessCatalog.audibleApplications()
+    }
+
+    func selectAudioSource(_ application: SystemAudioApplication?) {
+        guard !isHost else {
+            statusText = "Stop broadcasting before changing the shared audio app"
+            return
+        }
+        selectedAudioSourceBundleID = application?.bundleIdentifier
+        selectedAudioSourceName = application?.name
+        UserDefaults.standard.set(application?.bundleIdentifier, forKey: Self.audioSourceBundleIDKey)
+        UserDefaults.standard.set(application?.name, forKey: Self.audioSourceNameKey)
     }
 
     func sendRoomMediaCommand(_ command: RoomMediaCommand) {
         _ = meshSession?.sendMediaCommand(command)
+    }
+
+    func playNextRoomTrack() {
+        if meshSession?.sendMediaCommand(.nextTrack) != true {
+            statusText = nowPlaying.playbackControlsAvailable == false
+                ? "Playback controls are unavailable while sharing one app"
+                : "Wait for the broadcaster connection, then try again"
+        }
     }
 
     func syncParticipant(_ participant: RoomParticipant) {
@@ -2941,7 +2995,7 @@ final class ALOViewModel: ObservableObject {
         if !isHost {
             guard ensureScreenRecordingPermission() else { return }
             stopLocalNowPlayingMonitor()
-            meshSession?.beginBroadcasting()
+            meshSession?.beginBroadcasting(audioSourceSelection: selectedSystemAudioSource)
         }
         if NSWorkspace.shared.open(url) {
             meshSession?.removeQueueItem(item.id)
@@ -3299,13 +3353,24 @@ final class ALOViewModel: ObservableObject {
                 let chatIsVisible = self.floatingSection == .chat
                     && (!self.floatingBarHidden || self.menuBarPopoverVisible)
                 let chatIsAtLatest = chatIsVisible && !self.chatViewportsAtLatest.isEmpty
-                if senderID != self.currentParticipantID, !chatIsAtLatest {
-                    if self.firstUnreadMessageID == nil {
-                        self.firstUnreadMessageID = receivedMessage.id
+                if senderID != self.currentParticipantID {
+                    let mentionsThisMac = ChatNotificationMode.mentions.shouldPreview(
+                        text: receivedMessage.text,
+                        displayName: self.currentUserName,
+                        participantID: self.currentParticipantID,
+                        mentionedParticipantIDs: receivedMessage.mentionedParticipantIDs
+                    )
+                    if mentionsThisMac, self.chatNotificationMode != .muted, !NSApp.isActive {
+                        RoomMentionNotifier.shared.notify(message: receivedMessage, roomTitle: self.roomTitle)
                     }
-                    self.unreadMessageCount += 1
-                    if self.floatingSection == .collapsed, self.chatNotificationMode.shouldPreview(text: receivedMessage.text, displayName: self.currentUserName, participantID: self.currentParticipantID, mentionedParticipantIDs: receivedMessage.mentionedParticipantIDs) {
-                        self.presentIncomingMessagePreview(receivedMessage)
+                    if !chatIsAtLatest {
+                        if self.firstUnreadMessageID == nil {
+                            self.firstUnreadMessageID = receivedMessage.id
+                        }
+                        self.unreadMessageCount += 1
+                        if self.floatingSection == .collapsed, self.chatNotificationMode.shouldPreview(text: receivedMessage.text, displayName: self.currentUserName, participantID: self.currentParticipantID, mentionedParticipantIDs: receivedMessage.mentionedParticipantIDs) {
+                            self.presentIncomingMessagePreview(receivedMessage)
+                        }
                     }
                 }
             }
@@ -4124,7 +4189,13 @@ struct FloatingRoomView: View {
     }
 
     private var roomBarHeight: CGFloat {
-        presentation == .menuBar ? FloatingMetrics.menuBarMediaHeight : FloatingMetrics.barHeight
+        if presentation == .menuBar { return FloatingMetrics.menuBarMediaHeight }
+        return compactRoomBar ? 44 : FloatingMetrics.barHeight
+    }
+
+    private var compactRoomBar: Bool {
+        presentation == .floating && !model.permissionNotice
+            && model.floatingSection != .collapsed
     }
 
     private var navigationHeight: CGFloat {
@@ -4283,16 +4354,14 @@ struct FloatingRoomView: View {
                         active: false,
                         help: model.roomIsPlaying ? "Pause everywhere" : "Play everywhere"
                     ) { model.toggleRoomPlayback() }
+                    roomBarButton(
+                        icon: "forward.end.fill",
+                        active: false,
+                        help: "Next song"
+                    ) { model.playNextRoomTrack() }
                 }
 
             }
-
-            roomBarButton(
-                icon: "arrow.triangle.2.circlepath",
-                active: false,
-                disabled: !model.hasBroadcaster || model.currentParticipantID == nil || model.mediaSwitchBusy,
-                help: "Sync this Mac only"
-            ) { model.syncThisMac() }
 
             Button { showsMediaMore.toggle() } label: {
                 Image(systemName: "ellipsis")
@@ -4301,27 +4370,42 @@ struct FloatingRoomView: View {
                     .frame(width: 32, height: 32)
             }
             .buttonStyle(FlatToolButtonStyle(active: showsMediaMore))
-            .help("More: Chat, People, sharing and room settings")
+            .help("More room controls")
             .accessibilityLabel("More room controls")
             .popover(isPresented: $showsMediaMore, arrowEdge: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Button {
-                        showsMediaMore = false
-                        if presentation == .floating { model.showChatInFloatingBar() }
-                        else { model.roomGamesVisible = false; model.floatingSection = .chat }
-                    } label: {
-                        Label("Chat", systemImage: "bubble.left.and.text.bubble.right")
-                            .frame(maxWidth: .infinity, alignment: .leading).padding(8)
+                    if presentation == .floating && model.floatingSection == .collapsed {
+                        Button {
+                            showsMediaMore = false
+                            model.showChatInFloatingBar()
+                        } label: {
+                            Label("Chat", systemImage: "bubble.left.and.text.bubble.right")
+                                .frame(maxWidth: .infinity, alignment: .leading).padding(8)
+                        }
+                        Button {
+                            showsMediaMore = false
+                            model.showPeopleInFloatingBar()
+                        } label: {
+                            Label("People", systemImage: "person.2")
+                                .frame(maxWidth: .infinity, alignment: .leading).padding(8)
+                        }
+                        Button {
+                            showsMediaMore = false
+                            model.showGamesLibrary()
+                        } label: {
+                            Label("Games", systemImage: "gamecontroller")
+                                .frame(maxWidth: .infinity, alignment: .leading).padding(8)
+                        }
+                        Divider()
                     }
                     Button {
                         showsMediaMore = false
-                        if presentation == .floating { model.showPeopleInFloatingBar() }
-                        else { model.floatingSection = .people }
+                        model.syncThisMac()
                     } label: {
-                        Label("People", systemImage: "person.2")
+                        Label("Sync this Mac", systemImage: "arrow.triangle.2.circlepath")
                             .frame(maxWidth: .infinity, alignment: .leading).padding(8)
                     }
-                    Divider()
+                    .disabled(!model.hasBroadcaster || model.currentParticipantID == nil || model.mediaSwitchBusy)
                     Button {
                         showsMediaMore = false
                         model.toggleVideoFromFloatingBar()
@@ -4409,14 +4493,16 @@ struct FloatingRoomView: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(Palette.ink)
                     .lineLimit(1)
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(model.audioIsRendering ? roomAccent : Palette.secondary)
-                        .frame(width: 5, height: 5)
-                        .accessibilityHidden(true)
-                    ViewThatFits(in: .horizontal) {
-                        statusLabel(compact: false)
-                        statusLabel(compact: true)
+                if !compactRoomBar {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(model.audioIsRendering ? roomAccent : Palette.secondary)
+                            .frame(width: 5, height: 5)
+                            .accessibilityHidden(true)
+                        ViewThatFits(in: .horizontal) {
+                            statusLabel(compact: false)
+                            statusLabel(compact: true)
+                        }
                     }
                 }
             }
@@ -4483,8 +4569,8 @@ struct FloatingRoomView: View {
     }
 
     private var artworkTile: some View {
-        let size: CGFloat = presentation == .menuBar ? 62 : 38
-        let radius: CGFloat = presentation == .menuBar ? 17 : 11
+        let size: CGFloat = presentation == .menuBar ? 62 : compactRoomBar ? 28 : 38
+        let radius: CGFloat = presentation == .menuBar ? 17 : compactRoomBar ? 8 : 11
         return Group {
             if let data = model.nowPlaying.artworkData, let image = NSImage(data: data) {
                 Image(nsImage: image)
@@ -4755,7 +4841,12 @@ struct FloatingRoomView: View {
                 }.font(.system(size: 11)).padding(.horizontal, 14).padding(.vertical, 9)
                     .background(.white.opacity(0.035))
             }
-            if !showsGames { LyricsPanel(controller: model.lyrics, accent: roomAccent) }
+            if !showsGames, model.lyrics.enabled {
+                TimelineView(.periodic(from: .now, by: 0.5)) { context in
+                    LyricsPanel(controller: model.lyrics, accent: roomAccent,
+                                position: model.roomPlaybackPosition(at: context.date))
+                }
+            }
             if showsGames {
                 ArenaPanel(session: model.arena)
                     .onAppear { model.arena.names = Dictionary(uniqueKeysWithValues: model.participants.map { ($0.id, $0.name) }) }
@@ -4804,6 +4895,30 @@ struct FloatingRoomView: View {
 
             Spacer()
 
+            if showsGames, model.arena.selectedGameID != nil {
+                Button {
+                    model.arena.returnToLibrary()
+                } label: {
+                    Label("Library", systemImage: "chevron.left")
+                        .font(.system(size: 10, weight: .semibold))
+                        .padding(.horizontal, 9)
+                        .frame(height: 26)
+                        .background(Palette.messageSurface, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .help("Back to game library")
+
+                Button {
+                    model.arena.openExpanded()
+                } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .font(.system(size: 12, weight: .medium))
+                        .frame(width: 30, height: 28)
+                }
+                .buttonStyle(FlatToolButtonStyle(active: false))
+                .help("Open game window")
+            }
+
             Button {
                 showsGames.toggle()
                 if showsGames && !model.arena.expanded { model.arena.returnToLibrary() }
@@ -4826,21 +4941,6 @@ struct FloatingRoomView: View {
                 }
             }
             .accessibilityHidden(true)
-
-            Menu {
-                Button("Chat") { model.floatingSection = .chat; showsGames = false }
-                Button("People") { model.floatingSection = .people }
-                Button("Games") {
-                    model.floatingSection = .chat; showsGames = true
-                    if !model.arena.expanded { model.arena.returnToLibrary() }
-                }
-                Divider()
-                Button("Room settings…") { showsRoomInfo = true }
-            } label: {
-                Image(systemName: "ellipsis").foregroundStyle(Palette.controlIcon).frame(width: 24, height: 26)
-            }
-            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-            .help("Room navigation and settings")
 
             Button(action: model.collapseFloatingBar) {
                 Image(systemName: "chevron.down")
@@ -5950,6 +6050,45 @@ struct WalkieTalkieBar: View {
                 Divider()
                 Button("Refresh microphones") { model.refreshVoiceInputs() }
             }
+            Menu("Audio to share: \(model.selectedAudioSourceTitle)") {
+                Button {
+                    model.selectAudioSource(nil)
+                } label: {
+                    if model.selectedAudioSourceBundleID == nil {
+                        Label("All system audio", systemImage: "checkmark")
+                    } else {
+                        Text("All system audio")
+                    }
+                }
+                .disabled(model.isHost)
+                Divider()
+                if let selectedID = model.selectedAudioSourceBundleID,
+                   !model.audioSourceApplications.contains(where: { $0.bundleIdentifier == selectedID }) {
+                    Label("\(model.selectedAudioSourceName ?? "Selected app") · not currently audible",
+                          systemImage: "checkmark")
+                        .disabled(true)
+                }
+                ForEach(model.audioSourceApplications) { application in
+                    Button {
+                        model.selectAudioSource(application)
+                    } label: {
+                        if model.selectedAudioSourceBundleID == application.bundleIdentifier {
+                            Label(application.name, systemImage: "checkmark")
+                        } else {
+                            Text(application.name)
+                        }
+                    }
+                    .disabled(model.isHost)
+                }
+                if model.audioSourceApplications.isEmpty {
+                    Text("Play audio in an app, then refresh")
+                }
+                Divider()
+                Button("Refresh audible apps") { model.refreshAudioSourceApplications() }
+                if model.isHost {
+                    Text("Stop broadcasting to change source")
+                }
+            }
             Divider()
             Button(model.incomingCallsMuted ? "Unmute incoming voice" : "Mute incoming voice") {
                 model.toggleIncomingCallsMute()
@@ -5983,6 +6122,7 @@ struct WalkieTalkieBar: View {
         .fixedSize(horizontal: true, vertical: false)
         .help("Talk settings · \(selectedMicrophoneName)")
         .accessibilityLabel("Talk settings")
+        .onAppear { model.refreshAudioSourceApplications() }
     }
 
     private var voiceStateLabel: String {

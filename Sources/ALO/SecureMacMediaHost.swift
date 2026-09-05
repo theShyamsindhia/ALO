@@ -33,6 +33,7 @@ final class SecureMacMediaHost {
 
     func start(mesh: MeshControlPlane, room: RoomConfiguration, broadcaster: MeshBroadcaster,
                audioOutput: RoomAudioOutputEngine, nowPlaying: @escaping (NowPlayingMedia) -> Void,
+               audioSourceSelection: SystemAudioSource = .allSystemAudio,
                status: @escaping (String) -> Void, stopped: @escaping @Sendable (Error) -> Void,
                annotationScene: @escaping (AnnotationSceneModel?) -> Void = { _ in }) async throws {
         guard !started, cleanup == nil, room.transportPolicy == .secureV2,
@@ -75,16 +76,32 @@ final class SecureMacMediaHost {
             }
             ingress.receiveLocalFloor(renderer.initialOutputFloor)
             renderer.start()
-            playbackController = SystemPlaybackController()
-            let monitor = NowPlayingMonitor { [weak self] media in
-                Task { @MainActor [weak self] in
-                    guard let self, self.lifecycle == token, self.ingress.isActive else { return }
-                    self.ingress.setPlaying(media.isPlaying)
-                    nowPlaying(media)
+            if audioSourceSelection.usesGlobalPlaybackControls {
+                playbackController = SystemPlaybackController()
+                let monitor = NowPlayingMonitor { [weak self] media in
+                    Task { @MainActor [weak self] in
+                        guard let self, self.lifecycle == token, self.ingress.isActive else { return }
+                        self.ingress.setPlaying(media.isPlaying)
+                        nowPlaying(media)
+                    }
                 }
+                self.monitor = monitor; monitor.start()
+            } else {
+                ingress.setPlaying(nil)
+                nowPlaying(NowPlayingMedia(
+                    title: audioSourceSelection.title,
+                    artist: "Shared app audio",
+                    playbackControlsAvailable: false
+                ))
             }
-            self.monitor = monitor; monitor.start()
-            let tap = SystemAudioTapCapture(sourcePlaybackIsActive: { ingress.sourcePlaying },
+            let playbackActivity: @Sendable () -> Bool?
+            if audioSourceSelection.usesGlobalPlaybackControls {
+                playbackActivity = { ingress.sourcePlaying }
+            } else {
+                playbackActivity = { nil }
+            }
+            let tap = SystemAudioTapCapture(source: audioSourceSelection,
+                sourcePlaybackIsActive: playbackActivity,
                 unexpectedStopHandler: { [weak self] error in
                     // Revoke subscriptions immediately, before an actor hop.
                     ingress.revoke()
@@ -99,8 +116,10 @@ final class SecureMacMediaHost {
             status("Preparing secure synchronized system audio")
             try await tap.start { samples, captureTimeNanos in ingress.accept(samples, captureTimeNanos: captureTimeNanos) }
             guard lifecycle == token, !Task.isCancelled, ingress.isActive else { throw CancellationError() }
-            shouldPauseSourceOnStop = true
-            status("Sharing encrypted system audio")
+            shouldPauseSourceOnStop = audioSourceSelection.usesGlobalPlaybackControls
+            status(audioSourceSelection.usesGlobalPlaybackControls
+                ? "Sharing encrypted system audio"
+                : "Sharing encrypted audio from \(audioSourceSelection.title)")
         } catch {
             await stop()
             throw error

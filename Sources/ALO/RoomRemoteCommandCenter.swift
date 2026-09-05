@@ -52,6 +52,7 @@ final class RoomRemoteCommandCenter {
             )
         )
         lock.unlock()
+        refreshCommandAvailability()
         publishNowPlaying()
     }
 
@@ -146,7 +147,8 @@ final class RoomRemoteCommandCenter {
             sourceURL: media.sourceURL,
             isPlaying: isPlaying,
             elapsedTime: media.elapsedTime,
-            duration: media.duration
+            duration: media.duration,
+            playbackControlsAvailable: media.playbackControlsAvailable
         )
     }
 
@@ -173,6 +175,15 @@ final class RoomRemoteCommandCenter {
         let infoCenter = MPNowPlayingInfoCenter.default()
         infoCenter.nowPlayingInfo = information
         infoCenter.playbackState = isPlaying ? .playing : .paused
+    }
+
+    private func refreshCommandAvailability() {
+        lock.lock()
+        let enabled = isRunning && media.playbackControlsAvailable != false
+        let commands = targets.map(\.command)
+        lock.unlock()
+        guard Self.ownershipLock.withLock({ Self.activeOwnerID == ownerID }) else { return }
+        for command in commands { command.isEnabled = enabled }
     }
 
 }

@@ -62,6 +62,10 @@ public struct NowPlayingMedia: Codable, Sendable, Equatable {
     public let isPlaying: Bool?
     public let elapsedTime: TimeInterval?
     public let duration: TimeInterval?
+    /// Nil keeps compatibility with older peers and means the broadcaster has
+    /// not restricted global playback controls. False is used for app-scoped
+    /// capture, where a global media command could control the wrong app.
+    public let playbackControlsAvailable: Bool?
 
     public init(
         title: String? = nil,
@@ -71,7 +75,8 @@ public struct NowPlayingMedia: Codable, Sendable, Equatable {
         sourceURL: String? = nil,
         isPlaying: Bool? = nil,
         elapsedTime: TimeInterval? = nil,
-        duration: TimeInterval? = nil
+        duration: TimeInterval? = nil,
+        playbackControlsAvailable: Bool? = nil
     ) {
         self.title = title
         self.artist = artist
@@ -81,6 +86,7 @@ public struct NowPlayingMedia: Codable, Sendable, Equatable {
         self.isPlaying = isPlaying
         self.elapsedTime = elapsedTime
         self.duration = duration
+        self.playbackControlsAvailable = playbackControlsAvailable
     }
 
     public var isEmpty: Bool {

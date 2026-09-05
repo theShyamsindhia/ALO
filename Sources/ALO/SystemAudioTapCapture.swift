@@ -165,6 +165,7 @@ final class SystemAudioTapCapture: AudioSource, @unchecked Sendable {
     private let deliveryQueueKey = DispatchSpecificKey<UInt8>()
     private let unexpectedStopHandler: @Sendable (Error) -> Void
     private let sourcePlaybackIsActive: @Sendable () -> Bool?
+    private let source: SystemAudioSource
     private let stateLock = NSLock()
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var tapFormatConfiguration: TapStreamConfiguration?
@@ -187,9 +188,11 @@ final class SystemAudioTapCapture: AudioSource, @unchecked Sendable {
     )
 
     init(
+        source: SystemAudioSource = .allSystemAudio,
         sourcePlaybackIsActive: @escaping @Sendable () -> Bool? = { nil },
         unexpectedStopHandler: @escaping @Sendable (Error) -> Void = { _ in }
     ) {
+        self.source = source
         self.sourcePlaybackIsActive = sourcePlaybackIsActive
         self.unexpectedStopHandler = unexpectedStopHandler
         deliveryQueue.setSpecific(key: deliveryQueueKey, value: 1)
@@ -256,7 +259,14 @@ final class SystemAudioTapCapture: AudioSource, @unchecked Sendable {
             startedAtNanos: MonotonicClock.nowNanos()
         )
 
-        let description = Self.tapDescription(excluding: ownProcessID)
+        let description: CATapDescription
+        switch source {
+        case .allSystemAudio:
+            description = Self.tapDescription(excluding: ownProcessID)
+        case .application:
+            let processes = try SystemAudioProcessCatalog.processObjectIDs(for: source)
+            description = Self.tapDescription(including: processes, name: source.title)
+        }
 
         var newTapID = AudioObjectID(kAudioObjectUnknown)
         try Self.check(
@@ -656,6 +666,14 @@ final class SystemAudioTapCapture: AudioSource, @unchecked Sendable {
             stereoGlobalTapButExcludeProcesses: [ownProcessID]
         )
         description.name = "ALO synchronized system audio"
+        description.isPrivate = true
+        description.muteBehavior = .mutedWhenTapped
+        return description
+    }
+
+    static func tapDescription(including processIDs: [AudioObjectID], name: String) -> CATapDescription {
+        let description = CATapDescription(stereoMixdownOfProcesses: processIDs)
+        description.name = "ALO app audio · \(name)"
         description.isPrivate = true
         description.muteBehavior = .mutedWhenTapped
         return description

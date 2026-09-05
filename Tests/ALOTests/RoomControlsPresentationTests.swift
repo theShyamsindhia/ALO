@@ -44,6 +44,8 @@ extension NativePresentationTests {
             #expect(bitmap.pixelsWide > 0)
             #expect(bitmap.pixelsHigh > 0)
             #expect(try #require(model.roomPlaybackProgress(at: Date())) == 0.5)
+            let position = try #require(model.roomPlaybackPosition(at: Date()))
+            #expect(position >= 90 && position <= 91)
 
             if let directory = ProcessInfo.processInfo.environment["ALO_SPACES_SNAPSHOT_DIR"] {
                 let folder = URL(fileURLWithPath: directory, isDirectory: true)

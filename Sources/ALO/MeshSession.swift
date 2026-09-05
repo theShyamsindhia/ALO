@@ -39,6 +39,7 @@ final class MeshSession {
     private let walkieTalkiePlayer: WalkieTalkiePlayer
     private let secureVoice: SecureMacVoiceBridge
     private let audioOutput: RoomAudioOutputEngine
+    private var broadcastAudioSource: SystemAudioSource = .allSystemAudio
     private final class WalkieTransmissionState: @unchecked Sendable {
         struct Active {
             let id: String
@@ -376,7 +377,11 @@ final class MeshSession {
         else { statusHandler("Room open · waiting for a broadcaster") }
     }
 
-    func beginBroadcasting(videoEnabled: Bool = false) {
+    func beginBroadcasting(
+        videoEnabled: Bool = false,
+        audioSourceSelection: SystemAudioSource = .allSystemAudio
+    ) {
+        broadcastAudioSource = audioSourceSelection
         intendsToBroadcast = true
         intendsToBroadcastVideo = videoEnabled
         let service = "ALO-\(room.id.prefix(8))-\(nodeID.prefix(8))"
@@ -1044,7 +1049,8 @@ final class MeshSession {
                                 guard let self, self.transitionGeneration == generation else { return }
                                 self.nowPlayingHandler(media)
                                 self.control.publishPlayback(media)
-                            }, status: statusHandler, stopped: { [weak self, weak host] error in
+                            }, audioSourceSelection: broadcastAudioSource,
+                            status: statusHandler, stopped: { [weak self, weak host] error in
                                 Task { @MainActor in
                                     guard let self, let host, self.secureHost === host,
                                           self.transitionGeneration == generation else { return }
@@ -1104,6 +1110,7 @@ final class MeshSession {
                         chatHandler: { _, _, _ in },
                         queueHandler: { _ in },
                         videoHandler: videoHandler,
+                        audioSourceSelection: broadcastAudioSource,
                         audioStoppedHandler: { [weak self, weak host] error in
                             Task { @MainActor in
                                 guard let self, let host,

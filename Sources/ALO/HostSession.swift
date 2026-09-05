@@ -72,6 +72,7 @@ final class HostSession {
         chatHandler: @escaping (_ sender: String, _ text: String, _ sentNanos: UInt64) -> Void,
         queueHandler: @escaping ([RoomQueueItem]) -> Void,
         videoHandler: @escaping (CGImage) -> Void,
+        audioSourceSelection: SystemAudioSource = .allSystemAudio,
         audioStoppedHandler: @escaping @Sendable (Error) -> Void = { _ in },
         videoStoppedHandler: @escaping (Error) -> Void = { _ in }
     ) async throws {
@@ -80,7 +81,9 @@ final class HostSession {
             try Task.checkCancellation()
             statusHandler("Opening your room")
             statusHandler("Preparing system audio capture")
-            let playbackController = SystemPlaybackController()
+            let playbackController = audioSourceSelection.usesGlobalPlaybackControls
+                ? SystemPlaybackController()
+                : nil
             self.playbackController = playbackController
             let host = HostServer(
                 roomName: roomName,
@@ -97,21 +100,36 @@ final class HostSession {
             try Task.checkCancellation()
 
             let sourcePlaybackActivity = SourcePlaybackActivity()
-            let nowPlayingMonitor = NowPlayingMonitor { [weak host] media in
-                sourcePlaybackActivity.update(media.isPlaying)
-                host?.setNowPlaying(media)
+            if audioSourceSelection.usesGlobalPlaybackControls {
+                let nowPlayingMonitor = NowPlayingMonitor { [weak host] media in
+                    sourcePlaybackActivity.update(media.isPlaying)
+                    host?.setNowPlaying(media)
+                }
+                nowPlayingMonitor.start()
+                self.nowPlayingMonitor = nowPlayingMonitor
+            } else {
+                host.setNowPlaying(NowPlayingMedia(
+                    title: audioSourceSelection.title,
+                    artist: "Shared app audio",
+                    playbackControlsAvailable: false
+                ))
             }
-            nowPlayingMonitor.start()
-            self.nowPlayingMonitor = nowPlayingMonitor
 
+            let playbackActivity: @Sendable () -> Bool?
+            if audioSourceSelection.usesGlobalPlaybackControls {
+                playbackActivity = { sourcePlaybackActivity.current() }
+            } else {
+                playbackActivity = { nil }
+            }
             let (source, playbackMode) = try await startAudioSource(
                 host: host,
                 statusHandler: statusHandler,
-                sourcePlaybackIsActive: { sourcePlaybackActivity.current() },
+                source: audioSourceSelection,
+                sourcePlaybackIsActive: playbackActivity,
                 audioStoppedHandler: audioStoppedHandler
             )
             audioSource = source
-            shouldPauseSourceOnStop = true
+            shouldPauseSourceOnStop = audioSourceSelection.usesGlobalPlaybackControls
             try Task.checkCancellation()
 
             statusHandler("Broadcasting this Mac · waiting for audio")
@@ -148,7 +166,9 @@ final class HostSession {
             if initialVideoEnabled {
                 try await setVideoEnabled(true)
             }
-            statusHandler("Sharing system audio")
+            statusHandler(audioSourceSelection.usesGlobalPlaybackControls
+                ? "Sharing system audio"
+                : "Sharing audio from \(audioSourceSelection.title)")
         } catch {
             await stop()
             throw error
@@ -158,6 +178,7 @@ final class HostSession {
     private func startAudioSource(
         host: HostServer,
         statusHandler: @escaping (String) -> Void,
+        source: SystemAudioSource,
         sourcePlaybackIsActive: @escaping @Sendable () -> Bool?,
         audioStoppedHandler: @escaping @Sendable (Error) -> Void
     ) async throws -> (AudioSource, BroadcasterPlaybackMode) {
@@ -170,6 +191,7 @@ final class HostSession {
         }
         statusHandler("Starting one synchronized audio path")
         let tapSource = SystemAudioTapCapture(
+            source: source,
             sourcePlaybackIsActive: sourcePlaybackIsActive,
             unexpectedStopHandler: { [weak self] error in
                 Task { @MainActor [weak self] in
