@@ -13,11 +13,12 @@ final class OvhLyricsProvider: LyricsProviding {
 
     private let session: URLSession
     private let decoder = JSONDecoder()
-    private var cache: [String: TrackLyrics] = [:]
+    private var cache = BoundedCache<String, TrackLyrics>(capacity: 128)
 
     init() {
         let configuration = URLSessionConfiguration.default
-        configuration.requestCachePolicy = .returnCacheDataElseLoad
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
         configuration.timeoutIntervalForRequest = 30
         configuration.timeoutIntervalForResource = 45
         session = URLSession(configuration: configuration)

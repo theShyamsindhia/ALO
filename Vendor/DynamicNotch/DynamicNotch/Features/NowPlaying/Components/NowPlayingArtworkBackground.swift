@@ -82,7 +82,12 @@ private enum NowPlayingArtworkBlurProcessor {
         .useSoftwareRenderer: false,
         .priorityRequestLow: true
     ])
-    private static let cache = NSCache<NSString, NSImage>()
+    private static let cache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 64
+        cache.totalCostLimit = 8 * 1024 * 1024
+        return cache
+    }()
 
     static func generateBlurredImage(
         from image: NSImage,
@@ -140,7 +145,7 @@ private enum NowPlayingArtworkBlurProcessor {
         }
 
         let result = NSImage(cgImage: outputCGImage, size: targetExtent.size)
-        cache.setObject(result, forKey: cacheKey)
+        cache.setObject(result, forKey: cacheKey, cost: outputCGImage.bytesPerRow * outputCGImage.height)
         return result
     }
 

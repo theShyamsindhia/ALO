@@ -31,11 +31,12 @@ final class LRCLIBLyricsProvider: LyricsProviding {
 
     private let session: URLSession
     private let decoder = JSONDecoder()
-    private var cache: [String: CacheEntry] = [:]
+    private var cache = BoundedCache<String, CacheEntry>(capacity: 128)
 
     init() {
         let configuration = URLSessionConfiguration.default
-        configuration.requestCachePolicy = .returnCacheDataElseLoad
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        configuration.urlCache = nil
         configuration.timeoutIntervalForRequest = 30
         configuration.timeoutIntervalForResource = 45
         session = URLSession(configuration: configuration)

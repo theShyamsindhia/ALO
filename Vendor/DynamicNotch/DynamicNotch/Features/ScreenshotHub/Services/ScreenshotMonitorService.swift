@@ -65,6 +65,7 @@ final class ScreenshotMonitorService {
         fileWatcherTimer = nil
         pasteboardTimer?.invalidate()
         pasteboardTimer = nil
+        knownFilePaths.removeAll(keepingCapacity: false)
         
         Self.setSystemScreenshotLocation(originalScreenshotLocation)
         restoreThumbnail()
