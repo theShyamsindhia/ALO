@@ -4840,14 +4840,6 @@ struct FloatingRoomView: View {
 
     private var peopleMixer: some View {
         VStack(spacing: 0) {
-            MicrophoneTestPanel(selectedInputUID: model.selectedVoiceInputUID,
-                unavailable: model.walkieTalking || model.walkieStarting || model.openLineState.isSendingMicrophone || model.isHost)
-
-            panelHeader(
-                title: "People",
-                detail: "Each Mac has its own level",
-                syncAction: model.syncThisMac
-            )
             Divider().opacity(0.42)
             if model.activePrivateInviteKey != nil {
                 HStack(spacing: 8) {
@@ -5271,7 +5263,7 @@ private enum TalkTargetInteraction: Equatable {
     case hold
 }
 
-private extension OpenLineState {
+extension OpenLineState {
     var isSendingMicrophone: Bool {
         switch self {
         case .inviting, .connected: true

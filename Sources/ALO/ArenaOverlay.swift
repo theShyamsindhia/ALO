@@ -191,7 +191,7 @@ struct ArenaMenuOverlay: View {
                     .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(ArenaAppearance.accent)
             }
             if session.networked {
-                Text("Two player slots · \(session.spectatorCount) watching. Players cannot join mid-match; spectators can. The match ends if its host leaves.")
+                Text("Four player slots · \(session.spectatorCount) watching. Join mid-match by taking a live bot’s slot; otherwise spectate. The match ends if its host leaves.")
                     .font(.system(size: 10)).foregroundStyle(ArenaAppearance.secondary)
             }
         }
@@ -254,5 +254,23 @@ struct ArenaMenuOverlay: View {
                     .font(.system(size: 10)).foregroundStyle(ArenaAppearance.accent)
             }
         }
+    }
+}
+
+/// Crop the two-character portrait sheet at display time; the pack image is decoded once.
+struct ArenaFighterPortrait: View {
+    let image: NSImage?
+    let kind: ArenaFighterKind
+    var body: some View {
+        GeometryReader { geometry in
+            if let image {
+                Image(nsImage: image).resizable()
+                    .frame(width: geometry.size.width * 2, height: geometry.size.height)
+                    .offset(x: kind == .nova ? 0 : -geometry.size.width)
+            } else {
+                Image(systemName: kind == .nova ? "bolt" : "shield")
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+            }
+        }.clipped().accessibilityLabel(kind.title)
     }
 }

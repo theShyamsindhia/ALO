@@ -135,8 +135,8 @@ struct ArenaPanel: View {
                     ForEach(ArenaFighterKind.allCases, id: \.self) { fighter in
                         Button { session.selected = fighter } label: {
                             HStack(spacing: 10) {
-                                Image(systemName: fighter == .nova ? "bolt" : "shield").font(.system(size: 20))
-                                    .foregroundStyle(accent)
+                                ArenaFighterPortrait(image: session.fighterArtwork, kind: fighter)
+                                    .frame(width: 66, height: 88)
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(fighter.title).font(.system(size: 13, weight: .semibold))
                                     Text(fighter.subtitle).font(.system(size: 10)).foregroundStyle(.white.opacity(0.5))
@@ -149,6 +149,8 @@ struct ArenaPanel: View {
                         }.buttonStyle(.plain).disabled(session.mode != .picker)
                     }
                 }
+                Text("Mirror matches welcome. Your player number and colour identify you.")
+                    .font(.system(size: 10)).foregroundStyle(.secondary)
                 if session.mode == .picker {
                     Text("Choose your arena").font(.system(size: 12, weight: .semibold))
                     HStack(spacing: 8) {
@@ -328,6 +330,12 @@ final class ArenaScene: SKScene {
         buildWorld()
     }
     required init?(coder aDecoder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func didMove(to view: SKView) {
+        super.didMove(to: view)
+        for island in children.compactMap({ $0 as? ArenaPlatformNode }) {
+            if let baked = island.bake(to: view) { addChild(baked); island.removeFromParent() }
+        }
+    }
     private func shape(_ points: [CGPoint], color: NSColor, line: NSColor = .clear) -> SKShapeNode {
         let path = CGMutablePath(); path.addLines(between: points); path.closeSubpath()
         let node = SKShapeNode(path: path); node.fillColor = color; node.strokeColor = line
@@ -400,19 +408,9 @@ final class ArenaScene: SKScene {
         let ring = SKShapeNode(ellipseOf: CGSize(width: 680, height: 145))
         ring.position = CGPoint(x: 500, y: 112); ring.strokeColor = mint.withAlphaComponent(0.12); ring.lineWidth = 2; addChild(ring)
         for (index, platform) in (session?.simulation.arenaPlatforms ?? ArenaSimulation.platforms).enumerated() {
-            let l = platform.left, r = platform.right, y = platform.top
-            addChild(shape([CGPoint(x: l, y: y), CGPoint(x: r, y: y), CGPoint(x: r - 24, y: y - 40),
-                            CGPoint(x: (l + r) / 2 + 25, y: y - (index == 0 ? 112 : 65)), CGPoint(x: l + 15, y: y - 40)],
-                           color: NSColor(calibratedRed: 0.20, green: 0.20, blue: 0.21, alpha: 1), line: NSColor(white: 0.65, alpha: 0.3)))
-            let top = SKShapeNode(rectOf: CGSize(width: r - l, height: 9), cornerRadius: 4)
-            top.position = CGPoint(x: (l + r) / 2, y: y - 4); top.fillColor = NSColor(calibratedRed: 0.58, green: 0.55, blue: 0.48, alpha: 1)
-            top.strokeColor = NSColor(calibratedRed: 0.78, green: 0.74, blue: 0.65, alpha: 1); top.glowWidth = 0; addChild(top)
-            if index == 0 {
-                for j in 0..<7 {
-                    let rune = SKShapeNode(rectOf: CGSize(width: 20, height: 3)); rune.fillColor = NSColor(calibratedRed: 0.72, green: 0.64, blue: 0.45, alpha: 0.5)
-                    rune.strokeColor = .clear; rune.position = CGPoint(x: 280 + j * 74, y: 124); addChild(rune)
-                }
-            }
+            let island = ArenaPlatformNode(platform: platform, map: builtMap ?? .observatory, index: index)
+            addChild(island)
+            if let view, let baked = island.bake(to: view) { addChild(baked); island.removeFromParent() }
         }
         _ = label(session?.simulation.map.title ?? "Hollow Observatory", x: 500, y: 40, size: 10, color: mint.withAlphaComponent(0.4))
         for (i, fighter) in (session?.simulation.fighters ?? []).enumerated() {

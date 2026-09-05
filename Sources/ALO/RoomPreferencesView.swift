@@ -33,6 +33,11 @@ struct RoomPreferencesView: View {
                 Divider()
                 Toggle("Lower music during voice", isOn: Binding(get: { model.musicDuckingEnabled }, set: model.setMusicDuckingEnabled))
                 Text(model.microphoneAudienceSummary).font(.caption).foregroundStyle(.secondary)
+                DisclosureGroup("Test microphone") {
+                    MicrophoneTestPanel(selectedInputUID: model.selectedVoiceInputUID,
+                        unavailable: model.walkieTalking || model.walkieStarting || model.openLineState.isSendingMicrophone || model.isHost,
+                        showsTitle: false)
+                }
                 Button("Turn microphone off", action: model.silenceMicrophone)
                 Button(model.incomingMediaMuted && model.incomingCallsMuted ? "Unmute room audio" : "Mute room audio", action: model.toggleAllIncomingAudio)
                 Divider()
