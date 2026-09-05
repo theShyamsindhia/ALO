@@ -188,9 +188,14 @@ final class RoomRemoteCommandCenter {
         lock.lock()
         let enabled = Self.commandsAvailable(isRunning: isRunning, media: media)
         let commands = targets.map(\.command)
-        lock.unlock()
-        guard Self.ownershipLock.withLock({ Self.activeOwnerID == ownerID }) else { return }
+        // Keep the snapshot and application serialized with update(). A later
+        // media update must not be overwritten by an older refresh finishing.
+        guard Self.ownershipLock.withLock({ Self.activeOwnerID == ownerID }) else {
+            lock.unlock()
+            return
+        }
         for command in commands { command.isEnabled = enabled }
+        lock.unlock()
     }
 
 }
