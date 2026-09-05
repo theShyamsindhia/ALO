@@ -817,6 +817,13 @@ final class MeshSession {
         secureReceiver?.setLevel(volume: localVolume, muted: incomingAudioMuteRouting.localMediaPlaybackMuted)
         secureHost?.setLevel(volume: localVolume, muted: incomingAudioMuteRouting.localBroadcastPlaybackMuted)
     }
+    private var automaticSyncEnabled = true
+    func setAutomaticSyncEnabled(_ enabled: Bool) {
+        automaticSyncEnabled = enabled
+        receiver?.setAutomaticSyncEnabled(enabled)
+        hostSession?.setAutomaticSyncEnabled(enabled)
+    }
+
     private var musicDuckingEnabled = false
     private var appliedMusicDucking = false
 
@@ -1149,6 +1156,7 @@ final class MeshSession {
                         }
                     )
                     let routing = incomingAudioMuteRouting
+                    host.setAutomaticSyncEnabled(automaticSyncEnabled)
                     host.setMusicDucked(appliedMusicDucking)
                     host.setParticipantLevel(
                         id: nodeID,
@@ -1247,6 +1255,7 @@ final class MeshSession {
                         muted: routing.publishedParticipantMediaMuted
                     )
                     receiver.setLocalPlaybackMuted(routing.incomingMediaMuted)
+                    receiver.setAutomaticSyncEnabled(automaticSyncEnabled)
                     receiver.setMusicDucked(appliedMusicDucking)
                     guard generation == transitionGeneration,
                           replica.broadcaster == broadcaster else {

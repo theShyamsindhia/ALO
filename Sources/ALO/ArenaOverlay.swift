@@ -8,7 +8,12 @@ enum ArenaAppearance {
     static let surface = Color(red: 0.18, green: 0.18, blue: 0.19)
     static let secondary = Color.white.opacity(0.58)
     static func playerColor(_ slot: Int) -> Color {
-        slot == 0 ? accent : Color(red: 0.75, green: 0.59, blue: 0.51)
+        switch slot {
+        case 0: accent
+        case 1: Color(red: 0.75, green: 0.59, blue: 0.51)
+        case 2: Color(red: 0.49, green: 0.69, blue: 0.61)
+        default: Color(red: 0.78, green: 0.71, blue: 0.47)
+        }
     }
 }
 
@@ -19,9 +24,18 @@ struct ArenaPlayerRoster: View {
     var compact = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: compact ? 8 : 12) {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: compact ? 8 : 12), count: compact ? max(1, session.simulation.fighters.count) : min(2, max(1, session.simulation.fighters.count))), spacing: 10) {
             ForEach(Array(session.simulation.fighters.enumerated()), id: \.offset) { index, fighter in
-                player(index, fighter: fighter)
+                if compact && session.simulation.fighters.count > 2 {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(session.playerNames.indices.contains(index) ? session.playerNames[index] : "Player \(index + 1)")
+                            .font(.system(size: 10, weight: .semibold)).lineLimit(1)
+                        Text(fighter.stocks == 0 ? "Eliminated" : "P\(index + 1) · \(fighter.stocks) lives · \(Int(fighter.damage))%")
+                            .font(.system(size: 9)).monospacedDigit().lineLimit(1)
+                            .foregroundStyle(ArenaAppearance.playerColor(index))
+                    }.frame(maxWidth: .infinity, alignment: .leading).padding(7)
+                        .background(ArenaAppearance.playerColor(index).opacity(0.08), in: RoundedRectangle(cornerRadius: 9))
+                } else { player(index, fighter: fighter) }
             }
         }
         .accessibilityElement(children: .contain)
@@ -33,7 +47,7 @@ struct ArenaPlayerRoster: View {
         let state = fighter.stocks == 0 ? "Eliminated" : fighter.respawn > 0 ? "Respawning" : "In arena"
         return HStack(alignment: .top, spacing: 8) {
             VStack(spacing: 3) {
-                Image(systemName: fighter.kind == .nova ? "bolt.fill" : "shield.lefthalf.filled")
+                Image(systemName: fighter.kind.arenaSymbol)
                     .font(.system(size: compact ? 12 : 17, weight: .medium))
                     .frame(width: compact ? 27 : 34, height: compact ? 27 : 34)
                     .background(ArenaAppearance.playerColor(index).opacity(0.2), in: RoundedRectangle(cornerRadius: 9))
@@ -177,15 +191,19 @@ struct ArenaMenuOverlay: View {
                     .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(ArenaAppearance.accent)
             }
             if session.networked {
-                Text("Two player slots · \(session.spectatorCount) watching. Players cannot join mid-match; spectators can. The match ends if its host leaves.")
+                Text("Four player slots · \(session.spectatorCount) watching. Join mid-match by taking a live bot’s slot; otherwise spectate. The match ends if its host leaves.")
                     .font(.system(size: 10)).foregroundStyle(ArenaAppearance.secondary)
             }
         }
     }
 
+    private var controlsFighter: ArenaFighterKind {
+        session.simulation.fighters.indices.contains(session.localIndex) ? session.simulation.fighters[session.localIndex].kind : session.selected
+    }
+
     private var controls: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Click the arena to give the game keyboard/controller focus. Typing in room chat releases game input.")
+            Text("The arena takes focus when play starts or resumes. Click it to refocus after using other controls. J/K/L and Z/X/C are interchangeable; these are Rift Arena controls.")
                 .font(.system(size: 11)).foregroundStyle(ArenaAppearance.secondary)
             Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 9) {
                 GridRow {
@@ -196,15 +214,32 @@ struct ArenaMenuOverlay: View {
                 controlRow("Move", "A / D or ← / →", "Left stick / D-pad")
                 controlRow("Aim attack", "W / S or ↑ / ↓", "Stick up / down")
                 controlRow("Jump / air jump", "Space", "A / Cross")
-                controlRow("Light attack", "J", "X / Square")
-                controlRow("Heavy attack", "K", "Y / Triangle")
-                controlRow("Dodge", "L", "RB / R1")
+                controlRow("Light attack", "J / Z", "X / Square")
+                controlRow("Signature / aerial heavy", "K / X", "Y / Triangle")
+                controlRow("Dodge", "L / C", "RB / R1")
                 controlRow("Drop through", "S or ↓", "Stick down")
-                controlRow("Recovery", "W + K", "Up + Y / Triangle")
+                controlRow("Recovery", "W + K / X", "Up + Y / Triangle")
                 controlRow("Game menu", "P / Esc", "Menu / Options")
             }.font(.system(size: 10)).frame(maxWidth: .infinity, alignment: .leading)
             Text("You have two air jumps and one recovery before landing. Higher damage means stronger knockback. Use dodge to avoid a hit, then recover toward a platform.")
                 .font(.system(size: 11)).foregroundStyle(ArenaAppearance.secondary)
+            Divider()
+            Text("\(controlsFighter.title) move list").font(.system(size: 12, weight: .semibold))
+            Text("Tap an attack while aiming. Ground and aerial moves differ; heavy attacks have longer openings if you miss.")
+                .font(.system(size: 10)).foregroundStyle(ArenaAppearance.secondary)
+            ForEach([false, true], id: \.self) { aerial in
+                Text(aerial ? "In the air" : "On the ground").font(.system(size: 11, weight: .semibold))
+                ForEach([0, 1, -1], id: \.self) { direction in
+                    let aim = direction == 0 ? "Forward" : direction == 1 ? "Up" : "Down"
+                    let light = ArenaAttackProfile.resolve(kind: controlsFighter, heavy: false, direction: direction, aerial: aerial)
+                    let heavy = ArenaAttackProfile.resolve(kind: controlsFighter, heavy: true, direction: direction, aerial: aerial)
+                    HStack(alignment: .top) {
+                        Text(aim).frame(width: 48, alignment: .leading)
+                        Text("J · \(light.title)").frame(maxWidth: .infinity, alignment: .leading)
+                        Text("K · \(heavy.title)").frame(maxWidth: .infinity, alignment: .leading)
+                    }.font(.system(size: 10)).foregroundStyle(ArenaAppearance.secondary)
+                }
+            }
             Text("Controller button names depend on the connected gamepad. macOS must recognize an extended gamepad.")
                 .font(.system(size: 9)).foregroundStyle(ArenaAppearance.secondary)
         }
@@ -239,6 +274,40 @@ struct ArenaMenuOverlay: View {
                 Label("Reduce Motion is enabled in macOS.", systemImage: "accessibility")
                     .font(.system(size: 10)).foregroundStyle(ArenaAppearance.accent)
             }
+        }
+    }
+}
+
+/// Crop a portrait sheet at display time; each pack image is decoded once.
+struct ArenaFighterPortrait: View {
+    let image: NSImage?
+    let kind: ArenaFighterKind
+    private var columns: CGFloat { kind == .nova || kind == .atlas ? 2 : 3 }
+    private var column: CGFloat {
+        switch kind { case .nova, .ember: 0; case .atlas, .wisp: 1; case .rook: 2 }
+    }
+    var body: some View {
+        GeometryReader { geometry in
+            if let image {
+                Image(nsImage: image).resizable()
+                    .frame(width: geometry.size.width * columns, height: geometry.size.height)
+                    .offset(x: -geometry.size.width * column)
+            } else {
+                Image(systemName: kind.arenaSymbol)
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+            }
+        }.clipped().accessibilityLabel(kind.title)
+    }
+}
+
+extension ArenaFighterKind {
+    var arenaSymbol: String {
+        switch self {
+        case .nova: "bolt.fill"
+        case .atlas: "shield.lefthalf.filled"
+        case .ember: "flame.fill"
+        case .wisp: "sparkles"
+        case .rook: "hammer.fill"
         }
     }
 }

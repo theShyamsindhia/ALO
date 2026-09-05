@@ -5,8 +5,11 @@ public enum ChatNotificationMode: String, CaseIterable, Sendable {
     public var label: String {
         switch self { case .all: return "All messages"; case .mentions: return "Mentions only"; case .muted: return "Muted" }
     }
-    public func shouldPreview(text: String, displayName: String) -> Bool {
-        self == .all || (self == .mentions && RoomChatPresentation.containsMention(of: displayName, in: text))
+    public func shouldPreview(text: String, displayName: String, participantID: String? = nil, mentionedParticipantIDs: [String]? = nil) -> Bool {
+        guard self != .muted else { return false }
+        if self == .all { return true }
+        if let ids = mentionedParticipantIDs { return participantID.map(ids.contains) == true }
+        return RoomChatPresentation.containsMention(of: displayName, in: text)
     }
 }
 

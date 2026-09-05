@@ -104,6 +104,7 @@ final class SynchronizedPlayer {
     private var lastPacketReceivedNanos: UInt64?
     private var playbackWatchdog = PlaybackWatchdog()
     private var driftRecovery = PlaybackDriftRecovery()
+    private var automaticSyncPolicy = LocalAudioSyncPolicy()
     private var configurationObserver: NSObjectProtocol?
     private let configurationLock = NSLock()
     private var configurationGate = AudioConfigurationRecoveryGate()
@@ -208,6 +209,7 @@ final class SynchronizedPlayer {
     func maintainSync() {
         // An unavailable render clock is unknown, not a fresh zero-error sample.
         latestDriftMeasurement = nil
+        defer { if latestDriftMeasurement == nil { automaticSyncPolicy.resetEvidence() } }
         guard nodesAreAttached else { return }
         let now = MonotonicClock.nowNanos()
         guard roomPlaybackIsPlaying else {
@@ -259,7 +261,7 @@ final class SynchronizedPlayer {
             abs(errorFrames) * 1_000_000_000 / Double(AudioPacket.sampleRate)
         )
         latestDriftMeasurement = (absoluteErrorNanos, now)
-        if driftRecovery.shouldResynchronize(latenessNanos: absoluteErrorNanos) {
+        if automaticSyncPolicy.shouldRealign(driftNanos: absoluteErrorNanos, now: now) {
             latestLatenessNanos = absoluteErrorNanos
             hardResynchronize()
             return
@@ -360,6 +362,18 @@ final class SynchronizedPlayer {
         detachOutputNodes()
     }
 
+    func setAutomaticSyncEnabled(_ enabled: Bool) { automaticSyncPolicy.setEnabled(enabled) }
+    var activePlayoutDelayNanos: UInt64 { targetLatencyNanos }
+    var automaticSyncState: String {
+        if recoveryRetryNotBeforeNanos != 0 { return "Waiting for audio device recovery" }
+        if !roomPlaybackIsPlaying { return "Suspended while playback is paused" }
+        if !hasStarted { return "Waiting for live audio" }
+        if !automaticSyncPolicy.enabled { return "Automatic drift realignment off" }
+        if automaticSyncPolicy.isCoolingDown(at: MonotonicClock.nowNanos()) { return "Settling after realignment" }
+        if latestDriftMeasurement == nil { return "Waiting for a fresh timing measurement" }
+        return "Watching local audio timing"
+    }
+
     func setTargetLatencyNanos(_ nanos: UInt64) {
         targetLatencyNanos = RoomTiming.clampedPlayoutDelay(nanos)
     }
@@ -427,7 +441,8 @@ final class SynchronizedPlayer {
             latePacketCount: latePacketCount,
             resyncCount: resyncCount,
             driftNanos: latestDriftMeasurement?.magnitude,
-            driftSampleAgeNanos: latestDriftMeasurement.flatMap { now >= $0.time ? now - $0.time : nil }
+            driftSampleAgeNanos: latestDriftMeasurement.flatMap { now >= $0.time ? now - $0.time : nil },
+            automaticSyncEnabled: automaticSyncPolicy.enabled
         )
     }
 
@@ -457,6 +472,7 @@ final class SynchronizedPlayer {
         latestDriftMeasurement = nil
         resyncCutoverCaptureNanos = cutoverCaptureNanos
         resyncCount &+= 1
+        automaticSyncPolicy.didRealign(at: MonotonicClock.nowNanos())
         setPlaybackActive(false)
     }
 
@@ -843,6 +859,7 @@ final class SynchronizedPlayer {
         driftRecovery.reset()
         latestDriftMeasurement = nil
         resyncCount &+= 1
+        automaticSyncPolicy.didRealign(at: MonotonicClock.nowNanos())
         if let next = pending.values.min(by: { $0.sequence < $1.sequence }) {
             expectedSequence = next.sequence
         }

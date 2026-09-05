@@ -232,6 +232,10 @@ final class HostSession {
         host?.removeQueueItem(id: id)
     }
 
+    func setAutomaticSyncEnabled(_ enabled: Bool) {
+        localReceiver?.setAutomaticSyncEnabled(enabled)
+    }
+
     func setMusicDucked(_ ducked: Bool) {
         localReceiver?.setMusicDucked(ducked)
     }

@@ -92,6 +92,35 @@ struct ClientPlaybackReliabilityTests {
         #expect(selected.isEmpty)
     }
 
+    @Test("Compact Talk chooses either the room or one person and clicking an avatar alone has no side effect") @MainActor
+    func compactTalkAudienceIsExclusive() {
+        let model = ALOViewModel(discoverRooms: false)
+        model.currentParticipantID = "local"
+        model.participants = [
+            RoomParticipant(id: "local", name: "Local"),
+            RoomParticipant(id: "mac-a", name: "Maya"),
+            RoomParticipant(id: "mac-b", name: "Sam"),
+        ]
+
+        // Avatar presentation reads state only; transmission begins through
+        // the explicit room/private action below.
+        #expect(model.latchedTalkTargetIDs.isEmpty)
+        #expect(model.compactPrivateTalkTargetID == nil)
+
+        model.toggleCompactTalkTarget(nil)
+        #expect(model.latchedTalkTargetIDs == ["mac-a", "mac-b"])
+        #expect(model.compactRoomTalkIsSelected)
+
+        model.toggleCompactTalkTarget("mac-a")
+        #expect(model.latchedTalkTargetIDs == ["mac-a"])
+        #expect(model.compactPrivateTalkTargetID == "mac-a")
+        #expect(!model.compactRoomTalkIsSelected)
+
+        model.toggleCompactTalkTarget("mac-a")
+        #expect(model.latchedTalkTargetIDs.isEmpty)
+        #expect(model.compactPrivateTalkTargetID == nil)
+    }
+
     @Test("Voice input restart preserves Talk and Open Line recipients")
     func voiceInputRestartRecipients() {
         let invitation = OpenLineInvitation(

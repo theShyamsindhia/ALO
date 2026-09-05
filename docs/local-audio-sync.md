@@ -1,0 +1,11 @@
+# Local audio synchronization
+
+Room settings → Automatically keep this Mac in sync is enabled by default and persists per Mac. A fresh measured error of at least 40 ms must persist for one second before hard realignment. Corrections have an eight-second cooldown; missing/stale samples and pauses clear accumulated evidence. Small errors continue to use the existing bounded ±1% playback-rate correction. This preference controls optional drift realignment, not mandatory recovery from a stopped render clock or changed audio device.
+
+Updated receivers advertise ownership of this policy in their playback report. The updated host does not run its old competing lateness-triggered reset against these receivers. Legacy receivers retain their previous host fallback. Manual Sync this Mac still targets only the local receiver; no automatic room-wide reset is added. Each listener should enable their own local setting.
+
+Settings → Audio timing separates measured network round-trip, the actual agreed room playback delay, hardware output latency and fresh local drift. Drift is unknown when no current measurement exists; it is not displayed as a fabricated zero. Game RTT appears separately inside the fighter. Low game latency is good; neither game nor audio resync makes a slow network faster.
+
+A call can change the output route, sample rate or Bluetooth microphone profile, or stop the render clock. Existing AVAudioEngine configuration-change and watchdog recovery rebuild or realign playback. A call on one receiver should not require every listener to resync. A call that interrupts the broadcaster's source can affect everyone because their source itself has stopped or changed. This implementation does not detect or inspect phone calls, and does not guarantee recovery timing on untested hardware.
+
+The user's rapid-drift report was not reproduced on their hardware. The overlapping receiver/host correction path was a concrete code risk fixed here. Physical acceptance still requires AirPods/Bluetooth profile changes, wired devices, FaceTime/phone interruptions, sleep/wake, network loss and several Macs playing together. Automated policy tests establish thresholds, fresh-evidence requirements, cooldown and report compatibility; they do not establish audible call recovery quality.

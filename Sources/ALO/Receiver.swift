@@ -285,7 +285,9 @@ final class Receiver {
                 currentDriftMilliseconds: report.driftNanos.map { Double($0) / 1_000_000 },
                 driftMeasurementAgeMilliseconds: report.driftSampleAgeNanos.map { Double($0) / 1_000_000 },
                 video: screenTiming.presentationSnapshot(videoDecoder.presentationTimingSnapshot),
-                videoEnabled: screenTiming.videoEnabled
+                videoEnabled: screenTiming.videoEnabled,
+                activePlayoutBufferMilliseconds: Double(player.activePlayoutDelayNanos) / 1_000_000,
+                automaticSyncState: player.automaticSyncState
             )
         }
     }
@@ -328,6 +330,10 @@ final class Receiver {
     /// mixer state to the room.
     private var duckingGeneration = 0
     private var duckingGain = 1.0
+
+    func setAutomaticSyncEnabled(_ enabled: Bool) {
+        queue.async { [weak self] in self?.player.setAutomaticSyncEnabled(enabled) }
+    }
 
     func setMusicDucked(_ ducked: Bool) {
         queue.async { [weak self] in
@@ -664,7 +670,8 @@ final class Receiver {
             latenessNanos: audioReport.latenessNanos, latePacketCount: audioReport.latePacketCount,
             resyncCount: audioReport.resyncCount, driftNanos: audioReport.driftNanos,
             driftSampleAgeNanos: audioReport.driftSampleAgeNanos,
-            screenTiming: screenTiming.presentationSnapshot(videoDecoder.presentationTimingSnapshot).relativeTimingReport)
+            screenTiming: screenTiming.presentationSnapshot(videoDecoder.presentationTimingSnapshot).relativeTimingReport,
+            automaticSyncEnabled: audioReport.automaticSyncEnabled)
         send(ControlMessage(
             type: "sync_status",
             participantID: participantID,

@@ -13,8 +13,10 @@ public struct RoomChatOperation: Codable, Sendable, Equatable {
     public let text: String?
     public let enabled: Bool?
     public let timestamp: UInt64
+    public let mentionedParticipantIDs: [String]?
 
-    public init(id: UUID = UUID(), kind: Kind, target: UUID? = nil, text: String? = nil, enabled: Bool? = nil, timestamp: UInt64 = UInt64(Date().timeIntervalSince1970 * 1000)) {
+    public init(id: UUID = UUID(), kind: Kind, target: UUID? = nil, text: String? = nil, enabled: Bool? = nil, timestamp: UInt64 = UInt64(Date().timeIntervalSince1970 * 1000), mentionedParticipantIDs: [String]? = nil) {
+        self.mentionedParticipantIDs = mentionedParticipantIDs
         self.id = id; self.kind = kind; self.target = target
         self.text = text; self.enabled = enabled; self.timestamp = timestamp
     }
@@ -32,6 +34,10 @@ public struct RoomChatOperation: Codable, Sendable, Equatable {
     }
 
     private var isValid: Bool {
+        if let ids = mentionedParticipantIDs {
+            guard ids.count <= 8, Set(ids).count == ids.count, ids.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 128 }),
+                  ids.reduce(0, { $0 + $1.utf8.count }) <= 512 else { return false }
+        }
         switch kind {
         case .message, .edit:
             guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.count <= Self.maximumTextLength,
@@ -51,11 +57,13 @@ public struct RoomChatMessage: Identifiable, Equatable, Sendable {
     public var text: String
     public let sentNanos: UInt64
     public var replyTo: UUID?
+    public var mentionedParticipantIDs: [String]?
     public var edited = false
     public var deleted = false
     public var pinned = false
     public var reactions: [String: Set<String>] = [:]
-    public init(id: UUID = UUID(), senderID: String, sender: String, text: String, sentNanos: UInt64, replyTo: UUID? = nil) {
+    public init(id: UUID = UUID(), senderID: String, sender: String, text: String, sentNanos: UInt64, replyTo: UUID? = nil, mentionedParticipantIDs: [String]? = nil) {
+        self.mentionedParticipantIDs = mentionedParticipantIDs
         self.id = id; self.senderID = senderID; self.sender = sender
         self.text = text; self.sentNanos = sentNanos; self.replyTo = replyTo
     }
@@ -103,7 +111,7 @@ public struct RoomChatDocument: Sendable {
         var order: [UUID] = []
         for entry in ordered where entry.operation.kind == .message {
             let op = entry.operation
-            result[op.id] = RoomChatMessage(id: op.id, senderID: entry.senderID, sender: entry.sender, text: op.text ?? "", sentNanos: entry.sentNanos, replyTo: op.target)
+            result[op.id] = RoomChatMessage(id: op.id, senderID: entry.senderID, sender: entry.sender, text: op.text ?? "", sentNanos: entry.sentNanos, replyTo: op.target, mentionedParticipantIDs: op.mentionedParticipantIDs)
             order.append(op.id)
         }
         for entry in ordered where entry.operation.kind != .message {
@@ -111,9 +119,9 @@ public struct RoomChatDocument: Sendable {
             guard let target = op.target, var message = result[target], !message.deleted else { continue }
             switch op.kind {
             case .edit:
-                if entry.senderID == message.senderID { message.text = op.text ?? message.text; message.edited = true }
+                if entry.senderID == message.senderID { message.text = op.text ?? message.text; message.mentionedParticipantIDs = op.mentionedParticipantIDs; message.edited = true }
             case .delete:
-                if entry.senderID == message.senderID { message.deleted = true; message.text = "Message deleted"; message.reactions = [:]; message.pinned = false }
+                if entry.senderID == message.senderID { message.deleted = true; message.text = "Message deleted"; message.mentionedParticipantIDs = nil; message.reactions = [:]; message.pinned = false }
             case .reaction:
                 let emoji = op.text ?? ""
                 if op.enabled == true { message.reactions[emoji, default: []].insert(entry.senderID) }

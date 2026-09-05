@@ -17,6 +17,33 @@ struct PlaybackProgressTests {
         #expect(NowPlayingMedia(isPlaying: true, elapsedTime: nil, duration: 120).playbackProgress() == nil)
     }
 
+    @Test("MediaRemote timestamps advance stale elapsed values")
+    func timestampAnchoring() throws {
+        let anchor = Date(timeIntervalSinceReferenceDate: 1_000)
+
+        #expect(NowPlayingMonitor.currentElapsedTime(
+            elapsedTime: 0,
+            timestamp: anchor,
+            playbackRate: 1,
+            duration: 120,
+            at: anchor.addingTimeInterval(30)
+        ) == 30)
+        #expect(NowPlayingMonitor.currentElapsedTime(
+            elapsedTime: 118,
+            timestamp: anchor,
+            playbackRate: 1,
+            duration: 120,
+            at: anchor.addingTimeInterval(30)
+        ) == 120)
+        #expect(NowPlayingMonitor.currentElapsedTime(
+            elapsedTime: 45,
+            timestamp: anchor,
+            playbackRate: 0,
+            duration: 120,
+            at: anchor.addingTimeInterval(30)
+        ) == 45)
+    }
+
     @Test("Source notifications preserve timing for the same track without carrying it to the next")
     func timingPreservation() throws {
         let previous = NowPlayingMedia(
