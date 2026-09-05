@@ -15,6 +15,11 @@ extension TimerSound: StoredSettingValue {}
 
 @MainActor
 final class MediaAndFilesSettingsStore: SettingsStoreBase {
+    // ARC only: these settings own values, publishers and defaults, with no
+    // executor-bound cleanup. Avoid isolated-deinit backdeployment on macOS 15
+    // when a synchronous dispatch callback releases the last reference.
+    nonisolated deinit {}
+
     @StoredDefault(key: GeneralSettingsStorage.Keys.nowPlayingLiveActivityEnabled, defaultValue: false)
     var isNowPlayingLiveActivityEnabled: Bool
 

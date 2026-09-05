@@ -8,6 +8,11 @@ extension LockScreenMediaPanelBackgroundStyle: StoredSettingValue {}
 
 @MainActor
 final class LockScreenFeatureSettingsStore: SettingsStoreBase {
+    // ARC only: these settings own values, publishers and defaults, with no
+    // executor-bound cleanup. Avoid isolated-deinit backdeployment on macOS 15
+    // when a synchronous dispatch callback releases the last reference.
+    nonisolated deinit {}
+
     @StoredDefault(key: LockScreenSettings.liveActivityKey, defaultValue: false)
     var isLockScreenLiveActivityEnabled: Bool
 

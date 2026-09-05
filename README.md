@@ -421,7 +421,7 @@ ALO source is MIT licensed; imported DynamicNotch code is GPL-3.0 and includes i
 
 ## Optional notch presentation
 
-Open **ALO → Notch Settings…**, or **Room settings → Interface → Notch**, and enable the notch.
+Open **ALO → Settings… → Notch**, or **Room settings → Interface → Notch**, and enable the notch.
 Every additional feature starts disabled. The full settings window exposes original
 DynamicNotch feature options for media, downloads, timers, file tray/AirDrop, conversion,
 camera, CPU/RAM, battery, Bluetooth, Wi-Fi/hotspot, VPN, Focus, volume/brightness HUDs,

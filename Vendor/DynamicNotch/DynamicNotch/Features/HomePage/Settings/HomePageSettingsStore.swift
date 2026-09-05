@@ -7,6 +7,11 @@ extension HomePageScrollAxis: StoredSettingValue {}
 
 @MainActor
 final class HomePageSettingsStore: SettingsStoreBase {
+    // ARC only: these settings own values, publishers and defaults, with no
+    // executor-bound cleanup. Avoid isolated-deinit backdeployment on macOS 15
+    // when a synchronous dispatch callback releases the last reference.
+    nonisolated deinit {}
+
     @StoredDefault(key: GeneralSettingsStorage.Keys.homePageLiveActivity, defaultValue: false)
     var isHomePageLiveActivityEnabled: Bool
 

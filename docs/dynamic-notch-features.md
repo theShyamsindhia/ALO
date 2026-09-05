@@ -15,8 +15,8 @@ All paths in the following tables are relative to `Vendor/DynamicNotch/DynamicNo
 | Physical notch and floating capsule | `Shared/UI/Shapes/NotchShape.swift`, `Shared/UI/Shapes/DynamicIslandShape.swift`, `Core/NotchEngine/` | `Features/Notch/Settings/NotchSettingsView.swift`: size, background and stroke | SwiftUI/AppKit; notch versus capsule depends on display geometry. Selected originals are compiled by ALO. |
 | Spring transitions and content blur | `Core/NotchEngine/Models/NotchAnimationPreset.swift`, `Core/NotchEngine/Models/NotchTransitionMetrics.swift`, `Shared/UI/Modifiers/NotchTransitionModifier.swift`, `Shared/UI/Modifiers/BlurFadeModifier.swift`, `Shared/Extensions/extension+AnyTransition.swift` | `Features/Notch/Settings/AnimationSettingsView.swift` | Original engine coordination and feature views are compiled by ALONotchRuntime. |
 | Display selection and placement | `Application/Windows/OverlayWindowLayout.swift`, `Core/NotchEngine/Models/NotchScreenSelection.swift`, `Core/NotchEngine/Models/NotchScreenSelectionPreferences.swift` | `Features/Notch/Settings/DisplaySettingsView.swift`: screen selection and display behavior | Selected window-layout original is compiled; additional upstream selection logic uses the ALO adapter. |
-| Mouse/trackpad dismiss and restore | `Shared/UI/Modifiers/NotchMouseSwipeModifier.swift`, `NotchSwipeDismissModifier.swift`, `SwipeFeedbackMetrics.swift`, `ResizeAwareBlurModifier.swift` in the same directory | `Features/Notch/Settings/GesturesSettingsView.swift` | Opt-in; uses original event routing inside ALO's overlay. |
-| Activity arbitration | `Core/NotchEngine/Models/NotchContentRegistry.swift`, `NotchContentPriority.swift` in the same directory, `Features/Notch/NotchEventCoordinator.swift` | `Features/Notch/Settings/ActivityPrioritiesSettingsView.swift` | Opt-in; decides which activity occupies the notch when several are active. |
+| Mouse/trackpad dismiss and restore | `Shared/UI/Modifiers/NotchMouseSwipeModifier.swift`, `NotchSwipeDismissModifier.swift`, `SwipeFeedbackMetrics.swift`, `ResizeAwareBlurModifier.swift` in the same directory | `Features/Notch/Settings/GesturesSettingsView.swift` | Configurable behavior; original tap and swipe defaults apply when an activity is enabled. |
+| Activity arbitration | `Core/NotchEngine/Models/NotchContentRegistry.swift`, `NotchContentPriority.swift` in the same directory, `Features/Notch/NotchEventCoordinator.swift` | `Features/Notch/Settings/ActivityPrioritiesSettingsView.swift` | Intrinsic engine behavior; configurable priorities decide which enabled activity occupies the notch. |
 
 ## Media, files and useful home pages — opt-in
 
@@ -78,7 +78,7 @@ validated on the actual target system when those features are enabled.
 
 ## Activation and lifecycle
 
-Use **ALO → Notch Settings…** or **Room settings → Interface → Notch → Feature settings…**.
+Use **ALO → Settings… → Notch** (also available through **ALO → Notch Settings…**) or **Room settings → Interface → Notch → Notch settings…**.
 The master switch starts no individual feature by default. All home pages must also
 be selected explicitly. Feature toggles start/stop their services; master-off stops
 all services and clears queued/restorable activity content without erasing choices.
@@ -92,3 +92,21 @@ to use ALO's room model.
 See [validation](notch-validation.md) for test and package measurements. Tests with
 simulated services establish lifecycle behavior, not permission grants or compatibility
 of private macOS interfaces on every OS version.
+
+Room media uses the original player layout with ALO-supported transport commands. Seeking, favorites and lyrics are not supplied by the room adapter; original system-player source filtering and pause auto-hide apply to system media. The upstream About page identifies the reused DynamicNotch project; ALO owns app support and updates.
+
+## Lock-screen media states
+
+In **ALO → Settings… → Notch → Lock Screen**, enable the media panel, Expanded artwork, and Lyrics individually to use the original full-screen artwork/lyrics presentation. Each starts off. The lock-screen player follows system Now Playing; Room media is a separate notch adapter.
+
+| State | Behavior |
+| --- | --- |
+| No current track / playback session ends | Hide the media overlay and clear old artwork; the normal macOS lock screen remains. |
+| Playing | Show the original player; expanded artwork and lyrics follow their individual settings. |
+| Paused, session still present | Keep the player available; elapsed time stops advancing. |
+| Artwork missing | Use the original music-symbol fallback. |
+| Lyrics disabled, unavailable or failed | Playback remains usable; no old-track lyrics are retained. |
+| Unlock, media panel off, or notch master off | Hide/release the overlay and deactivate lyrics; queued callbacks cannot recreate a disposed panel. |
+| Relock after a cancelled lyrics request | Allow the current track to request lyrics again. |
+
+Automated checks use injected lock/media states; they do not lock the user's Mac or establish compatibility with every macOS lock-screen implementation.

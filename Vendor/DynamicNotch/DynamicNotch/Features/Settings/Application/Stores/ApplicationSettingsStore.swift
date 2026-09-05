@@ -13,6 +13,11 @@ extension NotchCollapseInteraction: StoredSettingValue {}
 
 @MainActor
 final class ApplicationSettingsStore: SettingsStoreBase, NotchSettingsProviding {
+    // ARC only: these settings own values, publishers and defaults, with no
+    // executor-bound cleanup. Avoid isolated-deinit backdeployment on macOS 15
+    // when a synchronous dispatch callback releases the last reference.
+    nonisolated deinit {}
+
     static let notchPressHoldDurationRange: ClosedRange<Double> = 0.20...0.60
     static let notchPressHoldDurationStep: Double = 0.01
     static let defaultNotchPressHoldDuration: TimeInterval = 0.25

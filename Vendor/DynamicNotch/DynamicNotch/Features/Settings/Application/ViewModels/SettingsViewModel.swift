@@ -3,6 +3,11 @@ import Foundation
 
 @MainActor
 final class SettingsViewModel: ObservableObject, NotchSettingsProviding {
+    // ARC only: these settings own values, publishers and defaults, with no
+    // executor-bound cleanup. Avoid isolated-deinit backdeployment on macOS 15
+    // when a synchronous dispatch callback releases the last reference.
+    nonisolated deinit {}
+
     enum ResetGroup {
         case general
         case notch

@@ -586,6 +586,9 @@ private extension NowPlayingViewModel {
     func cancelLyricsLookup() {
         lyricsLookupTask?.cancel()
         lyricsLookupTask = nil
+        // Unlocking or disabling lyrics cancels the request. A subsequent lock must
+        // be able to request this same track again instead of retaining a spinner.
+        if case .loading = lyricsState { lyricsState = .idle }
     }
 
     func scheduleSessionEnd() {

@@ -116,6 +116,9 @@ struct LockScreenNowPlayingPanelView: View {
             }
             syncLyricsPresentationState()
         }
+        .onChange(of: settingsViewModel.lockScreen.isLockScreenArtworkExpanded) { _, expanded in
+            onTapArtwork = expanded
+        }
         .onChange(of: settingsViewModel.lockScreen.isLockScreenLyricsEnabled) {
             syncLyricsPresentationState()
         }

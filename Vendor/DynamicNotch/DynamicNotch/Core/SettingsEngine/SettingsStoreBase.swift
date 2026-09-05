@@ -125,6 +125,11 @@ struct StoredDefault<Value: StoredSettingValue> {
 
 @MainActor
 class SettingsStoreBase: ObservableObject {
+    // ARC only: these settings own values, publishers and defaults, with no
+    // executor-bound cleanup. Avoid isolated-deinit backdeployment on macOS 15
+    // when a synchronous dispatch callback releases the last reference.
+    nonisolated deinit {}
+
     class var temporaryActivityDurationRange: ClosedRange<Int> { 1...5 }
     class var notificationDurationRange: ClosedRange<Int> { 3...8 }
 

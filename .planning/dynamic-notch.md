@@ -15,7 +15,7 @@ Reference: `/Users/zex/Desktop/Files/Refrence Repo/DynamicNotch-main`.
 - [x] Verify rendered compact/expanded UI.
 - [x] Complete feature/settings inventory and final limitations.
 
-## Scope
+## Initial scope (historical; superseded)
 
 The full upstream source is available locally. Only the dependency-light notch primitives
 are compiled into ALO. Additional system features are listed in `docs/dynamic-notch-features.md`;
@@ -51,9 +51,9 @@ At the initial room-only checkpoint, no production app was replaced and no branc
 - [x] Add master/feature lifecycle gating and shared ALO notch hosting.
 - [x] Expose original feature settings through ALO Notch Settings.
 - [x] Add packaged resources, permission descriptions and third-party notices.
-- [ ] Complete module and full-app builds, fix diagnostics.
-- [ ] Run original feature regression tests plus opt-in/lifecycle tests.
-- [ ] Visually verify the settings and enabled feature surfaces.
+- [x] Complete module and full-app builds, fix diagnostics.
+- [x] Run original feature regression tests plus opt-in/lifecycle tests.
+- [x] Visually verify the settings and enabled feature surfaces.
 - [ ] Measure installed size and idle resource use; confirm disabled services remain stopped.
 - [ ] Run release/room/iOS checks applicable to main.
 - [ ] Commit, fast-forward main and push after verification.
@@ -67,3 +67,11 @@ At the initial room-only checkpoint, no production app was replaced and no branc
 - [x] Fix macOS 15 reader destructor compatibility and actor-aware XCTest fixtures.
 - [ ] Verify the full corrected suite and packaged app; show/open ALO Dev.
 - [ ] Record final size and CI evidence, then push main without overwriting newer commits.
+
+## Lock-screen states and main settings follow-up
+
+- [x] Add a Notch tab to ALO main settings, hosting the same original feature settings.
+- [ ] Expose original expanded lock-screen artwork option explicitly.
+- [ ] Clear ended-track artwork and guard teardown against queued callbacks.
+- [ ] Test no-track, paused, missing artwork/lyrics, unlock and disable states.
+- [ ] Verify corrected package and macOS 15 cleanup compatibility before main push.

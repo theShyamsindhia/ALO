@@ -97,7 +97,7 @@ final class ALONotchFeatureBridge: ObservableObject {
     }
 }
 
-private struct ALONotchFeatureSettings: View {
+struct ALONotchFeatureSettings: View {
     @ObservedObject var features: ALONotchFeatureBridge
     @ObservedObject private var preferences = ALONotchPreferences.shared
     var body: some View {
@@ -113,7 +113,7 @@ private struct ALONotchFeatureSettings: View {
                     description: Text("Enable the notch to choose features. Every additional feature starts disabled."))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-        }.frame(width: 760, height: 638)
+        }.frame(maxWidth: .infinity, maxHeight: .infinity)
             .onAppear { features.setEnabled(preferences.enabled) }
             .onChange(of: preferences.enabled) { _, enabled in features.setEnabled(enabled) }
     }

@@ -5,6 +5,11 @@ extension BatteryNotificationStyle: StoredSettingValue {}
 
 @MainActor
 final class BatterySettingsStore: SettingsStoreBase {
+    // ARC only: these settings own values, publishers and defaults, with no
+    // executor-bound cleanup. Avoid isolated-deinit backdeployment on macOS 15
+    // when a synchronous dispatch callback releases the last reference.
+    nonisolated deinit {}
+
     static let lowPowerThresholdRange: ClosedRange<Int> = 5...50
     static let fullPowerThresholdRange: ClosedRange<Int> = 50...100
     private static let legacyBatteryDefaultStrokeKey = "settings.battery.defaultStroke"

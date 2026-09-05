@@ -100,13 +100,13 @@ final class AppSettingsWindowController {
 
     init() {
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 640, height: 650),
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 720),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered, defer: false
         )
         window.title = "ALO Settings"
         window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 480, height: 420)
+        window.minSize = NSSize(width: 760, height: 600)
         window.contentView = NSHostingView(rootView: AppSettingsView())
         let autosaveName = "ALO.AppSettings"
         if !window.setFrameUsingName(autosaveName) { window.center() }
@@ -120,6 +120,19 @@ final class AppSettingsWindowController {
 }
 
 private struct AppSettingsView: View {
+    var body: some View {
+        TabView {
+            AppAppearanceSettingsView()
+                .tabItem { Label("Appearance", systemImage: "paintpalette") }
+            ALONotchFeatureSettings(features: .shared)
+                .tabItem { Label("Notch", systemImage: "rectangle.topthird.inset.filled") }
+                .accessibilityIdentifier("ALO.Settings.Notch")
+        }
+        .padding(12)
+    }
+}
+
+private struct AppAppearanceSettingsView: View {
     @ObservedObject private var preferences = AppIconPreferences.shared
 
     var body: some View {

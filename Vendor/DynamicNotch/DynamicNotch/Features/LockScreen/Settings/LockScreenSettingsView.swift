@@ -91,6 +91,17 @@ struct LockScreenSettingsView: View {
     private var artworkAppearance: some View {
         SettingsCard(title: "settings.lockScreen.card.artworkAppearance") {
             SettingsToggleRow(
+                title: "Expanded artwork",
+                description: "Open the lock-screen player with full artwork. When enabled, lyrics appear beside the artwork if available.",
+                systemImage: "arrow.up.left.and.arrow.down.right",
+                color: .pink,
+                iconBadge: false,
+                isOn: $settings.isLockScreenArtworkExpanded,
+                accessibilityIdentifier: "settings.activities.lockScreen.expandedArtwork"
+            )
+
+            Divider().opacity(0.6)
+            SettingsToggleRow(
                 title: "settings.lockScreen.lyrics.title",
                 description: "settings.lockScreen.lyrics.desc",
                 systemImage: "text.quote",

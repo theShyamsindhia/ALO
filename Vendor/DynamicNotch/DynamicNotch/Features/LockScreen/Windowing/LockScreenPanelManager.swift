@@ -21,8 +21,13 @@ final class LockScreenPanelManager {
     private var appObservers: [NSObjectProtocol] = []
     private var workspaceObservers: [NSObjectProtocol] = []
     private var cancellables = Set<AnyCancellable>()
-    private var cachedSnapshot: NowPlayingSnapshot?
-    private var cachedArtworkImage: NSImage?
+    private(set) var isInvalidated = false
+    var hasPanel: Bool { panelWindow != nil }
+
+    /// A paused session remains controllable; an ended session never retains old artwork.
+    static func shouldPresent(isLockPresentation: Bool, mediaEnabled: Bool, snapshot: NowPlayingSnapshot?) -> Bool {
+        isLockPresentation && mediaEnabled && snapshot != nil
+    }
     
     init(
         nowPlayingViewModel: NowPlayingViewModel,
@@ -38,6 +43,9 @@ final class LockScreenPanelManager {
     }
     
     func invalidate() {
+        guard !isInvalidated else { return }
+        isInvalidated = true
+        nowPlayingViewModel.setLyricsPresentationActive(false)
         appObservers.forEach(NotificationCenter.default.removeObserver)
         appObservers.removeAll()
         
@@ -139,56 +147,25 @@ final class LockScreenPanelManager {
         liveSnapshot: NowPlayingSnapshot?,
         artworkImage: NSImage?
     ) {
-        let isShowingLockPresentation = isLocked || isPreparingLock
-
-        if let liveSnapshot {
-            cachedSnapshot = liveSnapshot
-            cachedArtworkImage = artworkImage
-        } else if !isShowingLockPresentation {
-            cachedSnapshot = nil
-            cachedArtworkImage = nil
-        }
-        
-        let resolvedSnapshot = resolvedSnapshot(
-            isShowingLockPresentation: isShowingLockPresentation,
-            liveSnapshot: liveSnapshot
-        )
-        let resolvedArtworkImage = resolvedArtworkImage(
-            isShowingLockPresentation: isShowingLockPresentation,
-            liveSnapshot: liveSnapshot,
-            artworkImage: artworkImage
-        )
-        
-        updatePresentation(
-            isShowingLockPresentation: isShowingLockPresentation,
-            snapshot: resolvedSnapshot,
-            artworkImage: resolvedArtworkImage
-        )
-    }
-    
-    private func updatePresentation(
-        isShowingLockPresentation: Bool,
-        snapshot: NowPlayingSnapshot?,
-        artworkImage: NSImage?
-    ) {
-        guard LockScreenSettings.isMediaPanelEnabled() else {
-            hidePanel(animated: true, releaseResources: true)
-            return
-        }
-        
-        if isShowingLockPresentation, let snapshot {
-            showPanel(snapshot: snapshot, artworkImage: artworkImage, animated: false)
+        guard !isInvalidated else { return }
+        if Self.shouldPresent(
+            isLockPresentation: isLocked || isPreparingLock,
+            mediaEnabled: settingsViewModel.lockScreen.isLockScreenMediaPanelEnabled,
+            snapshot: liveSnapshot
+        ), let liveSnapshot {
+            showPanel(snapshot: liveSnapshot, artworkImage: artworkImage, animated: false)
         } else {
+            nowPlayingViewModel.setLyricsPresentationActive(false)
             hidePanel(animated: true, releaseResources: true)
         }
     }
-    
+
     private func showPanel(
         snapshot: NowPlayingSnapshot,
         artworkImage: NSImage?,
         animated: Bool
     ) {
-        guard let screen = currentScreen() else { return }
+        guard !isInvalidated, let screen = currentScreen() else { return }
         
         let window = makeWindowIfNeeded(for: screen)
         let targetFrame = panelFrame(for: screen)
@@ -237,7 +214,8 @@ final class LockScreenPanelManager {
         }
         
         DispatchQueue.main.async { [weak self] in
-            self?.animator.isPresented = true
+            guard let self, !self.isInvalidated else { return }
+            self.animator.isPresented = true
         }
     }
     
@@ -256,14 +234,13 @@ final class LockScreenPanelManager {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak window] in
             guard let self else { return }
             
-            let shouldRemainVisible =
-            self.lockScreenManager.isShowingLockPresentation &&
-            self.resolvedSnapshot(
-                isShowingLockPresentation: self.lockScreenManager.isShowingLockPresentation,
-                liveSnapshot: self.nowPlayingViewModel.snapshot
-            ) != nil &&
-            LockScreenSettings.isMediaPanelEnabled()
-            
+            guard !self.isInvalidated else { return }
+            let shouldRemainVisible = Self.shouldPresent(
+                isLockPresentation: self.lockScreenManager.isShowingLockPresentation,
+                mediaEnabled: self.settingsViewModel.lockScreen.isLockScreenMediaPanelEnabled,
+                snapshot: self.nowPlayingViewModel.snapshot
+            )
+
             guard !shouldRemainVisible else { return }
             
             window?.orderOut(nil)
@@ -275,8 +252,6 @@ final class LockScreenPanelManager {
     }
 
     private func releasePanelResources() {
-        cachedSnapshot = nil
-        cachedArtworkImage = nil
         animator.isPresented = false
 
         panelWindow?.orderOut(nil)
@@ -287,21 +262,22 @@ final class LockScreenPanelManager {
     }
     
     private func refreshPosition(animated: Bool) {
-        guard let window = panelWindow, window.isVisible, let screen = currentScreen() else {
+        guard !isInvalidated, let window = panelWindow, window.isVisible, let screen = currentScreen() else {
             return
         }
         
         let targetFrame = panelFrame(for: screen)
-        let resolvedSnapshot = resolvedSnapshot(
-            isShowingLockPresentation: lockScreenManager.isShowingLockPresentation,
-            liveSnapshot: nowPlayingViewModel.snapshot
-        )
-        let resolvedArtworkImage = resolvedArtworkImage(
-            isShowingLockPresentation: lockScreenManager.isShowingLockPresentation,
-            liveSnapshot: nowPlayingViewModel.snapshot,
-            artworkImage: nowPlayingViewModel.artworkImage
-        )
-        
+        let resolvedSnapshot = nowPlayingViewModel.snapshot
+        let resolvedArtworkImage = nowPlayingViewModel.artworkImage
+        guard Self.shouldPresent(
+            isLockPresentation: lockScreenManager.isShowingLockPresentation,
+            mediaEnabled: settingsViewModel.lockScreen.isLockScreenMediaPanelEnabled,
+            snapshot: resolvedSnapshot
+        ) else {
+            hidePanel(animated: false, releaseResources: true)
+            return
+        }
+
         if animated {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.2
@@ -326,25 +302,6 @@ final class LockScreenPanelManager {
         
         window.orderFrontRegardless()
         window.makeKey()
-    }
-    
-    private func resolvedSnapshot(
-        isShowingLockPresentation: Bool,
-        liveSnapshot: NowPlayingSnapshot?
-    ) -> NowPlayingSnapshot? {
-        liveSnapshot ?? (isShowingLockPresentation ? cachedSnapshot : nil)
-    }
-    
-    private func resolvedArtworkImage(
-        isShowingLockPresentation: Bool,
-        liveSnapshot: NowPlayingSnapshot?,
-        artworkImage: NSImage?
-    ) -> NSImage? {
-        if liveSnapshot != nil {
-            return artworkImage
-        }
-        
-        return isShowingLockPresentation ? cachedArtworkImage : nil
     }
     
     private func makeWindowIfNeeded(for screen: NSScreen) -> OverlayPanelWindow {
