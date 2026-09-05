@@ -6,6 +6,37 @@ import ALOCore
 
 @Suite("Bounded audio sender bursts", .serialized)
 struct AudioSenderBurstTests {
+    @Test func expiredPendingDoesNotMakeFreshCaptureCongested() throws {
+        let fixture = try AudioBurstFixture()
+        defer { fixture.stop() }
+        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 12 * 240 * 2),
+            captureTimeNanos: fixture.audioNowNanos - 60_000_000)
+        fixture.barrier()
+        fixture.advanceAudioClock(by: 120_000_000)
+        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 4 * 240 * 2),
+            captureTimeNanos: fixture.audioNowNanos)
+        fixture.barrier()
+        fixture.drain()
+        #expect(fixture.probe.sequences == Array(0..<8) + Array(12..<16))
+        let snapshot = try #require(fixture.host.audioSenderSnapshot().first)
+        #expect(snapshot.enqueued == 16 && snapshot.sent == 12)
+        #expect(snapshot.expiredWait == 4 && snapshot.replaced == 0)
+    }
+
+    @Test func idleCapturePastPlayoutDeadlineHasAnExplicitDropReason() throws {
+        let fixture = try AudioBurstFixture()
+        defer { fixture.stop() }
+        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 4 * 240 * 2),
+            captureTimeNanos: fixture.audioNowNanos - 300_000_000)
+        fixture.barrier()
+        let snapshot = try #require(fixture.host.audioSenderSnapshot().first)
+        #expect(snapshot.enqueued == 4 && snapshot.sent == 0)
+        #expect(snapshot.expiredAge == 4 && snapshot.expiredWait == 0)
+        #expect(snapshot.pending == 0 && fixture.probe.sequences.isEmpty)
+        let diagnostics = try #require(fixture.host.diagnosticsSnapshot().listeners.first)
+        #expect(diagnostics.audioExpiredAge == 4)
+    }
+
     @Test(arguments: [UInt64(60_000_000), 120_000_000])
     func briefCompletionBurstPreservesEveryPacketInOrder(acquisitionAgeNanos: UInt64) throws {
         let fixture = try AudioBurstFixture()

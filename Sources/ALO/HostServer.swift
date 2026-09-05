@@ -21,6 +21,18 @@ final class HostServer {
         let captureTimeNanos: UInt64
         let enqueuedAtNanos: UInt64
     }
+    struct AudioSenderSnapshot {
+        let participantID: String
+        let udpPort: UInt16
+        let inFlight: Int
+        let pending: Int
+        let enqueued: UInt64
+        let sent: UInt64
+        let expiredWait: UInt64
+        let expiredAge: UInt64
+        let replaced: UInt64
+        let discardedBoundary: UInt64
+    }
     typealias OutboundSend = (
         _ connection: NWConnection,
         _ data: Data,
@@ -47,6 +59,13 @@ final class HostServer {
         var audioSendsInFlight = 0
         var pendingAudio: [PendingAudio] = []
         var audioBacklogCongested = false
+        var audioEnqueued: UInt64 = 0
+        var audioSent: UInt64 = 0
+        var audioExpiredWait: UInt64 = 0
+        var audioExpiredAge: UInt64 = 0
+        var audioReplaced: UInt64 = 0
+        var audioDiscardedBoundary: UInt64 = 0
+        var lastAudioAgeWarningNanos: UInt64?
         var syncReport: PlaybackSyncReport?
         var lastResyncCommandNanos: UInt64 = 0
         var lastManualResyncRequestNanos: UInt64 = 0
@@ -153,7 +172,7 @@ final class HostServer {
             listener?.cancel()
             listener = nil
             for client in clients.values {
-                client.pendingAudio.removeAll()
+                discardPendingAudio(for: client)
                 client.audio?.cancel()
                 client.video?.cancel()
                 client.control.cancel()
@@ -181,10 +200,28 @@ final class HostServer {
                         isTimingEligible: timingEligibleClients?.contains(ObjectIdentifier(client.control)) ?? true,
                         reportAgeMilliseconds: client.lastSyncReportNanos.map { Double(now >= $0 ? now - $0 : 0) / 1_000_000 },
                         recommendedBufferMilliseconds: Double(client.recommendedPlayoutDelayNanos) / 1_000_000,
-                        hardwareFloorMilliseconds: Double(client.outputLatencyPlayoutFloorNanos) / 1_000_000
+                        hardwareFloorMilliseconds: Double(client.outputLatencyPlayoutFloorNanos) / 1_000_000,
+                        audioEnqueued: client.audioEnqueued, audioSent: client.audioSent,
+                        audioExpiredWait: client.audioExpiredWait, audioExpiredAge: client.audioExpiredAge,
+                        audioReplaced: client.audioReplaced, audioDiscardedBoundary: client.audioDiscardedBoundary
                     )
                 }
             )
+        }
+    }
+
+    /// A queue-barrier snapshot, never a drain request or an expiry sweep.
+    func audioSenderSnapshot() -> [AudioSenderSnapshot] {
+        queue.sync {
+            clients.values.compactMap { client in
+                guard let id = client.id, let audio = client.audio,
+                      case .hostPort(_, let port) = audio.endpoint else { return nil }
+                return AudioSenderSnapshot(participantID: id, udpPort: port.rawValue,
+                    inFlight: client.audioSendsInFlight, pending: client.pendingAudio.count,
+                    enqueued: client.audioEnqueued, sent: client.audioSent,
+                    expiredWait: client.audioExpiredWait, expiredAge: client.audioExpiredAge,
+                    replaced: client.audioReplaced, discardedBoundary: client.audioDiscardedBoundary)
+            }
         }
     }
 
@@ -451,7 +488,7 @@ final class HostServer {
             client.name = uniqueName(for: proposedName, client: client)
             client.audio?.cancel()
             client.audioSendsInFlight = 0
-            client.pendingAudio.removeAll()
+            discardPendingAudio(for: client)
             client.audioBacklogCongested = false
             let connection = NWConnection(
                 host: host,
@@ -637,7 +674,7 @@ final class HostServer {
             timingEligibleClients?.insert(replacementIdentifier)
         }
         stale.audio?.cancel()
-        stale.pendingAudio.removeAll()
+        discardPendingAudio(for: stale)
         stale.video?.cancel()
         stale.control.cancel()
     }
@@ -718,14 +755,14 @@ final class HostServer {
         guard let data = try? coordinatedResyncMessage(nowNanos: nowNanos).encodedLine() else { return false }
         if let targetID {
             guard let target = clients.values.first(where: { $0.id == targetID }) else { return false }
-            target.pendingAudio.removeAll()
+            discardPendingAudio(for: target)
             send(data, over: target.control)
             return true
         } else {
             let targets = clients.values.filter { $0.id != nil }
             guard !targets.isEmpty else { return false }
             for target in targets {
-                target.pendingAudio.removeAll()
+                discardPendingAudio(for: target)
                 send(data, over: target.control)
             }
             return true
@@ -735,7 +772,7 @@ final class HostServer {
     private func removeClient(_ identifier: ObjectIdentifier) {
         guard let client = clients.removeValue(forKey: identifier) else { return }
         timingEligibleClients?.remove(identifier)
-        client.pendingAudio.removeAll()
+        discardPendingAudio(for: client)
         client.audio?.cancel()
         client.video?.cancel()
         receiverCountHandler?(participantNames.count)
@@ -965,11 +1002,16 @@ final class HostServer {
 
     private func sendAudio(_ data: Data, captureTimeNanos: UInt64, to client: Client) {
         guard let connection = client.audio else { return }
+        client.audioEnqueued &+= 1
         switch audioBackpressurePolicy {
         case .unbounded:
+            client.audioSent &+= 1
             send(data, over: connection, isComplete: true)
 
         case .boundedLatest(let maxInFlight):
+            // Expired capture is not evidence that fresh capture is congested.
+            // Sweep before comparing the new packet with the pending head.
+            expirePendingAudio(for: client, now: audioSendNowNanos())
             client.pendingAudio.append(PendingAudio(data: data, captureTimeNanos: captureTimeNanos,
                 enqueuedAtNanos: audioSendNowNanos()))
             if let first = client.pendingAudio.first {
@@ -980,6 +1022,7 @@ final class HostServer {
                 }
             }
             if client.audioBacklogCongested, client.pendingAudio.count > 1 {
+                client.audioReplaced &+= UInt64(client.pendingAudio.count - 1)
                 client.pendingAudio.removeFirst(client.pendingAudio.count - 1)
             }
             drainAudio(for: client, over: connection, maxInFlight: maxInFlight)
@@ -989,11 +1032,7 @@ final class HostServer {
     private func drainAudio(for client: Client, over connection: NWConnection, maxInFlight: Int) {
         guard client.audio === connection,
               clients[ObjectIdentifier(client.control)] === client else { return }
-        let now = audioSendNowNanos()
-        client.pendingAudio.removeAll {
-            (now >= $0.enqueuedAtNanos && now - $0.enqueuedAtNanos >= Self.maximumPendingAudioWaitNanos)
-                || (now >= $0.captureTimeNanos && now - $0.captureTimeNanos >= groupPlayoutDelayNanos)
-        }
+        expirePendingAudio(for: client, now: audioSendNowNanos())
         // Only backlog growth triggers latest-only mode, not delayed callback
         // dispatch on a fast link. Congestion clears only with an empty pending
         // queue and at least half the socket capacity free: an empty pending
@@ -1003,6 +1042,7 @@ final class HostServer {
         while client.audioSendsInFlight < max(1, maxInFlight), !client.pendingAudio.isEmpty {
             let packet = client.pendingAudio.removeFirst()
             client.audioSendsInFlight += 1
+            client.audioSent &+= 1
             send(packet.data, over: connection, isComplete: true) { [weak self, weak client] error in
                 guard let self, let client else { return }
                 self.queue.async { [weak self, weak client] in
@@ -1013,7 +1053,7 @@ final class HostServer {
                         fputs("Audio send failed: \(error)\n", stderr)
                         connection.cancel()
                         client.audio = nil
-                        client.pendingAudio.removeAll()
+                        self.discardPendingAudio(for: client)
                         return
                     }
                     self.drainAudio(for: client, over: connection, maxInFlight: maxInFlight)
@@ -1022,6 +1062,33 @@ final class HostServer {
         }
         if client.audioSendsInFlight <= max(1, maxInFlight) / 2, client.pendingAudio.isEmpty {
             client.audioBacklogCongested = false
+        }
+    }
+
+    private func discardPendingAudio(for client: Client) {
+        client.audioDiscardedBoundary &+= UInt64(client.pendingAudio.count)
+        client.pendingAudio.removeAll()
+    }
+
+    private func expirePendingAudio(for client: Client, now: UInt64) {
+        let priorAgeDrops = client.audioExpiredAge
+        client.pendingAudio.removeAll { packet in
+            if now >= packet.enqueuedAtNanos,
+               now - packet.enqueuedAtNanos >= Self.maximumPendingAudioWaitNanos {
+                client.audioExpiredWait &+= 1
+                return true
+            }
+            if now >= packet.captureTimeNanos,
+               now - packet.captureTimeNanos >= groupPlayoutDelayNanos {
+                client.audioExpiredAge &+= 1
+                return true
+            }
+            return false
+        }
+        if client.audioExpiredAge != priorAgeDrops,
+           client.lastAudioAgeWarningNanos.map({ now >= $0 && now - $0 >= 5_000_000_000 }) ?? true {
+            client.lastAudioAgeWarningNanos = now
+            fputs("Audio capture arrived after its room playout deadline; inspect capture-age drop diagnostics.\n", stderr)
         }
     }
 }
