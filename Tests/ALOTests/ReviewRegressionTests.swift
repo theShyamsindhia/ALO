@@ -56,10 +56,13 @@ struct ReviewRegressionTests {
     }
 
     @Test func artworkCompletionPreservesPauseAndIgnoresAnotherPlayer() throws {
-        let paused = NowPlayingMedia(title: "Song", sourceURL: "https://open.spotify.com/track/abc", isPlaying: false)
+        let paused = NowPlayingMedia(title: "Song", sourceURL: "https://open.spotify.com/track/abc",
+                                     isPlaying: false, elapsedTime: 42, duration: 180)
         let updated = try #require(NowPlayingMonitor.applyingSpotifyArtwork(Data([1]), trackID: "abc", to: paused))
         #expect(updated.isPlaying == false)
         #expect(updated.artworkData == Data([1]))
+        #expect(updated.elapsedTime == 42)
+        #expect(updated.duration == 180)
         #expect(NowPlayingMonitor.applyingSpotifyArtwork(Data([1]), trackID: "abc", to: NowPlayingMedia(title: "Music", isPlaying: true)) == nil)
     }
 
