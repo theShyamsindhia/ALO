@@ -5,6 +5,72 @@ import Testing
 import ALOCore
 
 struct MeshRoomTests {
+    @Test func counterPoisoningDoesNotPreventNextBroadcaster() {
+        var replica = MeshRoomReplica()
+        let bad = MeshRoomEvent(roomID: "room", version: .init(counter: .max, nodeID: "attacker"), kind: .broadcaster,
+            broadcasterID: "attacker", broadcasterEpoch: .max, mediaServiceName: "bad", isBroadcasting: true)
+        #expect(replica.merge([bad]).isEmpty)
+        let badEpoch = MeshRoomEvent(roomID: "room", version: .init(counter: 1, nodeID: "attacker"), kind: .broadcaster,
+            broadcasterID: "attacker", broadcasterEpoch: .max, mediaServiceName: "bad", isBroadcasting: true)
+        #expect(replica.merge([badEpoch]).isEmpty)
+        let next = MeshRoomEvent(roomID: "room", version: replica.nextVersion(nodeID: "local"), kind: .broadcaster,
+            broadcasterID: "local", broadcasterEpoch: replica.highestBroadcasterEpoch + 1, mediaServiceName: "good", isBroadcasting: true)
+        replica.merge([next])
+        #expect(replica.broadcaster?.nodeID == "local")
+        #expect(replica.logicalClock == 1)
+    }
+
+    @Test func retentionBoundsHistoryAndDoesNotResurrectStoppedBroadcaster() {
+        let artwork = Data(repeating: 1, count: 20_000)
+        var events = [MeshRoomEvent]()
+        for counter in 1...1_000 {
+            let chatVersion = MeshVersion(counter: UInt64(counter * 2), nodeID: "a")
+            let playbackVersion = MeshVersion(counter: UInt64(counter * 2 + 1), nodeID: "a")
+            events.append(MeshRoomEvent(id: "chat-\(counter)", roomID: "r", version: chatVersion, kind: .chat, text: "chat"))
+            let media = NowPlayingMedia(title: "\(counter)", artworkData: artwork)
+            events.append(MeshRoomEvent(id: "play-\(counter)", roomID: "r", version: playbackVersion, kind: .playback, nowPlaying: media))
+        }
+        var replica = MeshRoomReplica(events: events)
+        #expect(replica.chatEvents.count == 500)
+        #expect(replica.events.count == 501)
+        #expect(replica.nowPlaying.title == "1000")
+        #expect(replica.merge(events).isEmpty)
+        let claim = MeshRoomEvent(roomID: "r", version: .init(counter: 3_000, nodeID: "a"), kind: .broadcaster,
+            broadcasterID: "a", broadcasterEpoch: 1, mediaServiceName: "source", isBroadcasting: true)
+        let stop = MeshRoomEvent(roomID: "r", version: .init(counter: 3_001, nodeID: "a"), kind: .broadcaster,
+            broadcasterID: "a", broadcasterEpoch: 1, isBroadcasting: false)
+        replica.merge([stop, claim])
+        #expect(replica.broadcaster == nil)
+        #expect(replica.merge([claim]).isEmpty)
+        #expect(replica.broadcaster == nil)
+    }
+
+    @Test("A multi-megabyte legacy snapshot converges without reconnecting")
+    func largeLegacySnapshotIsPaced() throws {
+        let room = RoomConfiguration(name: "Large legacy snapshot")
+        let events = (1...500).map { counter in
+            MeshRoomEvent(id: "chat-\(counter)", roomID: room.id,
+                version: MeshVersion(counter: UInt64(counter), nodeID: "a"),
+                kind: .chat, text: String(repeating: "x", count: 4_000))
+        }
+        #expect(try JSONEncoder().encode(events).count > 1_024 * 1_024)
+        let a = MeshProbe(), b = MeshProbe(), ready = PortProbe(), attempts = CountProbe()
+        let nodeA = MeshControlPlane(room: room, nodeID: "a", displayName: "A", initialEvents: events,
+            replicaHandler: { a.update(replica: $0) }, participantsHandler: { a.update(participants: $0) },
+            disableRoomStateSyncDuringAuthenticationForTesting: true,
+            connectionAttemptHandler: { attempts.increment() })
+        let nodeB = MeshControlPlane(room: room, nodeID: "b", displayName: "B",
+            listenerReadyHandler: { ready.set($0) }, replicaHandler: { b.update(replica: $0) },
+            participantsHandler: { b.update(participants: $0) },
+            disableRoomStateSyncDuringAuthenticationForTesting: true)
+        try nodeA.start(advertise: false); try nodeB.start(advertise: false)
+        defer { nodeA.stop(); nodeB.stop() }
+        let port = try #require(ready.wait())
+        nodeA.connectForTesting(to: .hostPort(host: "127.0.0.1", port: port))
+        #expect(waitUntil(timeout: 10) { b.chatCount == 500 && b.participantCount == 2 })
+        #expect(attempts.count == 1)
+    }
+
     @Test("Room discovery and media allow nearby peer-to-peer paths")
     func nearbyPeerToPeerNetworking() {
         let tcp = LocalNetworkParameters.tcp()
@@ -393,7 +459,7 @@ struct MeshRoomTests {
         }
         nodeA.connectForTesting(to: .hostPort(host: "127.0.0.1", port: port))
 
-        #expect(waitUntil(timeout: 4) { b.eventCount == events.count })
+        #expect(waitUntil(timeout: 4) { b.eventCount == 1 && b.nowPlayingTitle == "Track 16" })
     }
 
     @Test("A relaunched peer recovers the room's active broadcaster")
@@ -1511,6 +1577,7 @@ private final class MeshProbe: @unchecked Sendable {
     var participantCount: Int { lock.withLock { participants.count } }
     var minimumObservedParticipantCount: Int? { lock.withLock { participantCountHistory.min() } }
     var chatCount: Int { lock.withLock { replica.chatEvents.count } }
+    var nowPlayingTitle: String? { lock.withLock { replica.nowPlaying.title } }
     var eventCount: Int { lock.withLock { replica.events.count } }
     var artworkByteCount: Int? { lock.withLock { replica.nowPlaying.artworkData?.count } }
     var chatTexts: [String?] { lock.withLock { replica.chatEvents.map(\.text) } }

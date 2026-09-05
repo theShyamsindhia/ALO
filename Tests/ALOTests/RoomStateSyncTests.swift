@@ -9,6 +9,20 @@ import Automerge
 // other fixture in this suite for their bounded handshake/processing deadlines.
 @Suite(.serialized)
 struct RoomStateSyncTests {
+    @Test("Durable state rejects impossible event counters on ingest and restore")
+    func rejectsCounterPoisoning() throws {
+        let event = MeshRoomEvent(id: "poison", roomID: "counter-room",
+            version: MeshVersion(counter: .max, nodeID: "remote"), kind: .chat, text: "bad")
+        let sync = try AutomergeRoomStateSync(roomID: "counter-room")
+        #expect(try sync.ingest([event]).isEmpty)
+        #expect(try sync.snapshot().events.isEmpty)
+        let document = Document()
+        try document.put(obj: ObjId.ROOT, key: "event:poison", value: .Bytes(try JSONEncoder().encode(event)))
+        #expect(throws: RoomStateSyncError.invalidDocument) {
+            try AutomergeRoomStateSync(roomID: "counter-room", savedDocument: document.save())
+        }
+    }
+
     @Test("Automerge sync repairs non-contiguous Lamport histories")
     func repairsVersionVectorGap() throws {
         let roomID = "room-gap"

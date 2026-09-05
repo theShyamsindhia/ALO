@@ -4,6 +4,10 @@ import Testing
 
 @Suite("Privacy-conscious diagnostics")
 struct DiagnosticsTests {
+    @Test func keyDerivedIdentifiersAreRedactedWithoutUUIDVersionAssumptions() {
+        #expect(DiagnosticRedactor.redact("peer FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF") == "peer <redacted-id>")
+    }
+
     @Test("Diagnostic reports redact identifiers, addresses, account names, and email")
     func reportRedaction() {
         let room = DiagnosticRoomContext(

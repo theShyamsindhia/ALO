@@ -234,7 +234,8 @@ final class SynchronizedPlayer {
         else { return }
 
         let renderLocalNanos = MonotonicClock.ticksToNanos(renderTime.hostTime)
-        let renderHostNanos = addSigned(renderLocalNanos, offset)
+        guard let renderHostNanos = RoomTiming.hostTimeNanos(clientTimeNanos: renderLocalNanos,
+                                                           clockOffsetNanos: offset) else { return }
         let audibleHostNanos = renderHostNanos &+ outputLatencyNanos
         let timelineStart = anchorCaptureNanos &+ targetLatencyNanos
         let expectedNanos = audibleHostNanos > timelineStart
@@ -278,8 +279,17 @@ final class SynchronizedPlayer {
                 return
             }
 
-            let desiredAudibleNanos = addSigned(packet.captureTimeNanos, -offset)
-                &+ targetLatencyNanos
+            guard let localCaptureNanos = RoomTiming.clientTimeNanos(hostTimeNanos: packet.captureTimeNanos,
+                                                                    clockOffsetNanos: offset) else {
+                expectedSequence = sequence &+ 1
+                continue
+            }
+            let audibleTime = localCaptureNanos.addingReportingOverflow(targetLatencyNanos)
+            guard !audibleTime.overflow else {
+                expectedSequence = sequence &+ 1
+                continue
+            }
+            let desiredAudibleNanos = audibleTime.partialValue
             let desiredRenderNanos = desiredAudibleNanos > outputLatencyNanos
                 ? desiredAudibleNanos - outputLatencyNanos
                 : desiredAudibleNanos
@@ -812,8 +822,11 @@ final class SynchronizedPlayer {
               next.sequence > sequence
         else { return }
 
-        let nextAudibleNanos = addSigned(next.captureTimeNanos, -offset)
-            &+ targetLatencyNanos
+        guard let localCaptureNanos = RoomTiming.clientTimeNanos(hostTimeNanos: next.captureTimeNanos,
+                                                                clockOffsetNanos: offset) else { return }
+        let audibleTime = localCaptureNanos.addingReportingOverflow(targetLatencyNanos)
+        guard !audibleTime.overflow else { return }
+        let nextAudibleNanos = audibleTime.partialValue
         let nextRenderNanos = nextAudibleNanos > outputLatencyNanos
             ? nextAudibleNanos - outputLatencyNanos
             : nextAudibleNanos
@@ -846,12 +859,6 @@ final class SynchronizedPlayer {
         return buffer
     }
 
-    private func addSigned(_ value: UInt64, _ delta: Int64) -> UInt64 {
-        if delta >= 0 {
-            return value &+ UInt64(delta)
-        }
-        return value > UInt64(-delta) ? value - UInt64(-delta) : 0
-    }
 }
 
 struct PlaybackDriftRecovery {

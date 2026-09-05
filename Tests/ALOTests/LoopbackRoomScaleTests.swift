@@ -6,6 +6,105 @@ import Testing
 
 @Suite("Single-Mac room integration", .serialized)
 struct LoopbackRoomScaleTests {
+    @Test("A late listener's rising network RTT cannot repeatedly reset every output", arguments: [UInt64(10_000_000), 150_000_000])
+    func lateListenerNetworkDelayCannotMasqueradeAsHardwareLatency(outputLatency: UInt64) throws {
+        let ready = DispatchSemaphore(value: 0)
+        let ports = PortState()
+        let host = HostServer(roomName: "Outlier join", advertise: false,
+            listenerReadyHandler: { ports.set($0); ready.signal() },
+            localParticipantID: "stable-output")
+        try host.start()
+        defer { host.stop() }
+        try #require(ready.wait(timeout: .now() + 3) == .success)
+        let port = try #require(ports.port)
+        let stable = HeadlessLoopbackPeer(index: 900, participantID: "stable-output")
+        let outlier = HeadlessLoopbackPeer(index: 901, participantID: "outlier")
+        defer { outlier.stop(); stable.stop() }
+        try stable.start(hostPort: port)
+        try #require(stable.waitUntilJoined(timeout: 3))
+        let samples = [Int16](repeating: 512, count: 480)
+        host.acceptAudio(samples: samples, captureTimeNanos: MonotonicClock.nowNanos())
+        try #require(waitUntil(timeout: 2) { stable.packetCount > 0 })
+        try outlier.start(hostPort: port)
+        try #require(outlier.waitUntilJoined(timeout: 3))
+        let initialResyncs = stable.resyncCommandCount
+        let initialBuffer = host.diagnosticsSnapshot().groupBufferMilliseconds
+        let initialTimingChanges = host.diagnosticsSnapshot().roomTimingChangeCount
+        // Same physical output, progressively delayed control traffic. Use the
+        // exact report calculation used by Receiver, not a fabricated zero floor.
+        for rtt: UInt64 in [300_000_000, 450_000_000, 600_000_000, 800_000_000] {
+            outlier.reportTiming(recommendation: 600_000_000,
+                hardwareFloor: RoomTiming.outputLatencyFloor(outputLatency, roundTripNanos: rtt))
+            outlier.sendPing()
+            try #require(outlier.waitForPong(timeout: 2))
+        }
+        // Barrier on the healthy peer's independent TCP stream: its own pong
+        // must follow all earlier cutovers enqueued by the host.
+        stable.sendPing()
+        try #require(stable.waitForPong(timeout: 2))
+        let hardwareFloor = RoomTiming.outputLatencyFloor(outputLatency)
+        let needsHardwareCutover = Double(hardwareFloor) / 1_000_000 > initialBuffer
+        #expect(stable.resyncCommandCount == initialResyncs + (needsHardwareCutover ? 1 : 0),
+            "A late outlier's network delay was treated as room-wide hardware latency")
+        let expectedBuffer = needsHardwareCutover ? Double(RoomTiming.liveIncreasePlayoutDelay(required: hardwareFloor)) / 1_000_000 : initialBuffer
+        #expect(host.diagnosticsSnapshot().groupBufferMilliseconds == expectedBuffer)
+        let diagnostics = host.diagnosticsSnapshot()
+        #expect(diagnostics.roomTimingChangeCount == initialTimingChanges + (needsHardwareCutover ? 1 : 0))
+        let outlierReport = try #require(diagnostics.listeners.first { $0.peerID == "outlier" })
+        #expect(!outlierReport.isTimingEligible)
+        #expect(outlierReport.recommendedBufferMilliseconds == 600)
+        #expect(outlierReport.hardwareFloorMilliseconds == Double(hardwareFloor) / 1_000_000)
+    }
+
+    @Test("Settling hardware latency from one joiner requires at most one shared cutover")
+    func lateHardwareCalibrationDoesNotCauseRepeatedCutovers() throws {
+        let ready = DispatchSemaphore(value: 0)
+        let ports = PortState()
+        let host = HostServer(roomName: "Hardware settling", advertise: false,
+            listenerReadyHandler: { ports.set($0); ready.signal() }, localParticipantID: "stable-output")
+        try host.start()
+        defer { host.stop() }
+        try #require(ready.wait(timeout: .now() + 3) == .success)
+        let port = try #require(ports.port)
+        let stable = HeadlessLoopbackPeer(index: 902, participantID: "stable-output")
+        let outlier = HeadlessLoopbackPeer(index: 903, participantID: "outlier")
+        defer { outlier.stop(); stable.stop() }
+        try stable.start(hostPort: port)
+        try #require(stable.waitUntilJoined(timeout: 3))
+        host.acceptAudio(samples: [Int16](repeating: 512, count: 480), captureTimeNanos: MonotonicClock.nowNanos())
+        try #require(waitUntil(timeout: 2) { stable.packetCount > 0 })
+        try outlier.start(hostPort: port)
+        try #require(outlier.waitUntilJoined(timeout: 3))
+        for floor: UInt64 in [300_000_000, 305_000_000, 310_000_000, 315_000_000] {
+            outlier.reportTiming(recommendation: floor, hardwareFloor: floor)
+            outlier.sendPing()
+            try #require(outlier.waitForPong(timeout: 2))
+        }
+        stable.sendPing()
+        try #require(stable.waitForPong(timeout: 2))
+        #expect(stable.resyncCommandCount == 1)
+        #expect(host.diagnosticsSnapshot().groupBufferMilliseconds == 350)
+        #expect(host.diagnosticsSnapshot().roomTimingChangeCount == 1)
+
+        // A pause must not discard the settling allowance and cause another
+        // all-room restart for the next small hardware report after resume.
+        host.setNowPlaying(NowPlayingMedia(title: "Calibration", isPlaying: false))
+        outlier.reportTiming(recommendation: 315_000_000, hardwareFloor: 315_000_000)
+        outlier.sendPing()
+        try #require(outlier.waitForPong(timeout: 2))
+        host.setNowPlaying(NowPlayingMedia(title: "Calibration", isPlaying: true))
+        stable.sendPing()
+        try #require(stable.waitForPong(timeout: 2))
+        let afterResume = stable.resyncCommandCount
+        outlier.reportTiming(recommendation: 320_000_000, hardwareFloor: 320_000_000)
+        outlier.sendPing()
+        try #require(outlier.waitForPong(timeout: 2))
+        stable.sendPing()
+        try #require(stable.waitForPong(timeout: 2))
+        #expect(stable.resyncCommandCount == afterResume,
+            "Pause discarded the calibration allowance and resumed audio restarted again")
+    }
+
     @Test("Live music, voice and chat survive repeated listener restarts", .timeLimit(.minutes(1)))
     func mixedTrafficSurvivesListenerRestarts() throws {
         let root = FileManager.default.temporaryDirectory
@@ -770,11 +869,12 @@ struct LoopbackRoomScaleTests {
         host.acceptAudio(samples: samples, captureTimeNanos: MonotonicClock.nowNanos())
         #expect(waitUntil(timeout: 2) { existingPeer.packetCount == 1 })
 
-        let establishedDelay = min(
+        let recommendation = min(
             RoomTiming.maximumPlayoutDelayNanos,
             RoomTiming.defaultPlayoutDelayNanos + 40_000_000
         )
-        existingPeer.recommendPlayoutDelay(establishedDelay)
+        let establishedDelay = RoomTiming.liveIncreasePlayoutDelay(required: recommendation)
+        existingPeer.recommendPlayoutDelay(recommendation)
         existingPeer.sendPing()
         #expect(existingPeer.waitForPong(timeout: 2))
         #expect(waitUntil(timeout: 2) { existingPeer.playoutDelays.last == establishedDelay })
@@ -1254,6 +1354,13 @@ private final class HeadlessLoopbackPeer {
     func recommendPlayoutDelay(_ nanos: UInt64) {
         queue.async { [weak self] in
             self?.send(ControlMessage(type: "sync_report", playoutDelayNanos: nanos))
+        }
+    }
+
+    func reportTiming(recommendation: UInt64, hardwareFloor: UInt64) {
+        queue.async { [weak self] in
+            self?.send(ControlMessage(type: "sync_report", playoutDelayNanos: recommendation,
+                outputLatencyPlayoutFloorNanos: hardwareFloor))
         }
     }
 

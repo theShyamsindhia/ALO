@@ -834,7 +834,7 @@ final class MeshSession {
 
         transitionTask = Task {
             await previousTransition?.value
-            guard !Task.isCancelled, generation == transitionGeneration else { return }
+            // This task owns the detached host even if a newer transition cancels it.
             await oldHost?.stop()
             guard !Task.isCancelled, generation == transitionGeneration else { return }
             guard let broadcaster else {
@@ -849,6 +849,7 @@ final class MeshSession {
                     hostSession = host
                     try await host.start(
                         roomName: broadcaster.mediaServiceName,
+                        mediaSecurity: try RoomMediaSecurity.forRoom(room, serviceName: broadcaster.mediaServiceName),
                         participantID: nodeID,
                         audioOutput: audioOutput,
                         statusHandler: statusHandler,
@@ -929,6 +930,7 @@ final class MeshSession {
                     statusHandler("Connecting to the room broadcaster")
                     let receiver = try Receiver(
                         requestedRoom: broadcaster.mediaServiceName,
+                        mediaSecurity: try RoomMediaSecurity.forRoom(room, serviceName: broadcaster.mediaServiceName),
                         roomDisplayName: room.name,
                         audioOutput: audioOutput,
                         participantID: nodeID,

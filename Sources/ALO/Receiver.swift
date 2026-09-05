@@ -86,10 +86,13 @@ final class Receiver {
     private var participantVolume = 1.0
     private var participantMuted = false
     private var levelPreference = ReceiverLevelPreference()
+    private let mediaSecurity: RoomMediaSecurity?
+    private var audioOpener: DatagramOpener?
     private var transportEpoch = ReceiverTransportEpoch()
 
     init(
         requestedRoom: String?,
+        mediaSecurity: RoomMediaSecurity? = nil,
         roomDisplayName: String? = nil,
         audioOutput: RoomAudioOutputEngine = RoomAudioOutputEngine(),
         outputDeviceUID: String? = nil,
@@ -107,6 +110,7 @@ final class Receiver {
         queueHandler: (([RoomQueueItem]) -> Void)? = nil,
         videoHandler: ((CGImage) -> Void)? = nil
     ) throws {
+        self.mediaSecurity = mediaSecurity
         self.requestedRoom = requestedRoom
         self.roomDisplayName = roomDisplayName ?? requestedRoom ?? "ALO Room"
         self.participantID = participantID
@@ -159,7 +163,7 @@ final class Receiver {
         audioListener.start(queue: queue)
         udpListener = audioListener
 
-        let videoListener = try NWListener(using: LocalNetworkParameters.tcp(), on: .any)
+        let videoListener = try NWListener(using: mediaSecurity?.tcp(video: true) ?? LocalNetworkParameters.tcp(), on: .any)
         videoListener.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             switch state {
@@ -195,6 +199,7 @@ final class Receiver {
     func stop() {
         queue.sync {
             transportEpoch.advance()
+            audioOpener = nil
             pingTimer?.cancel()
             pingTimer = nil
             maintenanceTimer?.cancel()
@@ -210,7 +215,7 @@ final class Receiver {
             videoListener = nil
             audioConnections.forEach { $0.cancel() }
             audioConnections.removeAll()
-            videoConnections.forEach { $0.cancel() }
+            videoConnections.forEach { $0.stateUpdateHandler = nil; $0.cancel() }
             videoConnections.removeAll()
             player.stop()
             videoDecoder.stop()
@@ -361,7 +366,7 @@ final class Receiver {
     }
 
     private func connect(to endpoint: NWEndpoint) {
-        let connection = NWConnection(to: endpoint, using: LocalNetworkParameters.tcp())
+        let connection = NWConnection(to: endpoint, using: mediaSecurity?.tcp() ?? LocalNetworkParameters.tcp())
         let connectionEpoch = transportEpoch.token
         connection.stateUpdateHandler = { [weak self, weak connection] state in
             guard let self else { return }
@@ -445,6 +450,14 @@ final class Receiver {
                     case "presence":
                         self.participantsHandler?(message.participantDetails ?? [])
                     case "welcome":
+                        guard !self.hasAuthenticatedControl else { continue }
+                        if let security = self.mediaSecurity {
+                            guard let sessionID = message.mediaSessionID,
+                                  let opener = try? security.audioOpener(sessionID: sessionID) else {
+                                self.handleControlDisconnect(expectedEpoch: epoch); return
+                            }
+                            self.audioOpener = opener
+                        }
                         self.hasAuthenticatedControl = true
                         self.statusHandler?(.connected)
                         if self.capturesSystemMediaCommands {
@@ -492,6 +505,10 @@ final class Receiver {
                         break
                     }
                 }
+                if self.controlDecoder.isOverflowed {
+                    self.handleControlDisconnect(expectedEpoch: epoch)
+                    return
+                }
             }
             if !isComplete, error == nil {
                 self.receiveControl(from: connection, epoch: epoch)
@@ -504,6 +521,7 @@ final class Receiver {
     private func handleControlDisconnect(expectedEpoch: UInt64) {
         guard transportEpoch.accepts(expectedEpoch) else { return }
         transportEpoch.advance()
+        audioOpener = nil
         pingTimer?.cancel()
         pingTimer = nil
         control?.cancel()
@@ -512,7 +530,7 @@ final class Receiver {
         controlDecoder = ControlLineDecoder()
         audioConnections.forEach { $0.cancel() }
         audioConnections.removeAll()
-        videoConnections.forEach { $0.cancel() }
+        videoConnections.forEach { $0.stateUpdateHandler = nil; $0.cancel() }
         videoConnections.removeAll()
         clock.reset()
         jitter.reset()
@@ -540,7 +558,11 @@ final class Receiver {
         func receiveNext() {
             connection.receiveMessage { [weak self] data, _, _, error in
                 guard let self, self.transportEpoch.accepts(connectionEpoch) else { return }
-                if let data, let packet = AudioPacket(data: data) {
+                let payload = data.flatMap { bytes -> Data? in
+                    if self.mediaSecurity != nil { return try? self.audioOpener?.open(bytes) }
+                    return bytes
+                }
+                if let payload, let packet = AudioPacket(data: payload) {
                     let now = MonotonicClock.nowNanos()
                     if let offset = self.clock.offsetNanos(at: now), self.clock.isReady {
                         self.jitter.observe(
@@ -575,7 +597,6 @@ final class Receiver {
             ),
             outputLatencyPlayoutFloorNanos: RoomTiming.outputLatencyFloor(
                 player.outputLatencyForTimingNanos,
-                roundTripNanos: clock.bestRoundTripNanos,
                 renderSchedulingHeadroomNanos: player.renderSchedulingHeadroomForTimingNanos
             )
         ))
@@ -598,16 +619,26 @@ final class Receiver {
         let connectionEpoch = transportEpoch.token
         videoConnections.append(connection)
         let decoder = VideoFrameStreamDecoder()
-        connection.stateUpdateHandler = { state in
-            if case .failed(let error) = state {
+        connection.stateUpdateHandler = { [weak self, weak connection] state in
+            guard let self, let connection else { return }
+            switch state {
+            case .failed(let error):
                 fputs("Video receive path failed: \(error)\n", stderr)
+                self.retireVideoConnection(connection)
+            case .cancelled:
+                self.retireVideoConnection(connection)
+            default: break
             }
         }
         connection.start(queue: queue)
 
         func receiveNext() {
             connection.receive(minimumIncompleteLength: 1, maximumLength: 1_048_576) { [weak self] data, _, isComplete, error in
-                guard let self, self.transportEpoch.accepts(connectionEpoch) else { return }
+                guard let self else { connection.cancel(); return }
+                guard self.transportEpoch.accepts(connectionEpoch) else {
+                    self.retireVideoConnection(connection)
+                    return
+                }
                 if let data {
                     for frame in decoder.append(data) {
                         self.videoDecoder.accept(frame)
@@ -615,10 +646,30 @@ final class Receiver {
                 }
                 if !isComplete, error == nil {
                     receiveNext()
+                } else {
+                    self.retireVideoConnection(connection)
                 }
             }
         }
         receiveNext()
+    }
+
+    private func retireVideoConnection(_ connection: NWConnection) {
+        // Stale-epoch callbacks retire only their own transport, never a newer
+        // replacement; they must still release resources after frame admission ends.
+        connection.stateUpdateHandler = nil
+        videoConnections.removeAll { $0 === connection }
+        connection.cancel()
+    }
+
+    var videoConnectionCountForTesting: Int { queue.sync { videoConnections.count } }
+
+    func receiveVideoForTesting(from connection: NWConnection) {
+        queue.async { [weak self] in self?.receiveVideo(from: connection) }
+    }
+
+    func advanceTransportEpochForTesting() {
+        queue.sync { transportEpoch.advance() }
     }
 }
 

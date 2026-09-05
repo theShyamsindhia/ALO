@@ -130,6 +130,7 @@ public struct PlaybackSyncReport: Codable, Sendable, Equatable {
 }
 
 public struct ControlMessage: Codable, Sendable {
+    public let mediaSessionID: UUID?
     public let type: String
     public let udpPort: UInt16?
     public let videoPort: UInt16?
@@ -159,6 +160,7 @@ public struct ControlMessage: Codable, Sendable {
 
     public init(
         type: String,
+        mediaSessionID: UUID? = nil,
         udpPort: UInt16? = nil,
         videoPort: UInt16? = nil,
         displayName: String? = nil,
@@ -185,6 +187,7 @@ public struct ControlMessage: Codable, Sendable {
         isPlaying: Bool? = nil,
         mediaCommand: RoomMediaCommand? = nil
     ) {
+        self.mediaSessionID = mediaSessionID
         self.type = type
         self.udpPort = udpPort
         self.videoPort = videoPort
@@ -221,20 +224,38 @@ public struct ControlMessage: Codable, Sendable {
 }
 
 public final class ControlLineDecoder {
+    public static let defaultMaximumLineBytes = 1_048_576
     private var buffer = Data()
+    private let maximumLineBytes: Int
+    public private(set) var isOverflowed = false
+    public var bufferedByteCount: Int { buffer.count }
 
-    public init() {}
+    public init(maximumLineBytes: Int = defaultMaximumLineBytes) {
+        precondition(maximumLineBytes > 0)
+        self.maximumLineBytes = maximumLineBytes
+    }
 
     public func append(_ data: Data) -> [ControlMessage] {
-        buffer.append(data)
+        guard !isOverflowed else { return [] }
         var messages = [ControlMessage]()
-
-        while let newline = buffer.firstIndex(of: 0x0A) {
-            let line = buffer[..<newline]
-            buffer.removeSubrange(...newline)
-            if let message = try? JSONDecoder().decode(ControlMessage.self, from: line) {
+        // Never copy an unbounded network read into retained storage. The cap
+        // applies to each line, including an unterminated tail after valid lines.
+        var cursor = data.startIndex
+        while cursor < data.endIndex {
+            let newline = data[cursor...].firstIndex(of: 0x0A)
+            let end = newline ?? data.endIndex
+            guard end - cursor <= maximumLineBytes - buffer.count else {
+                isOverflowed = true
+                buffer = Data()
+                return messages
+            }
+            buffer.append(data[cursor..<end])
+            guard let newline else { break }
+            if let message = try? JSONDecoder().decode(ControlMessage.self, from: buffer) {
                 messages.append(message)
             }
+            buffer.removeAll(keepingCapacity: true)
+            cursor = data.index(after: newline)
         }
         return messages
     }

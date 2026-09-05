@@ -150,7 +150,7 @@ private struct DataReader {
         guard offset + byteCount <= data.count else { return nil }
         var value: T = 0
         for index in 0..<byteCount {
-            value |= T(data[offset + index]) << T(index * 8)
+            value |= T(data[data.startIndex + offset + index]) << T(index * 8)
         }
         offset += byteCount
         return value

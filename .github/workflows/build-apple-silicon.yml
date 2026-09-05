@@ -29,8 +29,8 @@ jobs:
       - name: Verify Apple Silicon runner
         run: test "$(uname -m)" = "arm64"
 
-      - name: Verify room network and lifecycle scenarios
-        run: bash Scripts/test_room_scenarios.sh
+      - name: Verify Mac regressions, room network and lifecycle scenarios
+        run: swift test --no-parallel
 
       - name: Install Developer ID Application certificate
         id: import-application-certificate

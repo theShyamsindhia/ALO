@@ -140,6 +140,9 @@ final class MeshControlPlane: @unchecked Sendable {
         var roomStateSyncChunkCount: UInt16 = 0
         var roomStateSyncNextChunk: UInt16 = 0
         var roomStateSyncBuffer = Data()
+        var snapshotSendQueue = [MeshEnvelope]()
+        var snapshotSendInFlight = false
+        var snapshotResendRequested = false
         var roomStateSyncSendQueue = [Data]()
         var roomStateSyncSendInFlight = false
         var roomStateSyncReceiveInFlight = false
@@ -606,7 +609,7 @@ final class MeshControlPlane: @unchecked Sendable {
             if active {
                 publishBroadcasterEvent(
                     broadcasterID: nodeID,
-                    epoch: replica.highestBroadcasterEpoch &+ 1,
+                    epoch: replica.highestBroadcasterEpoch + 1,
                     active: true,
                     mediaServiceName: mediaServiceName
                 )
@@ -1089,7 +1092,7 @@ final class MeshControlPlane: @unchecked Sendable {
 
     private func validRoomEvents(_ events: [MeshRoomEvent]) -> [MeshRoomEvent] {
         events.filter {
-            $0.roomID == room.id && ($0.text?.utf8.count ?? 0) <= 8_192 &&
+            $0.roomID == room.id && MeshRoomReplica.hasPlausibleCounters($0) && ($0.text?.utf8.count ?? 0) <= 8_192 &&
                 (try? MeshEnvelope(type: "event", event: $0).encodedLine().count).map {
                     $0 <= MeshEnvelopeDecoder.maximumLineBytes
                 } == true
@@ -1671,12 +1674,34 @@ final class MeshControlPlane: @unchecked Sendable {
         versionVector: [String: UInt64]?,
         to link: Link
     ) {
-        for envelope in Self.synchronizationEnvelopes(
-            events: events,
-            versionVector: versionVector
-        ) {
-            send(envelope, to: link)
+        guard !link.snapshotSendInFlight, link.snapshotSendQueue.isEmpty else {
+            link.snapshotResendRequested = true
+            return
         }
+        link.snapshotSendQueue = Self.synchronizationEnvelopes(events: events, versionVector: versionVector)
+        drainSnapshot(to: link)
+    }
+
+    private func drainSnapshot(to link: Link) {
+        guard !link.snapshotSendInFlight, links[ObjectIdentifier(link.connection)] === link else { return }
+        guard !link.snapshotSendQueue.isEmpty else {
+            if link.snapshotResendRequested {
+                link.snapshotResendRequested = false
+                sendSync(events: replica.events, versionVector: replica.versionVector, to: link)
+            }
+            return
+        }
+        let envelope = link.snapshotSendQueue.removeFirst()
+        guard let data = try? envelope.encodedLine() else { link.connection.cancel(); return }
+        link.snapshotSendInFlight = true
+        link.connection.send(content: data, completion: .contentProcessed { [weak self, weak link] error in
+            guard let self, let link else { return }
+            self.queue.async {
+                link.snapshotSendInFlight = false
+                guard error == nil else { link.connection.cancel(); return }
+                self.drainSnapshot(to: link)
+            }
+        })
     }
 
     static func roomStateSyncEnvelopes(

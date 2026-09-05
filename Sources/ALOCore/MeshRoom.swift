@@ -125,6 +125,16 @@ public struct MeshBroadcaster: Sendable, Equatable {
 }
 
 public struct MeshRoomReplica: Sendable, Equatable {
+    public static let maximumChatEvents = 500
+    public static let maximumQueueEvents = 5_000
+
+    /// A moving ceiling rejects remote integer poisoning while leaving room for
+    /// the next local event and broadcaster takeover.
+    public static func hasPlausibleCounters(_ event: MeshRoomEvent, now: Date = Date()) -> Bool {
+        let ceiling = UInt64(max(0, min(now.timeIntervalSince1970 * 1_000_000, Double(UInt64.max / 2))))
+        return event.version.counter <= ceiling && (event.broadcasterEpoch ?? 0) <= ceiling
+    }
+
     public private(set) var eventsByID = [String: MeshRoomEvent]()
     public private(set) var logicalClock: UInt64 = 0
 
@@ -135,16 +145,46 @@ public struct MeshRoomReplica: Sendable, Equatable {
     @discardableResult
     public mutating func merge(_ events: [MeshRoomEvent]) -> [MeshRoomEvent] {
         var inserted = [MeshRoomEvent]()
-        for event in events where eventsByID[event.id] == nil {
+        for event in events where eventsByID[event.id] == nil && Self.hasPlausibleCounters(event) {
             eventsByID[event.id] = event
             logicalClock = max(logicalClock, event.version.counter)
             inserted.append(event)
         }
-        return inserted
+        compactRetainedEvents()
+        return inserted.filter { eventsByID[$0.id] != nil }
+    }
+
+    private mutating func compactRetainedEvents() {
+        let ordered = events
+        var retained = Array(ordered.filter { $0.kind == .chat }.suffix(Self.maximumChatEvents))
+        var queueByItem = [String: MeshRoomEvent]()
+        for event in ordered where event.kind == .queueAdd || event.kind == .queueRemove {
+            guard let id = event.queueItem?.id ?? event.queueItemID else { continue }
+            if queueByItem[id]?.kind != .queueRemove || event.kind == .queueRemove { queueByItem[id] = event }
+        }
+        retained += queueByItem.values.sorted { $0.version == $1.version ? $0.id < $1.id : $0.version < $1.version }
+            .suffix(Self.maximumQueueEvents)
+        if let playback = ordered.last(where: { $0.kind == .playback }) { retained.append(playback) }
+        // A claim can race its video state. Keep the latest state for recent scopes.
+        var videoByScope = [String: MeshRoomEvent]()
+        for event in ordered where event.kind == .video {
+            videoByScope["\(event.broadcasterID ?? "")/\(event.broadcasterEpoch ?? 0)"] = event
+        }
+        retained += videoByScope.values.sorted { $0.version == $1.version ? $0.id < $1.id : $0.version < $1.version }.suffix(128)
+        let claims = ordered.filter { $0.kind == .broadcaster }
+        if let claim = claims.filter({ $0.isBroadcasting == true }).max(by: broadcasterPrecedes) {
+            retained.append(claim)
+            if let stop = claims.last(where: { $0.isBroadcasting == false && $0.broadcasterID == claim.broadcasterID && $0.broadcasterEpoch == claim.broadcasterEpoch }) {
+                retained.append(stop)
+            }
+        }
+        // Preserve the epoch high-water mark even when it belongs to a stop.
+        if let highest = claims.max(by: broadcasterPrecedes) { retained.append(highest) }
+        eventsByID = Dictionary(retained.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
     }
 
     public mutating func nextVersion(nodeID: String) -> MeshVersion {
-        logicalClock &+= 1
+        logicalClock += 1
         return MeshVersion(
             counter: logicalClock,
             nodeID: nodeID,

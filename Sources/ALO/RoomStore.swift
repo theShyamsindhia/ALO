@@ -2,6 +2,12 @@ import Foundation
 import Security
 import ALOCore
 
+protocol RoomSecretStoring {
+    func read(roomID: String) -> String?
+    func write(_ value: String, roomID: String) throws
+    func remove(roomID: String)
+}
+
 final class RoomStore {
     private struct StoredRoom: Codable {
         let id: String
@@ -13,11 +19,19 @@ final class RoomStore {
     }
 
     private let fileURL: URL
-    private let secrets = RoomSecretStore()
+    private let secrets: any RoomSecretStoring
     private let roomStateIOQueue = DispatchQueue(label: "in.werai.room-state.persistence", qos: .utility)
+    private struct PendingWrite {
+        var events: [MeshRoomEvent]?
+        var document: Data?
+    }
+    private let pendingLock = NSLock()
+    private var pendingWrites = [String: PendingWrite]()
+    private var writeScheduled = false
     private var forgottenRoomIDs = Set<String>()
 
-    init(fileURL: URL? = nil) {
+    init(fileURL: URL? = nil, secretStore: (any RoomSecretStoring)? = nil) {
+        self.secrets = secretStore ?? RoomSecretStore()
         if let fileURL {
             self.fileURL = fileURL
         } else {
@@ -54,13 +68,13 @@ final class RoomStore {
     }
 
     func save(_ room: RoomConfiguration) throws {
-        roomStateIOQueue.async { [self] in forgottenRoomIDs.remove(room.id) }
         var rooms = load().filter { $0.id != room.id }
         rooms.insert(room, at: 0)
         if room.isPrivate, let key = room.accessKey {
             try secrets.write(key, roomID: room.id)
         }
         try persist(rooms)
+        roomStateIOQueue.async { [self] in forgottenRoomIDs.remove(room.id) }
     }
 
     @discardableResult
@@ -83,9 +97,10 @@ final class RoomStore {
 
     func forget(roomID: String) throws {
         try persist(load().filter { $0.id != roomID })
-        try? FileManager.default.removeItem(at: eventsURL(roomID: roomID))
-        roomStateIOQueue.async { [self] in
+        roomStateIOQueue.sync { [self] in
             forgottenRoomIDs.insert(roomID)
+            pendingLock.withLock { _ = pendingWrites.removeValue(forKey: roomID) }
+            try? FileManager.default.removeItem(at: eventsURL(roomID: roomID))
             try? FileManager.default.removeItem(at: roomStateURL(roomID: roomID))
         }
         secrets.remove(roomID: roomID)
@@ -102,11 +117,18 @@ final class RoomStore {
     }
 
     func loadEvents(roomID: String) -> [MeshRoomEvent] {
-        guard let data = try? Data(contentsOf: eventsURL(roomID: roomID)) else { return [] }
-        return (try? JSONDecoder().decode([MeshRoomEvent].self, from: data)) ?? []
+        roomStateIOQueue.sync {
+            drainPendingWrites()
+            guard let data = try? Data(contentsOf: eventsURL(roomID: roomID)) else { return [] }
+            return (try? JSONDecoder().decode([MeshRoomEvent].self, from: data)) ?? []
+        }
     }
 
     func saveEvents(_ events: [MeshRoomEvent], roomID: String) {
+        enqueue(roomID: roomID) { $0.events = events }
+    }
+
+    private func writeEvents(_ events: [MeshRoomEvent], roomID: String) {
         let chats = events.filter { $0.kind == .chat }.suffix(500)
         let latestPlayback = events.filter { $0.kind == .playback }.max { $0.version < $1.version }
         let latestVideo = events.filter { $0.kind == .video }.max { $0.version < $1.version }
@@ -133,15 +155,37 @@ final class RoomStore {
 
     func loadRoomStateDocument(roomID: String) -> Data? {
         roomStateIOQueue.sync {
-            try? Data(contentsOf: roomStateURL(roomID: roomID))
+            drainPendingWrites()
+            return try? Data(contentsOf: roomStateURL(roomID: roomID))
         }
     }
 
     func saveRoomStateDocument(_ document: Data, roomID: String) {
         guard !document.isEmpty else { return }
-        roomStateIOQueue.async { [self] in
-            guard !forgottenRoomIDs.contains(roomID) else { return }
-            try? document.write(to: roomStateURL(roomID: roomID), options: .atomic)
+        enqueue(roomID: roomID) { $0.document = document }
+    }
+
+    private func enqueue(roomID: String, update: (inout PendingWrite) -> Void) {
+        pendingLock.withLock {
+            update(&pendingWrites[roomID, default: PendingWrite()])
+            guard !writeScheduled else { return }
+            writeScheduled = true
+            roomStateIOQueue.async { [self] in drainPendingWrites() }
+        }
+    }
+
+    private func drainPendingWrites() {
+        let writes = pendingLock.withLock {
+            let writes = pendingWrites
+            pendingWrites.removeAll()
+            writeScheduled = false
+            return writes
+        }
+        for (roomID, write) in writes where !forgottenRoomIDs.contains(roomID) {
+            if let events = write.events { writeEvents(events, roomID: roomID) }
+            if let document = write.document {
+                try? document.write(to: roomStateURL(roomID: roomID), options: .atomic)
+            }
         }
     }
 
@@ -169,7 +213,7 @@ final class RoomStore {
     }
 }
 
-private final class RoomSecretStore {
+final class RoomSecretStore: RoomSecretStoring {
     private let service = Bundle.main.bundleIdentifier == "in.werai.audio.dev"
         ? "in.werai.audio.dev.room"
         : "in.werai.audio.room"
@@ -189,16 +233,33 @@ private final class RoomSecretStore {
         return String(data: data, encoding: .utf8)
     }
 
+    private let update: (CFDictionary, CFDictionary) -> OSStatus
+    private let add: (CFDictionary) -> OSStatus
+
+    init(update: @escaping (CFDictionary, CFDictionary) -> OSStatus = SecItemUpdate,
+         add: @escaping (CFDictionary) -> OSStatus = { SecItemAdd($0, nil) }) {
+        self.update = update
+        self.add = add
+    }
+
     func write(_ value: String, roomID: String) throws {
-        remove(roomID: roomID)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: roomID,
+        ]
+        let attributes: [String: Any] = [
             kSecValueData as String: Data(value.utf8),
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
         ]
-        let status = SecItemAdd(query as CFDictionary, nil)
+        var status = update(query as CFDictionary, attributes as CFDictionary)
+        if status == errSecItemNotFound {
+            status = add(query.merging(attributes) { _, new in new } as CFDictionary)
+            // Another writer may have inserted the item after our lookup.
+            if status == errSecDuplicateItem {
+                status = update(query as CFDictionary, attributes as CFDictionary)
+            }
+        }
         guard status == errSecSuccess else {
             throw NSError(domain: NSOSStatusErrorDomain, code: Int(status))
         }

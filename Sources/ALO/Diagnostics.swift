@@ -82,12 +82,22 @@ struct ReceiverTimingDiagnostics: Sendable, Equatable {
     let resyncCount: UInt64
 }
 
+struct HostListenerTimingDiagnostics: Sendable, Equatable {
+    let peerID: String
+    let isTimingEligible: Bool
+    let reportAgeMilliseconds: Double?
+    let recommendedBufferMilliseconds: Double
+    let hardwareFloorMilliseconds: Double
+}
+
 struct HostTimingDiagnostics: Sendable, Equatable {
     let listenerCount: Int
     let reportingListenerCount: Int
     let groupBufferMilliseconds: Double
     let maximumLatenessMilliseconds: Double
     let totalResyncCount: UInt64
+    var roomTimingChangeCount: UInt64 = 0
+    var listeners: [HostListenerTimingDiagnostics] = []
 }
 
 struct SessionTimingDiagnostics: Sendable, Equatable {
@@ -144,6 +154,11 @@ struct DiagnosticRoomContext: Sendable, Equatable {
             parts.append("\(host.reportingListenerCount)/\(host.listenerCount) listeners reporting")
             parts.append("max lateness \(Self.milliseconds(host.maximumLatenessMilliseconds))")
             parts.append("resyncs \(host.totalResyncCount)")
+            parts.append("room timing changes \(host.roomTimingChangeCount)")
+            for (index, listener) in host.listeners.enumerated() {
+                let age = listener.reportAgeMilliseconds.map(Self.milliseconds) ?? "not reported"
+                parts.append("listener \(index + 1): network \(Self.milliseconds(listener.recommendedBufferMilliseconds)), hardware floor \(Self.milliseconds(listener.hardwareFloorMilliseconds)), network vote \(listener.isTimingEligible ? "eligible" : "late join"), report age \(age)")
+            }
         }
         let ready = hasBroadcaster && (role == .broadcaster || timing?.receiver?.roundTripMilliseconds != nil)
         return DiagnosticCheckResult(
@@ -175,7 +190,7 @@ struct DiagnosticReportContext: Sendable {
 enum DiagnosticRedactor {
     private static let replacements: [(String, String)] = [
         (#"/Users/[^/\s]+"#, "/Users/<redacted>"),
-        (#"\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[1-5][0-9A-Fa-f]{3}-[89ABab][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}\b"#, "<redacted-id>"),
+        (#"\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b"#, "<redacted-id>"),
         (#"\b(?:\d{1,3}\.){3}\d{1,3}\b"#, "<redacted-ip>"),
         (#"\b[0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5}\b"#, "<redacted-address>"),
         (#"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b"#, "<redacted-email>"),

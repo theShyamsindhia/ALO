@@ -471,6 +471,7 @@ public final class AutomergeRoomStateSync: RoomStateSync, @unchecked Sendable {
 
     private func isValid(_ event: MeshRoomEvent, encodedBytes: Int) -> Bool {
         guard event.roomID == roomID,
+              MeshRoomReplica.hasPlausibleCounters(event),
               event.id.utf8.count <= 256,
               encodedBytes <= Self.maximumEventBytes
         else { return false }
