@@ -125,6 +125,11 @@ struct StoredDefault<Value: StoredSettingValue> {
 
 @MainActor
 class SettingsStoreBase: ObservableObject {
+    // @StoredDefault does not install Combine's @Published storage. Keep one
+    // stable publisher even on macOS versions whose synthesized publisher is
+    // recreated for objects without any @Published properties.
+    let objectWillChange = ObservableObjectPublisher()
+
     // ARC only: these settings own values, publishers and defaults, with no
     // executor-bound cleanup. Avoid isolated-deinit backdeployment on macOS 15
     // when a synchronous dispatch callback releases the last reference.

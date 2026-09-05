@@ -91,6 +91,9 @@ final class StoredDefaultTests: XCTestCase {
         let store = CalendarSettingsStore(defaults: testDefaults)
         var changeCount = 0
         var cancellables = Set<AnyCancellable>()
+        defer { withExtendedLifetime(cancellables) {} }
+        XCTAssertTrue(store.objectWillChange === store.objectWillChange,
+                      "Custom stored defaults must publish through one stable observable publisher")
 
         store.objectWillChange.sink {
             changeCount += 1
