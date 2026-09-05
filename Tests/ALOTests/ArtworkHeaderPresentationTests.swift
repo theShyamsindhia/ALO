@@ -13,6 +13,9 @@ extension NativePresentationTests {
         func artworkHeader(dark: Bool) async throws {
             _ = NSApplication.shared
             let model = ALOViewModel(discoverRooms: false)
+            func snapshot(_ name: String) async throws -> NSBitmapImageRep {
+            // Mount only after the model settles, while retaining the explicit
+            // phase marker and native raster-stability barrier from integration.
             let window = NSWindow(contentRect: NSRect(x: -2000, y: 0, width: 560, height: 144),
                                   styleMask: .borderless, backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false
@@ -30,7 +33,6 @@ extension NativePresentationTests {
             defer { window.close() }
             window.orderBack(nil)
 
-            func snapshot(_ name: String) async throws -> NSBitmapImageRep {
                 let environment = ProcessInfo.processInfo.environment
                 let folder = environment["ALO_SPACES_SNAPSHOT_DIR"].map { URL(fileURLWithPath: $0, isDirectory: true) }
                     ?? URL(fileURLWithPath: environment["RUNNER_TEMP"] ?? NSTemporaryDirectory(), isDirectory: true)
@@ -85,6 +87,13 @@ extension NativePresentationTests {
                     "The current model state did not finish rendering; inspect \(destination.path)")
                 return try #require(result)
             }
+            func waitForModel(_ condition: () -> Bool) async throws {
+                let deadline = ContinuousClock.now + .seconds(2)
+                while !condition(), ContinuousClock.now < deadline {
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                #expect(condition())
+            }
             func pixel(_ bitmap: NSBitmapImageRep, x: CGFloat, y: CGFloat) throws -> NSColor {
                 let scale = CGFloat(bitmap.pixelsWide) / 560
                 return try #require(bitmap.colorAt(x: Int(x * scale), y: Int(y * scale))?.usingColorSpace(.sRGB))
@@ -108,6 +117,7 @@ extension NativePresentationTests {
             }
             cover.unlockFocus()
             model.nowPlayingCallback(NowPlayingMedia(title: "Colour study", artist: "ALO", artworkData: cover.tiffRepresentation))
+            try await waitForModel { model.roomArtworkPalette != nil }
             let first = try await snapshot("multicolour")
             let palette = try #require(model.roomArtworkPalette)
             #expect(Set(palette.hexes).count == 3)
@@ -131,6 +141,7 @@ extension NativePresentationTests {
 
             // Metadata-only updates for the same song must not flash the theme away.
             model.nowPlayingCallback(NowPlayingMedia(title: "Colour study", artist: "ALO", isPlaying: false))
+            try await waitForModel { model.nowPlaying.isPlaying == false }
             _ = try await snapshot("paused")
             #expect(model.roomArtworkPalette == palette)
 
@@ -140,6 +151,7 @@ extension NativePresentationTests {
             NSRect(x: 0, y: 0, width: 60, height: 60).fill()
             cover.unlockFocus()
             model.nowPlayingCallback(NowPlayingMedia(title: "Monochrome", artworkData: cover.tiffRepresentation))
+            try await waitForModel { model.nowPlaying.title == "Monochrome" && model.roomArtworkPalette == nil }
             let neutral = try await snapshot("neutral")
             #expect(model.roomArtworkPalette == nil)
             let middle = try pixel(neutral, x: 320, y: 6)
