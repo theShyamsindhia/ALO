@@ -6,22 +6,30 @@ struct LyricsPanel: View {
     @ObservedObject var controller: LyricsController
     var accent: Color = Color(red: 0.55, green: 0.59, blue: 0.75)
     var position: Double? = nil
+    var expandedPresentation = false
     @State private var expanded = false
 
     var body: some View {
         if controller.enabled {
             VStack(alignment: .leading, spacing: 0) {
-                Button { expanded.toggle() } label: {
+                if expandedPresentation {
                     HStack(spacing: 6) {
                         Image(systemName: "text.alignleft")
                         Text("Lyrics")
-                        Spacer()
-                        Image(systemName: expanded ? "chevron.up" : "chevron.down").font(.system(size: 9, weight: .semibold))
                     }.font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
-                        .padding(.horizontal, 14).padding(.vertical, 9).contentShape(Rectangle())
-                }.buttonStyle(.plain).accessibilityLabel(expanded ? "Collapse lyrics" : "Show lyrics")
-                if expanded {
+                        .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 9)
                     content.padding(.horizontal, 14).padding(.bottom, 10)
+                } else {
+                    Button { expanded.toggle() } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "text.alignleft")
+                            Text("Lyrics")
+                            Spacer()
+                            Image(systemName: expanded ? "chevron.up" : "chevron.down").font(.system(size: 9, weight: .semibold))
+                        }.font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+                            .padding(.horizontal, 14).padding(.vertical, 9).contentShape(Rectangle())
+                    }.buttonStyle(.plain).accessibilityLabel(expanded ? "Collapse lyrics" : "Show lyrics")
+                    if expanded { content.padding(.horizontal, 14).padding(.bottom, 10) }
                 }
             }
         }
@@ -75,5 +83,41 @@ struct LyricsPanel: View {
     private func active(_ result: LyricsResult) -> Int? { LyricsProvider.activeLine(in: result.lines, seconds: position) }
     private func status(_ text: String) -> some View {
         Text(text).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+struct LyricsPlayerLine: View {
+    @ObservedObject var controller: LyricsController
+    let position: Double?
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "quote.bubble")
+                .font(.system(size: 8, weight: .medium))
+            Text(label)
+                .lineLimit(1)
+                .allowsTightening(true)
+        }
+        .font(.system(size: 9, weight: .medium))
+        .foregroundStyle(.secondary)
+        .accessibilityLabel("Lyrics: \(label)")
+    }
+
+    private var label: String {
+        switch controller.state {
+        case .disabled: return "Lyrics off"
+        case .missingTrack: return "Lyrics need a track title and artist"
+        case .loading: return "Finding lyrics…"
+        case .unavailable(let message), .failed(let message): return message
+        case .ready(let result):
+            if result.instrumental { return "Instrumental · no lyrics" }
+            if let index = LyricsProvider.activeLine(in: result.lines, seconds: position),
+               let line = result.lines.first(where: { $0.id == index }), !line.text.isEmpty {
+                return line.text
+            }
+            return result.lines.first(where: { !$0.text.isEmpty })?.text
+                ?? result.plain.split(separator: "\n").first.map(String.init)
+                ?? "Lyrics available"
+        }
     }
 }

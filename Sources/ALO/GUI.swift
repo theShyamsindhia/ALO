@@ -1449,6 +1449,7 @@ final class ALOViewModel: ObservableObject {
         didSet { UserDefaults.standard.set(chatNotificationMode.rawValue, forKey: "chatNotificationMode") }
     }
     @Published var draftMessage = ""
+    @Published private(set) var chatAttachmentURLs = [String: URL]()
     @Published var unreadMessageCount = 0
     @Published private(set) var firstUnreadMessageID: UUID?
     @Published private(set) var incomingMessagePreview: RoomMessage?
@@ -1922,6 +1923,9 @@ final class ALOViewModel: ObservableObject {
             mediaStateHandler: mediaStateCallback,
             nowPlayingHandler: nowPlayingCallback,
             chatHandler: chatCallback,
+            chatAttachmentHandler: { [weak self] senderID, payload in
+                self?.receiveChatAttachment(payload, senderID: senderID)
+            },
             queueHandler: queueCallback,
             videoHandler: videoCallback,
             annotationSceneHandler: { [weak self] scene in self?.annotationScene = scene },
@@ -2947,6 +2951,40 @@ final class ALOViewModel: ObservableObject {
         draftMessage = ""
     }
 
+    func sendChatAttachment(_ operation: RoomChatOperation, fileURL: URL) -> Bool {
+        guard phase == .live, let meshSession, let attachment = operation.attachment,
+              operation.kind == .message, operation.encoded != nil else { return false }
+        let accessed = fileURL.startAccessingSecurityScopedResource()
+        defer { if accessed { fileURL.stopAccessingSecurityScopedResource() } }
+        guard let data = try? Data(contentsOf: fileURL, options: [.mappedIfSafe]),
+              let payload = RoomChatAttachmentPayload(attachment: attachment, data: data),
+              let roomID = activeRoomConfiguration?.id,
+              let stored = try? ChatAttachmentStore.save(payload, roomID: roomID) else { return false }
+        let key = chatAttachmentKey(senderID: meshSession.nodeID, attachmentID: attachment.id)
+        chatAttachmentURLs[key] = stored
+        guard sendChatOperation(operation) else {
+            chatAttachmentURLs.removeValue(forKey: key)
+            return false
+        }
+        meshSession.sendChatAttachment(payload)
+        return true
+    }
+
+    func chatAttachmentURL(for message: RoomChatMessage) -> URL? {
+        guard let attachment = message.attachment else { return nil }
+        return chatAttachmentURLs[chatAttachmentKey(senderID: message.senderID, attachmentID: attachment.id)]
+    }
+
+    private func receiveChatAttachment(_ payload: RoomChatAttachmentPayload, senderID: String) {
+        guard let roomID = activeRoomConfiguration?.id,
+              let stored = try? ChatAttachmentStore.save(payload, roomID: roomID) else { return }
+        chatAttachmentURLs[chatAttachmentKey(senderID: senderID, attachmentID: payload.attachment.id)] = stored
+    }
+
+    private func chatAttachmentKey(senderID: String, attachmentID: String) -> String {
+        senderID + "|" + attachmentID
+    }
+
     @discardableResult
     func sendChatOperation(_ operation: RoomChatOperation) -> Bool {
         guard phase == .live, let meshSession, let wire = operation.encoded else { return false }
@@ -3042,6 +3080,18 @@ final class ALOViewModel: ObservableObject {
         } else {
             floatingSection = .chat
         }
+    }
+
+    func showShortcutMapper() {
+        (NSApp.delegate as? ALOAppDelegate)?.showShortcutMapper(nil)
+    }
+
+    func showDiagnostics() {
+        (NSApp.delegate as? ALOAppDelegate)?.showDiagnostics(nil)
+    }
+
+    func showAppSettings() {
+        (NSApp.delegate as? ALOAppDelegate)?.showSettings(nil)
     }
 
     func setChatViewportAtLatest(_ id: UUID, _ atLatest: Bool) {
@@ -3495,6 +3545,7 @@ final class ALOViewModel: ObservableObject {
         globalShortcutTalkTargets.removeAll()
         participants = []
         messages = []
+        chatAttachmentURLs.removeAll()
         chatDocument = RoomChatDocument()
         chatViewportsAtLatest.removeAll()
         unreadMessageCount = 0
@@ -4184,6 +4235,7 @@ struct FloatingRoomView: View {
     }
     @State private var showsRoomInfo = false
     @State private var showsMediaMore = false
+    @State private var showsLyrics = false
 
     private var panelTransition: AnyTransition {
         reduceMotion
@@ -4448,13 +4500,6 @@ struct FloatingRoomView: View {
                         Label("Room queue", systemImage: "music.note.list")
                             .frame(maxWidth: .infinity, alignment: .leading).padding(8)
                     }
-                    Button {
-                        showsMediaMore = false
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { showsRoomInfo = true }
-                    } label: {
-                        Label("Room settings", systemImage: "slider.horizontal.3")
-                            .frame(maxWidth: .infinity, alignment: .leading).padding(8)
-                    }
                     if presentation == .floating {
                         Divider()
                         Toggle("Member and navigation strip", isOn: $model.floatingNavigationVisible)
@@ -4530,6 +4575,29 @@ struct FloatingRoomView: View {
                         ViewThatFits(in: .horizontal) {
                             statusLabel(compact: false)
                             statusLabel(compact: true)
+                        }
+                    }
+                    if model.lyrics.enabled {
+                        TimelineView(.periodic(from: .now, by: 0.5)) { context in
+                            Button { showsLyrics.toggle() } label: {
+                                LyricsPlayerLine(
+                                    controller: model.lyrics,
+                                    position: model.roomPlaybackPosition(at: context.date)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .help("Show full lyrics")
+                        }
+                        .popover(isPresented: $showsLyrics, arrowEdge: .bottom) {
+                            TimelineView(.periodic(from: .now, by: 0.5)) { context in
+                                LyricsPanel(
+                                    controller: model.lyrics,
+                                    accent: roomAccent,
+                                    position: model.roomPlaybackPosition(at: context.date),
+                                    expandedPresentation: true
+                                )
+                                .frame(width: 320)
+                            }
                         }
                     }
                 }
@@ -4673,7 +4741,7 @@ struct FloatingRoomView: View {
                     Text(message.sender)
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Palette.ink)
-                    Text(message.text)
+                    Text(message.previewText)
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(Palette.secondary)
                         .lineLimit(1)
@@ -4698,7 +4766,7 @@ struct FloatingRoomView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(PressScaleButtonStyle())
-        .accessibilityLabel("New message from \(message.sender): \(message.text)")
+        .accessibilityLabel("New message from \(message.sender): \(message.previewText)")
         .help("Open conversation")
     }
 
@@ -4869,12 +4937,6 @@ struct FloatingRoomView: View {
                 }.font(.system(size: 11)).padding(.horizontal, 14).padding(.vertical, 9)
                     .background(.white.opacity(0.035))
             }
-            if !showsGames, model.lyrics.enabled {
-                TimelineView(.periodic(from: .now, by: 0.5)) { context in
-                    LyricsPanel(controller: model.lyrics, accent: roomAccent,
-                                position: model.roomPlaybackPosition(at: context.date))
-                }
-            }
             if showsGames {
                 ArenaPanel(session: model.arena)
                     .onAppear { model.arena.names = Dictionary(uniqueKeysWithValues: model.participants.map { ($0.id, $0.name) }) }
@@ -4892,6 +4954,8 @@ struct FloatingRoomView: View {
                     accent: roomAccent,
                     onLatestVisibilityChanged: model.setChatViewportAtLatest,
                     send: model.sendChatOperation,
+                    sendAttachment: model.sendChatAttachment,
+                    attachmentURL: model.chatAttachmentURL,
                     draft: $model.draftMessage,
                     notificationMode: $model.chatNotificationMode,
                     mentionNames: model.participants.filter { $0.id != model.currentParticipantID }.map(\.name),
@@ -5851,6 +5915,7 @@ struct WalkieTalkieBar: View {
     var embeddedFloating = false
     var onRoomSettings: (() -> Void)? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var showsSettings = false
 
     var body: some View {
         Group {
@@ -6020,11 +6085,7 @@ struct WalkieTalkieBar: View {
             }
             .keyboardShortcut("2", modifiers: .command)
 
-            if let onRoomSettings {
-                communicationButton(icon: "slider.horizontal.3", active: false, help: "Room settings", action: onRoomSettings)
-            } else {
-                settingsMenu
-            }
+            settingsButton
 
             if showsCloseButton {
                 Button(action: model.hideWalkieBar) {
@@ -6051,107 +6112,27 @@ struct WalkieTalkieBar: View {
         }
     }
 
-    private var settingsMenu: some View {
-        Menu {
-            Text("Microphone input")
-            Button {
-                model.selectVoiceInput(nil)
-            } label: {
-                if model.selectedVoiceInputUID == nil {
-                    Label(systemDefaultMicrophoneLabel, systemImage: "checkmark")
-                } else {
-                    Text(systemDefaultMicrophoneLabel)
-                }
+    @ViewBuilder
+    private var settingsButton: some View {
+        if let onRoomSettings {
+            communicationButton(
+                icon: "slider.horizontal.3",
+                active: false,
+                help: "Room and audio settings",
+                action: onRoomSettings
+            )
+        } else {
+            communicationButton(
+                icon: "slider.horizontal.3",
+                active: showsSettings,
+                help: "Room and audio settings"
+            ) {
+                showsSettings.toggle()
             }
-            ForEach(model.voiceInputDevices) { input in
-                Button {
-                    model.selectVoiceInput(input.id)
-                } label: {
-                    if input.id == model.selectedVoiceInputUID {
-                        Label(input.menuName, systemImage: "checkmark")
-                    } else {
-                        Text(input.menuName)
-                    }
-                }
+            .popover(isPresented: $showsSettings, arrowEdge: .top) {
+                RoomPreferencesView(model: model)
             }
-            Button("Refresh microphones") { model.refreshVoiceInputs() }
-            Divider()
-            Menu("Audio to share: \(model.selectedAudioSourceTitle)") {
-                Button {
-                    model.selectAudioSource(nil)
-                } label: {
-                    if model.selectedAudioSourceBundleID == nil {
-                        Label("All system audio", systemImage: "checkmark")
-                    } else {
-                        Text("All system audio")
-                    }
-                }
-                .disabled(model.isHost)
-                Divider()
-                if let selectedID = model.selectedAudioSourceBundleID,
-                   !model.audioSourceApplications.contains(where: { $0.bundleIdentifier == selectedID }) {
-                    Label("\(model.selectedAudioSourceName ?? "Selected app") · not currently audible",
-                          systemImage: "checkmark")
-                        .disabled(true)
-                }
-                ForEach(model.audioSourceApplications) { application in
-                    Button {
-                        model.selectAudioSource(application)
-                    } label: {
-                        if model.selectedAudioSourceBundleID == application.bundleIdentifier {
-                            Label(application.name, systemImage: "checkmark")
-                        } else {
-                            Text(application.name)
-                        }
-                    }
-                    .disabled(model.isHost)
-                }
-                if model.audioSourceApplications.isEmpty {
-                    Text("Play audio in an app, then refresh")
-                }
-                Divider()
-                Button("Refresh audible apps") { model.refreshAudioSourceApplications() }
-                if model.isHost {
-                    Text("Stop broadcasting to change source")
-                }
-            }
-            Divider()
-            Button(model.incomingCallsMuted ? "Unmute incoming voice" : "Mute incoming voice") {
-                model.toggleIncomingCallsMute()
-            }
-            Button(model.incomingMediaMuted ? "Unmute room media" : "Mute room media") {
-                model.toggleIncomingMediaMute()
-            }
-            Divider()
-            Button(model.walkieBarHidden ? "Show Talk bar" : "Hide Talk bar") {
-                model.walkieBarHidden ? model.showWalkieBar() : model.hideWalkieBar()
-            }
-            Button(model.floatingBarHidden ? "Show media floating bar" : "Hide media floating bar") {
-                model.floatingBarHidden ? model.showFloatingBar() : model.hideFloatingBar()
-            }
-            Divider()
-            Button("Shortcut Mapper…") {
-                (NSApp.delegate as? ALOAppDelegate)?.showShortcutMapper(nil)
-            }
-            Button("Diagnostics…") {
-                (NSApp.delegate as? ALOAppDelegate)?.showDiagnostics(nil)
-            }
-            Button("Settings…") {
-                (NSApp.delegate as? ALOAppDelegate)?.showSettings(nil)
-            }
-        } label: {
-            Image(systemName: "slider.horizontal.3")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Palette.controlIcon)
-                .frame(width: 30, height: 30)
-                .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize(horizontal: true, vertical: false)
-        .help("Talk settings · \(selectedMicrophoneName)")
-        .accessibilityLabel("Talk settings")
-        .onAppear { model.refreshAudioSourceApplications() }
     }
 
     private var voiceStateLabel: String {
@@ -6176,20 +6157,6 @@ struct WalkieTalkieBar: View {
 
     private var remoteParticipants: [RoomParticipant] {
         model.participants.filter { $0.id != model.currentParticipantID }
-    }
-
-    private var selectedMicrophoneName: String {
-        guard let selectedVoiceInputUID = model.selectedVoiceInputUID else {
-            let automaticName = VoiceInputCatalog.automaticInputName()
-            return automaticName.map { "Automatic · \($0)" } ?? "Automatic"
-        }
-        return model.voiceInputDevices.first(where: { $0.id == selectedVoiceInputUID })?.menuName
-            ?? "System microphone"
-    }
-
-    private var systemDefaultMicrophoneLabel: String {
-        VoiceInputCatalog.automaticInputName().map { "Automatic — \($0)" }
-            ?? "Automatic Microphone"
     }
 
     @ViewBuilder

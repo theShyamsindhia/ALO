@@ -226,6 +226,7 @@ final class MeshSession {
         mediaStateHandler: @escaping (Bool) -> Void,
         nowPlayingHandler: @escaping (NowPlayingMedia) -> Void,
         chatHandler: @escaping (String, String, String, UInt64, MeshVersion) -> Void,
+        chatAttachmentHandler: @escaping (String, RoomChatAttachmentPayload) -> Void = { _, _ in },
         queueHandler: @escaping ([RoomQueueItem]) -> Void,
         videoHandler: @escaping (CGImage) -> Void,
         annotationSceneHandler: @escaping (AnnotationSceneModel?) -> Void = { _ in },
@@ -322,6 +323,9 @@ final class MeshSession {
             arenaHandler: { sender, data in
                 DispatchQueue.main.async { arenaHandler(sender, data) }
             },
+            chatAttachmentHandler: { sender, payload in
+                DispatchQueue.main.async { chatAttachmentHandler(sender, payload) }
+            },
             roomStatePersistenceHandler: roomStatePersistenceHandler,
             installationIdentity: installationIdentity,
             peerPins: peerPins,
@@ -414,6 +418,7 @@ final class MeshSession {
     func sendArena(_ data: Data, targetID: String?) { control.publishArena(data, targetID: targetID) }
 
     func sendChat(_ text: String) { control.publishChat(text) }
+    func sendChatAttachment(_ payload: RoomChatAttachmentPayload) { control.publishChatAttachment(payload) }
     func addQueueItem(_ item: RoomQueueItem) {
         control.publishQueueAdd(RoomQueueItem(
             id: item.id,

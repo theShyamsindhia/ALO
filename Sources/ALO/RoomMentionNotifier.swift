@@ -26,7 +26,7 @@ final class RoomMentionNotifier: NSObject, UNUserNotificationCenterDelegate {
         let content = UNMutableNotificationContent()
         content.title = "\(message.sender) mentioned you"
         content.subtitle = roomTitle
-        content.body = String(message.text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(240))
+        content.body = String(message.previewText.prefix(240))
         content.sound = .default
         content.threadIdentifier = "room-\(roomTitle)"
 
