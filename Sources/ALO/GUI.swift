@@ -879,7 +879,7 @@ private final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
         let popoverController = NSHostingController(
             rootView: VStack(spacing: 0) {
                 FloatingRoomView(model: model, presentation: .menuBar)
-                Divider()
+                RoomPlaybackProgressDivider(model: model)
                 WalkieTalkieBar(model: model, showsCloseButton: false)
             }
             .background(Palette.opaqueSurface)
@@ -1456,6 +1456,7 @@ final class ALOViewModel: ObservableObject {
     @Published var incomingCallsMuted: Bool
     @Published var roomHasVideo = false
     @Published var nowPlaying = NowPlayingMedia()
+    private var nowPlayingReceivedAt = Date()
     @Published private(set) var roomAccentHex: String?
     @Published private(set) var roomArtworkPalette: ArtworkPalette?
     @Published var localNowPlaying = NowPlayingMedia()
@@ -1600,6 +1601,9 @@ final class ALOViewModel: ObservableObject {
             audioIsRendering: audioIsRendering,
             hasMedia: !nowPlaying.isEmpty || audioIsRendering
         )
+    }
+    func roomPlaybackProgress(at date: Date) -> Double? {
+        nowPlaying.playbackProgress(elapsedSinceReceipt: date.timeIntervalSince(nowPlayingReceivedAt))
     }
     var canControlRoomPlayback: Bool {
         Self.playbackControlAvailable(
@@ -3100,6 +3104,7 @@ final class ALOViewModel: ObservableObject {
                 let sameTrack = self.nowPlaying.title == media.title
                     && self.nowPlaying.artist == media.artist
                     && self.nowPlaying.album == media.album
+                self.nowPlayingReceivedAt = Date()
                 self.nowPlaying = media
                 if (media.artworkData != nil || !sameTrack), self.roomArtworkPalette != artworkPalette {
                     self.roomArtworkPalette = artworkPalette
@@ -3191,6 +3196,7 @@ final class ALOViewModel: ObservableObject {
         videoBroadcastTimeoutTask?.cancel()
         videoBroadcastTimeoutTask = nil
         nowPlaying = NowPlayingMedia()
+        nowPlayingReceivedAt = Date()
         roomAccentHex = nil
         roomArtworkPalette = nil
         localNowPlaying = NowPlayingMedia()
@@ -5296,6 +5302,61 @@ private struct VoiceLevelBadge: View {
         .clipShape(Capsule())
         .overlay(Capsule().stroke(Palette.glassHighlight.opacity(0.74), lineWidth: 0.75))
         .scaleEffect(1 + CGFloat(level) * 0.035)
+        .accessibilityHidden(true)
+    }
+}
+
+struct RoomPlaybackProgressDivider: View {
+    @ObservedObject var model: ALOViewModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        TimelineView(.animation(
+            minimumInterval: 1.0 / 15.0,
+            paused: reduceMotion || model.nowPlaying.isPlaying != true
+        )) { timeline in
+            GeometryReader { geometry in
+                let progress = model.roomPlaybackProgress(at: timeline.date)
+                ZStack(alignment: .leading) {
+                    Rectangle()
+                        .fill(Palette.strokeStrong.opacity(0.5))
+
+                    if let progress {
+                        Rectangle()
+                            .fill(model.roomAccentColor.opacity(0.48))
+                            .scaleEffect(x: max(0.001, progress), anchor: .leading)
+
+                        playbackFlare(progress: progress, width: geometry.size.width)
+                    }
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Playback progress")
+                .accessibilityValue(progress.map { "\(Int(($0 * 100).rounded())) percent" } ?? "Unavailable")
+                .accessibilityHidden(progress == nil)
+            }
+        }
+        .frame(height: FloatingMetrics.separatorHeight)
+        .allowsHitTesting(false)
+    }
+
+    private func playbackFlare(progress: Double, width: CGFloat) -> some View {
+        let flareWidth: CGFloat = 28
+        let x = min(max(0, CGFloat(progress) * width - flareWidth / 2), max(0, width - flareWidth))
+        return LinearGradient(
+            colors: [
+                .clear,
+                model.roomAccentColor.opacity(0.28),
+                Color.white.opacity(0.72),
+                model.roomAccentColor.opacity(0.62),
+                .clear
+            ],
+            startPoint: .leading,
+            endPoint: .trailing
+        )
+        .frame(width: flareWidth, height: 3)
+        .blur(radius: 0.7)
+        .offset(x: x, y: -1)
+        .blendMode(.screen)
         .accessibilityHidden(true)
     }
 }

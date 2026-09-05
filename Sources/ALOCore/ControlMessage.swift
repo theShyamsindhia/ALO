@@ -60,6 +60,8 @@ public struct NowPlayingMedia: Codable, Sendable, Equatable {
     public let artworkData: Data?
     public let sourceURL: String?
     public let isPlaying: Bool?
+    public let elapsedTime: TimeInterval?
+    public let duration: TimeInterval?
 
     public init(
         title: String? = nil,
@@ -67,7 +69,9 @@ public struct NowPlayingMedia: Codable, Sendable, Equatable {
         album: String? = nil,
         artworkData: Data? = nil,
         sourceURL: String? = nil,
-        isPlaying: Bool? = nil
+        isPlaying: Bool? = nil,
+        elapsedTime: TimeInterval? = nil,
+        duration: TimeInterval? = nil
     ) {
         self.title = title
         self.artist = artist
@@ -75,10 +79,22 @@ public struct NowPlayingMedia: Codable, Sendable, Equatable {
         self.artworkData = artworkData
         self.sourceURL = sourceURL
         self.isPlaying = isPlaying
+        self.elapsedTime = elapsedTime
+        self.duration = duration
     }
 
     public var isEmpty: Bool {
         title == nil && artist == nil && album == nil && artworkData == nil
+    }
+
+    public func playbackProgress(elapsedSinceReceipt: TimeInterval = 0) -> Double? {
+        guard let duration, duration.isFinite, duration > 0,
+              let elapsedTime, elapsedTime.isFinite, elapsedTime >= 0
+        else { return nil }
+        let advancement = isPlaying == true && elapsedSinceReceipt.isFinite
+            ? max(0, elapsedSinceReceipt)
+            : 0
+        return min(1, max(0, (elapsedTime + advancement) / duration))
     }
 }
 

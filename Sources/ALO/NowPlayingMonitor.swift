@@ -15,6 +15,7 @@ final class NowPlayingMonitor {
     private var timer: DispatchSourceTimer?
     private var notificationObservers = [NSObjectProtocol]()
     private var lastMedia = NowPlayingMedia()
+    private var lastMediaReceivedAt = Date()
     private var spotifyTrackID: String?
     private var artworkTask: URLSessionDataTask?
     private var artworkRequestID: UUID?
@@ -87,7 +88,9 @@ final class NowPlayingMonitor {
                 information["kMRMediaRemoteNowPlayingInfoArtworkData"] as? Data
             ),
             sourceURL: firstWebURL(information),
-            isPlaying: playbackState(information["kMRMediaRemoteNowPlayingInfoPlaybackRate"])
+            isPlaying: playbackState(information["kMRMediaRemoteNowPlayingInfoPlaybackRate"]),
+            elapsedTime: playbackTime(information["kMRMediaRemoteNowPlayingInfoElapsedTime"]),
+            duration: playbackTime(information["kMRMediaRemoteNowPlayingInfoDuration"])
         )
         guard !media.isEmpty else { return }
         publish(media)
@@ -196,13 +199,58 @@ final class NowPlayingMonitor {
     static func applyingSpotifyArtwork(_ artwork: Data, trackID: String, to media: NowPlayingMedia) -> NowPlayingMedia? {
         guard media.sourceURL == "https://open.spotify.com/track/\(trackID)" else { return nil }
         return NowPlayingMedia(title: media.title, artist: media.artist, album: media.album,
-            artworkData: artwork, sourceURL: media.sourceURL, isPlaying: media.isPlaying)
+            artworkData: artwork, sourceURL: media.sourceURL, isPlaying: media.isPlaying,
+            elapsedTime: media.elapsedTime, duration: media.duration)
     }
 
     private func publish(_ media: NowPlayingMedia) {
-        guard media != lastMedia else { return }
-        lastMedia = media
-        handler(media)
+        let receivedAt = Date()
+        let resolved = Self.preservingPlaybackTiming(
+            in: media,
+            from: lastMedia,
+            previousReceivedAt: lastMediaReceivedAt,
+            receivedAt: receivedAt
+        )
+        guard resolved != lastMedia else { return }
+        lastMedia = resolved
+        lastMediaReceivedAt = receivedAt
+        handler(resolved)
+    }
+
+    static func preservingPlaybackTiming(
+        in media: NowPlayingMedia,
+        from previous: NowPlayingMedia,
+        previousReceivedAt: Date,
+        receivedAt: Date
+    ) -> NowPlayingMedia {
+        guard sameTrack(media, previous) else { return media }
+        let elapsedTime = media.elapsedTime ?? previous.elapsedTime.map {
+            $0 + (previous.isPlaying == true ? max(0, receivedAt.timeIntervalSince(previousReceivedAt)) : 0)
+        }
+        return NowPlayingMedia(
+            title: media.title,
+            artist: media.artist,
+            album: media.album,
+            artworkData: media.artworkData,
+            sourceURL: media.sourceURL,
+            isPlaying: media.isPlaying,
+            elapsedTime: elapsedTime,
+            duration: media.duration ?? previous.duration
+        )
+    }
+
+    private static func sameTrack(_ lhs: NowPlayingMedia, _ rhs: NowPlayingMedia) -> Bool {
+        let lhsIdentity = [lhs.title, lhs.artist, lhs.album].map(cleanIdentity)
+        let rhsIdentity = [rhs.title, rhs.artist, rhs.album].map(cleanIdentity)
+        if lhsIdentity.contains(where: { $0 != nil }) || rhsIdentity.contains(where: { $0 != nil }) {
+            return lhsIdentity == rhsIdentity
+        }
+        return cleanIdentity(lhs.sourceURL) != nil && cleanIdentity(lhs.sourceURL) == cleanIdentity(rhs.sourceURL)
+    }
+
+    private static func cleanIdentity(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+        return value
     }
 
     private func clean(_ value: String?) -> String? {
@@ -218,6 +266,15 @@ final class NowPlayingMonitor {
         case "paused", "stopped", "pause", "stop": return false
         default: return nil
         }
+    }
+
+    private func playbackTime(_ value: Any?) -> TimeInterval? {
+        let result: TimeInterval?
+        if let number = value as? NSNumber { result = number.doubleValue }
+        else if let text = value as? String { result = Double(text) }
+        else { result = nil }
+        guard let result, result.isFinite, result >= 0 else { return nil }
+        return result
     }
 
     private func firstWebURL(_ information: NSDictionary) -> String? {

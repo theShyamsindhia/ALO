@@ -7,6 +7,52 @@ import ALOCore
 extension NativePresentationTests {
     @Suite(.serialized) @MainActor
     struct RoomControlsPresentationTests {
+        @Test("Playback progress replaces the menu popover seam")
+        func playbackProgressSeam() async throws {
+            _ = NSApplication.shared
+            let model = ALOViewModel(discoverRooms: false)
+            model.nowPlayingCallback(NowPlayingMedia(
+                title: "Yesterday",
+                artist: "The Marías",
+                isPlaying: false,
+                elapsedTime: 90,
+                duration: 180
+            ))
+            try await Task.sleep(for: .milliseconds(30))
+
+            let window = NSWindow(
+                contentRect: NSRect(x: -2000, y: 0, width: 560, height: 145),
+                styleMask: .borderless,
+                backing: .buffered,
+                defer: false
+            )
+            window.isReleasedWhenClosed = false
+            let hosting = NSHostingView(rootView: VStack(spacing: 0) {
+                FloatingRoomView(model: model, presentation: .menuBar)
+                RoomPlaybackProgressDivider(model: model)
+                WalkieTalkieBar(model: model, showsCloseButton: false)
+            }
+            .transaction { $0.disablesAnimations = true })
+            window.contentView = hosting
+            defer { window.close() }
+            window.orderBack(nil)
+            try await Task.sleep(for: .milliseconds(120))
+            hosting.layoutSubtreeIfNeeded()
+            let bitmap = try #require(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
+            hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
+
+            #expect(bitmap.pixelsWide > 0)
+            #expect(bitmap.pixelsHigh > 0)
+            #expect(try #require(model.roomPlaybackProgress(at: Date())) == 0.5)
+
+            if let directory = ProcessInfo.processInfo.environment["ALO_SPACES_SNAPSHOT_DIR"] {
+                let folder = URL(fileURLWithPath: directory, isDirectory: true)
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                let png = try #require(bitmap.representation(using: .png, properties: [:]))
+                try png.write(to: folder.appendingPathComponent("playback-progress-seam.png"))
+            }
+        }
+
         @Test("The setup window toggles without closing or rebuilding its content")
         func setupWindowToggle() {
             _ = NSApplication.shared

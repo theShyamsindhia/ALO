@@ -404,7 +404,9 @@ final class HostServer {
                 album: media.album,
                 artworkData: media.artworkData,
                 sourceURL: media.sourceURL,
-                isPlaying: media.isPlaying ?? self.roomPlaybackIsPlaying
+                isPlaying: media.isPlaying ?? self.roomPlaybackIsPlaying,
+                elapsedTime: media.elapsedTime,
+                duration: media.duration
             )
             if presentedMedia != self.nowPlaying {
                 self.nowPlaying = presentedMedia
@@ -762,7 +764,9 @@ final class HostServer {
             album: nowPlaying.album,
             artworkData: nowPlaying.artworkData,
             sourceURL: nowPlaying.sourceURL,
-            isPlaying: requestedState
+            isPlaying: requestedState,
+            elapsedTime: nowPlaying.elapsedTime,
+            duration: nowPlaying.duration
         )
         broadcast(ControlMessage(type: "now_playing", nowPlaying: nowPlaying))
         broadcast(ControlMessage(type: "room_playback", isPlaying: requestedState))
