@@ -17,21 +17,29 @@ final class MailDatabaseWatcher {
     private var fileDescriptor: Int32 = -1
     private var lastRowID: Int64 = 0
     private var debounceWorkItem: DispatchWorkItem?
+    private var monitoringRequested = false
+    private var generation = UUID()
+
+    var isWatching: Bool { queue.sync { source != nil } }
 
     init(reader: MailDatabaseReader) {
         self.reader = reader
     }
 
     deinit {
-        stopMonitoring()
+        debounceWorkItem?.cancel()
+        source?.cancel()
     }
     
     func startMonitoring() {
         queue.async { [weak self] in
-            guard let self, source == nil else { return }
+            guard let self, !monitoringRequested else { return }
+            monitoringRequested = true
+            generation = UUID()
 
             guard let latestRowID = reader.latestRowID() else {
                 logger.error("Could not read latest Mail RowID")
+                scheduleRestart()
                 return
             }
 
@@ -43,6 +51,8 @@ final class MailDatabaseWatcher {
     func stopMonitoring() {
         queue.async { [weak self] in
             guard let self else { return }
+            monitoringRequested = false
+            generation = UUID()
 
             debounceWorkItem?.cancel()
             debounceWorkItem = nil
@@ -53,6 +63,7 @@ final class MailDatabaseWatcher {
     }
     
     private func startWatchingWriteAheadLog() {
+        guard monitoringRequested else { return }
         guard let databaseURL = reader.databaseURL() else {
             logger.error("Mail database was not found")
             return
@@ -85,15 +96,9 @@ final class MailDatabaseWatcher {
             scheduleDatabaseRead()
         }
         
-        source.setCancelHandler { [weak self] in
-            guard let self else { return }
-
-            let descriptor = self.fileDescriptor
-
-            if descriptor >= 0 {
-                close(descriptor)
-                self.fileDescriptor = -1
-            }
+        let descriptor = fileDescriptor
+        source.setCancelHandler {
+            close(descriptor)
         }
 
         self.source = source
@@ -103,10 +108,13 @@ final class MailDatabaseWatcher {
     }
     
     private func scheduleDatabaseRead() {
+        guard monitoringRequested else { return }
         debounceWorkItem?.cancel()
+        let scheduledGeneration = generation
 
         let workItem = DispatchWorkItem { [weak self] in
-            self?.readNewMessages()
+            guard let self, monitoringRequested, generation == scheduledGeneration else { return }
+            readNewMessages()
         }
 
         debounceWorkItem = workItem
@@ -114,6 +122,7 @@ final class MailDatabaseWatcher {
     }
     
     private func readNewMessages() {
+        guard monitoringRequested else { return }
         let messages = reader.messages(after: lastRowID)
 
         guard !messages.isEmpty else { return }
@@ -133,15 +142,18 @@ final class MailDatabaseWatcher {
     }
     
     private func scheduleRestart() {
+        let scheduledGeneration = generation
         queue.asyncAfter(deadline: .now() + 1) { [weak self] in
-            guard let self, source == nil else { return }
+            guard let self, monitoringRequested, generation == scheduledGeneration, source == nil else { return }
 
             startWatchingWriteAheadLog()
         }
     }
 
     private func post(_ message: MailMessage) {
-        DispatchQueue.main.async {
+        let scheduledGeneration = generation
+        DispatchQueue.main.async { [weak self] in
+            guard let self, queue.sync(execute: { self.monitoringRequested && self.generation == scheduledGeneration }) else { return }
             NotificationCenter.default.post(
                 name: .mailDatabaseDidReceiveMessage,
                 object: message
@@ -153,8 +165,9 @@ final class MailDatabaseWatcher {
         for message: MailMessage,
         attempt: Int = 1
     ) {
+        let scheduledGeneration = generation
         queue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            guard let self else { return }
+            guard let self, monitoringRequested, generation == scheduledGeneration else { return }
 
             guard let refreshedMessage = reader.message(withRowID: message.rowID) else {
                 post(message)

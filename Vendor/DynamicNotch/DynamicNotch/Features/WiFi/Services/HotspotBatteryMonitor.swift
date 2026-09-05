@@ -17,7 +17,6 @@ final class HotspotBatteryMonitor: NSObject, ObservableObject {
     override init() {
         super.init()
         print("[HotspotBatteryMonitor] Initializing HotspotBatteryMonitor...")
-        setupSession()
     }
 
     deinit {
@@ -41,6 +40,7 @@ final class HotspotBatteryMonitor: NSObject, ObservableObject {
     }
 
     func startBrowsing() {
+        if session == nil { setupSession() }
         guard let session = session else {
             print("[HotspotBatteryMonitor] Cannot startBrowsing: session is nil")
             return

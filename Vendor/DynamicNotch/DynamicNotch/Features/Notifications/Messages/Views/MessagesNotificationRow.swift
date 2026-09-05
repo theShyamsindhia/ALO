@@ -123,7 +123,7 @@ struct MessagesNotificationRow: View {
         if message.sender.isKnownContact {
             contactAvatar
         } else {
-            Image("messages")
+            NotchImage("messages")
                 .resizable()
                 .interpolation(.high)
                 .scaledToFit()
@@ -151,7 +151,7 @@ struct MessagesNotificationRow: View {
         .frame(width: avatarSize, height: avatarSize)
         .clipShape(Circle())
         .overlay(alignment: .bottomTrailing) {
-            Image("messages")
+            NotchImage("messages")
                 .resizable()
                 .interpolation(.high)
                 .scaledToFit()

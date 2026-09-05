@@ -17,10 +17,10 @@ struct AppleMailNotificationsSettingsView: View {
         }
         .alert(isPresented: $isShowingFullDiskAccessAlert) {
             Alert(
-                title: Text("settings.notifications.appleMail.fullDiskAccess.title"),
-                message: Text("settings.notifications.appleMail.fullDiskAccess.description"),
+                title: NotchText("settings.notifications.appleMail.fullDiskAccess.title"),
+                message: NotchText("settings.notifications.appleMail.fullDiskAccess.description"),
                 primaryButton: .default(
-                    Text("settings.permissions.action.openPrivacySettings")
+                    NotchText("settings.permissions.action.openPrivacySettings")
                 ) {
                     settings.isAppleMailNotificationsPermissionPending = true
                     permissionController.performAction(for: .fullDiskAccess)

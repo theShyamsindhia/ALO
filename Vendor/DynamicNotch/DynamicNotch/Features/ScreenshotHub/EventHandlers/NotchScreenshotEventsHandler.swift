@@ -28,7 +28,6 @@ final class NotchScreenshotEventsHandler {
         
         setupScreenshotCallbacks()
         setupScreenRecordingResultCallbacks()
-        setupCaptureMonitoring()
         setupDiskSaveObserver()
     }
     
@@ -86,34 +85,6 @@ final class NotchScreenshotEventsHandler {
             self.notchViewModel.send(.hideLiveActivity(id: NotchContentRegistry.ScreenRecording.result.id))
             self.notchViewModel.hideTemporaryNotification()
         }
-    }
-    
-    private func setupCaptureMonitoring() {
-        let isCaptureMonitoringNeeded = settingsViewModel.screenRecording.isScreenshotActivityEnabled ||
-            settingsViewModel.isLiveActivityEnabled(.screenRecording)
-        if isCaptureMonitoringNeeded {
-            screenshotViewModel.startMonitoring(
-                disableSystemThumbnail: settingsViewModel.screenRecording.isScreenshotActivityEnabled
-            )
-        } else {
-            ScreenshotMonitorService.setSystemFloatingThumbnailEnabled(true)
-        }
-        
-        Publishers.CombineLatest(
-            settingsViewModel.screenRecording.$isScreenshotActivityEnabled,
-            settingsViewModel.screenRecording.$isScreenRecordingLiveActivityEnabled
-        )
-        .removeDuplicates { $0 == $1 }
-        .sink { [weak self] isScreenshotEnabled, isScreenRecordingEnabled in
-            guard let self else { return }
-            if isScreenshotEnabled || isScreenRecordingEnabled {
-                self.screenshotViewModel.startMonitoring(disableSystemThumbnail: isScreenshotEnabled)
-            } else {
-                self.screenshotViewModel.stopMonitoring()
-                ScreenshotMonitorService.setSystemFloatingThumbnailEnabled(true)
-            }
-        }
-        .store(in: &cancellables)
     }
     
     private func setupDiskSaveObserver() {

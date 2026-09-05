@@ -6,7 +6,7 @@ struct MediaRemoteAdapterResources {
     let testClientURL: URL?
 
     static func resolve(
-        bundle: Bundle = .main,
+        bundle: Bundle = NotchResources.bundle,
         fileManager: FileManager = .default
     ) -> MediaRemoteAdapterResources? {
         let scriptDirectories = [

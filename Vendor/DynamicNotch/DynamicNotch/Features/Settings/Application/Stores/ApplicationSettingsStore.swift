@@ -59,7 +59,7 @@ final class ApplicationSettingsStore: SettingsStoreBase, NotchSettingsProviding 
     @StoredDefault(key: GeneralSettingsStorage.Keys.notchStrokeEnabled, defaultValue: false)
     var isShowNotchStrokeEnabled: Bool
 
-    @StoredDefault(key: GeneralSettingsStorage.Keys.defaultActivityStrokeEnabled, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.defaultActivityStrokeEnabled, defaultValue: false)
     var isDefaultActivityStrokeEnabled: Bool
 
     @StoredDefault(
@@ -136,7 +136,7 @@ final class ApplicationSettingsStore: SettingsStoreBase, NotchSettingsProviding 
     @StoredDefault(key: GeneralSettingsStorage.Keys.notchSwipeRestoreEnabled, defaultValue: true)
     var isNotchSwipeRestoreEnabled: Bool
 
-    @StoredDefault(key: GeneralSettingsStorage.Keys.notchHoverHapticEnabled, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.notchHoverHapticEnabled, defaultValue: false)
     var isNotchHoverHapticEnabled: Bool
 
     @StoredDefault(key: GeneralSettingsStorage.Keys.closeAtFocusLiveActivityEnabled, defaultValue: false)
@@ -159,7 +159,7 @@ final class ApplicationSettingsStore: SettingsStoreBase, NotchSettingsProviding 
         }
     }
 
-    @StoredDefault(key: GeneralSettingsStorage.Keys.notchSizeTemporaryActivityEnabled, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.notchSizeTemporaryActivityEnabled, defaultValue: false)
     var isNotchSizeTemporaryActivityEnabled: Bool
 
     @StoredDefault(
@@ -191,7 +191,6 @@ final class ApplicationSettingsStore: SettingsStoreBase, NotchSettingsProviding 
         super.init(defaults: defaults)
         persistSanitizedNotchStrokeSettingsIfNeeded()
         ensureSpecificDisplaySelection(previousLocation: .main)
-        updateLaunchAtLogin()
     }
 
     func resetGeneral() {

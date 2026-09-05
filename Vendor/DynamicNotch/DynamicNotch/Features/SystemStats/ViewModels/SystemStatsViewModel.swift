@@ -32,6 +32,7 @@ final class SystemStatsViewModel: ObservableObject {
         timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
             guard let self else { return }
             Task { @MainActor in
+                guard self.timer != nil else { return }
                 self.updateStats()
             }
         }

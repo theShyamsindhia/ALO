@@ -41,7 +41,7 @@ final class NotchOnboardingEventsHandler {
     }
 
     func checkFirstLaunch(onShowOnboarding: @escaping () -> Void) {
-        let hasSeenOnboarding = UserDefaults.standard.bool(forKey: "hasSeenOnboarding")
+        let hasSeenOnboarding = UserDefaults.aloNotch.bool(forKey: "hasSeenOnboarding")
 
         if !hasSeenOnboarding {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
@@ -54,7 +54,7 @@ final class NotchOnboardingEventsHandler {
 
     func hideOnboarding(markAsSeen: Bool = false) {
         if markAsSeen {
-            UserDefaults.standard.set(true, forKey: "hasSeenOnboarding")
+            UserDefaults.aloNotch.set(true, forKey: "hasSeenOnboarding")
         }
 
         OnboardingSteps.allCases.forEach { step in

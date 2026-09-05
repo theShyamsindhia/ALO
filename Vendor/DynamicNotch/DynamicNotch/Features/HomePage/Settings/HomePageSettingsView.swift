@@ -119,8 +119,8 @@ private struct HomePageAppearancePreview: View {
             showsStroke: applicationSettings.isShowNotchStrokeEnabled,
             strokeColor: .white.opacity(0.2).opacity(applicationSettings.notchStrokeOpacity),
             strokeWidth: 1.5,
-            lightBackgroundImage: Image("backgroundLight"),
-            darkBackgroundImage: Image("backgroundDark")
+            lightBackgroundImage: NotchImage("backgroundLight"),
+            darkBackgroundImage: NotchImage("backgroundDark")
         ) {
             ZStack(alignment: .top) {
                 VStack() {
@@ -136,7 +136,7 @@ private struct HomePageAppearancePreview: View {
                                 .font(.system(size: 26))
                                 .foregroundStyle(.white)
                             
-                            Text(LocalizedStringKey("settings.homePage.preview.startCamera"))
+                            NotchText(LocalizedStringKey("settings.homePage.preview.startCamera"))
                                 .font(.subheadline)
                                 .fontWeight(.medium)
                                 .foregroundStyle(.white)

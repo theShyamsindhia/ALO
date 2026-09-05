@@ -35,7 +35,7 @@ struct AirDropActiveNotchView: View {
                 .opacity(isPulsing ? 1.0 : 0.7)
                 .frame(width: isDynamicIsland ? 20 : 25, height: isDynamicIsland ? 20 : 25)
             
-            Image("airdrop.white")
+            NotchImage("airdrop.white")
                 .resizable()
                 .renderingMode(.template)
                 .foregroundStyle(Color.blue)

@@ -106,8 +106,8 @@ struct FocusSettingsView: View {
                 headerTitle: "settings.focus.style.headerTitle",
                 headerDescription: "settings.focus.style.headerDesc",
                 itemHeight: 72,
-                lightBackgroundImage: Image("backgroundLight"),
-                darkBackgroundImage: Image("backgroundDark")
+                lightBackgroundImage: NotchImage("backgroundLight"),
+                darkBackgroundImage: NotchImage("backgroundDark")
             ) { style, isSelected in
                 focusStylePickerContent(for: style, isSelected: isSelected)
             }

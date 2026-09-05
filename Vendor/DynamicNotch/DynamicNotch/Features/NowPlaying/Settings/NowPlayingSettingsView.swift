@@ -177,8 +177,8 @@ private struct NowPlayingAppearancePreview: View {
             ? Color.white.opacity(0.2).opacity(applicationSettings.notchStrokeOpacity)
             : .clear,
             strokeWidth: 1.5,
-            lightBackgroundImage: Image("backgroundLight"),
-            darkBackgroundImage: Image("backgroundDark")
+            lightBackgroundImage: NotchImage("backgroundLight"),
+            darkBackgroundImage: NotchImage("backgroundDark")
         ) {
             VStack(spacing: 13) {
                 HStack(spacing: 13) {

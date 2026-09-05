@@ -47,7 +47,7 @@ struct LanguageSettingsView: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Color.yellow)
                 
-                Text(LocalizedStringKey("settings.language.notice"))
+                NotchText(LocalizedStringKey("settings.language.notice"))
                     .font(.caption)
                     .foregroundStyle(Color.secondary)
             }
@@ -83,7 +83,7 @@ struct LanguageSettingsView: View {
     private func flagView(for language: DynamicNotchLanguage) -> some View {
         ZStack {
             if let assetName = language.flagAssetName {
-                Image(assetName)
+                NotchImage(assetName)
                     .resizable()
                     .interpolation(.high)
                     .antialiased(true)

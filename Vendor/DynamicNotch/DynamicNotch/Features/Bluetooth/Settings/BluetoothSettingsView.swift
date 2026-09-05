@@ -79,8 +79,8 @@ struct BluetoothSettingsView: View {
                 headerTitle: "settings.bluetooth.style.headerTitle",
                 headerDescription: "settings.bluetooth.style.headerDesc",
                 itemHeight: 72,
-                lightBackgroundImage: Image("backgroundLight"),
-                darkBackgroundImage: Image("backgroundDark")
+                lightBackgroundImage: NotchImage("backgroundLight"),
+                darkBackgroundImage: NotchImage("backgroundDark")
             ) { style, isSelected in
                 bluetoothAppearancePickerContent(for: style, isSelected: isSelected)
             }

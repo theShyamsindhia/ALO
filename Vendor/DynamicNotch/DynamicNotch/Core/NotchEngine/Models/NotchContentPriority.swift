@@ -159,11 +159,11 @@ enum NotchContentPriority {
     static let lockScreen = 10003
     static let onboarding = 10004
 
-    static func resolvedValue(for key: Key, defaults: UserDefaults = .standard) -> Int {
+    static func resolvedValue(for key: Key, defaults: UserDefaults = .aloNotch) -> Int {
         overrideValues(defaults: defaults)[key.rawValue] ?? key.defaultValue
     }
 
-    static func overrideValues(defaults: UserDefaults = .standard) -> [String: Int] {
+    static func overrideValues(defaults: UserDefaults = .aloNotch) -> [String: Int] {
         guard let storedValues = defaults.dictionary(forKey: overrideStorageKey) else {
             return [:]
         }

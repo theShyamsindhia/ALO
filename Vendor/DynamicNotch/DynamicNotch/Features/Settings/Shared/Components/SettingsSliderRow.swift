@@ -22,9 +22,9 @@ struct SettingsSliderRow: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
+                    NotchText(title)
                     if let description {
-                        Text(description)
+                        NotchText(description)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)

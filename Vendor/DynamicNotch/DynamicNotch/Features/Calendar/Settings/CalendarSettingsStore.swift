@@ -5,7 +5,7 @@ extension CalendarTimeDisplayFormat: StoredSettingValue {}
 
 @MainActor
 final class CalendarSettingsStore: SettingsStoreBase {
-    @StoredDefault(key: GeneralSettingsStorage.Keys.calendarLiveActivity, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.calendarLiveActivity, defaultValue: false)
     var isCalendarLiveActivityEnabled: Bool
 
     @StoredDefault(key: GeneralSettingsStorage.Keys.calendarShowAllDay, defaultValue: true)

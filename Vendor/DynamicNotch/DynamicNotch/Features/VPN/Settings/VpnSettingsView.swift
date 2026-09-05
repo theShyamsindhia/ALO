@@ -202,8 +202,8 @@ struct VpnSettingsView: View {
                 headerTitle: "settings.vpn.style.headerTitle",
                 headerDescription: "settings.vpn.style.headerDesc",
                 itemHeight: 72,
-                lightBackgroundImage: Image("backgroundLight"),
-                darkBackgroundImage: Image("backgroundDark")
+                lightBackgroundImage: NotchImage("backgroundLight"),
+                darkBackgroundImage: NotchImage("backgroundDark")
             ) { style, isSelected in
                 vpnAppearancePickerContent(for: style, isSelected: isSelected, isTimerVisible: connectivitySettings.isVPNTimerVisible)
             }

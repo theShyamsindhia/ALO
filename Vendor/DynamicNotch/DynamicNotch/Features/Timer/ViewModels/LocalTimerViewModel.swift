@@ -57,7 +57,7 @@ class LocalTimerViewModel: ObservableObject {
         timer = Timer.publish(every: 0.1, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
-                guard let self = self else { return }
+                guard let self = self, self.state == .running else { return }
                 let rem = self.remainingTime(at: Date())
                 self.remainingTime = rem
                 if rem <= 0 {

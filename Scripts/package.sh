@@ -45,16 +45,21 @@ codesign_arguments=(
     --identifier "$bundle_identifier"
     --entitlements Resources/ALO.entitlements
 )
+nested_codesign_arguments=(--force --sign "$codesign_identity")
 if [[ "$codesign_identity" != "-" ]]; then
     codesign_arguments+=(--options runtime)
+    nested_codesign_arguments+=(--options runtime)
     if [[ "${ALO_CODESIGN_TIMESTAMP:-${WERAI_CODESIGN_TIMESTAMP:-automatic}}" == "none" ]]; then
         codesign_arguments+=(--timestamp=none)
+        nested_codesign_arguments+=(--timestamp=none)
     else
         codesign_arguments+=(--timestamp)
+        nested_codesign_arguments+=(--timestamp)
     fi
     signing_keychain="${ALO_SIGNING_KEYCHAIN:-${WERAI_SIGNING_KEYCHAIN:-}}"
     if [[ -n "$signing_keychain" ]]; then
         codesign_arguments+=(--keychain "$signing_keychain")
+        nested_codesign_arguments+=(--keychain "$signing_keychain")
     fi
 fi
 
@@ -81,6 +86,67 @@ run_codesign() {
     return "$codesign_status"
 }
 
+# Resource bundles contain the original notch assets and the MediaRemote helper.
+# Sign nested native code before sealing either the bundle or its containing app.
+# Preserve framework symlinks, and do not give helpers ALO's bundle identifier or
+# microphone/camera entitlements.
+sign_runtime_code() {
+    local resource_directory="$1"
+    local native_file framework
+    while IFS= read -r -d '' native_file; do
+        [[ "$native_file" == *.framework/* ]] && continue
+        if /usr/bin/file -b "$native_file" | /usr/bin/grep -q 'Mach-O'; then
+            for architecture in "${architectures[@]}"; do
+                lipo "$native_file" -verify_arch "$architecture"
+            done
+            run_codesign "${nested_codesign_arguments[@]}" "$native_file"
+        fi
+    done < <(/usr/bin/find "$resource_directory" -type f -print0)
+    while IFS= read -r -d '' framework; do
+        local framework_name="${framework:t:r}"
+        for architecture in "${architectures[@]}"; do
+            lipo "$framework/$framework_name" -verify_arch "$architecture"
+        done
+        run_codesign "${nested_codesign_arguments[@]}" "$framework"
+        codesign --verify --strict "$framework"
+    done < <(/usr/bin/find "$resource_directory" -depth -type d -name '*.framework' -print0)
+}
+
+runtime_bundle_name="ALO_ALONotchRuntime.bundle"
+runtime_bundle_source=".build/${architectures[1]}-apple-macosx/release/$runtime_bundle_name"
+test -d "$runtime_bundle_source"
+resource_bundles=()
+for built_resource_bundle in .build/${architectures[1]}-apple-macosx/release/*.bundle(N); do
+    packaged_resource_bundle="dist/${built_resource_bundle:t}"
+    rm -rf "$packaged_resource_bundle"
+    ditto "$built_resource_bundle" "$packaged_resource_bundle"
+    sign_runtime_code "$packaged_resource_bundle"
+    resource_bundles+=("$packaged_resource_bundle")
+done
+
+notices="dist/ThirdPartyNotices"
+mkdir -p "$notices"
+cp LICENSE "$notices/ALO-MIT.txt"
+cp Vendor/DynamicNotch/LICENSE "$notices/DynamicNotch-GPL-3.0.txt"
+cp Vendor/DynamicNotch/DynamicNotch/Resources/MediaRemoteAdapter/LICENSE "$notices/MediaRemoteAdapter-BSD-3-Clause.txt"
+cp Vendor/README.md "$notices/DynamicNotch-provenance.md"
+for dependency_notice in .build/checkouts/*/LICENSE*(N.) .build/checkouts/*/COPYING*(N.); do
+    dependency_directory="${dependency_notice:h}"
+    cp "$dependency_notice" "$notices/${dependency_directory:t}-${dependency_notice:t}"
+done
+cat > "$notices/README.txt" <<'NOTICE'
+ALO includes original and adapted DynamicNotch code under GNU GPL version 3.
+The ALO MIT notice does not replace the terms of the imported DynamicNotch code.
+MediaRemoteAdapter is distributed under its accompanying BSD 3-Clause license.
+Original copyright notices and license texts are retained with the source.
+
+ALO and adapted notch source, build scripts, and dependency manifests:
+https://github.com/theShyamsindhia/WERAI
+Use the source revision or release tag corresponding to this application build.
+The notch runtime source is in Vendor/DynamicNotch and ALO adapters are in
+Sources/ALO. Upstream: https://github.com/jackson-storm/DynamicNotch
+NOTICE
+
 if [[ ${#architectures[@]} -eq 1 ]]; then
     cp ".build/${architectures[1]}-apple-macosx/release/alo" "$binary"
 else
@@ -89,6 +155,12 @@ else
         .build/x86_64-apple-macosx/release/alo \
         -output "$binary"
 fi
+# Keep symbols outside the distributed app/CLI, then strip only debug and local
+# symbols. Exported symbols and Swift runtime reflection metadata remain intact.
+# This substantially reduces the embedded feature engine's LINKEDIT footprint.
+dsymutil "$binary" -o "$binary.dSYM"
+strip -S -x "$binary"
+
 if [[ "$codesign_identity" == "-" ]]; then
     run_codesign "${codesign_arguments[@]}" "$binary"
 fi
@@ -120,6 +192,10 @@ rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$binary" "$app/Contents/MacOS/alo"
 cp Resources/Info.plist "$app/Contents/Info.plist"
+for packaged_resource_bundle in "${resource_bundles[@]}"; do
+    ditto "$packaged_resource_bundle" "$app/Contents/Resources/${packaged_resource_bundle:t}"
+done
+ditto "$notices" "$app/Contents/Resources/ThirdPartyNotices"
 if $development_build; then
     /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $bundle_identifier" "$app/Contents/Info.plist"
     /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName ALO Dev" "$app/Contents/Info.plist"
@@ -149,5 +225,12 @@ if $development_build; then
 fi
 
 rm -f "$cli_archive"
-ditto -c -k "$binary" "$cli_archive"
+cli_staging="$(mktemp -d "${TMPDIR:-/tmp}/alo-cli-distribution.XXXXXX")"
+trap 'rm -rf "$cli_staging"' EXIT
+cp "$binary" "$cli_staging/alo"
+for packaged_resource_bundle in "${resource_bundles[@]}"; do
+    ditto "$packaged_resource_bundle" "$cli_staging/${packaged_resource_bundle:t}"
+done
+ditto "$notices" "$cli_staging/ThirdPartyNotices"
+ditto -c -k "$cli_staging" "$cli_archive"
 ./Scripts/create_distribution_archives.sh "$archive_suffix"

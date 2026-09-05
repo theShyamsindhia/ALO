@@ -10,23 +10,25 @@ final class CalendarViewModel: ObservableObject {
     @Published var nextEvent: EKEvent? = nil
     @Published var authorizationStatus: EKAuthorizationStatus = EKEventStore.authorizationStatus(for: .event)
     
-    private let eventStore = EKEventStore()
+    private lazy var eventStore = EKEventStore()
     private var cancellables = Set<AnyCancellable>()
     private var timerCancellable: AnyCancellable?
     
-    init() {
-        if authorizationStatus == .fullAccess {
-            startAutoRefresh()
-        }
+    init() {}
+    private(set) var isMonitoring = false
+
+    func refreshAuthorization() {
+        authorizationStatus = EKEventStore.authorizationStatus(for: .event)
+        if isMonitoring { fetchUpcomingEvents() }
     }
-    
+
     func requestAccess() {
         if #available(macOS 14.0, *) {
             eventStore.requestFullAccessToEvents { [weak self] granted, error in
                 DispatchQueue.main.async {
                     self?.authorizationStatus = EKEventStore.authorizationStatus(for: .event)
-                    if granted {
-                        self?.startAutoRefresh()
+                    if granted, self?.isMonitoring == true {
+                        self?.fetchUpcomingEvents()
                     }
                 }
             }
@@ -34,8 +36,8 @@ final class CalendarViewModel: ObservableObject {
             eventStore.requestAccess(to: .event) { [weak self] granted, error in
                 DispatchQueue.main.async {
                     self?.authorizationStatus = EKEventStore.authorizationStatus(for: .event)
-                    if granted {
-                        self?.startAutoRefresh()
+                    if granted, self?.isMonitoring == true {
+                        self?.fetchUpcomingEvents()
                     }
                 }
             }
@@ -50,12 +52,12 @@ final class CalendarViewModel: ObservableObject {
     }
 
     func fetchUpcomingEvents() {
-        guard authorizationStatus == .fullAccess else { return }
+        guard isMonitoring, authorizationStatus == .fullAccess else { return }
         
         let now = Date()
-        let daysToShow = UserDefaults.standard.object(forKey: GeneralSettingsStorage.Keys.calendarDaysToShow) as? Int ?? GeneralSettingsStorage.defaultValues[GeneralSettingsStorage.Keys.calendarDaysToShow] as! Int
-        let showAllDay = UserDefaults.standard.object(forKey: GeneralSettingsStorage.Keys.calendarShowAllDay) as? Bool ?? GeneralSettingsStorage.defaultValues[GeneralSettingsStorage.Keys.calendarShowAllDay] as! Bool
-        let includedCalendarIDs = UserDefaults.standard.object(forKey: GeneralSettingsStorage.Keys.calendarIncludedCalendarIDs) as? [String] ?? []
+        let daysToShow = UserDefaults.aloNotch.object(forKey: GeneralSettingsStorage.Keys.calendarDaysToShow) as? Int ?? GeneralSettingsStorage.defaultValues[GeneralSettingsStorage.Keys.calendarDaysToShow] as! Int
+        let showAllDay = UserDefaults.aloNotch.object(forKey: GeneralSettingsStorage.Keys.calendarShowAllDay) as? Bool ?? GeneralSettingsStorage.defaultValues[GeneralSettingsStorage.Keys.calendarShowAllDay] as! Bool
+        let includedCalendarIDs = UserDefaults.aloNotch.object(forKey: GeneralSettingsStorage.Keys.calendarIncludedCalendarIDs) as? [String] ?? []
         
         guard let endDate = Calendar.current.date(byAdding: .day, value: daysToShow, to: now) else { return }
         
@@ -87,7 +89,7 @@ final class CalendarViewModel: ObservableObject {
     }
 
     private func checkSoundAlert() {
-        let isSoundAlertEnabled = UserDefaults.standard.bool(forKey: GeneralSettingsStorage.Keys.calendarSoundAlert)
+        let isSoundAlertEnabled = UserDefaults.aloNotch.bool(forKey: GeneralSettingsStorage.Keys.calendarSoundAlert)
         guard isSoundAlertEnabled, hasUpcomingEvent, let event = nextEvent else { return }
 
         if lastAlertedEventIdentifier != event.eventIdentifier {
@@ -97,6 +99,9 @@ final class CalendarViewModel: ObservableObject {
     }
     
     func startAutoRefresh() {
+        guard !isMonitoring else { return }
+        isMonitoring = true
+        authorizationStatus = EKEventStore.authorizationStatus(for: .event)
         fetchUpcomingEvents()
         
         // Listen for calendar changes from the system
@@ -123,6 +128,9 @@ final class CalendarViewModel: ObservableObject {
     }
     
     func stopAutoRefresh() {
+        isMonitoring = false
+        events = []
+        nextEvent = nil
         cancellables.removeAll()
         timerCancellable?.cancel()
     }
@@ -134,7 +142,7 @@ final class CalendarViewModel: ObservableObject {
         }
         
         let now = Date()
-        let formatRaw = UserDefaults.standard.string(forKey: GeneralSettingsStorage.Keys.calendarTimeDisplayFormat) ?? CalendarTimeDisplayFormat.exact.rawValue
+        let formatRaw = UserDefaults.aloNotch.string(forKey: GeneralSettingsStorage.Keys.calendarTimeDisplayFormat) ?? CalendarTimeDisplayFormat.exact.rawValue
         let format = CalendarTimeDisplayFormat(rawValue: formatRaw) ?? .exact
         
         let formatter = DateFormatter()
@@ -164,7 +172,7 @@ final class CalendarViewModel: ObservableObject {
     }
 
     var isPrivacyModeEnabled: Bool {
-        UserDefaults.standard.bool(forKey: GeneralSettingsStorage.Keys.calendarPrivacyMode)
+        UserDefaults.aloNotch.bool(forKey: GeneralSettingsStorage.Keys.calendarPrivacyMode)
     }
 
     func displayTitle(for event: EKEvent) -> String {
@@ -189,7 +197,7 @@ final class CalendarViewModel: ObservableObject {
         
         // Is currently running
         if timeUntilStart <= 0 && timeUntilEnd > 0 {
-            let hideMinutes = UserDefaults.standard.object(forKey: GeneralSettingsStorage.Keys.calendarOngoingEventHideMinutes) as? Int ?? 0
+            let hideMinutes = UserDefaults.aloNotch.object(forKey: GeneralSettingsStorage.Keys.calendarOngoingEventHideMinutes) as? Int ?? 0
             if hideMinutes > 0 {
                 let elapsedMinutes = Int(abs(timeUntilStart) / 60)
                 if elapsedMinutes >= hideMinutes {
@@ -199,7 +207,7 @@ final class CalendarViewModel: ObservableObject {
             return true
         }
         
-        let noticeMinutes = UserDefaults.standard.object(forKey: GeneralSettingsStorage.Keys.calendarNoticeMinutes) as? Int ?? GeneralSettingsStorage.defaultValues[GeneralSettingsStorage.Keys.calendarNoticeMinutes] as! Int
+        let noticeMinutes = UserDefaults.aloNotch.object(forKey: GeneralSettingsStorage.Keys.calendarNoticeMinutes) as? Int ?? GeneralSettingsStorage.defaultValues[GeneralSettingsStorage.Keys.calendarNoticeMinutes] as! Int
         let maxSeconds = TimeInterval(noticeMinutes * 60)
         
         // Starts within configured notice time

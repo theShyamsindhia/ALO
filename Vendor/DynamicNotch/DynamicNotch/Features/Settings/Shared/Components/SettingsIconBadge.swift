@@ -116,7 +116,7 @@ struct SettingsIconBadge: View {
                 .foregroundStyle(iconColor)
 
         case .asset(let imageName):
-            Image(imageName)
+            NotchImage(imageName)
                 .resizable()
                 .foregroundStyle(iconColor)
                 .scaledToFit()

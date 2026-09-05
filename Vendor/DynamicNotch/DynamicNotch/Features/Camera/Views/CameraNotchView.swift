@@ -47,6 +47,7 @@ struct CameraNotchView: View {
             }
         }
         .onAppear {
+            cameraViewModel.checkPermissions()
             previewID = UUID()
         }
         .onDisappear {

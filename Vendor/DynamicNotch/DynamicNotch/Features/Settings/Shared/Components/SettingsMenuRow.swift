@@ -31,8 +31,8 @@ struct SettingsMenuRow<Option: Hashable, LeadingAccessory: View>: View {
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                Text(description)
+                NotchText(title)
+                NotchText(description)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -48,7 +48,7 @@ struct SettingsMenuRow<Option: Hashable, LeadingAccessory: View>: View {
                         selection = option
                     } label: {
                         HStack {
-                            Text(optionTitle(option))
+                            NotchText(optionTitle(option))
                             if option == selection {
                                 Spacer()
                                 Image(systemName: "checkmark")
@@ -57,7 +57,7 @@ struct SettingsMenuRow<Option: Hashable, LeadingAccessory: View>: View {
                     }
                 }
             } label: {
-                Text(optionTitle(selection))
+                NotchText(optionTitle(selection))
                     .lineLimit(1)
             }
             .fixedSize(horizontal: true, vertical: false)

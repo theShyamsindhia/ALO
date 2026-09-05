@@ -54,7 +54,7 @@ enum DragAndDropTarget: String, Hashable, CaseIterable {
     func icon() -> some View {
         switch self {
         case .airDrop:
-            Image("airdrop.white")
+            NotchImage("airdrop.white")
                 .resizable()
                 .renderingMode(.template)
                 .foregroundStyle(color)

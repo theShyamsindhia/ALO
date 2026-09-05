@@ -7,7 +7,7 @@ extension HudIndicatorTintStyle: StoredSettingValue {}
 
 @MainActor
 final class HUDSettingsStore: SettingsStoreBase {
-    @StoredDefault(key: GeneralSettingsStorage.Keys.brightnessHUDEnabled, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.brightnessHUDEnabled, defaultValue: false)
     var isBrightnessHUDEnabled: Bool
 
     @StoredDefault(
@@ -17,7 +17,7 @@ final class HUDSettingsStore: SettingsStoreBase {
     )
     var brightnessHUDDuration: Int
 
-    @StoredDefault(key: GeneralSettingsStorage.Keys.keyboardHUDEnabled, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.keyboardHUDEnabled, defaultValue: false)
     var isKeyboardHUDEnabled: Bool
 
     @StoredDefault(
@@ -27,7 +27,7 @@ final class HUDSettingsStore: SettingsStoreBase {
     )
     var keyboardHUDDuration: Int
 
-    @StoredDefault(key: GeneralSettingsStorage.Keys.volumeHUDEnabled, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.volumeHUDEnabled, defaultValue: false)
     var isVolumeHUDEnabled: Bool
 
     @StoredDefault(key: GeneralSettingsStorage.Keys.volumeFeedbackSoundEnabled, defaultValue: true)

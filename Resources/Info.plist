@@ -34,6 +34,18 @@
 	<string>ALO records the display or window and system audio you choose only while you are broadcasting.</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>ALO finds and streams audio, shared screens, room messages, and current track artwork to Macs on your local network.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>ALO shows a camera preview in the notch only when you enable and open the camera feature.</string>
+    <key>NSContactsUsageDescription</key>
+    <string>ALO uses contacts to show sender names and photos when you enable Messages notifications in the notch.</string>
+    <key>NSCalendarsUsageDescription</key>
+    <string>ALO reads the calendars you select to show upcoming events when you enable calendar features in the notch.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>ALO reads the calendars you select to show upcoming events when you enable calendar features in the notch.</string>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>ALO checks accessory connection and battery status when you enable Bluetooth notifications in the notch.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>ALO controls media apps and system features only when you use the corresponding enabled notch controls.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_werai-audio._tcp</string>

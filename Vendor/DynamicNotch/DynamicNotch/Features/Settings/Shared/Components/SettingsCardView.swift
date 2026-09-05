@@ -22,7 +22,7 @@ struct SettingsCard<Content: View>: View {
         @ViewBuilder content: () -> Content
     ) {
         self.title = title
-        self.titleText = title.map { Text($0) }
+        self.titleText = title.map { NotchText($0) }
         self.spacing = spacing
         self.padding = padding
         self.content = content()
@@ -35,7 +35,7 @@ struct SettingsCard<Content: View>: View {
         @ViewBuilder content: () -> Content
     ) {
         self.title = nil
-        self.titleText = Text(verbatim: verbatimTitle)
+        self.titleText = NotchText(verbatim: verbatimTitle)
         self.spacing = spacing
         self.padding = padding
         self.content = content()
@@ -103,9 +103,9 @@ struct SettingsResetCard: View {
         SettingsCard {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("settings.reset.title")
+                    NotchText("settings.reset.title")
                         .font(.body)
-                    Text("settings.reset.message")
+                    NotchText("settings.reset.message")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -113,15 +113,15 @@ struct SettingsResetCard: View {
                 Button(role: .destructive) {
                     showingAlert = true
                 } label: {
-                    Text("settings.reset.action")
+                    NotchText("settings.reset.action")
                 }
             }
         }
         .alert(isPresented: $showingAlert) {
             Alert(
-                title: Text("settings.reset.title"),
-                message: Text("settings.reset.message"),
-                primaryButton: .destructive(Text("settings.reset.action")) {
+                title: NotchText("settings.reset.title"),
+                message: NotchText("settings.reset.message"),
+                primaryButton: .destructive(NotchText("settings.reset.action")) {
                     action()
                 },
                 secondaryButton: .cancel()

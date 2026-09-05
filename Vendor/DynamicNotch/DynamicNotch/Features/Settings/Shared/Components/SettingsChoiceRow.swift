@@ -23,21 +23,21 @@ struct SettingsChoiceRow: View {
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
-                Text(title)
+                NotchText(title)
 
-                Text(description)
+                NotchText(description)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Text(statusText)
+                NotchText(statusText)
                     .font(.caption)
                     .foregroundStyle(statusColor)
                     .lineLimit(1)
                     .truncationMode(.middle)
 
                 if let errorText {
-                    Text(errorText)
+                    NotchText(errorText)
                         .font(.caption)
                         .foregroundStyle(.red)
                         .fixedSize(horizontal: false, vertical: true)

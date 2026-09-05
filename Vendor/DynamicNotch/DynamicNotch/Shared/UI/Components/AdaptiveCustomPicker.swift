@@ -73,7 +73,7 @@ struct AdaptiveCustomPicker<Option: Hashable, Content: View>: View {
         VStack(spacing: 8) {
             pickerButton(for: option, isSelected: isSelected)
 
-            Text(title(option))
+            NotchText(title(option))
                 .font(.system(size: 10))
                 .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
                 .lineLimit(1)
@@ -121,10 +121,10 @@ struct AdaptiveCustomPicker<Option: Hashable, Content: View>: View {
     private func pickerHeader(title: LocalizedStringKey) -> some View {
         HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(title)
+                NotchText(title)
 
                 if let headerDescription {
-                    Text(headerDescription)
+                    NotchText(headerDescription)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -132,7 +132,7 @@ struct AdaptiveCustomPicker<Option: Hashable, Content: View>: View {
 
             Spacer(minLength: 12)
 
-            Text(selectedHeaderValueTitle)
+            NotchText(selectedHeaderValueTitle)
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)

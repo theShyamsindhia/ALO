@@ -53,8 +53,8 @@ struct ScreenCaptureSettingsView: View {
                 headerTitle: "settings.screenRecording.style.headerTitle",
                 headerDescription: "settings.screenRecording.style.headerDesc",
                 itemHeight: 72,
-                lightBackgroundImage: Image("backgroundLight"),
-                darkBackgroundImage: Image("backgroundDark")
+                lightBackgroundImage: NotchImage("backgroundLight"),
+                darkBackgroundImage: NotchImage("backgroundDark")
             ) { style, isSelected in
                 screenRecordingAppearancePickerContent(for: style, isSelected: isSelected)
             }

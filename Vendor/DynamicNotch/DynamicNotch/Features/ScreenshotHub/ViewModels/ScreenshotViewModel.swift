@@ -195,8 +195,9 @@ final class ScreenshotViewModel: ObservableObject {
         if let fileURL = screenshot.fileURL, fileManager.fileExists(atPath: fileURL.path) {
             return fileURL
         }
-        let tempDir = fileManager.temporaryDirectory
-        let tempURL = tempDir.appendingPathComponent("Screenshot_\(Int(Date().timeIntervalSince1970)).png")
+        let tempDir = NotchStoragePaths.temporary.appendingPathComponent("SharedScreenshots", isDirectory: true)
+        try? fileManager.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let tempURL = tempDir.appendingPathComponent("Screenshot_\(UUID().uuidString).png")
         writePNG(image: screenshot.image, to: tempURL)
         return tempURL
     }

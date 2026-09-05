@@ -22,7 +22,7 @@ final class LockScreenManager: ObservableObject {
     init(
         service: (any LockScreenMonitoring)? = nil,
         soundPlayer: (any LockScreenSoundPlaying)? = nil,
-        defaults: UserDefaults = .standard,
+        defaults: UserDefaults = .aloNotch,
         unlockCollapseDelay: TimeInterval = 0.82,
         idleResetDelay: TimeInterval = 0.82
     ) {
@@ -131,6 +131,7 @@ final class LockScreenManager: ObservableObject {
     }
 
     private func apply(lockState locked: Bool) {
+        guard hasStartedMonitoring else { return }
         guard isLocked != locked else { return }
 
         unlockWorkItem?.cancel()

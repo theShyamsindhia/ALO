@@ -130,8 +130,8 @@ struct BatterySettingsView: View {
                 headerTitle: "settings.battery.lowBatteryStyle.headerTitle",
                 headerDescription: "settings.battery.lowBatteryStyle.headerDesc",
                 itemHeight: 82,
-                lightBackgroundImage: Image("backgroundLight"),
-                darkBackgroundImage: Image("backgroundDark")
+                lightBackgroundImage: NotchImage("backgroundLight"),
+                darkBackgroundImage: NotchImage("backgroundDark")
             ) { style, isSelected in
                 batteryStylePickerContent(
                     for: style,
@@ -179,8 +179,8 @@ struct BatterySettingsView: View {
                 headerTitle: "settings.battery.fullBatteryStyle.headerTitle",
                 headerDescription: "settings.battery.fullBatteryStyle.headerDesc",
                 itemHeight: 82,
-                lightBackgroundImage: Image("backgroundLight"),
-                darkBackgroundImage: Image("backgroundDark")
+                lightBackgroundImage: NotchImage("backgroundLight"),
+                darkBackgroundImage: NotchImage("backgroundDark")
             ) { style, isSelected in
                 batteryStylePickerContent(
                     for: style,

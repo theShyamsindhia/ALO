@@ -31,7 +31,7 @@ class SettingsWindowController: NSWindowController {
     private func setupWindow() {
         guard let window = window else { return }
         
-        window.title = NSLocalizedString("settings.title", comment: "")
+        window.title = "ALO Notch Settings"
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .visible
         window.toolbarStyle = .unified
@@ -52,6 +52,7 @@ class SettingsWindowController: NSWindowController {
         guard let window = window, let appDelegate = appDelegate else { return }
         
         let settingsView = SettingsRootView(container: appDelegate.container)
+            .defaultAppStorage(.aloNotch)
             .frame(width: SettingsWindowLayout.width, height: SettingsWindowLayout.height)
         
         let hostingView = NSHostingView(rootView: settingsView)
@@ -59,6 +60,9 @@ class SettingsWindowController: NSWindowController {
     }
     
     func showWindow() {
+        if appDelegate == nil, let embedded = AppDelegate.embeddedInstance {
+            setupDependencies(appDelegate: embedded)
+        }
         _ = window
 
         window?.level = .normal
@@ -102,7 +106,7 @@ class SettingsWindowController: NSWindowController {
         window?.orderOut(nil)
         
         let shouldShowDock = appDelegate?.settingsViewModel.application.isDockIconVisible ?? false
-        if !shouldShowDock {
+        if AppDelegate.embeddedInstance == nil && !shouldShowDock {
             NSApp.setActivationPolicy(.accessory)
         }
     }
@@ -119,7 +123,7 @@ extension SettingsWindowController: NSWindowDelegate {
     
     func windowDidBecomeKey(_ notification: Notification) {
         let shouldShowDock = appDelegate?.settingsViewModel.application.isDockIconVisible ?? false
-        if !shouldShowDock {
+        if AppDelegate.embeddedInstance == nil && !shouldShowDock {
             NSApp.setActivationPolicy(.regular)
         }
     }

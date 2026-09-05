@@ -6,9 +6,11 @@ final class MailDatabaseReader {
 
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "DynamicNotch", category: "MailDatabaseReader")
     private let databaseURLOverride: URL?
+    private let contactResolver: MessagesContactResolver
     
-    init(databaseURL: URL? = nil) {
+    init(databaseURL: URL? = nil, contactResolver: MessagesContactResolver = MessagesContactResolver()) {
         self.databaseURLOverride = databaseURL
+        self.contactResolver = contactResolver
     }
 
     func latestRowID() -> Int64? {
@@ -95,7 +97,8 @@ final class MailDatabaseReader {
                         sender: sender,
                         subject: subject,
                         summary: summary,
-                        receivedDate: Date(timeIntervalSince1970: TimeInterval(receivedTimestamp))
+                        receivedDate: Date(timeIntervalSince1970: TimeInterval(receivedTimestamp)),
+                        senderInfo: MailSenderFormatter.format(rawSender: sender, resolver: contactResolver)
                     )
                     messages.append(message)
                     result = sqlite3_step(statement)
@@ -166,7 +169,8 @@ final class MailDatabaseReader {
                     summary: summary,
                     receivedDate: Date(
                         timeIntervalSince1970: TimeInterval(receivedTimestamp)
-                    )
+                    ),
+                    senderInfo: MailSenderFormatter.format(rawSender: stringValue(from: statement, column: 3) ?? "", resolver: contactResolver)
                 )
             }
         }

@@ -84,7 +84,7 @@ struct MailNotificationRow: View {
         if senderInfo.isKnownContact {
             contactAvatar
         } else {
-            Image("appleMail")
+            NotchImage("appleMail")
                 .resizable()
                 .interpolation(.high)
                 .scaledToFit()
@@ -112,7 +112,7 @@ struct MailNotificationRow: View {
         .frame(width: avatarSize, height: avatarSize)
         .clipShape(Circle())
         .overlay(alignment: .bottomTrailing) {
-            Image("appleMail")
+            NotchImage("appleMail")
                 .resizable()
                 .interpolation(.high)
                 .scaledToFit()

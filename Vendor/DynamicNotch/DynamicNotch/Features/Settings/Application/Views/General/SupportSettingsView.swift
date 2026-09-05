@@ -36,10 +36,10 @@ struct SupportSettingsView: View {
                 .padding(.top, 20)
             
             VStack(spacing: 8) {
-                Text("settings.support.title")
+                NotchText("settings.support.title")
                     .font(.system(size: 20, weight: .bold))
                 
-                Text("settings.support.description")
+                NotchText("settings.support.description")
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)

@@ -157,8 +157,8 @@ struct SettingsToggleRow: View {
                     }
                 }
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
-                    Text(description)
+                    NotchText(title)
+                    NotchText(description)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

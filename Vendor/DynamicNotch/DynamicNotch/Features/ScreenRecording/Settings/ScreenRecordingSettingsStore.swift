@@ -5,7 +5,7 @@ extension ScreenRecordingStyle: StoredSettingValue {}
 
 @MainActor
 final class ScreenRecordingSettingsStore: SettingsStoreBase {
-    @StoredDefault(key: GeneralSettingsStorage.Keys.screenRecordingLiveActivityEnabled, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.screenRecordingLiveActivityEnabled, defaultValue: false)
     var isScreenRecordingLiveActivityEnabled: Bool
 
     @StoredDefault(key: GeneralSettingsStorage.Keys.screenRecordingDefaultStrokeEnabled, defaultValue: false)
@@ -14,10 +14,10 @@ final class ScreenRecordingSettingsStore: SettingsStoreBase {
     @StoredDefault(key: GeneralSettingsStorage.Keys.screenRecordingStyle, defaultValue: .detailed)
     var screenRecordingStyle: ScreenRecordingStyle
 
-    @StoredDefault(key: GeneralSettingsStorage.Keys.screenshotActivityEnabled, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.screenshotActivityEnabled, defaultValue: false)
     var isScreenshotActivityEnabled: Bool
 
-    @StoredDefault(key: GeneralSettingsStorage.Keys.screenshotDisableSystemThumbnail, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.screenshotDisableSystemThumbnail, defaultValue: false)
     var isScreenshotDisableSystemThumbnailEnabled: Bool
 
     @StoredDefault(key: GeneralSettingsStorage.Keys.screenshotAutoHideEnabled, defaultValue: true)

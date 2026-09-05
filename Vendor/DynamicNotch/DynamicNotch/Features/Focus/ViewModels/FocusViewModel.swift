@@ -18,10 +18,12 @@ final class FocusViewModel: ObservableObject {
     
     private let service = FocusService()
     
+    func startMonitoring() { service.start() }
+    func stopMonitoring() { service.stop(); focusEvent = nil }
+
     init() {
         service.onEvent = { [weak self] event in
             self?.focusEvent = event
         }
-        service.start()
     }
 }

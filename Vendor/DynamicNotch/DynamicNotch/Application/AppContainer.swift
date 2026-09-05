@@ -34,10 +34,6 @@ final class AppContainer {
             monitor.onEvent = { [weak self] event in
                 self?.notchEventCoordinator.handleHudEvent(event)
             }
-            monitor.updateConfiguration(
-                interceptVolume: settingsViewModel.hud.isVolumeHUDEnabled,
-                interceptBrightness: settingsViewModel.hud.isBrightnessHUDEnabled
-            )
             return monitor
         }
     }()
@@ -65,8 +61,8 @@ final class AppContainer {
         airDropController: airDropController
     )
 
-    init(isRunningUITests: Bool = ProcessInfo.processInfo.arguments.contains("-ui-testing")) {
-        self.settingsViewModel = SettingsViewModel()
+    init(isRunningUITests: Bool = ProcessInfo.processInfo.arguments.contains("-ui-testing"), defaults: UserDefaults = .aloNotch) {
+        self.settingsViewModel = SettingsViewModel(defaults: defaults)
         self.wifiViewModel = WifiViewModel(settings: settingsViewModel.connectivity)
         self.vpnViewModel = VpnViewModel(settings: settingsViewModel.connectivity)
         self.powerViewModel = PowerViewModel(

@@ -11,10 +11,12 @@ import CoreWLAN
 import SystemConfiguration
 
 final class WifiMonitor: NSObject, WifiMonitoring, CWEventDelegate {
-    private let monitor = NWPathMonitor()
+    private var isMonitoring = false
+    private var monitor = NWPathMonitor()
     private let queue = DispatchQueue(label: "WifiMonitorQueue")
     private let hotspotBatteryMonitor = HotspotBatteryMonitor.shared
     
+    var isHotspotMonitoringEnabled: () -> Bool = { false }
     var onStatusChange: ((_ wifi: Bool, _ hotspot: Bool, _ vpn: Bool) -> Void)?
     var onHotspotBatteryChange: ((Int) -> Void)?
     private(set) var currentWiFiName: String?
@@ -38,6 +40,9 @@ final class WifiMonitor: NSObject, WifiMonitoring, CWEventDelegate {
     }
 
     func startMonitoring() {
+        guard !isMonitoring else { return }
+        isMonitoring = true
+        monitor = NWPathMonitor()
         print("[WifiMonitor] startMonitoring called")
         CWWiFiClient.shared().delegate = self
         try? CWWiFiClient.shared().startMonitoringEvent(with: .ssidDidChange)
@@ -52,6 +57,7 @@ final class WifiMonitor: NSObject, WifiMonitoring, CWEventDelegate {
     }
 
     private func updateStatus(path: NWPath) {
+        guard isMonitoring else { return }
         let hasInternetConnection = path.status == .satisfied
         let isWifi = hasInternetConnection && path.usesInterfaceType(.wifi)
         
@@ -59,7 +65,7 @@ final class WifiMonitor: NSObject, WifiMonitoring, CWEventDelegate {
         let isHotspot = isWifi && (isTether || (path.isExpensive && !path.isConstrained))
         print("[WifiMonitor] updateStatus: isWifi=\(isWifi), isExpensive=\(path.isExpensive), isConstrained=\(path.isConstrained), isTether=\(isTether), isHotspot=\(isHotspot), battery=\(String(describing: hotspotBatteryMonitor.currentBatteryLevel))")
         
-        if isHotspot {
+        if isHotspot && isHotspotMonitoringEnabled() {
             hotspotBatteryMonitor.startBrowsing()
         } else {
             hotspotBatteryMonitor.stopBrowsing()
@@ -76,6 +82,7 @@ final class WifiMonitor: NSObject, WifiMonitoring, CWEventDelegate {
         let vpnName = resolveVPNName(isConnected: isVpn)
 
         DispatchQueue.main.async {
+            guard self.isMonitoring else { return }
             self.currentWiFiName = wifiName
             self.currentWiFiSignalLevel = wifiSignalLevel
             self.currentVPNName = vpnName
@@ -85,6 +92,8 @@ final class WifiMonitor: NSObject, WifiMonitoring, CWEventDelegate {
     }
 
     func stopMonitoring() {
+        guard isMonitoring else { return }
+        isMonitoring = false
         try? CWWiFiClient.shared().stopMonitoringEvent(with: .ssidDidChange)
         try? CWWiFiClient.shared().stopMonitoringEvent(with: .linkDidChange)
         try? CWWiFiClient.shared().stopMonitoringEvent(with: .bssidDidChange)

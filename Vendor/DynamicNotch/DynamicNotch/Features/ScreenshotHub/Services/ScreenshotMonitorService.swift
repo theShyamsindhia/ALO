@@ -9,6 +9,8 @@ final class ScreenshotMonitorService {
     
     private(set) var userTargetDirectoryURL: URL = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: NSHomeDirectory())
     
+    private var originalThumbnailPreference: Bool?
+    private var didChangeThumbnail = false
     private var originalScreenshotLocation: String?
     private var fileWatcherTimer: Timer?
     private var pasteboardTimer: Timer?
@@ -27,7 +29,11 @@ final class ScreenshotMonitorService {
     }
     
     func startMonitoring(disableSystemThumbnail: Bool = true) {
-        guard !isMonitoring else { return }
+        if isMonitoring {
+            updateThumbnail(disabled: disableSystemThumbnail)
+            return
+        }
+        originalThumbnailPreference = CFPreferencesCopyAppValue("show-thumbnail" as CFString, "com.apple.screencapture" as CFString) as? Bool
         isMonitoring = true
         
         self.originalScreenshotLocation = Self.getSystemScreenshotLocation()
@@ -38,9 +44,7 @@ final class ScreenshotMonitorService {
         
         Self.setSystemScreenshotLocation(stagingDir.path)
         
-        if disableSystemThumbnail {
-            Self.setSystemFloatingThumbnailEnabled(false)
-        }
+        updateThumbnail(disabled: disableSystemThumbnail)
         
         primeBaseline()
         
@@ -63,8 +67,26 @@ final class ScreenshotMonitorService {
         pasteboardTimer = nil
         
         Self.setSystemScreenshotLocation(originalScreenshotLocation)
+        restoreThumbnail()
     }
     
+    private func updateThumbnail(disabled: Bool) {
+        if disabled && !didChangeThumbnail {
+            Self.setSystemFloatingThumbnailEnabled(false)
+            didChangeThumbnail = true
+        } else if !disabled {
+            restoreThumbnail()
+        }
+    }
+
+    private func restoreThumbnail() {
+        guard didChangeThumbnail else { return }
+        let value: CFPropertyList? = originalThumbnailPreference.map { $0 as CFBoolean }
+        CFPreferencesSetValue("show-thumbnail" as CFString, value, "com.apple.screencapture" as CFString, kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        CFPreferencesAppSynchronize("com.apple.screencapture" as CFString)
+        didChangeThumbnail = false
+    }
+
     func updateLastPasteboardChangeCount() {
         lastPasteboardChangeCount = NSPasteboard.general.changeCount
     }
@@ -75,12 +97,11 @@ final class ScreenshotMonitorService {
     }
     
     func rawStagingDirectoryURL() -> URL {
-        let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first ?? fileManager.temporaryDirectory
-        return caches.appendingPathComponent("com.Jackson.DynamicNotch/RawScreenshots")
+        NotchStoragePaths.screenshots
     }
     
     private func computeUserTargetDirectoryURL() -> URL {
-        if let customPath = UserDefaults.standard.string(forKey: "settings.screenshot.savePath"), !customPath.isEmpty {
+        if let customPath = UserDefaults.aloNotch.string(forKey: "settings.screenshot.savePath"), !customPath.isEmpty {
             let expanded = (customPath as NSString).expandingTildeInPath
             return URL(fileURLWithPath: expanded)
         }
@@ -96,7 +117,7 @@ final class ScreenshotMonitorService {
     }
     
     private func computeScreenRecordingTargetDirectoryURL() -> URL {
-        if let customPath = UserDefaults.standard.string(forKey: "settings.screenRecording.savePath"), !customPath.isEmpty {
+        if let customPath = UserDefaults.aloNotch.string(forKey: "settings.screenRecording.savePath"), !customPath.isEmpty {
             let expanded = (customPath as NSString).expandingTildeInPath
             return URL(fileURLWithPath: expanded)
         }

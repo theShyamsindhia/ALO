@@ -622,12 +622,6 @@ struct SettingsRootView: View {
             PermissionsSettingsView(permissionController: permissionController, applicationSettings: settingsViewModel.application)
         case .softwareUpdate:
             SoftwareUpdateSettingsView()
-        case .support:
-            SupportSettingsView(
-                onRequestInternetAccess: {
-                    notchEventCoordinator.requestInternetAccess()
-                }
-            )
         case .about:
             AboutAppSettingsView(
                 applicationSettings: settingsViewModel.application,

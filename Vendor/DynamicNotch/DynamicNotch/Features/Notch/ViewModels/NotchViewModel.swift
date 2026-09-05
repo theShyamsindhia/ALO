@@ -339,6 +339,12 @@ final class NotchViewModel: ObservableObject {
         }
     }
     
+    var acceptsActivityEvents: Bool { engine.acceptsActivityEvents }
+
+    func setActivityEventsEnabled(_ enabled: Bool) {
+        engine.setActivityEventsEnabled(enabled)
+    }
+
     func send(_ notchState: NotchState) {
         engine.send(notchState)
     }

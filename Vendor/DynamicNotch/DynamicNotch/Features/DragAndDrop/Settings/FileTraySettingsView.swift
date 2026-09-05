@@ -22,8 +22,8 @@ struct FileTraySettingsView: View {
                 showsStroke: appearanceSettings.isShowNotchStrokeEnabled,
                 strokeColor: .white.opacity(0.2),
                 strokeWidth: appearanceSettings.notchStrokeWidth,
-                lightBackgroundImage: Image("backgroundLight"),
-                darkBackgroundImage: Image("backgroundDark")
+                lightBackgroundImage: NotchImage("backgroundLight"),
+                darkBackgroundImage: NotchImage("backgroundDark")
             ) {
                 trayAppearancePreviewContent
             }

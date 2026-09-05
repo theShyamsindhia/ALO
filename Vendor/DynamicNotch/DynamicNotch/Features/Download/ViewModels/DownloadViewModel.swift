@@ -8,7 +8,7 @@ final class DownloadViewModel: ObservableObject {
     @Published var event: DownloadEvent?
 
     private let monitor: any DownloadMonitoring
-    private var hasStartedMonitoring = false
+    private(set) var hasStartedMonitoring = false
     private var ignoresMonitorSnapshots = false
     private var latestObservedDownloads: [DownloadModel] = []
     #if DEBUG

@@ -8,7 +8,7 @@ struct SettingsSearchEmptyState: View {
         ContentUnavailableView(
             locale.dn("settings.search.empty.title", fallback: "No Settings Found"),
             systemImage: "magnifyingglass",
-            description: Text(
+            description: NotchText(
                 locale.dnFormat(
                     "settings.search.empty.subtitle",
                     fallback: "Try a different keyword for \"%@\".",

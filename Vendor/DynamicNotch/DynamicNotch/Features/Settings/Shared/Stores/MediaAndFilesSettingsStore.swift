@@ -15,7 +15,7 @@ extension TimerSound: StoredSettingValue {}
 
 @MainActor
 final class MediaAndFilesSettingsStore: SettingsStoreBase {
-    @StoredDefault(key: GeneralSettingsStorage.Keys.nowPlayingLiveActivityEnabled, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.nowPlayingLiveActivityEnabled, defaultValue: false)
     var isNowPlayingLiveActivityEnabled: Bool
 
     @StoredDefault(key: GeneralSettingsStorage.Keys.nowPlayingFavoriteButtonVisible, defaultValue: true)
@@ -43,7 +43,7 @@ final class MediaAndFilesSettingsStore: SettingsStoreBase {
     @StoredDefault(key: GeneralSettingsStorage.Keys.nowPlayingSourceFilter, defaultValue: .any)
     var nowPlayingSourceFilter: NowPlayingSourceFilter
 
-    @StoredDefault(key: GeneralSettingsStorage.Keys.downloadsLiveActivityEnabled, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.downloadsLiveActivityEnabled, defaultValue: false)
     var isDownloadsLiveActivityEnabled: Bool
 
     @StoredDefault(key: GeneralSettingsStorage.Keys.downloadsDefaultStrokeEnabled, defaultValue: false)
@@ -52,19 +52,19 @@ final class MediaAndFilesSettingsStore: SettingsStoreBase {
     @StoredDefault(key: GeneralSettingsStorage.Keys.downloadsProgressIndicatorStyle, defaultValue: .percent)
     var downloadsProgressIndicatorStyle: DownloadProgressIndicatorStyle
 
-    @StoredDefault(key: GeneralSettingsStorage.Keys.dragAndDropLiveActivityEnabled, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.dragAndDropLiveActivityEnabled, defaultValue: false)
     var isDragAndDropLiveActivityEnabled: Bool
 
-    @StoredDefault(key: GeneralSettingsStorage.Keys.airDropLiveActivityEnabled, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.airDropLiveActivityEnabled, defaultValue: false)
     var isAirDropLiveActivityEnabled: Bool
 
     @StoredDefault(key: GeneralSettingsStorage.Keys.airDropDefaultStrokeEnabled, defaultValue: false)
     var isDragAndDropDefaultStrokeEnabled: Bool
 
-    @StoredDefault(key: GeneralSettingsStorage.Keys.trayLiveActivityEnabled, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.trayLiveActivityEnabled, defaultValue: false)
     var isTrayLiveActivityEnabled: Bool
 
-    @StoredDefault(key: GeneralSettingsStorage.Keys.fileConverterLiveActivityEnabled, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.fileConverterLiveActivityEnabled, defaultValue: false)
     var isFileConverterLiveActivityEnabled: Bool
 
     @StoredDefault(
@@ -108,7 +108,7 @@ final class MediaAndFilesSettingsStore: SettingsStoreBase {
     @StoredDefault(key: GeneralSettingsStorage.Keys.dragAndDropActivityMode, defaultValue: .airDrop)
     var dragAndDropActivityMode: DragAndDropActivityMode
 
-    @StoredDefault(key: GeneralSettingsStorage.Keys.timerLiveActivityEnabled, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.timerLiveActivityEnabled, defaultValue: false)
     var isTimerLiveActivityEnabled: Bool
 
     @StoredDefault(key: GeneralSettingsStorage.Keys.timerDefaultStrokeEnabled, defaultValue: false)

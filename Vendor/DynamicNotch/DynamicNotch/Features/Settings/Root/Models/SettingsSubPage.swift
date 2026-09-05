@@ -7,7 +7,6 @@ enum SettingsSubPage: Hashable, Identifiable {
     case system
     case permissions
     case softwareUpdate
-    case support
     case about
     #if DEBUG
     case debug
@@ -33,7 +32,6 @@ enum SettingsSubPage: Hashable, Identifiable {
         case .system: return "settings.general.system.title"
         case .permissions: return "settings.section.permissions.title"
         case .softwareUpdate: return "settings.section.softwareUpdate.title"
-        case .support: return "settings.general.support.title"
         case .about: return "settings.section.about.title"
         #if DEBUG
         case .debug: return "settings.section.debug.title"
@@ -60,7 +58,6 @@ enum SettingsSubPage: Hashable, Identifiable {
         case .system: return "System"
         case .permissions: return "Permissions"
         case .softwareUpdate: return "Software Update"
-        case .support: return "Support"
         case .about: return "About"
         #if DEBUG
         case .debug: return "Debug"
@@ -87,7 +84,6 @@ enum SettingsSubPage: Hashable, Identifiable {
         case .system: return "settings.general.system.subtitle"
         case .permissions: return "settings.section.permissions.subtitle"
         case .softwareUpdate: return "settings.section.softwareUpdate.subtitle"
-        case .support: return "settings.general.support.subtitle"
         case .about: return "settings.section.about.subtitle"
         #if DEBUG
         case .debug: return "settings.section.debug.subtitle"
@@ -114,7 +110,6 @@ enum SettingsSubPage: Hashable, Identifiable {
         case .system: return "Manage launch options, Dock, and menu bar icon visibility."
         case .permissions: return "Manage system permissions and access settings."
         case .softwareUpdate: return "Check for updates and manage update preferences."
-        case .support: return "Support the project development and donations."
         case .about: return "Project details, links, and release information."
         #if DEBUG
         case .debug: return "Manual previews and event triggers for testing."

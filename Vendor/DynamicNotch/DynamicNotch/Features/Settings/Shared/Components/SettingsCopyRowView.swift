@@ -168,11 +168,11 @@ struct SettingsCopyRowView: View {
                     }
                     
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(title)
+                        NotchText(title)
                             .font(.body)
                             .foregroundStyle(.primary)
                         if let description {
-                            Text(description)
+                            NotchText(description)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)

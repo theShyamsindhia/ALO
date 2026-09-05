@@ -3,6 +3,8 @@ internal import AppKit
 import ObjectiveC
 
 private final class LiquidGlassHostingView<Content: View>: NSHostingView<Content> {
+    // No actor-owned teardown; avoid synthesizing an isolated generic destructor.
+    nonisolated deinit {}
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         true
     }

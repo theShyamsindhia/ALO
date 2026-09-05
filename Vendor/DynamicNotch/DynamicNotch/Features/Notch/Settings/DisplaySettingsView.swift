@@ -167,8 +167,8 @@ private struct SpecificDisplayPicker: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("settings.general.display.specificPicker.title")
-                    Text("settings.general.display.specificPicker.description")
+                    NotchText("settings.general.display.specificPicker.title")
+                    NotchText("settings.general.display.specificPicker.description")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -236,22 +236,22 @@ private struct SpecificDisplayPicker: View {
                 .contentShape(shape)
                 
                 if !display.isAvailable {
-                    Text("settings.general.display.badge.unavailable")
+                    NotchText("settings.general.display.badge.unavailable")
                         .font(.system(size: 10))
                         .foregroundStyle(Color.orange)
                     
                 } else if display.isBuiltIn {
-                    Text("settings.general.display.badge.builtin")
+                    NotchText("settings.general.display.badge.builtin")
                         .font(.system(size: 10))
                         .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
                     
                 } else if display.isMain {
-                    Text("settings.general.display.badge.main")
+                    NotchText("settings.general.display.badge.main")
                         .font(.system(size: 10))
                         .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
                     
                 } else {
-                    Text("settings.general.display.badge.external")
+                    NotchText("settings.general.display.badge.external")
                         .font(.system(size: 10))
                         .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
                 }

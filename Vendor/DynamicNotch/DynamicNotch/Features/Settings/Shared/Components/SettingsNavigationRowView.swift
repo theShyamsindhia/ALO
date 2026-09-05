@@ -178,11 +178,11 @@ struct SettingsNavigationRowView<Value: Hashable>: View {
                     }
                     
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(title)
+                        NotchText(title)
                             .font(.body)
                             .foregroundStyle(.primary)
                         if let description {
-                            Text(description)
+                            NotchText(description)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)

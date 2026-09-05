@@ -30,13 +30,9 @@ final class NotchEventCoordinator: ObservableObject {
     private let screenshotHandler: NotchScreenshotEventsHandler
     private let screenRecordingHandler: NotchScreenRecordingEventsHandler
     private let lockScreenHandler: NotchLockScreenEventsHandler
-    private let onboardingHandler: NotchOnboardingEventsHandler
     private var settingsObserver: NotchSettingsObserver?
     private var cancellables = Set<AnyCancellable>()
 
-    var isOnboardingActive: Bool {
-        onboardingHandler.isOnboardingActive
-    }
 
     convenience init(container: AppContainer) {
         self.init(
@@ -189,13 +185,6 @@ final class NotchEventCoordinator: ObservableObject {
             lockScreenManager: lockScreenManager,
             settingsViewModel: settingsViewModel
         )
-        self.onboardingHandler = NotchOnboardingEventsHandler(
-            notchViewModel: notchViewModel,
-            settingsViewModel: settingsViewModel,
-            nowPlayingViewModel: nowPlayingViewModel,
-            mediaHandler: mediaHandler,
-            homePageHandler: homePageHandler
-        )
 
         setupEventSubscriptions(
             powerViewModel: powerViewModel,
@@ -238,66 +227,30 @@ final class NotchEventCoordinator: ObservableObject {
         observeCalendarEvents()
     }
 
-    func checkFirstLaunch() {
-        onboardingHandler.checkFirstLaunch { [weak self] in
-            self?.handleOnboardingEvent(.onboarding)
-        }
-    }
-
-    func hideOnboarding(markAsSeen: Bool = false) {
-        onboardingHandler.hideOnboarding(markAsSeen: markAsSeen)
-    }
-
-    func finishOnboarding() {
-        onboardingHandler.hideOnboarding(markAsSeen: true)
-    }
-
-    func showOnboarding(step: OnboardingSteps = .first) {
-        onboardingHandler.showOnboarding(step: step, coordinator: self)
-    }
-
-    #if DEBUG
-    func showDebugOnboardingPreview(step: OnboardingSteps = .first) {
-        onboardingHandler.showDebugOnboardingPreview(step: step, coordinator: self)
-    }
-    #endif
-
     func handleNotchWidthEvent(_ event: NotchSizeEvent) {
-        guard !isOnboardingActive else { return }
         guard settingsViewModel.isTemporaryActivityEnabled(.notchSize) else { return }
 
         systemHandler.handleNotchSize(event)
     }
 
     func handleFocusEvent(_ event: FocusEvent) {
-        guard !isOnboardingActive else { return }
         focusHandler.handleFocus(event)
     }
 
     func handleHudEvent(_ event: HudEvent) {
-        guard !isOnboardingActive else { return }
         hudHandler.handleHud(event)
     }
 
-    func handleOnboardingEvent(_ event: OnboardingEvent) {
-        switch event {
-        case .onboarding:
-            showOnboarding(step: .first)
-        }
-    }
 
     func handleBluetoothEvent(_ event: BluetoothEvent) {
-        guard !isOnboardingActive else { return }
         connectivityHandler.handleBluetooth(event)
     }
 
     func handleWifiEvent(_ event: WifiEvent) {
-        guard !isOnboardingActive else { return }
         connectivityHandler.handleWifi(event)
     }
 
     func handleVpnEvent(_ event: VpnEvent) {
-        guard !isOnboardingActive else { return }
         connectivityHandler.handleVpn(event)
     }
 
@@ -312,12 +265,10 @@ final class NotchEventCoordinator: ObservableObject {
     }
 
     func handlePowerEvent(_ event: PowerEvent) {
-        guard !isOnboardingActive else { return }
         powerHandler.handle(event)
     }
 
     func handleDownloadEvent(_ event: DownloadEvent) {
-        guard !isOnboardingActive else { return }
         downloadHandler.handleDownload(event)
     }
 
@@ -326,22 +277,18 @@ final class NotchEventCoordinator: ObservableObject {
     }
 
     func handleNowPlayingEvent(_ event: NowPlayingEvent) {
-        guard !isOnboardingActive else { return }
         mediaHandler.handleNowPlaying(event)
     }
 
     func handleTimerEvent(_ event: TimerEvent) {
-        guard !isOnboardingActive else { return }
         timerHandler.handleTimer(event)
     }
 
     func handleHomePageEvent(_ event: HomePageEvent) {
-        guard !isOnboardingActive else { return }
         homePageHandler.handleHomePage(event)
     }
 
     func handleScreenRecordingEvent(_ event: ScreenRecordingEvent) {
-        guard !isOnboardingActive else { return }
         screenRecordingHandler.handleScreenRecordingEvent(event)
     }
 

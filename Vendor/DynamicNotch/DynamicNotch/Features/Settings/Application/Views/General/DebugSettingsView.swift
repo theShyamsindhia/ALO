@@ -150,16 +150,6 @@ struct DebugSettingsView: View {
 
         debugDivider
 
-        SettingsToggleRow(
-            title: "Onboarding",
-            description: "Show a safe debug preview of the onboarding live activity.",
-            systemImage: "sparkles.rectangle.stack",
-            color: .pink,
-            isOn: $viewModel.isOnboardingPreviewEnabled,
-            accessibilityIdentifier: "settings.debug.onboarding"
-        )
-
-        debugDivider
 
         SettingsToggleRow(
             title: "Software Update",

@@ -152,8 +152,8 @@ struct HUDSettingsView: View {
                     selection: $settings.hudStyle,
                     options: [.standard, .compact, .minimal],
                     title: { $0.title },
-                    lightBackgroundImage: Image("backgroundLight"),
-                    darkBackgroundImage: Image("backgroundDark")
+                    lightBackgroundImage: NotchImage("backgroundLight"),
+                    darkBackgroundImage: NotchImage("backgroundDark")
                 ) { style, isSelected in
                     hudStylePickerContent(for: style, isSelected: isSelected)
                 }
@@ -164,8 +164,8 @@ struct HUDSettingsView: View {
                     options: [.expandedCompact, .expandedDetailed],
                     title: { $0.title },
                     itemHeight: 110,
-                    lightBackgroundImage: Image("backgroundLight"),
-                    darkBackgroundImage: Image("backgroundDark")
+                    lightBackgroundImage: NotchImage("backgroundLight"),
+                    darkBackgroundImage: NotchImage("backgroundDark")
                 ) { style, isSelected in
                     hudStylePickerContent(for: style, isSelected: isSelected)
                 }

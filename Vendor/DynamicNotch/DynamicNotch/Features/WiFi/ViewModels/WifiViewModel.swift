@@ -36,6 +36,7 @@ final class WifiViewModel: ObservableObject {
     ) {
         self.monitor = monitor
         self.settings = settings
+        (monitor as? WifiMonitor)?.isHotspotMonitoringEnabled = { [weak settings] in settings?.isHotspotLiveActivityEnabled == true }
         setupMonitoring()
     }
 
@@ -49,8 +50,21 @@ final class WifiViewModel: ObservableObject {
     convenience init() {
         self.init(
             monitor: WifiMonitor(),
-            settings: ConnectivitySettingsStore(defaults: .standard)
+            settings: ConnectivitySettingsStore(defaults: .aloNotch)
         )
+    }
+
+    private(set) var isMonitoring = false
+    func startMonitoring() {
+        guard !isMonitoring else { return }
+        isMonitoring = true
+        isInitialCheck = true
+        monitor.startMonitoring()
+    }
+    func stopMonitoring() {
+        guard isMonitoring else { return }
+        isMonitoring = false
+        monitor.stopMonitoring()
     }
 
     private func setupMonitoring() {
@@ -111,7 +125,6 @@ final class WifiViewModel: ObservableObject {
             print("[WifiViewModel] onHotspotBatteryChange received: \(level)%")
             self.hotspotBatteryLevel = level
         }
-        monitor.startMonitoring()
     }
 
     private func shouldEmitConnectionNotification(

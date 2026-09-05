@@ -36,6 +36,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var vpnViewModel: VpnViewModel { container.vpnViewModel }
     var focusViewModel: FocusViewModel { container.focusViewModel }
     
+    /// Embedded mode borrows the host panel without taking ownership of it.
+    weak var hostWindow: NSWindow?
+    static weak var embeddedInstance: AppDelegate?
     var window: OverlayPanelWindow!
     var localClickMonitor: Any?
     let globalClickMonitor = GlobalClickMonitor()
@@ -88,7 +91,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if !isRunningUITests {
-            notchEventCoordinator.checkFirstLaunch()
+
             
             // Наблюдаем за появлением обновлений ПО для показа Live Activity
             SparkleUpdater.shared.$isUpdateAvailable

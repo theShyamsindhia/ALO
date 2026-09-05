@@ -37,8 +37,8 @@ struct SettingsOrderListView<Item: Hashable>: View {
                     )
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(title(item))
-                        Text(subtitle(item))
+                        NotchText(title(item))
+                        NotchText(subtitle(item))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)

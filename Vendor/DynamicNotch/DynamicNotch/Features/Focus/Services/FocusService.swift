@@ -17,7 +17,19 @@ final class FocusService {
     private var pendingFallback: DispatchWorkItem?
     private let metadataGracePeriod: TimeInterval = 0.6
 
+    private var isMonitoring = false
+    func stop() {
+        isMonitoring = false
+        cancelPendingFallback()
+        cancellables.removeAll()
+        manager.stopMonitoring()
+        lastActiveState = nil
+        lastModeType = nil
+    }
+
     func start() {
+        guard !isMonitoring else { return }
+        isMonitoring = true
         manager.startMonitoring()
 
         Publishers.CombineLatest3(

@@ -60,7 +60,7 @@ final class NowPlayingViewModel: ObservableObject {
             service: MediaRemoteNowPlayingService(),
             audioOutputRouting: SystemAudioOutputRoutingService(),
             lyricsProvider: LRCLIBLyricsProvider(),
-            favoritesStore: .standard,
+            favoritesStore: .aloNotch,
             playbackSourceOpener: WorkspacePlaybackSourceOpener(),
             sourceFilter: .any
         )
@@ -70,7 +70,7 @@ final class NowPlayingViewModel: ObservableObject {
         service: any NowPlayingMonitoring,
         audioOutputRouting: (any AudioOutputRouting)? = nil,
         lyricsProvider: (any LyricsProviding)? = nil,
-        favoritesStore: UserDefaults = .standard,
+        favoritesStore: UserDefaults = .aloNotch,
         playbackSourceOpener: (any PlaybackSourceOpening)? = nil,
         sourceFilter: NowPlayingSourceFilter = .any
     ) {

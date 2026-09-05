@@ -20,31 +20,31 @@ enum LockScreenSettings {
     static let mediaPanelVerticalOffsetKey = "settings.lockScreen.mediaPanelVerticalOffset"
     static let mediaPanelVerticalOffsetRange = -100.0...100.0
 
-    static func isLiveActivityEnabled(in defaults: UserDefaults = .standard) -> Bool {
-        resolvedBoolean(forKey: liveActivityKey, defaultValue: true, in: defaults)
+    static func isLiveActivityEnabled(in defaults: UserDefaults = .aloNotch) -> Bool {
+        resolvedBoolean(forKey: liveActivityKey, defaultValue: false, in: defaults)
     }
 
-    static func isMediaPanelEnabled(in defaults: UserDefaults = .standard) -> Bool {
-        resolvedBoolean(forKey: mediaPanelKey, defaultValue: true, in: defaults)
+    static func isMediaPanelEnabled(in defaults: UserDefaults = .aloNotch) -> Bool {
+        resolvedBoolean(forKey: mediaPanelKey, defaultValue: false, in: defaults)
     }
 
-    static func isSoundEnabled(in defaults: UserDefaults = .standard) -> Bool {
-        resolvedBoolean(forKey: soundKey, defaultValue: true, in: defaults)
+    static func isSoundEnabled(in defaults: UserDefaults = .aloNotch) -> Bool {
+        resolvedBoolean(forKey: soundKey, defaultValue: false, in: defaults)
     }
 
-    static func legacyCustomSoundPath(in defaults: UserDefaults = .standard) -> String? {
+    static func legacyCustomSoundPath(in defaults: UserDefaults = .aloNotch) -> String? {
         resolvedPath(forKey: customSoundPathKey, in: defaults)
     }
 
-    static func customLockSoundPath(in defaults: UserDefaults = .standard) -> String? {
+    static func customLockSoundPath(in defaults: UserDefaults = .aloNotch) -> String? {
         resolvedPath(forKey: customLockSoundPathKey, in: defaults)
     }
 
-    static func customUnlockSoundPath(in defaults: UserDefaults = .standard) -> String? {
+    static func customUnlockSoundPath(in defaults: UserDefaults = .aloNotch) -> String? {
         resolvedPath(forKey: customUnlockSoundPathKey, in: defaults)
     }
 
-    static func style(in defaults: UserDefaults = .standard) -> LockScreenStyle {
+    static func style(in defaults: UserDefaults = .aloNotch) -> LockScreenStyle {
         guard
             let rawValue = defaults.string(forKey: styleKey),
             let style = LockScreenStyle(rawValue: rawValue)
@@ -55,7 +55,7 @@ enum LockScreenSettings {
         return style
     }
 
-    static func widgetAppearanceStyle(in defaults: UserDefaults = .standard) -> LockScreenWidgetAppearanceStyle {
+    static func widgetAppearanceStyle(in defaults: UserDefaults = .aloNotch) -> LockScreenWidgetAppearanceStyle {
         guard
             let rawValue = defaults.string(forKey: widgetAppearanceStyleKey),
             let style = LockScreenWidgetAppearanceStyle(rawValue: rawValue)
@@ -70,7 +70,7 @@ enum LockScreenSettings {
         return style
     }
 
-    static func widgetTintStyle(in defaults: UserDefaults = .standard) -> LockScreenWidgetTintStyle {
+    static func widgetTintStyle(in defaults: UserDefaults = .aloNotch) -> LockScreenWidgetTintStyle {
         guard
             let rawValue = defaults.string(forKey: widgetTintStyleKey),
             let tintStyle = LockScreenWidgetTintStyle(rawValue: rawValue)
@@ -81,7 +81,7 @@ enum LockScreenSettings {
         return tintStyle
     }
 
-    static func widgetBackgroundBrightness(in defaults: UserDefaults = .standard) -> Double {
+    static func widgetBackgroundBrightness(in defaults: UserDefaults = .aloNotch) -> Double {
         guard let value = defaults.object(forKey: widgetBackgroundBrightnessKey) as? Double else {
             return 1.0
         }
@@ -89,7 +89,7 @@ enum LockScreenSettings {
         return min(max(value, widgetBackgroundBrightnessRange.lowerBound), widgetBackgroundBrightnessRange.upperBound)
     }
 
-    static func liquidGlassVariant(in defaults: UserDefaults = .standard) -> Int {
+    static func liquidGlassVariant(in defaults: UserDefaults = .aloNotch) -> Int {
         guard let value = defaults.object(forKey: liquidGlassVariantKey) as? Int else {
             return 8
         }
@@ -97,7 +97,7 @@ enum LockScreenSettings {
         return min(max(value, liquidGlassVariantRange.lowerBound), liquidGlassVariantRange.upperBound)
     }
 
-    static func mediaPanelBackgroundStyle(in defaults: UserDefaults = .standard) -> LockScreenMediaPanelBackgroundStyle {
+    static func mediaPanelBackgroundStyle(in defaults: UserDefaults = .aloNotch) -> LockScreenMediaPanelBackgroundStyle {
         guard
             let rawValue = defaults.string(forKey: mediaPanelBackgroundStyleKey),
             let style = LockScreenMediaPanelBackgroundStyle(rawValue: rawValue)
@@ -107,15 +107,15 @@ enum LockScreenSettings {
         return style
     }
 
-    static func isLyricsEnabled(in defaults: UserDefaults = .standard) -> Bool {
-        resolvedBoolean(forKey: lyricsEnabledKey, defaultValue: true, in: defaults)
+    static func isLyricsEnabled(in defaults: UserDefaults = .aloNotch) -> Bool {
+        resolvedBoolean(forKey: lyricsEnabledKey, defaultValue: false, in: defaults)
     }
 
-    static func isArtworkExpanded(in defaults: UserDefaults = .standard) -> Bool {
+    static func isArtworkExpanded(in defaults: UserDefaults = .aloNotch) -> Bool {
         resolvedBoolean(forKey: artworkExpandedKey, defaultValue: false, in: defaults)
     }
 
-    static func mediaPanelVerticalOffset(in defaults: UserDefaults = .standard) -> Double {
+    static func mediaPanelVerticalOffset(in defaults: UserDefaults = .aloNotch) -> Double {
         guard let value = defaults.object(forKey: mediaPanelVerticalOffsetKey) as? Double else {
             return 0
         }

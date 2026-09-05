@@ -11,13 +11,13 @@ struct CameraActiveNotchContent: NotchContentProtocol, DynamicIslandCustomizable
     }
     
     func expandedCornerRadius(baseRadius: CGFloat) -> (top: CGFloat, bottom: CGFloat) {
-        let isStarted = UserDefaults.standard.bool(forKey: "isCameraStarted")
+        let isStarted = UserDefaults.aloNotch.bool(forKey: "isCameraStarted")
         return (top: isStarted ? 34 : 24, bottom: isStarted ? 48 : 48)
     }
     
     func expandedSize(baseWidth: CGFloat, baseHeight: CGFloat) -> CGSize {
-        let isStarted = UserDefaults.standard.bool(forKey: "isCameraStarted")
-        let isLarge = UserDefaults.standard.bool(forKey: "isCameraLarge")
+        let isStarted = UserDefaults.aloNotch.bool(forKey: "isCameraStarted")
+        let isLarge = UserDefaults.aloNotch.bool(forKey: "isCameraLarge")
         
         if !isStarted {
             return .init(width: baseWidth + 65, height: baseHeight + 125)
@@ -30,8 +30,8 @@ struct CameraActiveNotchContent: NotchContentProtocol, DynamicIslandCustomizable
     }
 
     func expandedDynamicIslandSize(baseWidth: CGFloat, baseHeight: CGFloat) -> CGSize {
-        let isStarted = UserDefaults.standard.bool(forKey: "isCameraStarted")
-        let isLarge = UserDefaults.standard.bool(forKey: "isCameraLarge")
+        let isStarted = UserDefaults.aloNotch.bool(forKey: "isCameraStarted")
+        let isLarge = UserDefaults.aloNotch.bool(forKey: "isCameraLarge")
         
         if !isStarted {
             return .init(width: baseWidth + 95, height: baseHeight + 125)
@@ -44,8 +44,8 @@ struct CameraActiveNotchContent: NotchContentProtocol, DynamicIslandCustomizable
     }
     
     func expandedDynamicIslandCornerRadius(baseHeight: CGFloat) -> CGFloat {
-        let isStarted = UserDefaults.standard.bool(forKey: "isCameraStarted")
-        let isLarge = UserDefaults.standard.bool(forKey: "isCameraLarge")
+        let isStarted = UserDefaults.aloNotch.bool(forKey: "isCameraStarted")
+        let isLarge = UserDefaults.aloNotch.bool(forKey: "isCameraLarge")
         
         if !isStarted {
             return baseHeight * 0.2

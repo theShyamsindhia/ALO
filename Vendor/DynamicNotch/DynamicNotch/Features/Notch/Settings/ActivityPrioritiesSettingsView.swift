@@ -32,7 +32,7 @@ struct ActivityPrioritiesSettingsView: View {
             
             Divider().opacity(0.6)
             
-            Text("settings.notch.priorities.customOrder.description")
+            NotchText("settings.notch.priorities.customOrder.description")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

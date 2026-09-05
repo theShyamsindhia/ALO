@@ -47,8 +47,21 @@ final class VpnViewModel: ObservableObject {
     convenience init() {
         self.init(
             monitor: WifiMonitor(),
-            settings: ConnectivitySettingsStore(defaults: .standard)
+            settings: ConnectivitySettingsStore(defaults: .aloNotch)
         )
+    }
+
+    private(set) var isMonitoring = false
+    func startMonitoring() {
+        guard !isMonitoring else { return }
+        isMonitoring = true
+        isInitialCheck = true
+        monitor.startMonitoring()
+    }
+    func stopMonitoring() {
+        guard isMonitoring else { return }
+        isMonitoring = false
+        monitor.stopMonitoring()
     }
 
     private func setupMonitoring() {
@@ -96,6 +109,5 @@ final class VpnViewModel: ObservableObject {
             
             if self.isInitialCheck { self.isInitialCheck = false }
         }
-        monitor.startMonitoring()
     }
 }

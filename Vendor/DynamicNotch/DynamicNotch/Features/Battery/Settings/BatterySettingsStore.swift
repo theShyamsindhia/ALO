@@ -9,7 +9,7 @@ final class BatterySettingsStore: SettingsStoreBase {
     static let fullPowerThresholdRange: ClosedRange<Int> = 50...100
     private static let legacyBatteryDefaultStrokeKey = "settings.battery.defaultStroke"
 
-    @StoredDefault(key: GeneralSettingsStorage.Keys.chargerTemporaryActivityEnabled, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.chargerTemporaryActivityEnabled, defaultValue: false)
     var isChargerTemporaryActivityEnabled: Bool
 
     @StoredDefault(
@@ -19,7 +19,7 @@ final class BatterySettingsStore: SettingsStoreBase {
     )
     var chargerTemporaryActivityDuration: Int
 
-    @StoredDefault(key: GeneralSettingsStorage.Keys.lowPowerTemporaryActivityEnabled, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.lowPowerTemporaryActivityEnabled, defaultValue: false)
     var isLowPowerTemporaryActivityEnabled: Bool
 
     @StoredDefault(
@@ -29,7 +29,7 @@ final class BatterySettingsStore: SettingsStoreBase {
     )
     var lowPowerTemporaryActivityDuration: Int
 
-    @StoredDefault(key: GeneralSettingsStorage.Keys.fullPowerTemporaryActivityEnabled, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.fullPowerTemporaryActivityEnabled, defaultValue: false)
     var isFullPowerTemporaryActivityEnabled: Bool
 
     @StoredDefault(

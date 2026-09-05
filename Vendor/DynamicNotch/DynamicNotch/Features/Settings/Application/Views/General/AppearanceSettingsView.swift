@@ -26,8 +26,8 @@ struct AppearanceSettingsView: View {
                 headerTitle: "settings.appearance.theme.headerTitle",
                 headerDescription: "settings.appearance.theme.headerDesc",
                 itemHeight: 110,
-                lightBackgroundImage: Image("backgroundLight"),
-                darkBackgroundImage: Image("backgroundDark")
+                lightBackgroundImage: NotchImage("backgroundLight"),
+                darkBackgroundImage: NotchImage("backgroundDark")
             ) { mode, isSelected in
                 ThemeAppearancePickerContent(mode: mode, isSelected: isSelected)
             }

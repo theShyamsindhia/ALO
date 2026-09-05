@@ -13,7 +13,7 @@ struct SoftwareUpdateNotchView: View {
     
     var body: some View {
         HStack {
-            Image("logo")
+            NotchImage("logo")
                 .resizable()
                 .interpolation(.high)
                 .antialiased(true)
@@ -41,7 +41,7 @@ struct SoftwareUpdateExpandedNotchView: View {
             Spacer()
             
             HStack(alignment: .center, spacing: 12) {
-                Image("logo")
+                NotchImage("logo")
                     .resizable()
                     .interpolation(.high)
                     .antialiased(true)

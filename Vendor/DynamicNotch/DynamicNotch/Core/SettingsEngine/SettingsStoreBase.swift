@@ -55,7 +55,10 @@ extension StoredSettingValue where Self: RawRepresentable, Self.RawValue: Stored
 
 @propertyWrapper
 struct StoredDefault<Value: StoredSettingValue> {
-    final class Storage: @unchecked Sendable {
+    // Immutable storage does not own actor-bound work; access stays on the
+    // wrapper's @MainActor enclosing-instance subscripts. Explicit isolation
+    // also avoids Swift 6.3's optimizer crash in its synthesized destructor.
+    nonisolated final class Storage: @unchecked Sendable {
         let key: String
         let defaultValue: Value
         let transform: (@MainActor @Sendable (Value) -> Value)?

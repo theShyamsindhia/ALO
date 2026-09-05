@@ -88,7 +88,7 @@ extension AppDelegate {
 
     @MainActor
     var activeNotchScreenRect: CGRect? {
-        guard let window else { return nil }
+        guard let window = hostWindow ?? window else { return nil }
 
         let notchSize = notchViewModel.notchModel.size
         guard notchSize.width > 0, notchSize.height > 0 else { return nil }

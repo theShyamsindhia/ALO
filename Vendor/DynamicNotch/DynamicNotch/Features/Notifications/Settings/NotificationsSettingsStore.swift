@@ -29,7 +29,7 @@ final class NotificationsSettingsStore: SettingsStoreBase {
     @StoredDefault(key: GeneralSettingsStorage.Keys.messagesNotificationsPermissionPending, defaultValue: false)
     var isMessagesNotificationsPermissionPending: Bool
 
-    @StoredDefault(key: GeneralSettingsStorage.Keys.externalDrivesNotificationsEnabled, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.externalDrivesNotificationsEnabled, defaultValue: false)
     var isExternalDrivesNotificationsEnabled: Bool
 
     @StoredDefault(

@@ -10,10 +10,20 @@ protocol MessagesContactStoring {
 
 final class SystemMessagesContactStore: MessagesContactStoring {
 
-    private let contactStore: CNContactStore
+    private var storedContactStore: CNContactStore?
+    private let initializationLock = NSLock()
 
-    init(contactStore: CNContactStore = CNContactStore()) {
-        self.contactStore = contactStore
+    init(contactStore: CNContactStore? = nil) {
+        self.storedContactStore = contactStore
+    }
+
+    private func authorizedContactStore() -> CNContactStore {
+        initializationLock.lock()
+        defer { initializationLock.unlock() }
+        if let storedContactStore { return storedContactStore }
+        let store = CNContactStore()
+        storedContactStore = store
+        return store
     }
 
     var authorizationStatus: CNAuthorizationStatus {
@@ -21,6 +31,8 @@ final class SystemMessagesContactStore: MessagesContactStoring {
     }
 
     func contact(matching identifier: String) throws -> CNContact? {
+        guard authorizationStatus == .authorized else { return nil }
+        let contactStore = authorizedContactStore()
         let predicate: NSPredicate
 
         if identifier.contains("@") {

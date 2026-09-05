@@ -62,9 +62,9 @@ extension MessagesAttachment {
     }
 
     private static var debugAudioURL: URL? {
-        Bundle.main.url(forResource: "LowBatterySound", withExtension: "mp3")
-            ?? Bundle.main.url(forResource: "LowBatterySound", withExtension: "mp3", subdirectory: "Sounds")
-            ?? Bundle.main.url(forResource: "LowBatterySound", withExtension: "mp3", subdirectory: "Resources/Sounds")
+        NotchResources.bundle.url(forResource: "LowBatterySound", withExtension: "mp3")
+            ?? NotchResources.bundle.url(forResource: "LowBatterySound", withExtension: "mp3", subdirectory: "Sounds")
+            ?? NotchResources.bundle.url(forResource: "LowBatterySound", withExtension: "mp3", subdirectory: "Resources/Sounds")
     }
 
     static let debugImage = debugImageAttachment(id: "debug-image")
@@ -93,9 +93,9 @@ extension MessagesAttachment {
     }
 
     private static func debugResourceURL(named name: String, withExtension fileExtension: String) -> URL? {
-        Bundle.main.url(forResource: name, withExtension: fileExtension, subdirectory: "Preview Content/Messages")
-            ?? Bundle.main.url(forResource: name, withExtension: fileExtension, subdirectory: "Messages")
-            ?? Bundle.main.url(forResource: name, withExtension: fileExtension)
+        NotchResources.bundle.url(forResource: name, withExtension: fileExtension, subdirectory: "Preview Content/Messages")
+            ?? NotchResources.bundle.url(forResource: name, withExtension: fileExtension, subdirectory: "Messages")
+            ?? NotchResources.bundle.url(forResource: name, withExtension: fileExtension)
     }
 }
 #endif

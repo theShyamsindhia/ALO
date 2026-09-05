@@ -69,7 +69,7 @@ final class SettingsViewModel: ObservableObject, NotchSettingsProviding {
 
     private var cancellables = Set<AnyCancellable>()
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .aloNotch) {
         self.defaults = defaults
         self.application = ApplicationSettingsStore(defaults: defaults)
         self.homePage = HomePageSettingsStore(defaults: defaults)

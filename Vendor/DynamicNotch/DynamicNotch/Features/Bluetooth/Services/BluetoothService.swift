@@ -30,7 +30,7 @@ final class BluetoothService: ObservableObject, BluetoothServiceProtocol, @unche
     var cancellables = Set<AnyCancellable>()
     var pollingTimer: Timer?
     let bluetoothPreferencesSuite = "/Library/Preferences/com.apple.Bluetooth"
-    let batteryReader = BluetoothLEBatteryReader()
+    lazy var batteryReader = BluetoothLEBatteryReader()
     var isLiveBatteryRefreshInFlight = false
 
     let appleVendorID: UInt16 = 0x05AC
@@ -69,11 +69,23 @@ final class BluetoothService: ObservableObject, BluetoothServiceProtocol, @unche
     let hudBatteryWaitTimeout: TimeInterval = 1.8
     let postConnectionBatteryRetryDelays: [TimeInterval] = [0.4, 0.8, 1.2]
 
-    private init() {
-        print("🎧 [BluetoothAudioManager] Initializing...")
+    private(set) var isMonitoring = false
+    private init() {}
+
+    func startMonitoring() {
+        guard !isMonitoring else { return }
+        isMonitoring = true
         setupBluetoothObservers()
         checkInitialDevices()
         startPollingForChanges()
+    }
+
+    func stopMonitoring() {
+        guard isMonitoring else { return }
+        isMonitoring = false
+        cleanup()
+        connectedDevices.removeAll()
+        lastConnectedDevice = nil
     }
 
     deinit {

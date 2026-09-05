@@ -5,7 +5,7 @@ enum L10n {
         string(
             key,
             language: DynamicNotchLanguage.resolved(
-                UserDefaults.standard.string(forKey: GeneralSettingsStorage.Keys.appLanguage)
+                UserDefaults.aloNotch.string(forKey: GeneralSettingsStorage.Keys.appLanguage)
             ),
             fallback: fallback
         )
@@ -96,20 +96,20 @@ private extension L10n {
 private extension Bundle {
     static func localizedBundle(for languageCodes: [String]) -> Bundle {
         for languageCode in languageCodes {
-            if let path = Bundle.main.path(forResource: languageCode, ofType: "lproj"),
+            if let path = NotchResources.bundle.path(forResource: languageCode, ofType: "lproj"),
                let bundle = Bundle(path: path) {
                 return bundle
             }
         }
 
-        if let fallbackPath = Bundle.main.path(
-            forResource: Bundle.main.preferredLocalizations.first,
+        if let fallbackPath = NotchResources.bundle.path(
+            forResource: NotchResources.bundle.preferredLocalizations.first,
             ofType: "lproj"
         ),
            let fallbackBundle = Bundle(path: fallbackPath) {
             return fallbackBundle
         }
 
-        return .main
+        return NotchResources.bundle
     }
 }

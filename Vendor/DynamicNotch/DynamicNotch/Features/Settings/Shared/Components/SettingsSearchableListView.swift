@@ -129,12 +129,12 @@ struct SettingsSearchableListView<Item: Identifiable & Hashable, LeadingAccessor
                 leadingAccessory(item)
                 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title(item))
+                    NotchText(title(item))
                         .font(.body)
                         .foregroundStyle(.primary)
                     
                     if let subtitle = subtitle?(item), !subtitle.isEmpty {
-                        Text(subtitle)
+                        NotchText(subtitle)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -161,7 +161,7 @@ struct SettingsSearchableListView<Item: Identifiable & Hashable, LeadingAccessor
                 .font(.system(size: 24))
                 .foregroundStyle(.secondary)
             
-            Text(LocalizedStringKey("settings.search.empty.title"))
+            NotchText(LocalizedStringKey("settings.search.empty.title"))
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
         }

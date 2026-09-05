@@ -11,7 +11,7 @@ final class ConnectivitySettingsStore: SettingsStoreBase {
     @StoredDefault(key: GeneralSettingsStorage.Keys.hotspotLiveActivityEnabled, defaultValue: false)
     var isHotspotLiveActivityEnabled: Bool
 
-    @StoredDefault(key: GeneralSettingsStorage.Keys.focusLiveActivityEnabled, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.focusLiveActivityEnabled, defaultValue: false)
     var isFocusLiveActivityEnabled: Bool
 
     @StoredDefault(key: GeneralSettingsStorage.Keys.focusOnAutoHideEnabled, defaultValue: false)
@@ -30,7 +30,7 @@ final class ConnectivitySettingsStore: SettingsStoreBase {
     @StoredDefault(key: GeneralSettingsStorage.Keys.focusDefaultStrokeEnabled, defaultValue: false)
     var isFocusDefaultStrokeEnabled: Bool
 
-    @StoredDefault(key: GeneralSettingsStorage.Keys.bluetoothTemporaryActivityEnabled, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.bluetoothTemporaryActivityEnabled, defaultValue: false)
     var isBluetoothTemporaryActivityEnabled: Bool
 
     @StoredDefault(
@@ -49,7 +49,7 @@ final class ConnectivitySettingsStore: SettingsStoreBase {
     @StoredDefault(key: GeneralSettingsStorage.Keys.bluetoothBatteryIndicatorStyle, defaultValue: .percent)
     var bluetoothBatteryIndicatorStyle: BluetoothBatteryIndicatorStyle
 
-    @StoredDefault(key: GeneralSettingsStorage.Keys.wifiTemporaryActivityEnabled, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.wifiTemporaryActivityEnabled, defaultValue: false)
     var isWifiTemporaryActivityEnabled: Bool
 
     @StoredDefault(
@@ -59,7 +59,7 @@ final class ConnectivitySettingsStore: SettingsStoreBase {
     )
     var wifiTemporaryActivityDuration: Int
 
-    @StoredDefault(key: GeneralSettingsStorage.Keys.vpnTemporaryActivityEnabled, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.vpnTemporaryActivityEnabled, defaultValue: false)
     var isVpnTemporaryActivityEnabled: Bool
 
     @StoredDefault(
@@ -69,7 +69,7 @@ final class ConnectivitySettingsStore: SettingsStoreBase {
     )
     var vpnTemporaryActivityDuration: Int
 
-    @StoredDefault(key: GeneralSettingsStorage.Keys.vpnDisconnectedTemporaryActivityEnabled, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.vpnDisconnectedTemporaryActivityEnabled, defaultValue: false)
     var isVpnDisconnectedTemporaryActivityEnabled: Bool
 
     @StoredDefault(
@@ -79,7 +79,7 @@ final class ConnectivitySettingsStore: SettingsStoreBase {
     )
     var vpnDisconnectedTemporaryActivityDuration: Int
 
-    @StoredDefault(key: GeneralSettingsStorage.Keys.noInternetTemporaryActivityEnabled, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.noInternetTemporaryActivityEnabled, defaultValue: false)
     var isNoInternetTemporaryActivityEnabled: Bool
 
     @StoredDefault(key: GeneralSettingsStorage.Keys.networkShowVPNDetail, defaultValue: false)
@@ -97,7 +97,7 @@ final class ConnectivitySettingsStore: SettingsStoreBase {
     @StoredDefault(key: GeneralSettingsStorage.Keys.selectedVPNID, defaultValue: "")
     var selectedVPNID: String
 
-    @StoredDefault(key: GeneralSettingsStorage.Keys.focusOffTemporaryActivityEnabled, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.focusOffTemporaryActivityEnabled, defaultValue: false)
     var isFocusOffTemporaryActivityEnabled: Bool
 
     @StoredDefault(

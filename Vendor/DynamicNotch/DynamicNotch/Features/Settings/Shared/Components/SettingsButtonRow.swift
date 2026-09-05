@@ -177,9 +177,9 @@ struct SettingsButtonRow: View {
             }
             
             VStack(alignment: .leading, spacing: 2) {
-                Text(title)
+                NotchText(title)
                 if let description {
-                    Text(description)
+                    NotchText(description)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -189,7 +189,7 @@ struct SettingsButtonRow: View {
             Spacer()
             
             Button(action: action) {
-                Text(buttonTitle)
+                NotchText(buttonTitle)
             }
             .buttonStyle(.bordered)
             .controlSize(.regular)

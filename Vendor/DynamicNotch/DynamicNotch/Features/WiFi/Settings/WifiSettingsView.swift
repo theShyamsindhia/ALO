@@ -99,8 +99,8 @@ struct WifiSettingsView: View {
                 headerTitle: "settings.wifi.appearance.headerTitle",
                 headerDescription: "settings.wifi.appearance.headerDesc",
                 itemHeight: 72,
-                lightBackgroundImage: Image("backgroundLight"),
-                darkBackgroundImage: Image("backgroundDark")
+                lightBackgroundImage: NotchImage("backgroundLight"),
+                darkBackgroundImage: NotchImage("backgroundDark")
             ) { style, isSelected in
                 hotspotAppearancePickerContent(for: style, isSelected: isSelected)
             }

@@ -60,8 +60,8 @@ struct LockScreenSettingsView: View {
                 selection: $settings.lockScreenStyle,
                 options: Array(LockScreenStyle.allCases),
                 title: { $0.title },
-                lightBackgroundImage: Image("backgroundLight"),
-                darkBackgroundImage: Image("backgroundDark")
+                lightBackgroundImage: NotchImage("backgroundLight"),
+                darkBackgroundImage: NotchImage("backgroundDark")
             ) { style, isSelected in
                 lockScreenStylePickerContent(for: style, isSelected: isSelected)
             }
@@ -121,8 +121,8 @@ struct LockScreenSettingsView: View {
                 options: LockScreenWidgetAppearanceStyle.availableOptions,
                 title: { $0.title },
                 itemHeight: 128,
-                lightBackgroundImage: Image("backgroundLight"),
-                darkBackgroundImage: Image("backgroundDark"),
+                lightBackgroundImage: NotchImage("backgroundLight"),
+                darkBackgroundImage: NotchImage("backgroundDark"),
             ) { style, isSelected in
                 widgetAppearancePickerContent(for: style, isSelected: isSelected)
             }

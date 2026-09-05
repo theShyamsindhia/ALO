@@ -41,3 +41,19 @@ The notch is off by default, visible only in a live room, and reuses existing ro
 Manual follow-up: exercise pointer movement, physical display changes/full-screen Spaces,
 and multi-Mac room playback on hardware. Native render tests do not establish those outcomes.
 No production app was replaced and no branch was pushed.
+
+## Full feature integration (requested follow-up)
+
+- [x] Merge latest origin/main changes without disturbing other active branches.
+- [x] Compile the full original feature engine as a separate ALO module.
+- [x] Remove standalone onboarding/updater/donation dependencies from the compiled app.
+- [x] Default all extra features and home pages to off; isolate preferences.
+- [x] Add master/feature lifecycle gating and shared ALO notch hosting.
+- [x] Expose original feature settings through ALO Notch Settings.
+- [x] Add packaged resources, permission descriptions and third-party notices.
+- [ ] Complete module and full-app builds, fix diagnostics.
+- [ ] Run original feature regression tests plus opt-in/lifecycle tests.
+- [ ] Visually verify the settings and enabled feature surfaces.
+- [ ] Measure installed size and idle resource use; confirm disabled services remain stopped.
+- [ ] Run release/room/iOS checks applicable to main.
+- [ ] Commit, fast-forward main and push after verification.

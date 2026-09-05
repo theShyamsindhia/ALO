@@ -67,8 +67,8 @@ struct DragAndDropSettingsView: View {
                 showsStroke: appearanceSettings.isShowNotchStrokeEnabled,
                 strokeColor: dragAndDropPreviewStrokeColor,
                 strokeWidth: appearanceSettings.notchStrokeWidth,
-                lightBackgroundImage: Image("backgroundLight"),
-                darkBackgroundImage: Image("backgroundDark")
+                lightBackgroundImage: NotchImage("backgroundLight"),
+                darkBackgroundImage: NotchImage("backgroundDark")
             ) {
                 dragAndDropPreviewContent
             }

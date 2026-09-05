@@ -25,7 +25,7 @@ final class SettingsRootViewModel {
         homePageViewModel: HomePageViewModel? = nil,
         localTimerViewModel: LocalTimerViewModel? = nil,
         calendarViewModel: CalendarViewModel? = nil,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .aloNotch
     ) {
         self.settingsViewModel = settingsViewModel
         self.defaults = defaults

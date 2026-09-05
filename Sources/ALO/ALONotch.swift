@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import SwiftUI
+import ALONotchRuntime
 
 /// ALO's adapter; geometry and spring/transition implementations live in DynamicNotch/.
 @MainActor
@@ -29,7 +30,11 @@ struct ALONotchSettingsMenu: View {
     @ObservedObject private var preferences = ALONotchPreferences.shared
     var body: some View {
         Menu("Notch") {
-            Toggle("Show room in notch", isOn: $preferences.enabled)
+            Toggle("Enable notch", isOn: $preferences.enabled)
+            if preferences.enabled {
+                Button("Feature settings…") { ALONotchFeatureBridge.shared.showSettings() }
+                Button("Open activities") { ALONotchFeatureBridge.shared.openActivities() }
+                Divider()
             Toggle("Expand on hover", isOn: $preferences.hoverToExpand)
             Toggle("Floating island style", isOn: $preferences.island)
             Toggle("Prefer built-in display", isOn: $preferences.builtInDisplay)
@@ -37,6 +42,7 @@ struct ALONotchSettingsMenu: View {
                 ForEach(NotchAnimationPreset.allCases, id: \.rawValue) { preset in
                     Text(preset.rawValue.capitalized).tag(preset.rawValue)
                 }
+            }
             }
         }
     }
@@ -66,7 +72,8 @@ final class ALONotchWindowController {
     private var outsideSince: Date?
     private var menuTracking = false
     private var pointerWasInside = false
-    private let canvasWidth: CGFloat = 620
+    private let features = ALONotchFeatureBridge.shared
+    private let canvasWidth: CGFloat = 1000
 
     init(model: ALOViewModel, preferences: ALONotchPreferences? = nil) {
         self.model = model
@@ -84,16 +91,18 @@ final class ALONotchWindowController {
         panel.becomesKeyOnlyIfNeeded = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         panel.animationBehavior = .none
-        let hosting = NSHostingView(rootView: ALONotchView(model: model, preferences: preferences, state: state))
+        let hosting = NSHostingView(rootView: ALONotchHostView(model: model, preferences: preferences, state: state, features: features))
         hosting.sizingOptions = []
         panel.contentView = hosting
         Publishers.CombineLatest(model.$phase, preferences.$enabled)
             .receive(on: RunLoop.main)
             .sink { [weak self] _, _ in self?.updateVisibility() }.store(in: &observers)
+        features.objectWillChange.receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.updateVisibility() }.store(in: &observers)
         state.$expanded.receive(on: RunLoop.main)
             .sink { [weak self] expanded in
                 guard let self else { return }
-                self.model.notchExpandedVisible = expanded && self.preferences.enabled && self.model.phase == .live
+                self.model.notchExpandedVisible = expanded && self.preferences.enabled && self.model.phase == .live && !self.features.showingActivities
             }.store(in: &observers)
         preferences.objectWillChange.receive(on: RunLoop.main)
             .sink { [weak self] in self?.layout() }.store(in: &observers)
@@ -103,24 +112,32 @@ final class ALONotchWindowController {
             .sink { [weak self] _ in self?.menuTracking = true }.store(in: &observers)
         NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)
             .sink { [weak self] _ in self?.menuTracking = false }.store(in: &observers)
-        // Transparent canvas must not consume clicks intended for apps underneath it.
-        timer = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.trackPointer() }
-        }
-        if let timer { RunLoop.main.add(timer, forMode: .common) }
         updateVisibility()
     }
 
     deinit { timer?.invalidate() }
 
     private func updateVisibility() {
-        guard preferences.enabled, model.phase == .live else {
+        features.setEnabled(preferences.enabled)
+        features.runtime?.attachHostWindow(panel)
+        model.notchExpandedVisible = preferences.enabled && state.expanded && model.phase == .live && !features.showingActivities
+        guard preferences.enabled, features.runtime?.isLocked != true, features.runtime?.shouldHideInFullscreen != true else {
+            timer?.invalidate()
+            timer = nil
             panel.orderOut(nil)
             model.notchExpandedVisible = false
             state.expanded = false
             outsideSince = nil
             pointerWasInside = false
             return
+        }
+        if timer == nil {
+            // Poll only while the overlay is enabled; disabled startup has no timer.
+            let tracking = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.trackPointer() }
+            }
+            RunLoop.main.add(tracking, forMode: .common)
+            timer = tracking
         }
         layout()
         panel.orderFrontRegardless()
@@ -133,7 +150,8 @@ final class ALONotchWindowController {
             guard let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return false }
             return CGDisplayIsBuiltin(id.uint32Value) != 0
         }
-        guard let screen = (preferences.builtInDisplay ? builtIn : nil) ?? screens.first else { return }
+        let roomScreen = (preferences.builtInDisplay ? builtIn : nil) ?? screens.first
+        guard let screen = features.showingActivities ? features.runtime?.preferredScreen ?? roomScreen : roomScreen else { return }
         state.safeTop = max(24, screen.safeAreaInsets.top)
         if let left = screen.auxiliaryTopLeftArea, let right = screen.auxiliaryTopRightArea {
             state.compactWidth = max(280, right.minX - left.maxX + 110)
@@ -145,6 +163,14 @@ final class ALONotchWindowController {
 
     private func trackPointer() {
         guard panel.isVisible else { return }
+        if features.showingActivities, let runtime = features.runtime {
+            let size = runtime.hitTestSize
+            let rect = NSRect(x: panel.frame.midX - max(220, size.width) / 2 - 16,
+                              y: panel.frame.maxY - size.height - 98,
+                              width: max(220, size.width) + 32, height: size.height + 98)
+            panel.ignoresMouseEvents = !rect.contains(NSEvent.mouseLocation)
+            return
+        }
         let topInset: CGFloat = preferences.island ? state.safeTop + 6 : 0
         let height = state.expanded ? min(state.availableHeight - topInset, model.floatingPanelHeight + 87 + state.safeTop + 36) : state.safeTop + 8
         let width: CGFloat = state.expanded ? 592 : state.compactWidth
@@ -192,6 +218,8 @@ struct ALONotchView: View {
                     VStack(spacing: 0) {
                         HStack {
                             Text("ALO").font(.caption.weight(.semibold))
+                            Button("Activities") { ALONotchFeatureBridge.shared.openActivities() }
+                                .buttonStyle(.plain).font(.caption)
                             Spacer()
                             Button { state.expanded = false } label: {
                                 Image(systemName: "chevron.up").frame(width: 30, height: 24)
@@ -201,9 +229,16 @@ struct ALONotchView: View {
                         .padding(.top, preferences.island ? 8 : state.safeTop)
                         ScrollView {
                             VStack(spacing: 0) {
-                                FloatingRoomView(model: model, presentation: .notch)
-                                RoomPlaybackProgressDivider(model: model)
-                                WalkieTalkieBar(model: model, showsCloseButton: false)
+                                if model.phase == .live {
+                                    FloatingRoomView(model: model, presentation: .notch)
+                                    RoomPlaybackProgressDivider(model: model)
+                                    WalkieTalkieBar(model: model, showsCloseButton: false)
+                                } else {
+                                    VStack(spacing: 12) {
+                                        Text("Join a room to see room controls")
+                                        Button("Notch feature settings…") { ALONotchFeatureBridge.shared.showSettings() }
+                                    }.frame(height: 145)
+                                }
                             }.frame(width: 560)
                         }.scrollBounceBehavior(.basedOnSize)
                     }

@@ -1,18 +1,25 @@
-# DynamicNotch source import
+# DynamicNotch source integration
 
-`DynamicNotch/` is an unchanged copy of the user-provided `DynamicNotch-main` directory,
-imported September 6, 2026. Upstream: https://github.com/jackson-storm/DynamicNotch.
-No Git commit metadata was included in the supplied directory.
+`DynamicNotch/` was copied from the user-provided `DynamicNotch-main` directory on
+September 6, 2026. The initial unchanged snapshot is retained in commit `a6d26f7`.
+Upstream: https://github.com/jackson-storm/DynamicNotch. No upstream Git metadata was
+included in the supplied directory.
 
-The upstream source is licensed under GNU GPL v3; see `DynamicNotch/LICENSE`.
-Its copyright headers remain intact. The root ALO MIT license does not replace the
-license of this imported code. Distribution of a combined build must account for the
-upstream GPL terms.
+The full feature source is now compiled as the separate `ALONotchRuntime` SwiftPM
+target. Adaptations in place add opt-in defaults, service lifecycle control, isolated
+settings storage, packaged resource lookup, and ALO window embedding. Original
+copyright headers remain intact. The standalone entrypoint, onboarding, updater,
+and donation animation code are excluded from ALO. The original nine primitives in
+`Sources/ALO/DynamicNotch/` still drive ALO room motion; their copy hashes remain in
+`DynamicNotch-import.json`.
 
-Nine original dependency-light Swift files are compiled from `Sources/ALO/DynamicNotch/`.
-`DynamicNotch-import.json` records their source paths and SHA-256 hashes.
-`Sources/ALO/ALONotch.swift` is the ALO-specific state, window and settings adapter.
-The rest of the snapshot is source-only, outside SwiftPM targets. It includes the
-upstream settings, assets, tests, and system integrations for future porting.
+The upstream code is GNU GPL v3; see `DynamicNotch/LICENSE`. The ALO MIT license does
+not replace those terms. Packaged builds include the GPL text, MediaRemoteAdapter's
+BSD 3-Clause license, dependency notices, and a reference to corresponding source.
 
-See `../docs/dynamic-notch-features.md` for the inventory and integration requirements.
+`Scripts/prepare_notch_resources.py` generates SwiftPM-compatible localization and
+named image resources from the original Xcode catalogs. Generated files are checked
+in so builds do not require Python. Run it again after changing the catalogs.
+
+See `../docs/dynamic-notch-features.md` for feature settings and dependencies, and
+`../docs/notch-validation.md` for validation and remaining hardware-dependent checks.

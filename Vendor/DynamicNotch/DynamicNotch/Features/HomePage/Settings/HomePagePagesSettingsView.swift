@@ -24,7 +24,7 @@ struct HomePagePagesSettingsView: View {
 
             Divider().opacity(0.6)
 
-            Text(LocalizedStringKey("settings.homePage.pages.reorderHint"))
+            NotchText(LocalizedStringKey("settings.homePage.pages.reorderHint"))
                 .font(.caption)
                 .foregroundColor(.gray)
                 .opacity(homePageSettings.isHomePageLiveActivityEnabled ? 1.0 : 0.5)

@@ -22,13 +22,13 @@ final class CameraViewModel: ObservableObject {
     private let sessionQueue = DispatchQueue(label: "com.dynamicnotch.cameraSessionQueue")
     private var stopWorkItem: DispatchWorkItem?
     private var isConfigured = false
+    private(set) var isPageVisible = false
     
     let previewLayer = AVCaptureVideoPreviewLayer()
     
     init() {
         previewLayer.session = session
         previewLayer.videoGravity = .resizeAspectFill
-        checkPermissions()
     }
     
     deinit {
@@ -43,12 +43,14 @@ final class CameraViewModel: ObservableObject {
     }
     
     func checkPermissions() {
+        isPageVisible = true
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
             setupCamera()
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
                 DispatchQueue.main.async {
+                    guard self?.isPageVisible == true else { return }
                     if granted {
                         self?.setupCamera()
                     } else {
@@ -64,6 +66,7 @@ final class CameraViewModel: ObservableObject {
     }
     
     func setupCamera() {
+        guard isPageVisible else { return }
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
             guard !self.isConfigured else { return }
@@ -103,6 +106,7 @@ final class CameraViewModel: ObservableObject {
             captureSession.commitConfiguration()
             
             DispatchQueue.main.async {
+                guard self.isPageVisible else { return }
                 withAnimation {
                     self.cameraState = self.isConfigured ? .ready : .unavailable
                 }
@@ -111,6 +115,7 @@ final class CameraViewModel: ObservableObject {
     }
     
     func startSession() {
+        guard isPageVisible, isConfigured else { return }
         stopWorkItem?.cancel()
         stopWorkItem = nil
         
@@ -126,6 +131,7 @@ final class CameraViewModel: ObservableObject {
                 captureSession.startRunning()
                 
                 DispatchQueue.main.async {
+                    guard self.isPageVisible else { return }
                     withAnimation {
                         self.cameraState = .ready
                     }
@@ -143,6 +149,7 @@ final class CameraViewModel: ObservableObject {
     }
     
     func stopSession() {
+        isPageVisible = false
         stopWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
@@ -151,7 +158,7 @@ final class CameraViewModel: ObservableObject {
             }
         }
         self.stopWorkItem = workItem
-        sessionQueue.asyncAfter(deadline: .now() + 1.5, execute: workItem)
+        sessionQueue.async(execute: workItem)
     }
 }
 

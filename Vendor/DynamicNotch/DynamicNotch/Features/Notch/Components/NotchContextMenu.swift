@@ -7,6 +7,7 @@ struct NotchContextMenu: View {
     var body: some View {
         let locale = settingsViewModel.application.appLanguage.locale
         
+        if AppDelegate.embeddedInstance == nil {
         Button {
             updater.checkForUpdates()
         } label: {
@@ -14,6 +15,7 @@ struct NotchContextMenu: View {
             Text(locale.dn("menuBar.checkForUpdates", fallback: "Check for Updates"))
         }
         .disabled(!updater.canCheckForUpdates)
+        }
         
         Button {
             SettingsWindowController.shared.showWindow()
@@ -22,6 +24,7 @@ struct NotchContextMenu: View {
             Text(locale.dn("menuBar.settings", fallback: "Settings"))
         }
         
+        if AppDelegate.embeddedInstance == nil {
         Divider()
         
         Button(action: { AppRelauncher.restartApp() }) {
@@ -32,6 +35,7 @@ struct NotchContextMenu: View {
         Button(action: { NSApp.terminate(nil) }) {
             Image(systemName: "rectangle.portrait.and.arrow.right")
             Text(locale.dn("menuBar.quit", fallback: "Quit"))
+        }
         }
     }
 }

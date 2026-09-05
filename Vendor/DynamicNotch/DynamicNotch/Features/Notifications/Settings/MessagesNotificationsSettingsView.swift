@@ -17,10 +17,10 @@ struct MessagesNotificationsSettingsView: View {
         }
         .alert(isPresented: $isShowingFullDiskAccessAlert) {
             Alert(
-                title: Text("settings.notifications.messages.fullDiskAccess.title"),
-                message: Text("settings.notifications.messages.fullDiskAccess.description"),
+                title: NotchText("settings.notifications.messages.fullDiskAccess.title"),
+                message: NotchText("settings.notifications.messages.fullDiskAccess.description"),
                 primaryButton: .default(
-                    Text("settings.permissions.action.openPrivacySettings")
+                    NotchText("settings.permissions.action.openPrivacySettings")
                 ) {
                     settings.isMessagesNotificationsPermissionPending = true
                     permissionController.performAction(for: .fullDiskAccess)

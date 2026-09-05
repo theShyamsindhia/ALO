@@ -7,7 +7,7 @@ extension HomePageScrollAxis: StoredSettingValue {}
 
 @MainActor
 final class HomePageSettingsStore: SettingsStoreBase {
-    @StoredDefault(key: GeneralSettingsStorage.Keys.homePageLiveActivity, defaultValue: true)
+    @StoredDefault(key: GeneralSettingsStorage.Keys.homePageLiveActivity, defaultValue: false)
     var isHomePageLiveActivityEnabled: Bool
 
     @StoredDefault(key: GeneralSettingsStorage.Keys.homePagePageIndicator, defaultValue: true)
@@ -37,9 +37,9 @@ final class HomePageSettingsStore: SettingsStoreBase {
     }
 
     func resetHomePage() {
-        isHomePageLiveActivityEnabled = true
+        isHomePageLiveActivityEnabled = false
         homePageOrder = HomePages.allCases
-        homePageDisabled = Set<HomePages>()
+        homePageDisabled = Set(HomePages.allCases)
         isHomePagePageIndicatorEnabled = true
         homePageIndicatorSize = .medium
         homePageScrollAxis = .horizontal

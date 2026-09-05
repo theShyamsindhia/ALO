@@ -44,7 +44,7 @@ struct AboutAppSettingsView: View {
     
     private var headerCard: some View {
         VStack(spacing: 16) {
-            Image("logo")
+            NotchImage("logo")
                 .resizable()
                 .interpolation(.high)
                 .antialiased(true)
@@ -59,7 +59,7 @@ struct AboutAppSettingsView: View {
                 Text("DynamicNotch")
                     .font(.system(size: 20, weight: .bold))
                 
-                Text("settings.about.description")
+                NotchText("settings.about.description")
                     .font(.system(size: 14))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)

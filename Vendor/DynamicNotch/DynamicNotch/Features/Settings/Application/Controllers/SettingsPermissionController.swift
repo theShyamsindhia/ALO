@@ -88,7 +88,7 @@ final class SettingsPermissionController: NSObject, ObservableObject, CBCentralM
     private var didPromptForCalendarAccess = false
     private var didPromptForAutomationAccess = false
     private var bluetoothPermissionRequester: CBCentralManager?
-    private let contactsStore = CNContactStore()
+    private lazy var contactsStore = CNContactStore()
     private var cancellables = Set<AnyCancellable>()
 
     private static let privacySettingsURL = URL(

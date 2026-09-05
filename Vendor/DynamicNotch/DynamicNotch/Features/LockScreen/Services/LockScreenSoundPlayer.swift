@@ -27,7 +27,7 @@ final class LockScreenSoundPlayer: LockScreenSoundPlaying {
     private var customPlayers: [SoundAsset: AVAudioPlayer] = [:]
     private var customPlayerURLs: [SoundAsset: URL] = [:]
 
-    init(bundle: Bundle = .main, defaults: UserDefaults = .standard) {
+    init(bundle: Bundle = NotchResources.bundle, defaults: UserDefaults = .aloNotch) {
         self.bundle = bundle
         self.defaults = defaults
     }

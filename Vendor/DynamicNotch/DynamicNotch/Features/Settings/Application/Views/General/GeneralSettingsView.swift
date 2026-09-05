@@ -13,7 +13,7 @@ struct GeneralSettingsView: View {
     
     var body: some View {
         SettingsPageScrollView {
-            firstCard
+            if AppDelegate.embeddedInstance == nil { firstCard }
             secondCard
             thirdCard
             fourthCard
@@ -78,19 +78,10 @@ struct GeneralSettingsView: View {
                 systemImage: "checkmark.seal.fill",
                 color: .green.opacity(0.9),
                 accessibilityIdentifier: "settings.general.permissions",
-                position: .first,
+                position: .single,
                 value: SettingsSubPage.permissions
             )
             
-            SettingsNavigationRowView(
-                title: "settings.general.support.title",
-                description: "settings.general.support.subtitle",
-                systemImage: "dollarsign",
-                color: LinearGradient.yellowGradient,
-                accessibilityIdentifier: "settings.general.support",
-                position: .last,
-                value: SettingsSubPage.support
-            )
         }
     }
     

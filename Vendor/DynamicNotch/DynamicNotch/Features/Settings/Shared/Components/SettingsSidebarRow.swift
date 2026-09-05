@@ -8,6 +8,7 @@
 import SwiftUI
 
 struct SettingsSidebarRow: View {
+    @Environment(\.colorScheme) private var colorScheme
     let title: String
     let systemImage: String?
     let imageName: String?
@@ -39,7 +40,8 @@ struct SettingsSidebarRow: View {
     var body: some View {
         HStack(spacing: 8) {
             Label {
-                Text(title)
+                NotchText(title)
+                    .foregroundStyle(colorScheme == .dark ? Color.white : Color.black)
             } icon: {
                 if let systemImage {
                     SettingsIconBadge(

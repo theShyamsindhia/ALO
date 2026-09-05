@@ -233,13 +233,18 @@ struct HomePageNotchView: View {
             }
         }
         .onDisappear {
+            settleTask?.cancel()
+            updateTask?.cancel()
             let activePages = settings.homePageOrder.filter { !settings.homePageDisabled.contains($0) }
+            guard notchViewModel.acceptsActivityEvents,
+                  settings.isHomePageLiveActivityEnabled,
+                  let firstPage = activePages.first else { return }
             notchViewModel.send(
                 .showLiveActivity(
                     HomePageNotchContent(
                         notchViewModel: notchViewModel,
                         settings: settings,
-                        homePages: activePages.first ?? .camera,
+                        homePages: firstPage,
                         localTimerViewModel: localTimerViewModel,
                         nowPlayingViewModel: nowPlayingViewModel,
                         fileConverterViewModel: fileConverterViewModel,

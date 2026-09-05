@@ -26,6 +26,7 @@ final class NotchEngine: ObservableObject {
     private var eventQueue: [NotchState] = []
     private var isProcessingQueue = false
     private var isTransitioning = false
+    private(set) var acceptsActivityEvents = true
 
     init(
         animations: @escaping () -> NotchAnimations,
@@ -76,7 +77,18 @@ final class NotchEngine: ObservableObject {
         notchModel.isDynamicIsland = isDynamicIsland
     }
 
+    func setActivityEventsEnabled(_ enabled: Bool) {
+        acceptsActivityEvents = enabled
+        if !enabled { send(.hide) }
+    }
+
     func send(_ notchState: NotchState) {
+        if !acceptsActivityEvents {
+            switch notchState {
+            case .showLiveActivity, .showTemporaryNotification: return
+            default: break
+            }
+        }
         switch notchState {
         case .showTemporaryNotification(let content, let duration):
             if notchModel.temporaryNotificationContent?.id == content.id {
@@ -143,6 +155,13 @@ final class NotchEngine: ObservableObject {
             }
 
         case .hide:
+            // A master-disable must also discard restoration history, otherwise
+            // a subsequent gesture can reopen a disabled page (including camera).
+            activeLiveActivities.removeAll()
+            dismissedLiveActivityIDs.removeAll()
+            lastDismissedContent = nil
+            suspendedActivity = nil
+            cancelTemporary()
             eventQueue.removeAll()
 
         case .dismissLiveActivity:
@@ -252,7 +271,7 @@ final class NotchEngine: ObservableObject {
     }
 
     func handleOutsideClick() {
-        if UserDefaults.standard.bool(forKey: "isNotchLocked") {
+        if UserDefaults.aloNotch.bool(forKey: "isNotchLocked") {
             return
         }
 

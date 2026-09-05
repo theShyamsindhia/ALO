@@ -9,20 +9,32 @@ final class PowerService: ObservableObject {
     @Published var isLowPowerMode: Bool = false
     
     private var runLoopSource: CFRunLoopSource?
-    private let startMonitoring: Bool
+    private(set) var isMonitoring = false
     private var cancellables = Set<AnyCancellable>()
     private var powerStateChangeHandler: ((_ onACPower: Bool, _ batteryLevel: Int) -> Void)?
 
-    init(startMonitoring: Bool = true) {
-        self.startMonitoring = startMonitoring
+    init(startMonitoring: Bool = false) {
         if startMonitoring {
-            setupPowerNotifications()
-            updatePowerState()
-            updateLowPowerMode()
-            setupLowPowerModeObserver()
+            self.startMonitoring()
         }
     }
     
+    func startMonitoring() {
+        guard !isMonitoring else { return }
+        isMonitoring = true
+        setupPowerNotifications()
+        updatePowerState()
+        updateLowPowerMode()
+        setupLowPowerModeObserver()
+    }
+
+    func stopMonitoring() {
+        isMonitoring = false
+        if let source = runLoopSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .defaultMode) }
+        runLoopSource = nil
+        cancellables.removeAll()
+    }
+
     deinit {
         if let rls = runLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), rls, .defaultMode)

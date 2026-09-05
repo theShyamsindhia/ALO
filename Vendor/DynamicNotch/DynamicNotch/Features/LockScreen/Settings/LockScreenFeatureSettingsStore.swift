@@ -8,10 +8,10 @@ extension LockScreenMediaPanelBackgroundStyle: StoredSettingValue {}
 
 @MainActor
 final class LockScreenFeatureSettingsStore: SettingsStoreBase {
-    @StoredDefault(key: LockScreenSettings.liveActivityKey, defaultValue: true)
+    @StoredDefault(key: LockScreenSettings.liveActivityKey, defaultValue: false)
     var isLockScreenLiveActivityEnabled: Bool
 
-    @StoredDefault(key: LockScreenSettings.soundKey, defaultValue: true)
+    @StoredDefault(key: LockScreenSettings.soundKey, defaultValue: false)
     var isLockScreenSoundEnabled: Bool
 
     @StoredDefault(key: LockScreenSettings.customLockSoundPathKey, defaultValue: "")
@@ -20,7 +20,7 @@ final class LockScreenFeatureSettingsStore: SettingsStoreBase {
     @StoredDefault(key: LockScreenSettings.customUnlockSoundPathKey, defaultValue: "")
     var customUnlockSoundPath: String
 
-    @StoredDefault(key: LockScreenSettings.mediaPanelKey, defaultValue: true)
+    @StoredDefault(key: LockScreenSettings.mediaPanelKey, defaultValue: false)
     var isLockScreenMediaPanelEnabled: Bool
 
     @StoredDefault(key: LockScreenSettings.styleKey, defaultValue: .compact)

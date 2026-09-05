@@ -40,7 +40,7 @@ final class VpnPageViewModel: ObservableObject {
             let list = VPNStatusFetcher.fetchVPNs()
             
             var connDate: Date? = nil
-            let selectedID = UserDefaults.standard.string(forKey: "settings.vpn.selectedID") ?? ""
+            let selectedID = UserDefaults.aloNotch.string(forKey: "settings.vpn.selectedID") ?? ""
             if let selectedVpn = list.first(where: { $0.id == selectedID }), selectedVpn.isConnected {
                 connDate = VPNStatusFetcher.fetchVPNConnectedAt(uuid: selectedVpn.id)
             } else if let activeVpn = list.first(where: { $0.isConnected }) {

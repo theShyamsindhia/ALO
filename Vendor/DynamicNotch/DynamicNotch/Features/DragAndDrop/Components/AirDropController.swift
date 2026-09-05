@@ -256,9 +256,7 @@ private struct ResolvedAirDropBatch {
     let temporaryDirectory: URL
 
     nonisolated static func make(from sourceURLs: [URL]) throws -> ResolvedAirDropBatch {
-        let temporaryDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("DynamicNotch")
-            .appendingPathComponent("AirDrop")
+        let temporaryDirectory = NotchStoragePaths.airDrop
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
 
         try FileManager.default.createDirectory(

@@ -65,13 +65,13 @@ struct ExternalDriveNotificationView: View {
                     .lineLimit(1)
                 
             } else if drive.isDiskImage {
-                Text("settings.notifications.externalDrives.diskImage")
+                NotchText("settings.notifications.externalDrives.diskImage")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
         } else {
-            Text("settings.notifications.externalDrives.safeToDisconnect")
+            NotchText("settings.notifications.externalDrives.safeToDisconnect")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)

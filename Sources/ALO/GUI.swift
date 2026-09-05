@@ -784,6 +784,8 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
         )
         shortcutsItem.keyEquivalentModifierMask = [.command]
         shortcutsItem.target = self
+        let notchItem = appMenu.addItem(withTitle: "Notch Settings…", action: #selector(showNotchSettings(_:)), keyEquivalent: "")
+        notchItem.target = self
         appMenu.addItem(.separator())
         appMenu.addItem(
             withTitle: "Quit ALO",
@@ -797,6 +799,10 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
         editMenuItem.submenu = makeALOEditMenu()
 
         NSApp.mainMenu = mainMenu
+    }
+
+    @objc private func showNotchSettings(_ sender: Any?) {
+        ALONotchFeatureBridge.shared.showSettings()
     }
 
     @objc private func checkForUpdates(_ sender: Any?) {

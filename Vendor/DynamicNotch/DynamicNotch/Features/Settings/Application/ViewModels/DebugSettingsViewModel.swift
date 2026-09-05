@@ -11,7 +11,6 @@ import Combine
 
 @MainActor
 final class DebugSettingsViewModel: ObservableObject {
-    @Published var isOnboardingPreviewEnabled = false
     @Published var isFocusLivePreviewEnabled = false
     @Published var isScreenRecordingPreviewEnabled = false
     @Published var isHotspotPreviewEnabled = false
@@ -527,7 +526,6 @@ final class DebugSettingsViewModel: ObservableObject {
         stopPreviewSequence()
         messagesQueuePreviewTask?.cancel()
         messagesQueuePreviewTask = nil
-        isOnboardingPreviewEnabled = false
         isFocusLivePreviewEnabled = false
         isScreenRecordingPreviewEnabled = false
         isHotspotPreviewEnabled = false
@@ -542,10 +540,6 @@ final class DebugSettingsViewModel: ObservableObject {
     }
 
     private func setupPreviewBindings() {
-        $isOnboardingPreviewEnabled
-            .dropFirst()
-            .sink { [weak self] enabled in self?.updateOnboardingPreview(isEnabled: enabled) }
-            .store(in: &cancellables)
 
         $isFocusLivePreviewEnabled
             .dropFirst()
@@ -598,14 +592,6 @@ final class DebugSettingsViewModel: ObservableObject {
             .store(in: &cancellables)
     }
 
-    private func updateOnboardingPreview(isEnabled: Bool? = nil) {
-        let enabled = isEnabled ?? isOnboardingPreviewEnabled
-        if enabled {
-            notchEventCoordinator.showDebugOnboardingPreview(step: .first)
-        } else {
-            notchEventCoordinator.hideOnboarding()
-        }
-    }
 
     private func updateFocusPreview(isEnabled: Bool? = nil) {
         let enabled = isEnabled ?? isFocusLivePreviewEnabled
@@ -733,13 +719,6 @@ final class DebugSettingsViewModel: ObservableObject {
             }
 
             do {
-                try await self.playLivePreview(
-                    DebugOnboardingPreviewNotchContent(
-                        step: .first,
-                        notchEventCoordinator: notchEventCoordinator
-                    ),
-                    id: NotchContentRegistry.DebugSequence.onboarding
-                )
                 try await self.playLivePreview(
                     FocusOnNotchContent(settingsViewModel: settingsViewModel, focusModeType: .custom),
                     id: Self.sequenceFocusID
@@ -1360,8 +1339,7 @@ final class DebugSettingsViewModel: ObservableObject {
     }
 
     private func debugPreviewDirectory() throws -> URL {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("DynamicNotch", isDirectory: true)
+        let directory = NotchStoragePaths.temporary
             .appendingPathComponent("DebugPreviews", isDirectory: true)
 
         try FileManager.default.createDirectory(

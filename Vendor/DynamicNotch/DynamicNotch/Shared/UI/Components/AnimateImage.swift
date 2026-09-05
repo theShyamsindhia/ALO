@@ -19,7 +19,7 @@ struct AnimateImage: NSViewRepresentable {
         container.wantsLayer = true
         container.layer?.backgroundColor = NSColor.clear.cgColor
         
-        let animationView = LottieAnimationView(name: name)
+        let animationView = LottieAnimationView(name: name, bundle: NotchResources.bundle)
         animationView.translatesAutoresizingMaskIntoConstraints = false
         animationView.layer?.contentsGravity = .resizeAspect
         animationView.contentMode = .scaleAspectFit

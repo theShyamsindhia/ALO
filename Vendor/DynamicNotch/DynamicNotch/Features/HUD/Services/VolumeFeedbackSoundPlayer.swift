@@ -31,16 +31,16 @@ final class VolumeFeedbackSoundPlayer {
     }
 
     private func shouldPlay(shiftHeld: Bool) -> Bool {
-        let appFeedbackEnabled = UserDefaults.standard.object(forKey: "settings.hud.volumeFeedbackSound") as? Bool ?? true
+        let appFeedbackEnabled = UserDefaults.aloNotch.object(forKey: "settings.hud.volumeFeedbackSound") as? Bool ?? true
         guard appFeedbackEnabled else { return false }
 
         // Absent key means the preference has never been toggled, which macOS
         // treats as enabled.
         let feedbackEnabled: Bool
-        if UserDefaults.standard.object(forKey: Self.feedbackDefaultsKey) == nil {
+        if UserDefaults.aloNotch.object(forKey: Self.feedbackDefaultsKey) == nil {
             feedbackEnabled = true
         } else {
-            feedbackEnabled = UserDefaults.standard.bool(forKey: Self.feedbackDefaultsKey)
+            feedbackEnabled = UserDefaults.aloNotch.bool(forKey: Self.feedbackDefaultsKey)
         }
 
         return feedbackEnabled != shiftHeld

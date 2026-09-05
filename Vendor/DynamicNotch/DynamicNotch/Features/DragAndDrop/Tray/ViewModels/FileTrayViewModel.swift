@@ -124,8 +124,15 @@ final class FileTrayViewModel: ObservableObject {
     private static let persistedItemsKey = "settings.live.tray.persistedItems"
     private let defaults: UserDefaults
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .aloNotch) {
         self.defaults = defaults
+
+    }
+
+    private var hasLoadedItems = false
+    func activate() {
+        guard !hasLoadedItems else { return }
+        hasLoadedItems = true
         restorePersistedItems()
         FileTrayStorage.removeUntrackedItems(keeping: items.map(\.url))
     }
@@ -323,9 +330,7 @@ final class FileTrayViewModel: ObservableObject {
 
 private enum FileTrayStorage {
     static var rootURL: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("DynamicNotch", isDirectory: true)
-            .appendingPathComponent("FileTray", isDirectory: true)
+        NotchStoragePaths.fileTray
     }
 
     static func removeUntrackedItems(keeping keptURLs: [URL]) {

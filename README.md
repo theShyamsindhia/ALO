@@ -421,14 +421,22 @@ MIT. No paid service, account, server, or third-party runtime dependency.
 
 ## Optional notch presentation
 
-In a live room, open **Talk settings → Notch → Show room in notch**. The notch reuses
-ALO's media, voice, chat, queue, and people controls. Hover to expand (optional), click
-to open, and use the top chevron or Escape to collapse. Settings persist for floating
-island style, built-in display preference, and five motion speeds. Reduced Motion is
-respected. The feature starts disabled.
+Open **ALO → Notch Settings…**, or **Talk settings → Notch**, and enable the notch.
+Every additional feature starts disabled. The full settings window exposes original
+DynamicNotch feature options for media, downloads, timers, file tray/AirDrop, conversion,
+camera, CPU/RAM, battery, Bluetooth, Wi-Fi/hotspot, VPN, Focus, volume/brightness HUDs,
+calendar, screenshots/OCR, recording notifications, Mail/Messages/external drives,
+and lock-screen presentation.
 
-The original DynamicNotch geometry and motion sources are used directly. The full
-reference source, including additional feature settings, is preserved in `Vendor/DynamicNotch`.
-See [the feature inventory](docs/dynamic-notch-features.md) and
-[third-party provenance/license](Vendor/README.md). Additional imported modules are source
-only; they are not enabled in ALO.
+Enable only the features you want. Features requiring access to camera, calendars,
+Contacts, Accessibility, or protected files use the corresponding macOS permission
+flow. Turning off a feature stops its monitor; turning off the notch stops all feature
+services while retaining your choices. Camera and CPU/RAM capture are also tied to
+page visibility. The notch works outside a room for utility features; room controls
+appear when you join a room. Use **Activities** and **Room controls** to switch surfaces.
+
+Original DynamicNotch shapes, spring motion, feature views, and settings are compiled
+as `ALONotchRuntime`; ALO supplies the lifecycle and window adapters. The standalone
+updater, onboarding and donation animations are excluded. Resources and third-party
+licenses are included in packaged builds. See [the feature inventory](docs/dynamic-notch-features.md),
+[validation](docs/notch-validation.md), and [provenance/license](Vendor/README.md).
