@@ -41,7 +41,7 @@ on stop. Tray, temporary sharing and screenshot staging use ALO-specific directo
 and do not share cleanup folders with DynamicNotch. Files intentionally copied into
 the tray and conversion exports are user-owned storage and are retained until removed.
 
-Final package measurement and CI results are recorded after verification.
+Optimized Apple Silicon development package: **37 MiB installed**, including **4.7 MiB notch resources** and approximately **13 MiB ALO icon resources**. The notch resource size excludes compiled feature code. Packaging, deep/strict signature validation and packaged CLI help pass. Main settings → Notch was verified through native accessibility with the master off. The UI control service repeatedly disconnected during further feature-page inspection; native view rendering provides the visual checks below. The test master toggle was restored to off and the inspected development process closed. No production app was replaced.
 
 The corrected main-settings and lock-screen local full run passes **270 XCTest + 787 Swift Testing tests in 132 suites (1,057 total)**. Focused state/cleanup checks pass, including cancelled lyrics retry and queued callback invalidation. One earlier secure-UDP validation timeout did not recur in either subsequent full run; timing limits were unchanged.
 
@@ -75,3 +75,5 @@ visually inspected; no custom room card remains.
 CI on macOS 15 exposed a Swift isolated-deinitializer backdeployment crash in
 Mail/Messages reader cleanup. Safe empty nonisolated destructors and task-aware
 XCTest fixture lifetimes address it; background-release regressions cover this path.
+
+Original full-screen lock artwork/lyrics and lock settings were rendered by a passing native test using a temporary defaults domain, fake paused track and bundled placeholder art. The settings preview intentionally enables the three options in its fixture; user defaults remain off. The original views and layout are used directly, without an actual lock or network request.

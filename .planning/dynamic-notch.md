@@ -54,7 +54,7 @@ At the initial room-only checkpoint, no production app was replaced and no branc
 - [x] Complete module and full-app builds, fix diagnostics.
 - [x] Run original feature regression tests plus opt-in/lifecycle tests.
 - [x] Visually verify the settings and enabled feature surfaces.
-- [ ] Measure installed size and idle resource use; confirm disabled services remain stopped.
+- [x] Measure installed size and idle resource use; confirm disabled services remain stopped.
 - [ ] Run release/room/iOS checks applicable to main.
 - [ ] Commit, fast-forward main and push after verification.
 
@@ -65,7 +65,7 @@ At the initial room-only checkpoint, no production app was replaced and no branc
 - [x] Adapt room playback data/commands to the original player; Room media defaults off.
 - [x] Render original player, battery and tray, including non-notch island mode.
 - [x] Fix macOS 15 reader destructor compatibility and actor-aware XCTest fixtures.
-- [ ] Verify the full corrected suite and packaged app; show/open ALO Dev.
+- [x] Verify the full corrected suite and packaged app; show/open ALO Dev.
 - [ ] Record final size and CI evidence, then push main without overwriting newer commits.
 
 ## Lock-screen states and main settings follow-up
