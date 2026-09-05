@@ -3,6 +3,11 @@ import Testing
 @testable import ALO
 
 struct BrandingTests {
+    @Test("Public updates use the canonical ALO repository")
+    func canonicalRepository() {
+        #expect(AppUpdater.repository == "theShyamsindhia/ALO")
+    }
+
     @Test("ALO branding preserves the installed app and discovery identities")
     func installedCompatibility() throws {
         let root = URL(fileURLWithPath: #filePath)

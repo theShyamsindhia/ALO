@@ -1,6 +1,14 @@
-# ALO
+<p align="center">
+  <img src="docs/brand/alo-social.png" alt="ALO — Listen together." width="720">
+</p>
 
-Free, synchronized system audio with optional screen sharing between locally connected Macs.
+Share what’s playing on your Mac. Hear it together, in sync.
+
+[Download for Apple Silicon](https://github.com/theShyamsindhia/ALO/releases/latest/download/ALO-macos-arm64.dmg) · [Release notes](https://github.com/theShyamsindhia/ALO/releases/latest) · [Build from source](#build-it)
+
+Free and open source. Made for macOS. Audio, screens, voice, and chat between locally connected Macs.
+
+## One room, together
 
 ALO creates a persistent local group with synchronized 48 kHz stereo audio, optional
 full-screen video sharing, current album artwork, a per-Mac mixer, participant presence, group
@@ -30,8 +38,9 @@ development and are not included in this Mac release.
 
 ## Run the Mac app
 
-Open `dist/ALO.app`. The first screen lists nearby rooms and rooms previously saved
-on this Mac:
+Download the latest disk image, drag **ALO** into **Applications**, and open it.
+If you built from source, open `dist/ALO.app`. The first screen lists nearby rooms
+and rooms previously saved on this Mac:
 
 - Select a nearby or saved room to rejoin it.
 - Choose **Create Room** for a new public room, or enable **Private** to generate an
@@ -90,15 +99,24 @@ Changing those names cosmetically would lose existing permissions, saved rooms,
 or interoperability with installed versions. `ALO_*` signing settings are preferred;
 existing `WERAI_*` settings remain supported as fallbacks.
 
-The repository is currently still `theShyamsindhia/WERAI`; renaming it to `alo`
-requires repository-admin access. Keep the updater on that working repository
-until the rename succeeds. The local checkout folder may retain its old name;
-it does not affect the app's identity.
+The canonical repository is [theShyamsindhia/ALO](https://github.com/theShyamsindhia/ALO).
+GitHub redirects the former repository URL, including update requests from older
+installed apps. Do not reuse the old repository name: that would break those redirects.
+Existing clones can switch to the canonical URL without moving their working files:
+
+```sh
+git remote set-url origin https://github.com/theShyamsindhia/ALO.git
+```
+
+The local checkout folder may retain its old name; it does not affect the app's identity.
+See [brand assets](docs/brand/README.md) for the ALO mark and GitHub share image.
 
 Build once on each Mac with Apple's free Command Line Tools:
 
 ```sh
 xcode-select --install
+git clone https://github.com/theShyamsindhia/ALO.git
+cd ALO
 swift build -c release
 ```
 
