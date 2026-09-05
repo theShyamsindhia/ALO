@@ -4,7 +4,7 @@ Lyrics are disabled by default. Enabling the setting permits title, artist and a
 
 The provider uses the documented public `GET /api/search` endpoint, then requires matching title and artist, plus album when available. Different matching lyric versions produce an ambiguity state rather than an arbitrary choice. Responses are bounded to 512 KB; eight results are cached in memory only. Each accepted plain/synced source is limited to 128 KB. Parsed lyric rows are capped at 2,000 and 128 KB of retained text, and timed rows use a lazy stack. Disabling lyrics cancels the current request. Track changes discard stale responses. `Retry-After` blocks further requests; failures have an explicit retry action. No lyrics are bundled with the app or these tests.
 
-The present room metadata does not carry duration or a reliable playback position. Lyrics therefore display without timed highlighting. `LyricsPanel.position` is an optional extension point for a future playhead that correctly handles seeks, pauses and receiver latency. It must not be derived from the time a track's metadata arrived. Adding elapsed time to the existing metadata monitor would also require accounting for durable playback-event traffic.
+Upstream playback-progress metadata now carries optional duration and elapsed time. Lyrics still display without timed highlighting: that visual integration needs verification against seeks, pauses and the receiver’s audio buffer delay before claiming line-accurate timing. `LyricsPanel.position` remains the optional integration point. Track receipt time alone is not a trustworthy lyric clock.
 
 API reference: [LRCLIB documentation](https://lrclib.net/docs). Native provider attribution links to LRCLIB.
 

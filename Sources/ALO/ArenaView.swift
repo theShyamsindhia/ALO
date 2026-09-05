@@ -407,8 +407,11 @@ final class ArenaScene: SKScene {
         }
         let ring = SKShapeNode(ellipseOf: CGSize(width: 680, height: 145))
         ring.position = CGPoint(x: 500, y: 112); ring.strokeColor = mint.withAlphaComponent(0.12); ring.lineWidth = 2; addChild(ring)
+        let stoneTexture = session?.platformArtwork.map {
+            SKTexture(rect: CGRect(x: 0.01, y: 0.20, width: 0.98, height: 0.50), in: SKTexture(image: $0))
+        }
         for (index, platform) in (session?.simulation.arenaPlatforms ?? ArenaSimulation.platforms).enumerated() {
-            let island = ArenaPlatformNode(platform: platform, map: builtMap ?? .observatory, index: index)
+            let island = ArenaPlatformNode(platform: platform, map: builtMap ?? .observatory, index: index, texture: stoneTexture)
             addChild(island)
             if let view, let baked = island.bake(to: view) { addChild(baked); island.removeFromParent() }
         }

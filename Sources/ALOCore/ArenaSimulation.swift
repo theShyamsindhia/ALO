@@ -18,6 +18,62 @@ public enum ArenaFighterKind: String, Codable, CaseIterable, Sendable {
     public var speed: Double { self == .nova ? 310 : 270 }
 }
 
+/// Attack-specific timing and geometry used by both authority and presentation.
+public struct ArenaAttackProfile: Equatable, Sendable {
+    public let title: String
+    public let startup: Int
+    public let activeFrames: Int
+    public let totalFrames: Int
+    public let damage: Double
+    public let baseForce: Double
+    public let scaling: Double
+    public let reach: Double
+    public let lift: Double
+    public let radius: Double
+    public let launchX: Double
+    public let launchY: Double
+    public let selfVelocityX: Double
+    public let selfVelocityY: Double
+
+    public static func resolve(kind: ArenaFighterKind, heavy: Bool, direction: Int, aerial: Bool) -> Self {
+        func move(_ title: String, _ startup: Int, _ total: Int, _ damage: Double,
+                  _ reach: Double, _ lift: Double, _ radius: Double,
+                  _ launchX: Double, _ launchY: Double, _ speedX: Double = 0, _ speedY: Double = 0) -> Self {
+            Self(title: title, startup: startup, activeFrames: heavy ? 6 : 5, totalFrames: total, damage: damage,
+                 baseForce: heavy ? (kind == .atlas ? 390 : 330) : (kind == .atlas ? 210 : 185),
+                 scaling: heavy ? (kind == .atlas ? 3.8 : 3.5) : (kind == .atlas ? 2.4 : 2.1),
+                 reach: reach, lift: lift, radius: radius, launchX: launchX, launchY: launchY,
+                 selfVelocityX: speedX, selfVelocityY: speedY)
+        }
+        switch (kind, heavy, aerial, direction) {
+        case (.nova, false, false, 1): return move("Rising Edge", 6, 24, 8, 14, 62, 34, 0.25, 1.25)
+        case (.nova, false, false, -1): return move("Low Sweep", 7, 26, 10, 54, -8, 34, 1, 0.3)
+        case (.nova, false, false, _): return move("Crescent Cut", 5, 23, 9, 58, 0, 37, 1, 0.65)
+        case (.nova, false, true, 1): return move("Star Pierce", 5, 24, 9, 12, 75, 34, 0.2, 1.25)
+        case (.nova, false, true, -1): return move("Falling Point", 8, 28, 12, 20, -50, 34, 0.3, -1)
+        case (.nova, false, true, _): return move("Sky Arc", 5, 25, 10, 65, 20, 40, 1, 0.55)
+        case (.nova, true, false, 1): return move("Lunar Rise", 11, 42, 18, 18, 68, 48, 0.3, 1.35, 0, 380)
+        case (.nova, true, false, -1): return move("Moonwake", 15, 44, 20, 0, 0, 70, 0.9, 0.7)
+        case (.nova, true, false, _): return move("Comet Lunge", 13, 40, 19, 78, 0, 45, 1.2, 0.55, 360)
+        case (.nova, true, true, 1): return move("Astral Step", 9, 38, 15, 16, 64, 42, 0.25, 1.3, 0, 700)
+        case (.nova, true, true, -1): return move("Comet Dive", 12, 44, 21, 20, -54, 46, 0.35, -1.1, 90, -520)
+        case (.nova, true, true, _): return move("Crosswind", 11, 38, 17, 74, 10, 45, 1.1, 0.5, 460)
+        case (.atlas, false, false, 1): return move("Rising Knuckle", 7, 28, 10, 12, 60, 32, 0.25, 1.3)
+        case (.atlas, false, false, -1): return move("Ankle Breaker", 8, 29, 13, 45, -4, 34, 1.1, 0.25)
+        case (.atlas, false, false, _): return move("Iron Jab", 7, 27, 12, 42, 0, 33, 1, 0.6)
+        case (.atlas, false, true, 1): return move("Sky Knuckle", 6, 26, 10, 12, 68, 33, 0.2, 1.35)
+        case (.atlas, false, true, -1): return move("Hammer Heel", 9, 30, 14, 18, -52, 35, 0.2, -1.15)
+        case (.atlas, false, true, _): return move("Air Hook", 6, 25, 11, 48, 20, 35, 1.05, 0.6)
+        case (.atlas, true, false, 1): return move("Titan Uppercut", 14, 46, 23, 12, 66, 53, 0.2, 1.5, 0, 330)
+        case (.atlas, true, false, -1): return move("Faultline", 19, 52, 27, 0, -5, 90, 1.1, 0.65)
+        case (.atlas, true, false, _): return move("Meteor Fist", 17, 48, 25, 55, 0, 55, 1.25, 0.65, 180)
+        case (.atlas, true, true, 1): return move("Rocket Knuckle", 10, 42, 18, 12, 65, 48, 0.2, 1.45, 0, 740)
+        case (.atlas, true, true, -1): return move("Meteor Drop", 13, 50, 25, 14, -58, 52, 0.2, -1.3, 0, -600)
+        case (.atlas, true, true, _): return move("Hammer Drive", 15, 43, 22, 60, 12, 50, 1.25, 0.4, 260)
+        }
+    }
+}
+
 public struct ArenaFighter: Codable, Equatable, Sendable {
     public var kind: ArenaFighterKind
     public var x: Double
@@ -36,11 +92,15 @@ public struct ArenaFighter: Codable, Equatable, Sendable {
     public var dodgeFrames: Int = 0
     public var attackFrames: Int = 0
     public var attackAge: Int = 0
+    public var attackAerial: Bool? = nil
     public var attackHeavy = false
     public var attackDirection: Int = 0
     public var attackConnected = false
     public var respawn: Int = 0
     public var hitSerial: Int = 0
+    public var attackProfile: ArenaAttackProfile {
+        ArenaAttackProfile.resolve(kind: kind, heavy: attackHeavy, direction: attackDirection, aerial: attackAerial ?? !grounded)
+    }
     public init(kind: ArenaFighterKind, x: Double, facing: Double) {
         self.kind = kind; self.x = x; self.facing = facing
     }
@@ -168,13 +228,25 @@ public struct ArenaSimulation: Codable, Equatable, Sendable {
                 f.vy = Double(input.vertical) * 440
             } else if f.attackFrames == 0 && ((input.light && !old.light) || (input.heavy && !old.heavy)) {
                 f.attackHeavy = input.heavy
+                f.attackAerial = !f.grounded
                 f.attackDirection = input.vertical
                 f.attackAge = 0; f.attackConnected = false
-                f.attackFrames = input.heavy ? 40 : 23
+                let move = ArenaAttackProfile.resolve(kind: f.kind, heavy: f.attackHeavy, direction: f.attackDirection, aerial: f.attackAerial == true)
+                f.attackFrames = move.totalFrames
                 // Attacking forfeits respawn protection.
                 f.invulnerable = 0
                 if input.heavy && input.vertical == 1 && !f.grounded && f.recoveryAvailable {
-                    f.vy = 660; f.recoveryAvailable = false
+                    f.vy = move.selfVelocityY; f.recoveryAvailable = false
+                }
+            }
+        }
+        if f.attackFrames > 0 {
+            let move = ArenaAttackProfile.resolve(kind: f.kind, heavy: f.attackHeavy, direction: f.attackDirection, aerial: f.attackAerial ?? !f.grounded)
+            if f.attackAge == move.startup {
+                if move.selfVelocityX != 0 { f.vx = f.facing * move.selfVelocityX }
+                // Aerial recovery thrust is consumed once at startup, never again on active frames.
+                if move.selfVelocityY != 0 && !(f.attackAerial == true && f.attackDirection == 1) {
+                    f.vy = move.selfVelocityY; f.grounded = false
                 }
             }
         }
@@ -195,17 +267,17 @@ public struct ArenaSimulation: Codable, Equatable, Sendable {
         fighters[i] = f
     }
 
-    public func attackCenter(_ i: Int) -> (x: Double, y: Double, radius: Double) {
+    public func attackProfile(_ i: Int) -> ArenaAttackProfile {
         let f = fighters[i]
-        let reach = f.kind == .nova ? 58.0 : 48.0
-        return (f.x + (f.attackDirection == 0 ? f.facing * reach : f.facing * 12),
-                f.y + 25 + Double(f.attackDirection) * 48,
-                f.attackHeavy ? 52 : 37)
+        return f.attackProfile
+    }
+    public func attackCenter(_ i: Int) -> (x: Double, y: Double, radius: Double) {
+        let f = fighters[i], move = attackProfile(i)
+        return (f.x + f.facing * move.reach, f.y + 25 + move.lift, move.radius)
     }
     public func attackActive(_ i: Int) -> Bool {
-        let f = fighters[i]
-        let startup = f.attackHeavy ? 13 : 5
-        return f.attackFrames > 0 && f.attackAge >= startup && f.attackAge < startup + 5
+        let f = fighters[i], move = attackProfile(i)
+        return f.attackFrames > 0 && f.attackAge >= move.startup && f.attackAge < move.startup + move.activeFrames
     }
     private func canHit(_ a: Int, _ b: Int) -> Bool {
         let f = fighters[a], target = fighters[b]
@@ -217,11 +289,12 @@ public struct ArenaSimulation: Codable, Equatable, Sendable {
     private mutating func hit(_ a: Int, _ b: Int) {
         let f = fighters[a]
         fighters[a].attackConnected = true
-        let damage = (f.attackHeavy ? 19.0 : 9.0) * (f.kind == .atlas ? 1.15 : 1)
-        fighters[b].damage += damage
-        let force = (f.attackHeavy ? 330.0 : 185.0) + fighters[b].damage * (f.attackHeavy ? 3.5 : 2.1)
-        fighters[b].vx = f.facing * force * (f.attackDirection == 0 ? 1 : 0.45)
-        fighters[b].vy = force * (f.attackDirection == -1 ? -0.8 : f.attackDirection == 1 ? 1.25 : 0.65)
+        let move = attackProfile(a)
+        fighters[b].damage += move.damage
+        let force = move.baseForce + fighters[b].damage * move.scaling
+        let direction = move.reach == 0 ? (fighters[b].x >= f.x ? 1.0 : -1.0) : f.facing
+        fighters[b].vx = direction * force * move.launchX
+        fighters[b].vy = force * move.launchY
         fighters[b].stun = f.attackHeavy ? 24 : 14
         fighters[b].attackFrames = 0
         fighters[b].grounded = false
@@ -239,7 +312,7 @@ public struct ArenaSimulation: Codable, Equatable, Sendable {
         let dx = targetX - bot.x
         result.horizontal = abs(dx) > 46 ? (dx > 0 ? 1 : -1) : 0
         result.jump = frame % 32 == 0 && (bot.y < 160 || foe.y > bot.y + 70 || bot.x < 210 || bot.x > 790)
-        result.vertical = bot.y < 110 ? 1 : (foe.y > bot.y + 65 ? 1 : 0)
+        result.vertical = bot.y < 110 ? 1 : (foe.y > bot.y + 65 ? 1 : (foe.y < bot.y - 45 || frame % 183 == 0 ? -1 : 0))
         result.heavy = frame % 61 == 0 && (abs(foe.x - bot.x) < 110 || bot.y < 110)
         result.light = frame % 29 == 0 && abs(foe.x - bot.x) < 100
         result.dodge = frame % 77 == 0 && abs(foe.x - bot.x) < 130 && foe.attackFrames > 0
@@ -253,7 +326,7 @@ public struct ArenaSimulation: Codable, Equatable, Sendable {
                 $0.facing.isFinite && [-1.0, 1.0].contains($0.facing) && $0.x.isFinite && $0.y.isFinite && $0.vx.isFinite && $0.vy.isFinite && $0.damage.isFinite
                 && abs($0.x) < 3000 && abs($0.y) < 3000 && abs($0.vx) < 20_000 && abs($0.vy) < 20_000
                 && (0...2).contains($0.airJumps) && (0...120).contains($0.invulnerable) && (0...75).contains($0.respawn)
-                && (0...40).contains($0.attackFrames) && (0...40).contains($0.attackAge) && (0...24).contains($0.stun)
+                && (0...60).contains($0.attackFrames) && (0...60).contains($0.attackAge) && (0...24).contains($0.stun)
                 && (0...150).contains($0.dodgeCooldown) && (0...12).contains($0.dodgeFrames) && (-1...1).contains($0.attackDirection)
                 && (0...1_000_000).contains($0.hitSerial) && (0...3).contains($0.stocks) && (0...10_000).contains($0.damage)
             }

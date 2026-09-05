@@ -84,7 +84,7 @@ final class ArenaPlatformNode: SKNode {
             let surface = SKSpriteNode(texture: texture)
             surface.size = CGSize(width: width, height: depth * 1.25)
             surface.position = CGPoint(x: width / 2, y: -depth * 0.60)
-            surface.color = palette.face; surface.colorBlendFactor = 0.55; surface.alpha = 0.28
+            surface.color = palette.face; surface.colorBlendFactor = 0.20; surface.alpha = 0.88
             crop.addChild(surface); addChild(crop)
         }
 

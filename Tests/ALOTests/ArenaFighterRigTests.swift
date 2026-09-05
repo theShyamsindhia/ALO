@@ -15,8 +15,9 @@ struct ArenaFighterRigTests {
         let hand = try #require(rig.childNode(withName: "//front-hand"))
         let idle = hand.convert(.zero, to: rig)
         let count = nodeCount(rig)
-        fighter.attackFrames = 20; fighter.attackHeavy = false; fighter.attackAge = 9
-        rig.update(fighter: fighter, frame: 9, reducedMotion: false)
+        fighter.attackFrames = 20; fighter.attackHeavy = false
+        fighter.attackAge = fighter.attackProfile.startup + fighter.attackProfile.activeFrames - 1
+        rig.update(fighter: fighter, frame: fighter.attackAge, reducedMotion: false)
         let strike = hand.convert(.zero, to: rig)
         #expect(hypot(idle.x - strike.x, idle.y - strike.y) > 10)
         for frame in 10..<120 {

@@ -14,7 +14,7 @@ catalog = []
 for entry in entries:
     pack = {"schemaVersion": 1, "version": entry["version"], **{key: entry[key] for key in ("id", "engine", "arenaName", "subtitle", "accentHex")}}
     if entry["id"] == "rift-arena":
-        for field, filename in [("backgroundImageBase64", "hollow-observatory.jpg"), ("fighterImageBase64", "fighters.png"), ("gardenImageBase64", "moon-garden.jpg"), ("midgroundImageBase64", "garden-islands.png")]:
+        for field, filename in [("backgroundImageBase64", "hollow-observatory.jpg"), ("fighterImageBase64", "fighters.png"), ("gardenImageBase64", "moon-garden.jpg"), ("midgroundImageBase64", "garden-islands.png"), ("platformImageBase64", "arena-stone.png")]:
             artwork = root / "GamePacks" / "source-art" / filename
             if artwork.exists():
                 pack[field] = base64.b64encode(artwork.read_bytes()).decode()

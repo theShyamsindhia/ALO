@@ -63,13 +63,16 @@ public struct GamePackContent: Codable, Sendable, Equatable {
     public let accentHex: String
     public let backgroundImageBase64: String?
     public let fighterImageBase64: String?
+    public let platformImageBase64: String?
+    public var platformImageData: Data? { platformImageBase64.flatMap { Data(base64Encoded: $0) } }
     public let midgroundImageBase64: String?
     public var midgroundImageData: Data? { midgroundImageBase64.flatMap { Data(base64Encoded: $0) } }
     public let gardenImageBase64: String?
     public var gardenImageData: Data? { gardenImageBase64.flatMap { Data(base64Encoded: $0) } }
     public var backgroundImageData: Data? { backgroundImageBase64.flatMap { Data(base64Encoded: $0) } }
     public var fighterImageData: Data? { fighterImageBase64.flatMap { Data(base64Encoded: $0) } }
-    public init(id: String, engine: String, version: Int, arenaName: String, subtitle: String, accentHex: String, backgroundImageBase64: String? = nil, fighterImageBase64: String? = nil, gardenImageBase64: String? = nil, midgroundImageBase64: String? = nil) {
+    public init(id: String, engine: String, version: Int, arenaName: String, subtitle: String, accentHex: String, backgroundImageBase64: String? = nil, fighterImageBase64: String? = nil, gardenImageBase64: String? = nil, midgroundImageBase64: String? = nil, platformImageBase64: String? = nil) {
+        self.platformImageBase64 = platformImageBase64
         self.midgroundImageBase64 = midgroundImageBase64
         self.gardenImageBase64 = gardenImageBase64
         schemaVersion = 1; self.id = id; self.engine = engine; self.version = version
@@ -87,7 +90,7 @@ public struct GamePackContent: Codable, Sendable, Equatable {
               pack.version == descriptor.version, !pack.arenaName.isEmpty, pack.arenaName.count <= 80,
               pack.subtitle.count <= 500, pack.accentHex.count == 6,
               pack.accentHex.allSatisfy(\.isHexDigit) else { throw GamePackError.invalidPack }
-        for image in [pack.backgroundImageBase64, pack.fighterImageBase64, pack.gardenImageBase64, pack.midgroundImageBase64].compactMap({ $0 }) {
+        for image in [pack.backgroundImageBase64, pack.fighterImageBase64, pack.gardenImageBase64, pack.midgroundImageBase64, pack.platformImageBase64].compactMap({ $0 }) {
             guard let decoded = Data(base64Encoded: image), !decoded.isEmpty, decoded.count <= 10 * 1_024 * 1_024 else { throw GamePackError.invalidPack }
             let png = decoded.starts(with: [137, 80, 78, 71, 13, 10, 26, 10])
             let jpeg = decoded.starts(with: [255, 216, 255])

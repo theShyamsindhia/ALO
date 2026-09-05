@@ -150,7 +150,7 @@ final class GameLibraryStore: ObservableObject {
     }
 
     private static func validateImage(_ content: GamePackContent) throws {
-        for data in [content.backgroundImageData, content.fighterImageData, content.gardenImageData, content.midgroundImageData].compactMap({ $0 }) {
+        for data in [content.backgroundImageData, content.fighterImageData, content.gardenImageData, content.midgroundImageData, content.platformImageData].compactMap({ $0 }) {
         guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
               CGImageSourceGetCount(source) == 1,
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],

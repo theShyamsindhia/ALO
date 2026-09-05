@@ -323,3 +323,69 @@ struct ArenaRoomRosterTests {
         #expect(hits.fighters.dropFirst().allSatisfy { $0.hitSerial == 1 })
     }
 }
+
+@Suite("Directional sword and gauntlet combat")
+struct ArenaAttackProfileTests {
+    @Test func eachCharacterHasTwelveDistinctMoves() {
+        for kind in ArenaFighterKind.allCases {
+            var titles = Set<String>()
+            for aerial in [false, true] { for heavy in [false, true] { for direction in -1...1 {
+                let move = ArenaAttackProfile.resolve(kind: kind, heavy: heavy, direction: direction, aerial: aerial)
+                titles.insert(move.title)
+                #expect(move.startup > 0 && move.activeFrames > 0)
+                #expect(move.startup + move.activeFrames < move.totalFrames)
+                #expect(move.totalFrames <= 60)
+            } } }
+            #expect(titles.count == 12)
+        }
+        let sword = ArenaAttackProfile.resolve(kind: .nova, heavy: true, direction: 0, aerial: false)
+        let fist = ArenaAttackProfile.resolve(kind: .atlas, heavy: true, direction: 0, aerial: false)
+        #expect(sword.startup < fist.startup); #expect(sword.reach > fist.reach); #expect(fist.damage > sword.damage)
+    }
+
+    @Test func aerialMoveDoesNotChangeWhenLanding() {
+        var sim = ArenaSimulation(); sim.countdown = 0
+        sim.fighters[0].y = 152; sim.fighters[0].vy = -200
+        var attack = ArenaInput(); attack.light = true; attack.vertical = -1
+        sim.tick([attack, ArenaInput()])
+        #expect(sim.fighters[0].grounded)
+        #expect(sim.fighters[0].attackAerial == true)
+        #expect(sim.attackProfile(0).title == "Falling Point")
+        #expect(sim.attackProfile(0).launchY < 0)
+    }
+
+    @Test func aerialRecoveryCannotBeRepeatedBeforeLanding() {
+        var sim = ArenaSimulation(); sim.countdown = 0
+        sim.fighters[0].x = -50; sim.fighters[0].y = 200
+        var recovery = ArenaInput(); recovery.heavy = true; recovery.vertical = 1
+        sim.tick([recovery, ArenaInput()])
+        #expect(sim.fighters[0].vy > 600); #expect(!sim.fighters[0].recoveryAvailable)
+        sim.fighters[0].attackFrames = 0
+        sim.tick([ArenaInput(), ArenaInput()])
+        let velocity = sim.fighters[0].vy
+        sim.tick([recovery, ArenaInput()])
+        #expect(sim.fighters[0].vy < velocity)
+        #expect(!sim.fighters[0].recoveryAvailable)
+    }
+
+    @Test func faultlineLaunchesNearbyOpponentsAwayOnBothSides() {
+        var sim = ArenaSimulation(kinds: [.atlas, .nova, .nova]); sim.countdown = 0
+        for index in sim.fighters.indices { sim.fighters[index].y = 150; sim.fighters[index].grounded = true }
+        sim.fighters[0].x = 500; sim.fighters[1].x = 430; sim.fighters[2].x = 570
+        var smash = ArenaInput(); smash.heavy = true; smash.vertical = -1
+        for _ in 0..<20 { sim.tick([smash, ArenaInput(), ArenaInput()]) }
+        #expect(sim.attackProfile(0).title == "Faultline")
+        #expect(sim.fighters[1].damage == 27 && sim.fighters[2].damage == 27)
+        #expect(sim.fighters[1].vx < 0 && sim.fighters[2].vx > 0)
+    }
+
+    @Test func novaLungeMovesOnlyWhenSignatureBecomesActive() {
+        var sim = ArenaSimulation(); sim.countdown = 0
+        sim.fighters[0].grounded = true; sim.fighters[0].y = 150
+        var signature = ArenaInput(); signature.heavy = true
+        for _ in 0..<13 { sim.tick([signature, ArenaInput()]) }
+        #expect(sim.fighters[0].vx == 0)
+        sim.tick([signature, ArenaInput()])
+        #expect(sim.fighters[0].vx == 360)
+    }
+}

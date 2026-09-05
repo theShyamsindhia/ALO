@@ -197,6 +197,10 @@ struct ArenaMenuOverlay: View {
         }
     }
 
+    private var controlsFighter: ArenaFighterKind {
+        session.simulation.fighters.indices.contains(session.localIndex) ? session.simulation.fighters[session.localIndex].kind : session.selected
+    }
+
     private var controls: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Click the arena to give the game keyboard/controller focus. Typing in room chat releases game input.")
@@ -211,7 +215,7 @@ struct ArenaMenuOverlay: View {
                 controlRow("Aim attack", "W / S or ↑ / ↓", "Stick up / down")
                 controlRow("Jump / air jump", "Space", "A / Cross")
                 controlRow("Light attack", "J", "X / Square")
-                controlRow("Heavy attack", "K", "Y / Triangle")
+                controlRow("Signature / aerial heavy", "K", "Y / Triangle")
                 controlRow("Dodge", "L", "RB / R1")
                 controlRow("Drop through", "S or ↓", "Stick down")
                 controlRow("Recovery", "W + K", "Up + Y / Triangle")
@@ -219,6 +223,23 @@ struct ArenaMenuOverlay: View {
             }.font(.system(size: 10)).frame(maxWidth: .infinity, alignment: .leading)
             Text("You have two air jumps and one recovery before landing. Higher damage means stronger knockback. Use dodge to avoid a hit, then recover toward a platform.")
                 .font(.system(size: 11)).foregroundStyle(ArenaAppearance.secondary)
+            Divider()
+            Text("\(controlsFighter.title) move list").font(.system(size: 12, weight: .semibold))
+            Text("Tap an attack while aiming. Ground and aerial moves differ; heavy attacks have longer openings if you miss.")
+                .font(.system(size: 10)).foregroundStyle(ArenaAppearance.secondary)
+            ForEach([false, true], id: \.self) { aerial in
+                Text(aerial ? "In the air" : "On the ground").font(.system(size: 11, weight: .semibold))
+                ForEach([0, 1, -1], id: \.self) { direction in
+                    let aim = direction == 0 ? "Forward" : direction == 1 ? "Up" : "Down"
+                    let light = ArenaAttackProfile.resolve(kind: controlsFighter, heavy: false, direction: direction, aerial: aerial)
+                    let heavy = ArenaAttackProfile.resolve(kind: controlsFighter, heavy: true, direction: direction, aerial: aerial)
+                    HStack(alignment: .top) {
+                        Text(aim).frame(width: 48, alignment: .leading)
+                        Text("J · \(light.title)").frame(maxWidth: .infinity, alignment: .leading)
+                        Text("K · \(heavy.title)").frame(maxWidth: .infinity, alignment: .leading)
+                    }.font(.system(size: 10)).foregroundStyle(ArenaAppearance.secondary)
+                }
+            }
             Text("Controller button names depend on the connected gamepad. macOS must recognize an extended gamepad.")
                 .font(.system(size: 9)).foregroundStyle(ArenaAppearance.secondary)
         }

@@ -43,6 +43,7 @@ final class ArenaSession: ObservableObject {
     private(set) var fighterArtwork: NSImage?
     private(set) var gardenBackground: NSImage?
     private(set) var midgroundArtwork: NSImage?
+    private(set) var platformArtwork: NSImage?
     var arenaBackground: NSImage? { selectedMap == .observatory ? gameBackground : gardenBackground ?? gameBackground }
     private var loadTask: Task<Void, Never>?
     @Published var selectedMap: ArenaMap = .observatory
@@ -155,8 +156,9 @@ final class ArenaSession: ObservableObject {
             gameBackground = pack.content.backgroundImageData.flatMap(NSImage.init(data:))
             gardenBackground = pack.content.gardenImageData.flatMap(NSImage.init(data:))
             midgroundArtwork = pack.content.midgroundImageData.flatMap(NSImage.init(data:))
+            platformArtwork = pack.content.platformImageData.flatMap(NSImage.init(data:))
             fighterArtwork = pack.content.fighterImageData.flatMap(NSImage.init(data:))
-            if pack.content.backgroundImageBase64 != nil && gameBackground == nil {
+            if (pack.content.backgroundImageBase64 != nil && gameBackground == nil) || (pack.content.platformImageBase64 != nil && platformArtwork == nil) {
                 gameLoadError = "The artwork could not be loaded. Remove the pack and download it again."
             }
             loadingGame = false; configureTimer()
@@ -164,7 +166,7 @@ final class ArenaSession: ObservableObject {
     }
     func returnToLibrary() {
         leave(); loadTask?.cancel(); selectedGameID = nil; loadingGame = false
-        gameBackground = nil; gardenBackground = nil; midgroundArtwork = nil; fighterArtwork = nil; gameLoadError = nil; controlsFocused = false; configureTimer()
+        gameBackground = nil; gardenBackground = nil; midgroundArtwork = nil; platformArtwork = nil; fighterArtwork = nil; gameLoadError = nil; controlsFocused = false; configureTimer()
     }
     func closeMenu() { showsMenu = false; paused = false; clearInput() }
     func activate() { configureTimer() }

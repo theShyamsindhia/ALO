@@ -4,7 +4,7 @@
 
 The room gamepad opens Games, not a running game. The library lists Rift Arena and Fourfold, with explicit download, cancel, retry, verify, update and remove states. Selecting an installed game loads its presentation data; the fighter starts only after the creator starts a room match and all human players ready up. Ordinary room members receiving lobby advertisements do not start a simulation, render view, or timer. Library browsing creates no SpriteKit scene.
 
-Rift uses original illustrated observatory and moon-garden scenery and fighter artwork, compressed into an approximately 1.84 MiB version-3 pack. Only small native engines and catalog metadata ship in the app. See [downloadable packs](game-library.md) for content releases and their limits. The app shell follows ALO's charcoal surfaces, system typography and muted accents. Player 1 is lavender; player 2 is clay, with text labels and state so color is not the only identifier.
+Rift uses original illustrated observatory and moon-garden scenery and fighter artwork, compressed into an approximately 2.60 MiB version-3 pack. Only small native engines and catalog metadata ship in the app. See [downloadable packs](game-library.md) for content releases and their limits. The app shell follows ALO's charcoal surfaces, system typography and muted accents. Player 1 is lavender; player 2 is clay, with text labels and state so color is not the only identifier.
 
 ## Play
 
@@ -14,7 +14,7 @@ Rift uses original illustrated observatory and moon-garden scenery and fighter a
 - Ground jump, two air jumps, one upward recovery, short invulnerable dodge with cooldown, fast fall and one-way upper platforms.
 - Respawn protection ends on attack. Ring-outs remove stocks; results support another practice round or a shared ready-up rematch.
 - Keyboard: A/D movement, Space jump, W/S aim, J light, K heavy, L dodge, Esc/P menu. Controller: left stick/d-pad movement and aim, A jump, X/Y attacks, right shoulder dodge, Menu for game menu. Click the arena to focus controls. The main game flow is room creation with configurable bots; private training remains an internal test utility.
-- Menu contains Overview, Controls and Settings, player identities/colors/stocks/eliminated state, volume, effects, restart/leave/fullscreen controls. Solo pauses; a network match continues while a participant inspects the menu, with their input cleared.
+- Menu contains Overview, Controls and Settings, player identities/colors/stocks/eliminated state, volume, effects, restart/leave/fullscreen controls. Internal practice pauses; a network match continues while a participant inspects the menu, with their input cleared.
 
 The same session remains active across embedded, pop-out and fullscreen presentation. Hidden render surfaces pause; hidden practice pauses. Only participants in an explicitly started online match continue its simulation/connection heartbeat. Leaving the activity ends participation. Game sound has an independent volume control and releases its audio engine after idle.
 
@@ -37,3 +37,11 @@ This is an original two-fighter game with three arena layouts. It does not copy 
 References: [Brawlhalla](https://www.brawlhalla.com/), [movement](https://brawlhalla.wiki.gg/wiki/Movement), [attacks](https://brawlhalla.wiki.gg/wiki/Attacks).
 
 The library shows a brief in-room invitation when a peer opens a match; this is ephemeral and does not enter chat history or OS notifications. Its leaderboard is a bounded local record of completed room matches with at least two humans. It does not claim global or cheat-resistant ranking. See [game records](game-records.md).
+
+## Fighter identity and moves
+
+Both players may choose the same fighter. Character colours stay faithful to the portrait art; player number, roster colour and small costume accents distinguish mirror matches. Portraits appear in selection; combat uses separate animated limbs and weapons rather than moving the portrait as one rigid image.
+
+Each fighter has twelve deterministic move profiles: light/heavy × forward/up/down × grounded/aerial. Nova uses blade cuts, lunges and dives; Atlas uses gauntlet jabs, uppercuts and ground slams. The controls tab lists the exact move names for the selected fighter. Heavies are tap-triggered signatures, not charge attacks. Weapon pickups/throws, wall jumps, gravity cancels, charge mechanics and competitive combo balance remain outside this build.
+
+Platforms combine original compressed stone artwork with bounded static masonry, bevels, cracks, inlays, moss and roots. The collision edge remains unchanged. Static nodes bake once into a sprite per platform when the SpriteKit view becomes available.
