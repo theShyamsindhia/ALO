@@ -40,6 +40,8 @@ final class ArenaSession: ObservableObject {
     @Published var showsMenu = false
     @Published var effectsEnabled = true
     private(set) var gameBackground: NSImage?
+    private(set) var expandedFighterArtwork: NSImage?
+    @Published var botDifficulty: ArenaBotDifficulty = .normal
     private(set) var fighterArtwork: NSImage?
     private(set) var gardenBackground: NSImage?
     private(set) var midgroundArtwork: NSImage?
@@ -61,6 +63,7 @@ final class ArenaSession: ObservableObject {
         didSet { UserDefaults.standard.set(gameVolume, forKey: "arenaVolume"); sound.volume = Float(gameVolume) }
     }
     var controlsFocused = false
+    @Published private(set) var inputFocusRequest = 0
     private let sound = ArenaSoundPlayer()
     private var priorSoundHits = [0, 0]
     private var priorSoundStocks = [3, 3]
@@ -158,6 +161,7 @@ final class ArenaSession: ObservableObject {
             midgroundArtwork = pack.content.midgroundImageData.flatMap(NSImage.init(data:))
             platformArtwork = pack.content.platformImageData.flatMap(NSImage.init(data:))
             fighterArtwork = pack.content.fighterImageData.flatMap(NSImage.init(data:))
+            expandedFighterArtwork = pack.content.expandedFighterImageData.flatMap(NSImage.init(data:))
             if (pack.content.backgroundImageBase64 != nil && gameBackground == nil) || (pack.content.platformImageBase64 != nil && platformArtwork == nil) {
                 gameLoadError = "The artwork could not be loaded. Remove the pack and download it again."
             }
@@ -166,9 +170,9 @@ final class ArenaSession: ObservableObject {
     }
     func returnToLibrary() {
         leave(); loadTask?.cancel(); selectedGameID = nil; loadingGame = false
-        gameBackground = nil; gardenBackground = nil; midgroundArtwork = nil; platformArtwork = nil; fighterArtwork = nil; gameLoadError = nil; controlsFocused = false; configureTimer()
+        gameBackground = nil; gardenBackground = nil; midgroundArtwork = nil; platformArtwork = nil; expandedFighterArtwork = nil; fighterArtwork = nil; gameLoadError = nil; controlsFocused = false; configureTimer()
     }
-    func closeMenu() { showsMenu = false; paused = false; clearInput() }
+    func closeMenu() { showsMenu = false; paused = false; clearInput(); inputFocusRequest &+= 1 }
     func activate() { configureTimer() }
     func panelAppeared() { visiblePanels += 1; configureTimer() }
     func panelDisappeared() {
@@ -188,6 +192,11 @@ final class ArenaSession: ObservableObject {
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
     }
+    private func botKind(slot: Int) -> ArenaFighterKind {
+        let roster = ArenaFighterKind.allCases
+        let start = roster.firstIndex(of: selected) ?? 0
+        return roster[(start + slot) % roster.count]
+    }
     func practice() {
         leave(); simulation = ArenaSimulation(first: selected, second: selected == .nova ? .atlas : .nova, map: selectedMap)
         botSlots = [1]; mode = .practice; paused = false; refreshSlots(); activate()
@@ -195,7 +204,7 @@ final class ArenaSession: ObservableObject {
     func host(botCount: Int = 0) {
         leave(); round = 0; sessionID = UUID().uuidString
         let count = min(3, max(0, botCount))
-        simulation = ArenaSimulation(kinds: [selected] + (0..<count).map { $0.isMultiple(of: 2) ? .atlas : .nova }, map: selectedMap)
+        simulation = ArenaSimulation(kinds: [selected] + (0..<count).map { botKind(slot: $0 + 1) }, map: selectedMap)
         botSlots = Set(1..<simulation.fighters.count)
         mode = count > 0 ? .readyHost : .hosting
         notice = "Room arena open. Add bots or invite people, then ready up."
@@ -204,7 +213,7 @@ final class ArenaSession: ObservableObject {
     func addBot() {
         guard [.hosting, .readyHost].contains(mode), simulation.fighters.count < 4 else { return }
         let index = simulation.fighters.count
-        simulation = ArenaSimulation(kinds: simulation.fighters.map(\.kind) + [index.isMultiple(of: 2) ? .nova : .atlas], map: selectedMap)
+        simulation = ArenaSimulation(kinds: simulation.fighters.map(\.kind) + [botKind(slot: index)], map: selectedMap)
         botSlots.insert(index); mode = .readyHost; refreshSlots(); sendRoster(); advertise(); startIfReady()
     }
     func removeBot() {
@@ -277,6 +286,7 @@ final class ArenaSession: ObservableObject {
         }
     }
     func setInput(_ input: ArenaInput) {
+        guard playing, mode != .spectator, !showsMenu, !paused else { clearInput(); return }
         bufferedActions.jump = bufferedActions.jump || (input.jump && !localInput.jump)
         bufferedActions.light = bufferedActions.light || (input.light && !localInput.light)
         bufferedActions.heavy = bufferedActions.heavy || (input.heavy && !localInput.heavy)
@@ -284,7 +294,7 @@ final class ArenaSession: ObservableObject {
         localInput = input
     }
     func clearInput() { localInput = ArenaInput(); bufferedActions = ArenaInput() }
-    private func sampledInput() -> ArenaInput {
+    func sampledInput() -> ArenaInput {
         var input = inputWithController()
         if showsMenu { return ArenaInput() }
         input.jump = input.jump || bufferedActions.jump
@@ -323,9 +333,10 @@ final class ArenaSession: ObservableObject {
     func togglePause() {
         clearInput(); showsMenu.toggle()
         if mode == .practice { paused = showsMenu }
+        if !showsMenu { inputFocusRequest &+= 1 }
     }
     func focusLost() {
-        clearInput()
+        clearInput(); controlsFocused = false; controllerPausePressed = false
         if mode == .practice { paused = true; showsMenu = true }
     }
     private func advertise() {
@@ -491,7 +502,7 @@ final class ArenaSession: ObservableObject {
         while accumulator >= ArenaSimulation.step && steps < 6 {
             let inputs = simulation.fighters.indices.map { slot -> ArenaInput in
                 if slot == 0 { return frameInput }
-                if botSlots.contains(slot) || mode == .practice { return simulation.botInput(for: slot) }
+                if botSlots.contains(slot) || mode == .practice { return simulation.botInput(for: slot, difficulty: botDifficulty) }
                 guard let member = members.values.first(where: { $0.slot == slot }), now - member.lastInput <= 0.25 else { return ArenaInput() }
                 return member.input
             }

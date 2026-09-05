@@ -110,7 +110,7 @@ import Testing
         #expect(!ArenaPacket(kind: .state, session: id, state: sim).isValid)
         var packet = ArenaPacket(kind: .state, session: id, state: ArenaSimulation())
         packet.version = 999; #expect(!packet.isValid)
-        packet.version = 3
+        packet.version = 4
         let encoded = try JSONEncoder().encode(packet)
         #expect(encoded.count < 8192)
         #expect(try JSONDecoder().decode(ArenaPacket.self, from: encoded).isValid)
@@ -304,7 +304,7 @@ struct ArenaRoomRosterTests {
         }
         let packet = ArenaPacket(kind: .state, session: UUID().uuidString, state: simulation)
         #expect(try JSONEncoder().encode(packet).count < 8192)
-        #expect(packet.version == 3)
+        #expect(packet.version == 4)
         var legacy = packet; legacy.version = 2; #expect(!legacy.isValid)
         var oversized = simulation; oversized.fighters.append(simulation.fighters[0]); #expect(!oversized.isValidSnapshot)
     }
@@ -387,5 +387,62 @@ struct ArenaAttackProfileTests {
         #expect(sim.fighters[0].vx == 0)
         sim.tick([signature, ArenaInput()])
         #expect(sim.fighters[0].vx == 360)
+    }
+}
+
+@Suite("Five fighter roster and bot difficulty")
+struct ArenaRosterDifficultyTests {
+    @Test func fiveWeaponsHaveDistinctTradeoffsAndSixtyMoves() {
+        #expect(ArenaFighterKind.allCases.count == 5)
+        var titles = Set<String>()
+        for fighter in ArenaFighterKind.allCases {
+            for aerial in [false,true] { for heavy in [false,true] { for direction in -1...1 {
+                let move = ArenaAttackProfile.resolve(kind: fighter, heavy: heavy, direction: direction, aerial: aerial)
+                titles.insert(move.title)
+                #expect(move.totalFrames <= 60)
+            } } }
+        }
+        #expect(titles.count == 60)
+        let spear = ArenaAttackProfile.resolve(kind: .ember, heavy: true, direction: 0, aerial: false)
+        let hammer = ArenaAttackProfile.resolve(kind: .rook, heavy: true, direction: 0, aerial: false)
+        #expect(spear.reach > hammer.reach); #expect(hammer.damage > spear.damage)
+        #expect(ArenaFighterKind.wisp.speed > ArenaFighterKind.rook.speed)
+    }
+    @Test func everyDifficultyAndRosterProducesDeterministicValidInputs() {
+        for difficulty in ArenaBotDifficulty.allCases {
+            var a = ArenaSimulation(kinds: [.ember,.wisp,.rook,.atlas]), b = a
+            a.countdown = 0; b.countdown = 0
+            for _ in 0..<600 {
+                let inputs = a.fighters.indices.map { a.botInput(for: $0, difficulty: difficulty) }
+                #expect(inputs.allSatisfy(\.isValid))
+                #expect(inputs == b.fighters.indices.map { b.botInput(for: $0, difficulty: difficulty) })
+                a.tick(inputs); b.tick(inputs)
+                #expect(a == b); #expect(a.isValidSnapshot)
+            }
+        }
+    }
+    @Test func nearbyBotTurnsTowardOpponentThenHoldsSpacing() {
+        var sim = ArenaSimulation(); sim.countdown = 0
+        sim.fighters[0].x = 400; sim.fighters[0].y = 150; sim.fighters[0].grounded = true
+        sim.fighters[1].x = 425; sim.fighters[1].y = 150; sim.fighters[1].grounded = true
+        sim.fighters[1].facing = 1
+        let turn = sim.botInput(for: 1)
+        #expect(turn.horizontal == -1)
+        sim.tick([ArenaInput(), turn])
+        #expect(sim.fighters[1].facing == -1)
+        #expect(sim.botInput(for: 1).horizontal == 0)
+    }
+
+    @Test func recoveryTakesPriorityAndHardBotsDefendEarlier() {
+        var sim = ArenaSimulation(kinds: [.rook,.wisp]); sim.countdown = 0
+        sim.frame = 0; sim.fighters[0].x = 100; sim.fighters[0].y = 60; sim.fighters[0].airJumps = 0
+        let recovery = sim.botInput(for: 0, difficulty: .hard)
+        #expect(recovery.horizontal == 1); #expect(recovery.vertical == 1); #expect(recovery.heavy)
+        sim.fighters[0].x = 400; sim.fighters[0].y = 150; sim.fighters[1].x = 450; sim.fighters[1].y = 150
+        sim.fighters[1].attackFrames = 20
+        #expect(sim.botInput(for: 0, difficulty: .hard).dodge)
+        #expect(!sim.botInput(for: 0, difficulty: .easy).dodge)
+        #expect(ArenaBotDifficulty.hard.decisionInterval < ArenaBotDifficulty.normal.decisionInterval)
+        #expect(ArenaBotDifficulty.normal.decisionInterval < ArenaBotDifficulty.easy.decisionInterval)
     }
 }

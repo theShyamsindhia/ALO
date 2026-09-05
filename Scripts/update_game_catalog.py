@@ -7,14 +7,14 @@ from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
 entries = [
-    dict(version=3, id="rift-arena", engine="rift-arena-v3", title="Rift Arena", summary="A room platform fighter for up to four players. Add bots, join a round, or watch.", arenaName="The Hollow", subtitle="A quiet sky. A friendly rivalry.", accentHex="A2ADBE"),
+    dict(version=4, id="rift-arena", engine="rift-arena-v4", title="Rift Arena", summary="A room platform fighter for up to four players. Add bots, join a round, or watch.", arenaName="The Hollow", subtitle="A quiet sky. A friendly rivalry.", accentHex="A2ADBE"),
     dict(version=1, id="fourfold", engine="fourfold-v1", title="Fourfold", summary="A four-in-a-row board game. Play the bot or pass and play on this Mac.", arenaName="Fourfold", subtitle="A thoughtful little rivalry.", accentHex="A2ADBE"),
 ]
 catalog = []
 for entry in entries:
     pack = {"schemaVersion": 1, "version": entry["version"], **{key: entry[key] for key in ("id", "engine", "arenaName", "subtitle", "accentHex")}}
     if entry["id"] == "rift-arena":
-        for field, filename in [("backgroundImageBase64", "hollow-observatory.jpg"), ("fighterImageBase64", "fighters.png"), ("gardenImageBase64", "moon-garden.jpg"), ("midgroundImageBase64", "garden-islands.png"), ("platformImageBase64", "arena-stone.png")]:
+        for field, filename in [("backgroundImageBase64", "hollow-observatory.jpg"), ("fighterImageBase64", "fighters.png"), ("gardenImageBase64", "moon-garden.jpg"), ("midgroundImageBase64", "garden-islands.png"), ("platformImageBase64", "arena-stone.png"), ("expandedFighterImageBase64", "fighters-expanded.png")]:
             artwork = root / "GamePacks" / "source-art" / filename
             if artwork.exists():
                 pack[field] = base64.b64encode(artwork.read_bytes()).decode()

@@ -47,7 +47,7 @@ struct ArenaPlayerRoster: View {
         let state = fighter.stocks == 0 ? "Eliminated" : fighter.respawn > 0 ? "Respawning" : "In arena"
         return HStack(alignment: .top, spacing: 8) {
             VStack(spacing: 3) {
-                Image(systemName: fighter.kind == .nova ? "bolt.fill" : "shield.lefthalf.filled")
+                Image(systemName: fighter.kind.arenaSymbol)
                     .font(.system(size: compact ? 12 : 17, weight: .medium))
                     .frame(width: compact ? 27 : 34, height: compact ? 27 : 34)
                     .background(ArenaAppearance.playerColor(index).opacity(0.2), in: RoundedRectangle(cornerRadius: 9))
@@ -203,7 +203,7 @@ struct ArenaMenuOverlay: View {
 
     private var controls: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Click the arena to give the game keyboard/controller focus. Typing in room chat releases game input.")
+            Text("The arena takes focus when play starts or resumes. Click it to refocus after using other controls. J/K/L and Z/X/C are interchangeable; these are Rift Arena controls.")
                 .font(.system(size: 11)).foregroundStyle(ArenaAppearance.secondary)
             Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 9) {
                 GridRow {
@@ -214,11 +214,11 @@ struct ArenaMenuOverlay: View {
                 controlRow("Move", "A / D or ← / →", "Left stick / D-pad")
                 controlRow("Aim attack", "W / S or ↑ / ↓", "Stick up / down")
                 controlRow("Jump / air jump", "Space", "A / Cross")
-                controlRow("Light attack", "J", "X / Square")
-                controlRow("Signature / aerial heavy", "K", "Y / Triangle")
-                controlRow("Dodge", "L", "RB / R1")
+                controlRow("Light attack", "J / Z", "X / Square")
+                controlRow("Signature / aerial heavy", "K / X", "Y / Triangle")
+                controlRow("Dodge", "L / C", "RB / R1")
                 controlRow("Drop through", "S or ↓", "Stick down")
-                controlRow("Recovery", "W + K", "Up + Y / Triangle")
+                controlRow("Recovery", "W + K / X", "Up + Y / Triangle")
                 controlRow("Game menu", "P / Esc", "Menu / Options")
             }.font(.system(size: 10)).frame(maxWidth: .infinity, alignment: .leading)
             Text("You have two air jumps and one recovery before landing. Higher damage means stronger knockback. Use dodge to avoid a hit, then recover toward a platform.")
@@ -278,20 +278,36 @@ struct ArenaMenuOverlay: View {
     }
 }
 
-/// Crop the two-character portrait sheet at display time; the pack image is decoded once.
+/// Crop a portrait sheet at display time; each pack image is decoded once.
 struct ArenaFighterPortrait: View {
     let image: NSImage?
     let kind: ArenaFighterKind
+    private var columns: CGFloat { kind == .nova || kind == .atlas ? 2 : 3 }
+    private var column: CGFloat {
+        switch kind { case .nova, .ember: 0; case .atlas, .wisp: 1; case .rook: 2 }
+    }
     var body: some View {
         GeometryReader { geometry in
             if let image {
                 Image(nsImage: image).resizable()
-                    .frame(width: geometry.size.width * 2, height: geometry.size.height)
-                    .offset(x: kind == .nova ? 0 : -geometry.size.width)
+                    .frame(width: geometry.size.width * columns, height: geometry.size.height)
+                    .offset(x: -geometry.size.width * column)
             } else {
-                Image(systemName: kind == .nova ? "bolt" : "shield")
+                Image(systemName: kind.arenaSymbol)
                     .frame(width: geometry.size.width, height: geometry.size.height)
             }
         }.clipped().accessibilityLabel(kind.title)
+    }
+}
+
+extension ArenaFighterKind {
+    var arenaSymbol: String {
+        switch self {
+        case .nova: "bolt.fill"
+        case .atlas: "shield.lefthalf.filled"
+        case .ember: "flame.fill"
+        case .wisp: "sparkles"
+        case .rook: "hammer.fill"
+        }
     }
 }

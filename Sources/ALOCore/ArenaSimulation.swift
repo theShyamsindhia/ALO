@@ -12,10 +12,20 @@ public struct ArenaInput: Codable, Equatable, Sendable {
 }
 
 public enum ArenaFighterKind: String, Codable, CaseIterable, Sendable {
-    case nova, atlas
-    public var title: String { self == .nova ? "Nova" : "Atlas" }
-    public var subtitle: String { self == .nova ? "Quick blade · agile pressure" : "Heavy gauntlets · launching power" }
-    public var speed: Double { self == .nova ? 310 : 270 }
+    case nova, atlas, ember, wisp, rook
+    public var title: String { rawValue.capitalized }
+    public var subtitle: String {
+        switch self {
+        case .nova: "Sword · mobile pressure"
+        case .atlas: "Gauntlets · close-range power"
+        case .ember: "Spear · narrow, long-reaching thrusts"
+        case .wisp: "Staff · fast control, lighter launches"
+        case .rook: "Hammer · slow, punishing swings"
+        }
+    }
+    public var speed: Double {
+        switch self { case .nova: 310; case .atlas: 270; case .ember: 290; case .wisp: 330; case .rook: 245 }
+    }
 }
 
 /// Attack-specific timing and geometry used by both authority and presentation.
@@ -40,12 +50,49 @@ public struct ArenaAttackProfile: Equatable, Sendable {
                   _ reach: Double, _ lift: Double, _ radius: Double,
                   _ launchX: Double, _ launchY: Double, _ speedX: Double = 0, _ speedY: Double = 0) -> Self {
             Self(title: title, startup: startup, activeFrames: heavy ? 6 : 5, totalFrames: total, damage: damage,
-                 baseForce: heavy ? (kind == .atlas ? 390 : 330) : (kind == .atlas ? 210 : 185),
-                 scaling: heavy ? (kind == .atlas ? 3.8 : 3.5) : (kind == .atlas ? 2.4 : 2.1),
+                 baseForce: heavy ? (kind == .rook ? 430 : kind == .atlas ? 390 : kind == .wisp ? 300 : 330) : (kind == .rook ? 235 : kind == .atlas ? 210 : kind == .wisp ? 165 : 185),
+                 scaling: heavy ? (kind == .rook ? 4.0 : kind == .atlas ? 3.8 : kind == .wisp ? 3.0 : 3.5) : (kind == .rook ? 2.6 : kind == .atlas ? 2.4 : kind == .wisp ? 1.9 : 2.1),
                  reach: reach, lift: lift, radius: radius, launchX: launchX, launchY: launchY,
                  selfVelocityX: speedX, selfVelocityY: speedY)
         }
         switch (kind, heavy, aerial, direction) {
+        case (.ember, false, false, 1): return move("Spear Lift", 7, 26, 9, 14, 80, 26, 0.2, 1.2)
+        case (.ember, false, false, -1): return move("Ash Sweep", 8, 28, 11, 72, -10, 30, 1, 0.3)
+        case (.ember, false, false, _): return move("Ember Thrust", 6, 25, 10, 88, 0, 24, 1, 0.45)
+        case (.ember, false, true, 1): return move("Flare Tip", 6, 25, 9, 10, 88, 26, 0.2, 1.25)
+        case (.ember, false, true, -1): return move("Falling Ember", 9, 30, 13, 20, -66, 28, 0.25, -1.1)
+        case (.ember, false, true, _): return move("Sky Skewer", 6, 26, 10, 92, 12, 26, 1.1, 0.45)
+        case (.ember, true, false, 1): return move("Phoenix Vault", 13, 44, 18, 16, 88, 35, 0.25, 1.35, 0, 420)
+        case (.ember, true, false, -1): return move("Ash Ring", 17, 46, 20, 0, -6, 78, 1, 0.65)
+        case (.ember, true, false, _): return move("Sunlance", 15, 44, 21, 112, 0, 30, 1.3, 0.4, 260)
+        case (.ember, true, true, 1): return move("Phoenix Ascent", 10, 40, 16, 18, 85, 34, 0.2, 1.3, 0, 720)
+        case (.ember, true, true, -1): return move("Sunfall", 14, 48, 24, 28, -74, 35, 0.3, -1.25, 80, -560)
+        case (.ember, true, true, _): return move("Firebrand", 13, 42, 19, 104, 10, 30, 1.2, 0.45, 300)
+        case (.wisp, false, false, 1): return move("Willow Tap", 5, 21, 7, 10, 70, 32, 0.2, 1.25)
+        case (.wisp, false, false, -1): return move("Lantern Sweep", 6, 23, 8, 56, -6, 38, 0.9, 0.35)
+        case (.wisp, false, false, _): return move("Spirit Tap", 4, 20, 7, 64, 0, 34, 0.9, 0.65)
+        case (.wisp, false, true, 1): return move("Moonbell", 4, 21, 7, 8, 78, 34, 0.15, 1.25)
+        case (.wisp, false, true, -1): return move("Dewfall", 7, 25, 9, 16, -50, 34, 0.25, -0.9)
+        case (.wisp, false, true, _): return move("Ghost Arc", 4, 22, 8, 68, 18, 40, 0.9, 0.6)
+        case (.wisp, true, false, 1): return move("Willow Lift", 10, 36, 14, 8, 80, 46, 0.2, 1.4, 0, 440)
+        case (.wisp, true, false, -1): return move("Lantern Ring", 13, 38, 16, 0, 0, 88, 0.8, 0.9)
+        case (.wisp, true, false, _): return move("Spirit Palm", 12, 36, 16, 75, 0, 60, 1.05, 0.7)
+        case (.wisp, true, true, 1): return move("Ghostlight", 8, 34, 12, 10, 78, 42, 0.15, 1.35, 0, 780)
+        case (.wisp, true, true, -1): return move("Falling Lantern", 11, 40, 18, 18, -54, 45, 0.2, -1, 0, -430)
+        case (.wisp, true, true, _): return move("Wandering Spirit", 10, 34, 14, 76, 15, 48, 1, 0.65, 340)
+        case (.rook, false, false, 1): return move("Anvil Lift", 10, 32, 13, 12, 65, 42, 0.3, 1.3)
+        case (.rook, false, false, -1): return move("Stone Sweep", 11, 34, 15, 50, -8, 46, 1.15, 0.3)
+        case (.rook, false, false, _): return move("Iron Swing", 9, 31, 14, 58, 0, 43, 1.05, 0.65)
+        case (.rook, false, true, 1): return move("Tower Bell", 8, 30, 12, 10, 72, 42, 0.25, 1.35)
+        case (.rook, false, true, -1): return move("Drop Hammer", 12, 36, 17, 18, -58, 46, 0.25, -1.2)
+        case (.rook, false, true, _): return move("Heavy Pendulum", 8, 30, 13, 65, 12, 45, 1.1, 0.6)
+        case (.rook, true, false, 1): return move("Citadel Breaker", 18, 54, 27, 12, 75, 60, 0.25, 1.5, 0, 280)
+        case (.rook, true, false, -1): return move("Earthshatter", 23, 60, 31, 0, -5, 98, 1.2, 0.8)
+        case (.rook, true, false, _): return move("Siege Hammer", 21, 56, 30, 72, 0, 62, 1.35, 0.65, 120)
+        case (.rook, true, true, 1): return move("Tower Rise", 13, 46, 21, 12, 68, 52, 0.25, 1.4, 0, 680)
+        case (.rook, true, true, -1): return move("Falling Citadel", 18, 56, 29, 20, -62, 60, 0.25, -1.4, 0, -650)
+        case (.rook, true, true, _): return move("Bell Ringer", 19, 52, 26, 78, 12, 58, 1.35, 0.5, 180)
+
         case (.nova, false, false, 1): return move("Rising Edge", 6, 24, 8, 14, 62, 34, 0.25, 1.25)
         case (.nova, false, false, -1): return move("Low Sweep", 7, 26, 10, 54, -8, 34, 1, 0.3)
         case (.nova, false, false, _): return move("Crescent Cut", 5, 23, 9, 58, 0, 37, 1, 0.65)
@@ -134,6 +181,11 @@ public enum ArenaMap: String, Codable, CaseIterable, Sendable {
         case .skybridge: return [floor]
         }
     }
+}
+
+public enum ArenaBotDifficulty: String, Codable, CaseIterable, Sendable {
+    case easy, normal, hard
+    public var decisionInterval: Int { switch self { case .easy: 48; case .normal: 28; case .hard: 16 } }
 }
 
 public struct ArenaSimulation: Codable, Equatable, Sendable {
@@ -301,21 +353,59 @@ public struct ArenaSimulation: Codable, Equatable, Sendable {
         fighters[b].hitSerial += 1
     }
 
-    public func botInput(for index: Int = 1) -> ArenaInput {
+    public func botInput(for index: Int = 1, difficulty: ArenaBotDifficulty = .normal) -> ArenaInput {
         var result = ArenaInput()
         guard fighters.indices.contains(index), fighters[index].stocks > 0,
-              let enemy = fighters.indices.filter({ $0 != index && fighters[$0].stocks > 0 }).min(by: {
-                  abs(fighters[$0].x - fighters[index].x) < abs(fighters[$1].x - fighters[index].x)
+              let enemy = fighters.indices.filter({ $0 != index && fighters[$0].stocks > 0 && fighters[$0].respawn == 0 }).min(by: {
+                  let a = fighters[$0], b = fighters[$1], bot = fighters[index]
+                  return abs(a.x - bot.x) + abs(a.y - bot.y) * 0.65 < abs(b.x - bot.x) + abs(b.y - bot.y) * 0.65
               }) else { return result }
         let bot = fighters[index], foe = fighters[enemy]
-        let targetX = bot.x < 200 || bot.x > 800 || bot.y < 130 ? 500 : foe.x
+        let pulse = (frame + index * 7) % difficulty.decisionInterval == 0
+        let recoveryNeeded = bot.y < (difficulty == .easy ? 70 : 125) || bot.x < 160 || bot.x > 840
+        let targetX = recoveryNeeded ? 500 : min(780, max(220, foe.x))
         let dx = targetX - bot.x
-        result.horizontal = abs(dx) > 46 ? (dx > 0 ? 1 : -1) : 0
-        result.jump = frame % 32 == 0 && (bot.y < 160 || foe.y > bot.y + 70 || bot.x < 210 || bot.x > 790)
-        result.vertical = bot.y < 110 ? 1 : (foe.y > bot.y + 65 ? 1 : (foe.y < bot.y - 45 || frame % 183 == 0 ? -1 : 0))
-        result.heavy = frame % 61 == 0 && (abs(foe.x - bot.x) < 110 || bot.y < 110)
-        result.light = frame % 29 == 0 && abs(foe.x - bot.x) < 100
-        result.dodge = frame % 77 == 0 && abs(foe.x - bot.x) < 130 && foe.attackFrames > 0
+        let neutral = ArenaAttackProfile.resolve(kind: bot.kind, heavy: false, direction: 0, aerial: !bot.grounded)
+        let spacing = recoveryNeeded ? 12 : max(32, neutral.reach * 0.85)
+        result.horizontal = abs(dx) > spacing ? (dx > 0 ? 1 : -1) : 0
+        // A brief turn input faces a nearby opponent without continuously
+        // walking through the weapon's preferred spacing distance.
+        let enemyDirection = foe.x > bot.x ? 1.0 : -1.0
+        if !recoveryNeeded, result.horizontal == 0, abs(foe.x - bot.x) > 1,
+           bot.facing != enemyDirection, bot.attackFrames == 0 {
+            result.horizontal = Int(enemyDirection)
+        }
+        // Recovery is prioritized over chasing opponents offstage. Difficulty
+        // changes decision cadence and anticipation, never physics or damage.
+        if recoveryNeeded {
+            let recoveryInterval = difficulty == .easy ? 12 : difficulty == .normal ? 6 : 3
+            let recoveryPulse = (frame + index * 3) % recoveryInterval == 0
+            result.vertical = 1
+            result.jump = recoveryPulse && (bot.grounded || bot.airJumps > 0)
+            result.heavy = recoveryPulse && !bot.grounded && bot.airJumps == 0 && bot.recoveryAvailable
+            return result
+        }
+        result.jump = pulse && (bot.grounded || bot.airJumps > 0) && foe.y > bot.y + 65
+        result.vertical = foe.y > bot.y + 48 ? 1 : foe.y < bot.y - 48 ? -1 : 0
+        let danger = foe.attackFrames > 0 && abs(foe.x - bot.x) < 145 && abs(foe.y - bot.y) < 80
+        if difficulty != .easy, danger, bot.dodgeCooldown == 0,
+           (frame + index * 3) % (difficulty == .hard ? 6 : 15) == 0 {
+            result.dodge = true; result.horizontal = bot.x < foe.x ? -1 : 1
+            return result
+        }
+        guard pulse, bot.attackFrames == 0, bot.stun == 0 else { return result }
+        let heavy = foe.stun > 6 || foe.damage >= (difficulty == .easy ? 110 : 70)
+        if heavy && bot.grounded && abs(foe.x - bot.x) < 55 && abs(foe.y - bot.y) < 30 { result.vertical = -1 }
+        let move = ArenaAttackProfile.resolve(kind: bot.kind, heavy: heavy, direction: result.vertical, aerial: !bot.grounded)
+        let anticipation = difficulty == .hard ? min(0.3, Double(move.startup) / 60) : 0
+        let expectedX = foe.x + foe.vx * anticipation
+        let expectedY = foe.y + foe.vy * anticipation
+        let direction = result.horizontal != 0 ? Double(result.horizontal) : bot.facing
+        let centerX = bot.x + direction * move.reach, centerY = bot.y + 25 + move.lift
+        let inRange = abs(expectedX - centerX) <= move.radius + 17 && abs(expectedY + 25 - centerY) <= move.radius + 25
+        if inRange && (!heavy || !danger || difficulty == .easy) {
+            result.heavy = heavy; result.light = !heavy
+        }
         return result
     }
 

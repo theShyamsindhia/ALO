@@ -131,11 +131,11 @@ struct ArenaPanel: View {
                     }.padding(14)
                 }.frame(height: detached ? 185 : 100).clipShape(RoundedRectangle(cornerRadius: 14))
                 Text("Choose your fighter").font(.system(size: 12, weight: .semibold))
-                HStack(spacing: 10) {
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
                     ForEach(ArenaFighterKind.allCases, id: \.self) { fighter in
                         Button { session.selected = fighter } label: {
                             HStack(spacing: 10) {
-                                ArenaFighterPortrait(image: session.fighterArtwork, kind: fighter)
+                                ArenaFighterPortrait(image: (fighter == .nova || fighter == .atlas) ? session.fighterArtwork : session.expandedFighterArtwork, kind: fighter)
                                     .frame(width: 66, height: 88)
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(fighter.title).font(.system(size: 13, weight: .semibold))
@@ -197,6 +197,13 @@ struct ArenaPanel: View {
                         }.buttonStyle(.borderedProminent).disabled(session.send == nil)
                             .help("Invites your room. Everyone readies up, then late joiners can replace bots.")
                     }
+                    if configuredBots > 0 {
+                        Picker("Bot difficulty", selection: $session.botDifficulty) {
+                            ForEach(ArenaBotDifficulty.allCases, id: \.self) { difficulty in
+                                Text(difficulty.rawValue.capitalized).tag(difficulty)
+                            }
+                        }.font(.system(size: 11)).frame(maxWidth: 240)
+                    }
                     if session.send == nil { Text("Join a live room to create a match.").font(.system(size: 10)).foregroundStyle(.secondary) }
                 } else if session.mode == .hosting || session.mode == .readyHost || session.mode == .readyGuest {
                     HStack(spacing: 6) {
@@ -249,45 +256,75 @@ private struct ArenaSurface: NSViewRepresentable {
 
 final class ArenaSKView: SKView {
     weak var session: ArenaSession?
-    private var keys = Set<UInt16>()
+    private var keyboard = ArenaKeyboardInput()
     private let surfaceID = UUID()
+    private var lastFocusRequest: Int?
+    private var wasInputBlocked = false
     override var acceptsFirstResponder: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    override func mouseDown(with event: NSEvent) { window?.makeKeyAndOrderFront(nil); window?.makeFirstResponder(self); session?.controlsFocused = true }
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted { session?.controlsFocused = true }
+        return accepted
+    }
+    override func mouseDown(with event: NSEvent) {
+        guard session?.showsMenu != true, session?.mode != .spectator else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+        window?.makeFirstResponder(self)
+    }
     override func resignFirstResponder() -> Bool {
-        keys.removeAll(); session?.clearInput(); session?.controlsFocused = false
+        resetKeyboard(); session?.controlsFocused = false
         return super.resignFirstResponder()
     }
     override func keyDown(with event: NSEvent) {
-        guard !event.modifierFlags.contains(.command) else { super.keyDown(with: event); return }
-        if event.keyCode == 35 || event.keyCode == 53 {
-            if !event.isARepeat { session?.togglePause() }
-            return
-        }
-        guard [0, 2, 13, 1, 49, 38, 40, 37, 123, 124, 125, 126].contains(event.keyCode) else {
+        // Let application and room shortcuts keep their modifier combinations.
+        guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty else {
             super.keyDown(with: event); return
         }
-        keys.insert(event.keyCode); publish()
+        if event.keyCode == 35 || event.keyCode == 53 {
+            if !event.isARepeat { resetKeyboard(); session?.togglePause() }
+            return
+        }
+        guard ArenaKeyboardInput.handledKeys.contains(event.keyCode) else { super.keyDown(with: event); return }
+        guard session?.showsMenu != true, session?.paused != true else { resetKeyboard(); return }
+        keyboard.press(event.keyCode); session?.setInput(keyboard.input)
     }
-    override func keyUp(with event: NSEvent) { keys.remove(event.keyCode); publish() }
-    private func publish() {
-        var input = ArenaInput()
-        input.horizontal = (keys.contains(2) || keys.contains(124) ? 1 : 0) - (keys.contains(0) || keys.contains(123) ? 1 : 0)
-        input.vertical = (keys.contains(13) || keys.contains(126) ? 1 : 0) - (keys.contains(1) || keys.contains(125) ? 1 : 0)
-        input.jump = keys.contains(49); input.light = keys.contains(38)
-        input.heavy = keys.contains(40); input.dodge = keys.contains(37)
-        session?.setInput(input)
+    override func keyUp(with event: NSEvent) {
+        guard ArenaKeyboardInput.handledKeys.contains(event.keyCode) else { super.keyUp(with: event); return }
+        keyboard.release(event.keyCode); session?.setInput(keyboard.input)
     }
+    private func resetKeyboard() { keyboard.reset(); session?.clearInput() }
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         NotificationCenter.default.removeObserver(self)
+        lastFocusRequest = nil
         if let window {
             NotificationCenter.default.addObserver(self, selector: #selector(visibilityChanged), name: NSWindow.didChangeOcclusionStateNotification, object: window)
             NotificationCenter.default.addObserver(self, selector: #selector(lostFocus), name: NSWindow.didResignKeyNotification, object: window)
         }
-        visibilityChanged()
+        refreshVisibility()
     }
-    func refreshVisibility() { visibilityChanged() }
+    func refreshVisibility() {
+        visibilityChanged()
+        guard let session else { return }
+        let blocked = session.showsMenu || session.paused
+        if blocked { resetKeyboard() }
+        if lastFocusRequest == nil || lastFocusRequest != session.inputFocusRequest || (wasInputBlocked && !blocked) {
+            lastFocusRequest = session.inputFocusRequest
+            if !blocked, session.playing, session.mode != .spectator {
+                // Claim focus once when Ready/Play creates the surface, or after
+                // Resume. Regular state frames never steal it from room chat.
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, let window = self.window, window.isKeyWindow, NSApp.isActive,
+                          self.session?.showsMenu != true, self.session?.paused != true,
+                          !self.isHiddenOrHasHiddenAncestor else { return }
+                    window.makeFirstResponder(self)
+                }
+            }
+        }
+        wasInputBlocked = blocked
+    }
     @objc private func visibilityChanged() {
         let visible = window?.occlusionState.contains(.visible) == true && !isHiddenOrHasHiddenAncestor
         isPaused = !visible || session?.paused == true
@@ -295,9 +332,9 @@ final class ArenaSKView: SKView {
         let id = surfaceID
         DispatchQueue.main.async { [weak session] in session?.surfaceVisibility(id, visible: visible) }
     }
-    override func viewDidHide() { super.viewDidHide(); visibilityChanged() }
-    override func viewDidUnhide() { super.viewDidUnhide(); visibilityChanged() }
-    @objc private func lostFocus() { keys.removeAll(); session?.controlsFocused = false; session?.focusLost() }
+    override func viewDidHide() { super.viewDidHide(); resetKeyboard(); visibilityChanged() }
+    override func viewDidUnhide() { super.viewDidUnhide(); refreshVisibility() }
+    @objc private func lostFocus() { resetKeyboard(); session?.focusLost() }
     deinit { NotificationCenter.default.removeObserver(self) }
 }
 

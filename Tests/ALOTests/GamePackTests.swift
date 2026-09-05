@@ -81,6 +81,7 @@ struct GamePackTests {
             #expect(content.id == descriptor.id)
             if descriptor.id == "rift-arena", descriptor.version >= 3 {
                 #expect(content.platformImageData != nil)
+                if descriptor.version >= 4 { #expect(content.expandedFighterImageData != nil) }
             }
         }
     }
