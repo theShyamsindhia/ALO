@@ -3045,6 +3045,18 @@ final class ALOViewModel: ObservableObject {
         }
     }
 
+    func showShortcutMapper() {
+        (NSApp.delegate as? ALOAppDelegate)?.showShortcutMapper(nil)
+    }
+
+    func showDiagnostics() {
+        (NSApp.delegate as? ALOAppDelegate)?.showDiagnostics(nil)
+    }
+
+    func showAppSettings() {
+        (NSApp.delegate as? ALOAppDelegate)?.showSettings(nil)
+    }
+
     func setChatViewportAtLatest(_ id: UUID, _ atLatest: Bool) {
         if atLatest {
             chatViewportsAtLatest.insert(id)
@@ -4449,13 +4461,6 @@ struct FloatingRoomView: View {
                         Label("Room queue", systemImage: "music.note.list")
                             .frame(maxWidth: .infinity, alignment: .leading).padding(8)
                     }
-                    Button {
-                        showsMediaMore = false
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { showsRoomInfo = true }
-                    } label: {
-                        Label("Room settings", systemImage: "slider.horizontal.3")
-                            .frame(maxWidth: .infinity, alignment: .leading).padding(8)
-                    }
                     if presentation == .floating {
                         Divider()
                         Toggle("Member and navigation strip", isOn: $model.floatingNavigationVisible)
@@ -5852,6 +5857,7 @@ struct WalkieTalkieBar: View {
     var embeddedFloating = false
     var onRoomSettings: (() -> Void)? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var showsSettings = false
 
     var body: some View {
         Group {
@@ -6021,11 +6027,7 @@ struct WalkieTalkieBar: View {
             }
             .keyboardShortcut("2", modifiers: .command)
 
-            if let onRoomSettings {
-                communicationButton(icon: "slider.horizontal.3", active: false, help: "Room settings", action: onRoomSettings)
-            } else {
-                settingsMenu
-            }
+            settingsButton
 
             if showsCloseButton {
                 Button(action: model.hideWalkieBar) {
@@ -6052,107 +6054,27 @@ struct WalkieTalkieBar: View {
         }
     }
 
-    private var settingsMenu: some View {
-        Menu {
-            Text("Microphone input")
-            Button {
-                model.selectVoiceInput(nil)
-            } label: {
-                if model.selectedVoiceInputUID == nil {
-                    Label(systemDefaultMicrophoneLabel, systemImage: "checkmark")
-                } else {
-                    Text(systemDefaultMicrophoneLabel)
-                }
+    @ViewBuilder
+    private var settingsButton: some View {
+        if let onRoomSettings {
+            communicationButton(
+                icon: "slider.horizontal.3",
+                active: false,
+                help: "Room and audio settings",
+                action: onRoomSettings
+            )
+        } else {
+            communicationButton(
+                icon: "slider.horizontal.3",
+                active: showsSettings,
+                help: "Room and audio settings"
+            ) {
+                showsSettings.toggle()
             }
-            ForEach(model.voiceInputDevices) { input in
-                Button {
-                    model.selectVoiceInput(input.id)
-                } label: {
-                    if input.id == model.selectedVoiceInputUID {
-                        Label(input.menuName, systemImage: "checkmark")
-                    } else {
-                        Text(input.menuName)
-                    }
-                }
+            .popover(isPresented: $showsSettings, arrowEdge: .top) {
+                RoomPreferencesView(model: model)
             }
-            Button("Refresh microphones") { model.refreshVoiceInputs() }
-            Divider()
-            Menu("Audio to share: \(model.selectedAudioSourceTitle)") {
-                Button {
-                    model.selectAudioSource(nil)
-                } label: {
-                    if model.selectedAudioSourceBundleID == nil {
-                        Label("All system audio", systemImage: "checkmark")
-                    } else {
-                        Text("All system audio")
-                    }
-                }
-                .disabled(model.isHost)
-                Divider()
-                if let selectedID = model.selectedAudioSourceBundleID,
-                   !model.audioSourceApplications.contains(where: { $0.bundleIdentifier == selectedID }) {
-                    Label("\(model.selectedAudioSourceName ?? "Selected app") · not currently audible",
-                          systemImage: "checkmark")
-                        .disabled(true)
-                }
-                ForEach(model.audioSourceApplications) { application in
-                    Button {
-                        model.selectAudioSource(application)
-                    } label: {
-                        if model.selectedAudioSourceBundleID == application.bundleIdentifier {
-                            Label(application.name, systemImage: "checkmark")
-                        } else {
-                            Text(application.name)
-                        }
-                    }
-                    .disabled(model.isHost)
-                }
-                if model.audioSourceApplications.isEmpty {
-                    Text("Play audio in an app, then refresh")
-                }
-                Divider()
-                Button("Refresh audible apps") { model.refreshAudioSourceApplications() }
-                if model.isHost {
-                    Text("Stop broadcasting to change source")
-                }
-            }
-            Divider()
-            Button(model.incomingCallsMuted ? "Unmute incoming voice" : "Mute incoming voice") {
-                model.toggleIncomingCallsMute()
-            }
-            Button(model.incomingMediaMuted ? "Unmute room media" : "Mute room media") {
-                model.toggleIncomingMediaMute()
-            }
-            Divider()
-            Button(model.walkieBarHidden ? "Show Talk bar" : "Hide Talk bar") {
-                model.walkieBarHidden ? model.showWalkieBar() : model.hideWalkieBar()
-            }
-            Button(model.floatingBarHidden ? "Show media floating bar" : "Hide media floating bar") {
-                model.floatingBarHidden ? model.showFloatingBar() : model.hideFloatingBar()
-            }
-            Divider()
-            Button("Shortcut Mapper…") {
-                (NSApp.delegate as? ALOAppDelegate)?.showShortcutMapper(nil)
-            }
-            Button("Diagnostics…") {
-                (NSApp.delegate as? ALOAppDelegate)?.showDiagnostics(nil)
-            }
-            Button("Settings…") {
-                (NSApp.delegate as? ALOAppDelegate)?.showSettings(nil)
-            }
-        } label: {
-            Image(systemName: "slider.horizontal.3")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Palette.controlIcon)
-                .frame(width: 30, height: 30)
-                .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize(horizontal: true, vertical: false)
-        .help("Talk settings · \(selectedMicrophoneName)")
-        .accessibilityLabel("Talk settings")
-        .onAppear { model.refreshAudioSourceApplications() }
     }
 
     private var voiceStateLabel: String {
@@ -6177,20 +6099,6 @@ struct WalkieTalkieBar: View {
 
     private var remoteParticipants: [RoomParticipant] {
         model.participants.filter { $0.id != model.currentParticipantID }
-    }
-
-    private var selectedMicrophoneName: String {
-        guard let selectedVoiceInputUID = model.selectedVoiceInputUID else {
-            let automaticName = VoiceInputCatalog.automaticInputName()
-            return automaticName.map { "Automatic · \($0)" } ?? "Automatic"
-        }
-        return model.voiceInputDevices.first(where: { $0.id == selectedVoiceInputUID })?.menuName
-            ?? "System microphone"
-    }
-
-    private var systemDefaultMicrophoneLabel: String {
-        VoiceInputCatalog.automaticInputName().map { "Automatic — \($0)" }
-            ?? "Automatic Microphone"
     }
 
     @ViewBuilder
