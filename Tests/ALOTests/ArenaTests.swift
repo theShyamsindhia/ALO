@@ -278,7 +278,7 @@ struct ArenaRoomRosterTests {
         #expect(guest.notice.contains("host left"))
     }
 
-    @Test @MainActor func receivedResultsCarryStableIDsAndDeduplicate() async throws {
+    @Test @MainActor func receivedResultsCarryStableIDsAndDeduplicate() throws {
         let bus = Bus(), host = bus.add("host"), guest = bus.add("guest")
         defer { bus.stop() }
         var hostResults: [ArenaMatchResult] = [], guestResults: [ArenaMatchResult] = []
@@ -286,12 +286,12 @@ struct ArenaRoomRosterTests {
         host.host(botCount: 3); host.readyUp(); bus.drain()
         guest.join(try #require(guest.lobbies.first)); bus.drain()
         host.simulation.winner = 1
-        try await Task.sleep(for: .milliseconds(120)); bus.drain()
+        host.update(); bus.drain()
         #expect(hostResults.count == 1); #expect(guestResults.count == 1)
         #expect(guestResults.first?.participantIDs == ["host", "guest", nil, nil])
         #expect(guestResults.first?.botSlots == Set([2,3]))
         #expect(guestResults.first?.winner == 1)
-        try await Task.sleep(for: .milliseconds(80)); bus.drain()
+        host.update(); bus.drain()
         #expect(guestResults.count == 1)
     }
 
