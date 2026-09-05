@@ -331,6 +331,8 @@ public final class AutomergeRoomStateSync: RoomStateSync, @unchecked Sendable {
                 guard current == old else { throw RoomStateSyncError.immutableEventChanged }
                 continue
             }
+            if old.kind == .queueReorder,
+               next.values.contains(where: { $0.kind == .queueReorder && eventPrecedes(old, $0) }) { continue }
             if old.kind == .chat {
                 let newerCount = visibleChats.lazy.filter { self.eventPrecedes(old, $0) }.count
                 guard newerCount >= Self.maximumChatEvents else {
@@ -379,6 +381,12 @@ public final class AutomergeRoomStateSync: RoomStateSync, @unchecked Sendable {
             }
         }
 
+        let orders = eventsByID.values.filter { $0.kind == .queueReorder }.sorted(by: eventPrecedes)
+        for event in orders.dropLast() {
+            try document.delete(obj: ObjId.ROOT, key: Self.keyPrefix + event.id)
+            eventsByID.removeValue(forKey: event.id)
+            changed = true
+        }
         var queueEventsByItem = [String: [MeshRoomEvent]]()
         for event in eventsByID.values where event.kind == .queueAdd || event.kind == .queueRemove {
             guard let itemID = event.queueItem?.id ?? event.queueItemID else { continue }
@@ -408,13 +416,17 @@ public final class AutomergeRoomStateSync: RoomStateSync, @unchecked Sendable {
     }
 
     private func isDurable(_ event: MeshRoomEvent) -> Bool {
-        event.kind == .chat || event.kind == .queueAdd || event.kind == .queueRemove
+        event.kind == .chat || event.kind == .queueAdd || event.kind == .queueRemove || event.kind == .queueReorder
     }
 
     private func shouldSkip(
         _ event: MeshRoomEvent,
         given retained: [String: MeshRoomEvent]
     ) -> Bool {
+        if event.kind == .queueReorder,
+           let current = retained.values.filter({ $0.kind == .queueReorder }).max(by: eventPrecedes) {
+            return !eventPrecedes(current, event)
+        }
         if event.kind == .chat {
             let chats = retained.values.filter { $0.kind == .chat }
             guard chats.count >= Self.maximumChatEvents,
@@ -487,6 +499,8 @@ public final class AutomergeRoomStateSync: RoomStateSync, @unchecked Sendable {
         case .queueAdd:
             guard let item = event.queueItem else { return false }
             return item.id.utf8.count <= 256 && item.title.utf8.count <= 8_192 && item.url.utf8.count <= 16_384
+        case .queueReorder:
+            return MeshRoomReplica.hasValidQueueOrder(event)
         case .queueRemove:
             return event.queueItemID.map { !$0.isEmpty && $0.utf8.count <= 256 } == true
         case .broadcaster, .playback, .video:

@@ -75,7 +75,7 @@ final class SecureRoomEventPolicy: @unchecked Sendable {
     static func capability(for kind: MeshRoomEventKind) -> PeerCapabilities {
         switch kind {
         case .chat: return .chat
-        case .queueAdd, .queueRemove: return .editQueue
+        case .queueAdd, .queueRemove, .queueReorder: return .editQueue
         case .broadcaster, .playback, .video: return .broadcast
         }
     }

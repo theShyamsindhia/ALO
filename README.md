@@ -1,6 +1,16 @@
+<img src="Resources/ALOLogo-1024.png" alt="ALO app icon" width="96" height="96">
+
 # ALO
 
-Free, synchronized system audio with optional screen sharing between locally connected Macs.
+Listen together.
+
+Share what’s playing on your Mac. Hear it together, in sync.
+
+[Download for Apple Silicon](https://github.com/theShyamsindhia/ALO/releases/latest/download/ALO-macos-arm64.dmg) · [Release notes](https://github.com/theShyamsindhia/ALO/releases/latest) · [Build from source](#build-it)
+
+Free and open source. Made for macOS. Audio, screens, voice, and chat between locally connected Macs.
+
+## One room, together
 
 ALO creates a persistent local group with synchronized 48 kHz stereo audio, optional
 full-screen video sharing, current album artwork, a per-Mac mixer, participant presence, group
@@ -30,8 +40,9 @@ development and are not included in this Mac release.
 
 ## Run the Mac app
 
-Open `dist/ALO.app`. The first screen lists nearby rooms and rooms previously saved
-on this Mac:
+Download the latest disk image, drag **ALO** into **Applications**, and open it.
+If you built from source, open `dist/ALO.app`. The first screen lists nearby rooms
+and rooms previously saved on this Mac:
 
 - Select a nearby or saved room to rejoin it.
 - Choose **Create Room** for a new public room, or enable **Private** to generate an
@@ -90,15 +101,24 @@ Changing those names cosmetically would lose existing permissions, saved rooms,
 or interoperability with installed versions. `ALO_*` signing settings are preferred;
 existing `WERAI_*` settings remain supported as fallbacks.
 
-The repository is currently still `theShyamsindhia/WERAI`; renaming it to `alo`
-requires repository-admin access. Keep the updater on that working repository
-until the rename succeeds. The local checkout folder may retain its old name;
-it does not affect the app's identity.
+The canonical repository is [theShyamsindhia/ALO](https://github.com/theShyamsindhia/ALO).
+GitHub redirects the former repository URL, including update requests from older
+installed apps. Do not reuse the old repository name: that would break those redirects.
+Existing clones can switch to the canonical URL without moving their working files:
+
+```sh
+git remote set-url origin https://github.com/theShyamsindhia/ALO.git
+```
+
+The local checkout folder may retain its old name; it does not affect the app's identity.
+See [brand assets](docs/brand/README.md) for the ALO mark and GitHub share image.
 
 Build once on each Mac with Apple's free Command Line Tools:
 
 ```sh
 xcode-select --install
+git clone https://github.com/theShyamsindhia/ALO.git
+cd ALO
 swift build -c release
 ```
 
@@ -183,17 +203,22 @@ ALO separates room coordination from the high-rate media stream:
   replicas settle on the same source. A later take-over supersedes the prior claim.
 - Queue removals are replicated as tombstones, so an old add event cannot resurrect a
   removed item after a temporarily disconnected peer returns.
-- Each Mac retains durable queue state and up to 500 chat messages from the last seven
-  days. Transient broadcaster ownership is deliberately not restored after relaunch.
+- Each Mac retains durable queue state and up to 500 chat events, including edits
+  and reactions. This count-based cache is not a permanent archive. Transient broadcaster ownership is deliberately not restored after relaunch.
 
-Public rooms are discoverable and joinable by devices on reachable local links.
-Private rooms require the same room ID and invite key; peers prove possession during
-the control handshake. Private broadcast media uses shared-key TLS for media control
-and video, plus authenticated, replay-protected audio packets. Update every Mac in a
-private room to a compatible version. This does not provide forward secrecy or the
-future nearby transport's installation-identity model. Room mesh traffic, including
-chat and voice, is not end-to-end encrypted, and public media remains unencrypted:
-use trusted local links for both room types.
+Public rooms are discoverable and joinable on reachable local links. Private rooms
+require the same room ID and invite key, proved during the control handshake.
+Private broadcast media uses room-key TLS for media control and video, and AES-GCM
+with replay protection for audio datagrams. These protections do not provide forward
+secrecy or the future nearby transport's installation-identity model. Room coordination
+(chat, queue, presence, activities, and Talk/Open Line voice) still uses unencrypted
+TCP even in private rooms; public media is also unencrypted. Use trusted local links.
+See the [channel-by-channel audit](docs/room-privacy.md).
+
+Per-person **Voice on this Mac** levels persist independently of media volume. Room
+settings include optional music ducking during incoming speech and local microphone
+routing details. Status dots in People show per-device state; hover for details.
+
 
 ## How synchronization works
 
@@ -219,8 +244,8 @@ use trusted local links for both room types.
 - Audio uses about 1.54 Mb/s per receiving Mac. Video targets about 4 Mb/s at up to
   1280×720 and 30 fps using Apple’s hardware H.264 encoder.
 - Packet loss becomes a short silence rather than delaying every receiver.
-- Room traffic stays on local network paths, without a cloud media relay. See the
-  private-media protections and remaining mesh-traffic limitations above.
+- Room traffic stays on local network paths without a cloud media relay. Encryption
+  varies by channel; see [room privacy](docs/room-privacy.md).
 - Spotify artwork is resolved once per track through Spotify’s public HTTPS artwork
   endpoint; no Spotify account token is used. Other players use macOS Now Playing data
   when the system makes it available.

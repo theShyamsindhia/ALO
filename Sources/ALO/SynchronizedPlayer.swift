@@ -7,9 +7,10 @@ import ALOCore
 struct MediaOutputGain {
     static func effectiveGain(
         participantVolume: Double,
-        muted: Bool
+        muted: Bool,
+        duckingGain: Double = 1
     ) -> Double {
-        muted ? 0 : min(max(participantVolume, 0), 1)
+        muted ? 0 : min(max(participantVolume, 0), 1) * min(max(duckingGain, 0), 1)
     }
 }
 
@@ -107,6 +108,7 @@ final class SynchronizedPlayer {
     private let configurationLock = NSLock()
     private var configurationGate = AudioConfigurationRecoveryGate()
     private var recoveryRetryNotBeforeNanos: UInt64 = 0
+    private var duckingGain: Double = 1
     private var participantVolume: Double = 1
     private var participantMuted = false
     private var playbackIsActive = false
@@ -356,6 +358,11 @@ final class SynchronizedPlayer {
         targetLatencyNanos = RoomTiming.clampedPlayoutDelay(nanos)
     }
 
+    func setDuckingGain(_ gain: Double) {
+        duckingGain = min(1, max(0, gain))
+        applyOutputGain()
+    }
+
     func setLevel(volume: Double, muted: Bool) {
         participantVolume = min(max(volume, 0), 1)
         participantMuted = muted
@@ -386,7 +393,8 @@ final class SynchronizedPlayer {
     private func applyOutputGain() {
         player.volume = Float(MediaOutputGain.effectiveGain(
             participantVolume: participantVolume,
-            muted: participantMuted
+            muted: participantMuted,
+            duckingGain: duckingGain
         ))
         updatePlaybackActivity(nowNanos: MonotonicClock.nowNanos())
     }

@@ -326,6 +326,28 @@ final class Receiver {
 
     /// Changes playback only on this Receiver without publishing participant
     /// mixer state to the room.
+    private var duckingGeneration = 0
+    private var duckingGain = 1.0
+
+    func setMusicDucked(_ ducked: Bool) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.duckingGeneration += 1
+            let generation = self.duckingGeneration
+            let start = self.duckingGain
+            let target = ducked ? 0.3 : 1.0
+            // Short attack and slower release avoid abrupt gain jumps.
+            let duration = ducked ? 0.12 : 0.35
+            for step in 1...12 {
+                self.queue.asyncAfter(deadline: .now() + duration * Double(step) / 12) { [weak self] in
+                    guard let self, self.duckingGeneration == generation else { return }
+                    self.duckingGain = start + (target - start) * Double(step) / 12
+                    self.player.setDuckingGain(self.duckingGain)
+                }
+            }
+        }
+    }
+
     func setLocalPlaybackMuted(_ muted: Bool) {
         queue.async { [weak self] in
             guard let self else { return }

@@ -1054,13 +1054,7 @@ private final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
     }
 }
 
-struct RoomMessage: Identifiable, Equatable {
-    let id = UUID()
-    let senderID: String
-    let sender: String
-    let text: String
-    let sentNanos: UInt64
-}
+typealias RoomMessage = RoomChatMessage
 
 private enum FloatingMetrics {
     static let width: CGFloat = 560
@@ -1426,6 +1420,10 @@ final class ALOViewModel: ObservableObject {
     @Published var errorIsPermissionRelated = false
     @Published var participants = [RoomParticipant]()
     @Published var messages = [RoomMessage]()
+    private var chatDocument = RoomChatDocument()
+    @Published var chatNotificationMode = ChatNotificationMode(rawValue: UserDefaults.standard.string(forKey: "chatNotificationMode") ?? "all") ?? .all {
+        didSet { UserDefaults.standard.set(chatNotificationMode.rawValue, forKey: "chatNotificationMode") }
+    }
     @Published var draftMessage = ""
     @Published var unreadMessageCount = 0
     @Published private(set) var firstUnreadMessageID: UUID?
@@ -1479,11 +1477,15 @@ final class ALOViewModel: ObservableObject {
     private var legacyNearbyRooms: [NearbyRoom] = []
     private var secureNearbyRooms: [NearbyRoom] = []
     private var secureRoomIdentity: MacSecureRoomIdentity?
+    let arena = ArenaSession()
     private var meshSession: MeshSession?
     private var liveSyncTask: Task<Void, Never>?
     private let syncHealthLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "in.werai.audio", category: "synchronization")
     private var requestedVideoBroadcast = false
     private var videoBroadcastTimeoutTask: Task<Void, Never>?
+    @Published private(set) var musicDuckingEnabled = UserDefaults.standard.bool(forKey: "musicDuckingEnabled")
+    @Published private var participantVoiceLevels = VoiceLevelStore().levels
+    private let voiceLevelStore = VoiceLevelStore()
     private let roomStore = RoomStore()
     private let lastJoinedRoomStore = LastJoinedRoomStore()
     private let nodeID: String
@@ -1861,6 +1863,7 @@ final class ALOViewModel: ObservableObject {
                     self.errorMessage = "Could not save the shared space icon: \(error.localizedDescription)"
                 }
             },
+            arenaHandler: { [weak self] sender, data in self?.arena.receive(from: sender, data: data) },
             errorHandler: { [weak self] error in
                 guard let self else { return }
                 let permissionRelated = self.isPermissionError(error)
@@ -1942,8 +1945,12 @@ final class ALOViewModel: ObservableObject {
         roomBrowser.stop()
         secureRoomBrowser.stop()
         meshSession = session
+        arena.localName = currentUserName
+        arena.send = { [weak session] data, target in session?.sendArena(data, targetID: target) }
         session.setIncomingMediaMuted(incomingMediaMuted)
         session.setIncomingWalkieTalkieMuted(incomingCallsMuted)
+        session.setMusicDuckingEnabled(musicDuckingEnabled)
+        for (id, level) in participantVoiceLevels { session.setVoiceVolume(level, for: id) }
         do {
             try session.start(broadcastInitially: broadcastInitially)
             try? roomStore.save(room)
@@ -2031,6 +2038,50 @@ final class ALOViewModel: ObservableObject {
         }
     }
 
+    func setMusicDuckingEnabled(_ enabled: Bool) {
+        musicDuckingEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "musicDuckingEnabled")
+        meshSession?.setMusicDuckingEnabled(enabled)
+    }
+
+    var microphoneAudienceSummary: String {
+        if walkieStarting { return "Microphone starting…" }
+        var names = Set<String>()
+        if walkieTalking {
+            let targets = effectiveTalkTargetIDs.intersection(currentRemoteParticipantIDs)
+            names.formUnion(participants.filter { targets.contains($0.id) }.map(\.name))
+        }
+        if openLineState.isSendingMicrophone, let invitation = openLineState.invitation {
+            names.insert(openLinePeerName(invitation))
+        }
+        return names.isEmpty ? "Microphone off · nobody can hear you" : "Microphone live → " + names.sorted().joined(separator: ", ")
+    }
+
+    var connectionSummary: String {
+        if permissionNotice || errorIsPermissionRelated { return "Audio permission needed" }
+        if phase == .starting { return "Connecting to room…" }
+        if phase != .live { return statusText }
+        if statusText.localizedCaseInsensitiveContains("failed") || statusText.localizedCaseInsensitiveContains("lost") {
+            return statusText
+        }
+        if statusText.hasPrefix("Reconnecting") { return "Reconnecting to room audio…" }
+        if incomingMediaMuted { return "Connected · music muted on this Mac" }
+        if !hasBroadcaster { return "Connected · nobody is broadcasting" }
+        return audioIsRendering ? "Connected · listening" : "Connected · waiting for audio"
+    }
+
+    func voiceVolume(for participantID: String) -> Double {
+        participantVoiceLevels[participantID] ?? 1
+    }
+
+    func setVoiceVolume(_ volume: Double, for participantID: String) {
+        guard volume.isFinite else { return }
+        let level = VoiceLevelStore.clamp(volume)
+        participantVoiceLevels[participantID] = level
+        voiceLevelStore.set(level, for: participantID)
+        meshSession?.setVoiceVolume(level, for: participantID)
+    }
+
     func setParticipantVolume(_ participant: RoomParticipant, volume: Double) {
         updateParticipant(participant.id, volume: volume, muted: participant.isMuted)
         if isHost {
@@ -2100,6 +2151,22 @@ final class ALOViewModel: ObservableObject {
     func syncParticipant(_ participant: RoomParticipant) {
         if meshSession?.requestResync(participantID: participant.id) == true {
             statusText = "Syncing \(participant.id == currentParticipantID ? "this Mac" : participant.name)"
+        } else {
+            statusText = "Wait for the audio connection, then try syncing again"
+        }
+    }
+
+    /// A missing local identity must never fall through to the nil/all-devices target.
+    nonisolated static func performLocalResync(currentParticipantID: String?, send: (String) -> Bool) -> Bool {
+        guard let currentParticipantID, !currentParticipantID.isEmpty else { return false }
+        return send(currentParticipantID)
+    }
+
+    func syncThisMac() {
+        if Self.performLocalResync(currentParticipantID: currentParticipantID, send: {
+            meshSession?.requestResync(participantID: $0) == true
+        }) {
+            statusText = "Syncing this Mac"
         } else {
             statusText = "Wait for the audio connection, then try syncing again"
         }
@@ -2581,6 +2648,14 @@ final class ALOViewModel: ObservableObject {
         UserDefaults.standard.set(false, forKey: Self.walkieBarPreferenceKey)
     }
 
+    func silenceMicrophone() {
+        latchedTalkTargetIDs.removeAll()
+        pushToTalkTargetIDs.removeAll()
+        globalShortcutTalkTargets.removeAll()
+        endOpenLine()
+        stopWalkieTalkie()
+    }
+
     func toggleAllIncomingAudio() {
         let mute = !(incomingMediaMuted && incomingCallsMuted)
         setIncomingMediaMuted(mute)
@@ -2637,9 +2712,17 @@ final class ALOViewModel: ObservableObject {
 
     func sendMessage() {
         let text = draftMessage.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, phase == .live, let meshSession else { return }
-        meshSession.sendChat(text)
+        let operation = RoomChatOperation(kind: .message, text: text)
+        guard phase == .live, meshSession != nil, operation.encoded != nil else { return }
+        sendChatOperation(operation)
         draftMessage = ""
+    }
+
+    @discardableResult
+    func sendChatOperation(_ operation: RoomChatOperation) -> Bool {
+        guard phase == .live, let meshSession, let wire = operation.encoded else { return false }
+        meshSession.sendChat(wire)
+        return true
     }
 
     var canQueueCurrentTrack: Bool {
@@ -2685,6 +2768,18 @@ final class ALOViewModel: ObservableObject {
     func removeQueueItem(_ item: RoomQueueItem) {
         guard canRemoveQueueItem(item) else { return }
         meshSession?.removeQueueItem(item.id)
+    }
+
+    func moveQueueItem(_ id: String, before targetID: String) -> Bool {
+        guard isHost, mediaQueue.count <= 2_000,
+              id != targetID, mediaQueue.contains(where: { $0.id == id }),
+              mediaQueue.contains(where: { $0.id == targetID }) else { return false }
+        var order = mediaQueue.map(\.id).filter { $0 != id }
+        guard let destination = order.firstIndex(of: targetID) else { return false }
+        order.insert(id, at: destination)
+        meshSession?.reorderQueue(order)
+        queueNotice = "Queue order updated for the room."
+        return true
     }
 
     func canRemoveQueueItem(_ item: RoomQueueItem) -> Bool {
@@ -2778,6 +2873,7 @@ final class ALOViewModel: ObservableObject {
     }
 
     func stop() {
+        arena.disconnect()
         isLeavingRoom = true
         stopLiveSyncMonitoring()
         lastJoinedRoomStore.clear(ifMatching: activeRoomConfiguration?.id)
@@ -2850,6 +2946,7 @@ final class ALOViewModel: ObservableObject {
     }
 
     func stopImmediately() {
+        arena.disconnect()
         isLeavingRoom = true
         stopLiveSyncMonitoring()
         stopLocalNowPlayingMonitor()
@@ -3038,26 +3135,23 @@ final class ALOViewModel: ObservableObject {
         }
     }
 
-    private var chatCallback: (String, String, String, UInt64) -> Void {
-        { [weak self] senderID, sender, text, sentNanos in
+    private var chatCallback: (String, String, String, UInt64, MeshVersion) -> Void {
+        { [weak self] senderID, sender, text, sentNanos, version in
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.messages.append(RoomMessage(
-                    senderID: senderID,
-                    sender: sender,
-                    text: text,
-                    sentNanos: sentNanos
-                ))
+                let isNewMessage = self.chatDocument.receive(senderID: senderID, sender: sender, text: text, sentNanos: sentNanos, version: version)
+                self.messages = self.chatDocument.messages
+                guard isNewMessage, let receivedMessage = self.messages.first(where: { $0.senderID == senderID && $0.sentNanos == sentNanos }) else { return }
                 let chatIsVisible = self.floatingSection == .chat
                     && (!self.floatingBarHidden || self.menuBarPopoverVisible)
                 let chatIsAtLatest = chatIsVisible && !self.chatViewportsAtLatest.isEmpty
                 if senderID != self.currentParticipantID, !chatIsAtLatest {
                     if self.firstUnreadMessageID == nil {
-                        self.firstUnreadMessageID = self.messages[self.messages.count - 1].id
+                        self.firstUnreadMessageID = receivedMessage.id
                     }
                     self.unreadMessageCount += 1
-                    if self.floatingSection == .collapsed {
-                        self.presentIncomingMessagePreview(self.messages[self.messages.count - 1])
+                    if self.floatingSection == .collapsed, self.chatNotificationMode.shouldPreview(text: receivedMessage.text, displayName: self.currentUserName) {
+                        self.presentIncomingMessagePreview(receivedMessage)
                     }
                 }
             }
@@ -3134,6 +3228,7 @@ final class ALOViewModel: ObservableObject {
 
     private func resetRoomState() {
         stopLiveSyncMonitoring()
+        arena.disconnect()
         stopLocalNowPlayingMonitor()
         isLeavingRoom = false
         errorMessage = nil
@@ -3152,6 +3247,7 @@ final class ALOViewModel: ObservableObject {
         globalShortcutTalkTargets.removeAll()
         participants = []
         messages = []
+        chatDocument = RoomChatDocument()
         chatViewportsAtLatest.removeAll()
         unreadMessageCount = 0
         firstUnreadMessageID = nil
@@ -3189,7 +3285,7 @@ final class ALOViewModel: ObservableObject {
         }
     }
 
-    private func dismissIncomingMessagePreview() {
+    fileprivate func dismissIncomingMessagePreview() {
         incomingMessagePreviewTask?.cancel()
         incomingMessagePreviewTask = nil
         incomingMessagePreview = nil
@@ -3264,6 +3360,7 @@ final class ALOViewModel: ObservableObject {
             || status.hasPrefix("Connecting")
             || status.hasPrefix("Recovering room audio")
             || status.hasPrefix("Synchronizing room audio")
+            || status.hasPrefix("Reconnecting")
             || status.hasPrefix("Room open")
             || status.hasPrefix("Taking over") {
             return false
@@ -3828,6 +3925,9 @@ struct FloatingRoomView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var composerFocused: Bool
     @FocusState private var queueFocused: Bool
+    @State private var showsGames = false
+    @State private var showsRoomInfo = false
+    @State private var showsMediaMore = false
 
     private var panelTransition: AnyTransition {
         reduceMotion
@@ -3902,7 +4002,16 @@ struct FloatingRoomView: View {
             case .chat:
                 chatHistory
             case .people:
-                peopleMixer
+                VStack(spacing: 0) {
+                    HStack {
+                        Button { model.floatingSection = .chat; showsGames = false } label: { Label("Chat", systemImage: "chevron.left") }
+                        Spacer()
+                        Text("People").font(.system(size: 13, weight: .semibold))
+                        Spacer()
+                        Button { showsRoomInfo = true } label: { Image(systemName: "slider.horizontal.3") }
+                    }.buttonStyle(.plain).font(.system(size: 11)).padding(14)
+                    peopleMixer
+                }
             case .video:
                 videoPlayer
             }
@@ -3912,23 +4021,41 @@ struct FloatingRoomView: View {
     var body: some View {
         return Group {
             if presentation == .floating {
-                roomContent
-                    .floatingSurface(cornerRadius: FloatingMetrics.cornerRadius)
-                    .padding(FloatingMetrics.windowInset)
+                GeometryReader { geometry in
+                    roomContent(width: max(FloatingMetrics.width, geometry.size.width - FloatingMetrics.windowInset * 2),
+                                height: max(roomBarHeight, geometry.size.height - FloatingMetrics.windowInset * 2))
+                        .floatingSurface(cornerRadius: FloatingMetrics.cornerRadius)
+                        .padding(FloatingMetrics.windowInset)
+                }
             } else {
-                roomContent.background(Palette.opaqueSurface)
+                roomContent(width: FloatingMetrics.width, height: roomContentHeight)
+                    .background(Palette.opaqueSurface)
             }
         }
         .tint(roomAccent)
         .environment(\.roomAccent, roomAccent)
+        .popover(isPresented: $showsRoomInfo) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(model.roomTitle).font(.headline)
+                Text(model.connectionSummary).font(.caption)
+                Text(model.microphoneAudienceSummary).font(.caption)
+                Toggle("Lower music during voice", isOn: Binding(get: { model.musicDuckingEnabled }, set: model.setMusicDuckingEnabled))
+                Button("Turn microphone off", action: model.silenceMicrophone)
+                Button(model.incomingMediaMuted && model.incomingCallsMuted ? "Unmute room audio" : "Mute room audio", action: model.toggleAllIncomingAudio)
+                Text(model.activePrivateInviteKey == nil ? "Public room · discoverable nearby" : "Private room · invite key required")
+                    .font(.caption).foregroundStyle(.secondary)
+            }.padding(18).frame(width: 260)
+        }
         .animation(themeAnimation, value: model.roomArtworkPalette)
     }
 
-    private var roomContent: some View {
+    private func roomContent(width: CGFloat, height: CGFloat) -> some View {
         VStack(spacing: 0) {
             if hasExpandedContent {
-                expandedContent
-                    .frame(width: FloatingMetrics.width, height: expandedContentHeight)
+                VStack(spacing: 0) {
+                    expandedContent
+                }
+                    .frame(width: width, height: max(0, height - roomBarHeight - FloatingMetrics.separatorHeight))
                     .id(expansionIdentity)
                     .transition(panelTransition)
 
@@ -3940,12 +4067,21 @@ struct FloatingRoomView: View {
 
             roomBar
         }
-        .frame(width: FloatingMetrics.width, height: roomContentHeight, alignment: .bottom)
+        .frame(width: width, height: height, alignment: .bottom)
         .background(ArtworkAtmosphere(colors: model.roomAtmosphereColors))
         .animation(panelAnimation, value: model.floatingSection)
         .animation(panelAnimation, value: model.permissionNotice)
         .animation(panelAnimation, value: model.participants.count)
         .animation(panelAnimation, value: model.incomingMessagePreview?.id)
+    }
+
+    private var videoMenuTitle: String {
+        if model.mediaSwitchBusy { return "Cancel screen selection" }
+        switch model.videoControlIntent {
+        case .toggleViewer, .showViewer: return "View shared video"
+        case .enableVideo, .beginAudioAndVideoBroadcast: return "Share screen and audio…"
+        case .unavailable: return "Share screen…"
+        }
     }
 
     private var roomBar: some View {
@@ -3969,30 +4105,54 @@ struct FloatingRoomView: View {
                     ) { model.toggleRoomPlayback() }
                 }
 
-                roomBarButton(
-                    icon: "music.note.list",
-                    activeIcon: "music.note.list",
-                    active: model.floatingSection == .queue,
-                    help: "Room queue"
-                ) { model.showQueue() }
-                .keyboardShortcut("4", modifiers: .command)
             }
 
             roomBarButton(
-                icon: model.mediaSwitchBusy ? "xmark" : "rectangle.on.rectangle",
-                activeIcon: "rectangle.fill.on.rectangle.fill",
-                active: model.floatingSection == .video || model.experience == .video,
-                disabled: !model.canSelectVideo,
-                help: model.mediaSwitchBusy ? "Cancel screen selection" : model.videoControlHelp
-            ) { model.toggleVideoFromFloatingBar() }
-            .keyboardShortcut("3", modifiers: .command)
+                icon: "arrow.triangle.2.circlepath",
+                active: false,
+                disabled: !model.hasBroadcaster || model.currentParticipantID == nil || model.mediaSwitchBusy,
+                help: "Sync this Mac only"
+            ) { model.syncThisMac() }
 
-            if presentation == .floating {
-                roomBarButton(
-                    icon: "eye.slash",
-                    active: false,
-                    help: "Hide media controls"
-                ) { model.hideFloatingBar() }
+            Button { showsMediaMore.toggle() } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Palette.controlIcon)
+                    .frame(width: 32, height: 32)
+            }
+            .buttonStyle(FlatToolButtonStyle(active: showsMediaMore))
+            .help("More: screen sharing and room queue")
+            .accessibilityLabel("More room controls")
+            .popover(isPresented: $showsMediaMore, arrowEdge: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Button {
+                        showsMediaMore = false
+                        model.toggleVideoFromFloatingBar()
+                    } label: {
+                        Label(videoMenuTitle, systemImage: "rectangle.on.rectangle")
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(8)
+                    }.disabled(!model.canSelectVideo)
+                    Button {
+                        showsMediaMore = false
+                        model.showQueue()
+                    } label: {
+                        Label("Room queue", systemImage: "music.note.list")
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(8)
+                    }
+                    if presentation == .floating {
+                        Divider()
+                        Button {
+                            showsMediaMore = false
+                            model.hideFloatingBar()
+                        } label: {
+                            Label("Hide media controls", systemImage: "eye.slash")
+                                .frame(maxWidth: .infinity, alignment: .leading).padding(8)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 12))
+                .padding(8).frame(width: 220)
             }
 
             if presentation == .menuBar {
@@ -4010,7 +4170,8 @@ struct FloatingRoomView: View {
             }
         }
         .padding(.horizontal, 8)
-        .frame(width: FloatingMetrics.width, height: roomBarHeight)
+        .frame(maxWidth: .infinity)
+        .frame(height: roomBarHeight)
         .background(alignment: .leading) {
             if presentation == .menuBar {
                 menuBarArtworkBackdrop
@@ -4098,7 +4259,7 @@ struct FloatingRoomView: View {
         if model.nowPlaying.title == nil {
             text = compact
                 ? "\(model.participants.count) · \(model.roomSyncLabel)"
-                : "\(model.participants.count) listening · \(model.roomSyncLabel)"
+                : "\(model.participants.count) \(model.hasBroadcaster ? "listening" : "here") · \(model.roomSyncLabel)"
         } else {
             text = compact ? model.roomSyncLabel : "\(model.roomTitle) · \(model.roomSyncLabel)"
         }
@@ -4222,14 +4383,26 @@ struct FloatingRoomView: View {
             panelHeader(
                 title: "Up next",
                 detail: model.mediaQueue.isEmpty
-                    ? "Anyone can add media"
-                    : "\(model.mediaQueue.count) queued · anyone can add"
+                    ? "Anyone can add · broadcaster manages order"
+                    : "\(model.mediaQueue.count) queued · broadcaster can drag to reorder"
             )
             Divider().opacity(0.42)
             ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(model.mediaQueue) { item in
                         queueRow(item)
+                            .onDrag {
+                                NSItemProvider(object: (model.isHost ? item.id : "") as NSString)
+                            }
+                            .dropDestination(for: String.self) { items, _ in
+                                guard let id = items.first else { return false }
+                                return model.moveQueueItem(id, before: item.id)
+                            }
+                            .contextMenu {
+                                if model.isHost, let first = model.mediaQueue.first, first.id != item.id {
+                                    Button("Move to top") { _ = model.moveQueueItem(item.id, before: first.id) }
+                                }
+                            }
                         if item.id != model.mediaQueue.last?.id {
                             Divider().opacity(0.34).padding(.leading, 54)
                         }
@@ -4360,42 +4533,40 @@ struct FloatingRoomView: View {
         VStack(spacing: 0) {
             chatHeader
             Divider().opacity(0.42)
-            ChatTranscript(
-                messages: model.messages,
-                currentParticipantID: model.currentParticipantID,
-                firstUnreadMessageID: model.firstUnreadMessageID,
-                unreadCount: model.unreadMessageCount,
-                isPresented: chatIsPresented,
-                accent: roomAccent,
-                onLatestVisibilityChanged: model.setChatViewportAtLatest
-            ) { message, showsSender in
-                floatingMessage(message, showsSender: showsSender)
-            }
-            .overlay {
-                if model.messages.isEmpty {
-                    VStack(spacing: 7) {
-                        Image(systemName: "bubble.left.and.bubble.right")
-                            .font(.system(size: 18, weight: .medium))
-                            .foregroundStyle(Palette.controlIcon)
-                        Text("Start the conversation")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(Palette.ink)
-                        Text("Everyone in the room will see it.")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(Palette.secondary)
+            if showsGames {
+                ArenaPanel(session: model.arena)
+                    .onAppear { model.arena.names = Dictionary(uniqueKeysWithValues: model.participants.map { ($0.id, $0.name) }) }
+                    .onChange(of: model.participants) { _, people in
+                        model.arena.names = Dictionary(uniqueKeysWithValues: people.map { ($0.id, $0.name) })
                     }
-                    .allowsHitTesting(false)
-                }
+            } else {
+                RoomChatPanel(
+                    messages: model.messages,
+                    currentParticipantID: model.currentParticipantID,
+                    roomTitle: model.roomTitle,
+                    firstUnreadMessageID: model.firstUnreadMessageID,
+                    unreadCount: model.unreadMessageCount,
+                    isPresented: chatIsPresented,
+                    accent: roomAccent,
+                    onLatestVisibilityChanged: model.setChatViewportAtLatest,
+                    send: model.sendChatOperation,
+                    draft: $model.draftMessage,
+                    notificationMode: $model.chatNotificationMode,
+                    mentionNames: model.participants.filter { $0.id != model.currentParticipantID }.map(\.name),
+                    avatar: { id, name, size in AnyView(identityAvatar(id: id, name: name, size: size)) }
+                )
             }
-            Divider().opacity(0.42)
-            messageComposer
-                .fixedSize(horizontal: false, vertical: true)
+            if showsGames {
+                Divider().opacity(0.42)
+                messageComposer
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var chatIsPresented: Bool {
-        model.phase == .live && model.floatingSection == .chat && !model.permissionNotice
+        !showsGames && model.phase == .live && model.floatingSection == .chat && !model.permissionNotice
             && (presentation == .menuBar
                 ? model.menuBarPopoverVisible
                 : !model.floatingBarHidden && !model.videoFullscreen)
@@ -4404,7 +4575,7 @@ struct FloatingRoomView: View {
     private var chatHeader: some View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Room chat")
+                Text(showsGames ? "Games" : "Room chat")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Palette.ink)
                 Text("\(model.participants.count) here · live")
@@ -4414,6 +4585,21 @@ struct FloatingRoomView: View {
 
             Spacer()
 
+            Button {
+                showsGames.toggle()
+                if showsGames && !model.arena.expanded { model.arena.returnToLibrary() }
+                composerFocused = false
+                model.arena.clearInput()
+            } label: {
+                Image(systemName: showsGames ? "bubble.left.fill" : "gamecontroller.fill")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(showsGames ? roomAccent : Palette.controlIcon)
+                    .frame(width: 32, height: 30)
+            }
+            .buttonStyle(FlatToolButtonStyle(active: showsGames))
+            .help(showsGames ? "Return to room chat" : "Pick a game")
+            .accessibilityLabel(showsGames ? "Return to room chat" : "Pick a game")
+
             HStack(spacing: -5) {
                 ForEach(Array(model.participants.prefix(3))) { participant in
                     identityAvatar(id: participant.id, name: participant.name, size: 22)
@@ -4421,6 +4607,21 @@ struct FloatingRoomView: View {
                 }
             }
             .accessibilityHidden(true)
+
+            Menu {
+                Button("Chat") { model.floatingSection = .chat; showsGames = false }
+                Button("People") { model.floatingSection = .people }
+                Button("Games") {
+                    model.floatingSection = .chat; showsGames = true
+                    if !model.arena.expanded { model.arena.returnToLibrary() }
+                }
+                Divider()
+                Button("Room settings…") { showsRoomInfo = true }
+            } label: {
+                Image(systemName: "ellipsis").foregroundStyle(Palette.controlIcon).frame(width: 24, height: 26)
+            }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .help("Room navigation and settings")
 
             Button(action: model.collapseFloatingBar) {
                 Image(systemName: "chevron.down")
@@ -4564,10 +4765,13 @@ struct FloatingRoomView: View {
 
     private var peopleMixer: some View {
         VStack(spacing: 0) {
+            MicrophoneTestPanel(selectedInputUID: model.selectedVoiceInputUID,
+                unavailable: model.walkieTalking || model.walkieStarting || model.openLineState.isSendingMicrophone || model.isHost)
+
             panelHeader(
                 title: "People",
                 detail: "Each Mac has its own level",
-                syncAction: model.syncAllDevices
+                syncAction: model.syncThisMac
             )
             Divider().opacity(0.42)
             if model.activePrivateInviteKey != nil {
@@ -4608,10 +4812,30 @@ struct FloatingRoomView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private func participantPresence(_ participant: RoomParticipant) -> String {
+        let isLocal = participant.id == model.currentParticipantID
+        if model.incomingWalkieSpeakerIDs.contains(participant.id) || (isLocal && model.walkieTalking) {
+            return "Talking"
+        }
+        if participant.isMuted { return "Audio muted" }
+        if isLocal && model.audioIsRendering { return "Listening" }
+        // Remote output and idle state are not advertised by this protocol.
+        return "In room"
+    }
+
+    private func participantPresenceColor(_ participant: RoomParticipant) -> Color {
+        let presence = participantPresence(participant)
+        if presence == "Talking" { return Palette.accentText }
+        if presence == "Audio muted" { return Palette.red }
+        if presence == "Listening" { return Color.green.opacity(0.8) }
+        return Palette.secondary.opacity(0.7)
+    }
+
     private func floatingParticipant(_ participant: RoomParticipant) -> some View {
         let controllable = model.canControl(participant)
         let appearance = DeviceAppearance.generated(from: participant.id)
-        return HStack(spacing: 11) {
+        return VStack(spacing: 0) {
+          HStack(spacing: 11) {
             DeviceAvatar(
                 emoji: participant.icon ?? appearance.icon,
                 colorHex: participant.colorHex ?? appearance.colorHex,
@@ -4619,14 +4843,16 @@ struct FloatingRoomView: View {
                 size: 32
             )
 
-            VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(participantPresenceColor(participant))
+                    .frame(width: 6, height: 6)
+                    .help(participantPresence(participant))
+                    .accessibilityLabel(participantPresence(participant))
                 Text(participant.id == model.currentParticipantID ? "You" : participant.name)
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(Palette.ink)
                     .lineLimit(1)
-                Text(participant.isMuted ? "Muted" : "In sync")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(participant.isMuted ? Palette.red : Palette.accentText)
             }
             .frame(width: 122, alignment: .leading)
 
@@ -4670,6 +4896,27 @@ struct FloatingRoomView: View {
         .padding(.horizontal, 8)
         .frame(height: 64)
         .opacity(controllable ? 1 : 0.68)
+          if participant.id != model.currentParticipantID {
+            HStack(spacing: 10) {
+                Label("Voice on this Mac", systemImage: "mic.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Palette.secondary)
+                    .frame(width: 150, alignment: .leading)
+                Slider(value: Binding(
+                    get: { model.voiceVolume(for: participant.id) },
+                    set: { model.setVoiceVolume($0, for: participant.id) }
+                ), in: 0...1)
+                .controlSize(.mini)
+                .accessibilityLabel("\(participant.name) voice volume on this Mac")
+                Text("\(Int(model.voiceVolume(for: participant.id) * 100))%")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(Palette.secondary)
+                    .frame(width: 34)
+            }
+            .padding(.horizontal, 8)
+            .padding(.bottom, 12)
+          }
+        }
     }
 
     private var videoPlayer: some View {
@@ -4772,12 +5019,12 @@ struct FloatingRoomView: View {
             Spacer()
             if let syncAction {
                 Button(action: syncAction) {
-                    Label("Sync all", systemImage: "arrow.triangle.2.circlepath")
+                    Label("Sync this Mac", systemImage: "arrow.triangle.2.circlepath")
                         .font(.system(size: 10, weight: .semibold))
                 }
                 .buttonStyle(PillButtonStyle(filled: false))
-                .help("Re-align every Mac to the room clock")
-                .accessibilityLabel("Sync all Macs now")
+                .help("Re-align this Mac without interrupting other listeners")
+                .accessibilityLabel("Sync this Mac only")
             }
             Button(action: model.collapseFloatingBar) {
                 Image(systemName: "chevron.down")
@@ -5570,15 +5817,23 @@ private final class FloatingRoomPanel: NSPanel {
 }
 
 @MainActor
-private final class FloatingRoomWindowController {
+private final class FloatingRoomWindowController: NSObject, NSWindowDelegate {
     private let panel: FloatingRoomPanel
     private let model: ALOViewModel
     private var modelObserver: AnyCancellable?
+    private var activityObserver: AnyCancellable?
     private var pendingShrink: DispatchWorkItem?
     private var hasPosition = false
+    private var adjustingFrame = false
+    private var preferredExpandedSize: NSSize
 
     init(model: ALOViewModel) {
         self.model = model
+        let defaults = UserDefaults.standard
+        preferredExpandedSize = NSSize(
+            width: min(1800, max(FloatingMetrics.windowWidth, defaults.double(forKey: "room.expanded.width"))),
+            height: min(1400, max(440, defaults.object(forKey: "room.expanded.height") == nil ? 550 : defaults.double(forKey: "room.expanded.height")))
+        )
         panel = FloatingRoomPanel(
             contentRect: NSRect(
                 x: 0,
@@ -5586,10 +5841,12 @@ private final class FloatingRoomWindowController {
                 width: FloatingMetrics.windowWidth,
                 height: FloatingMetrics.windowHeight(for: model.floatingPanelHeight)
             ),
-            styleMask: [.borderless],
+            styleMask: [.borderless, .resizable],
             backing: .buffered,
             defer: false
         )
+        super.init()
+        panel.delegate = self
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
@@ -5608,6 +5865,14 @@ private final class FloatingRoomWindowController {
         hostingView.layer?.backgroundColor = NSColor.clear.cgColor
         hostingView.layer?.drawsAsynchronously = true
         panel.contentView = hostingView
+
+        activityObserver = model.arena.$expanded.removeDuplicates().sink { [weak self] detached in
+            guard let self else { return }
+            // A floating utility panel must never cover its own playable window.
+            self.panel.level = detached ? .normal : .floating
+            self.panel.isFloatingPanel = !detached
+            if detached { self.panel.orderBack(nil) }
+        }
 
         modelObserver = Publishers.CombineLatest4(
             model.$floatingSection.removeDuplicates(),
@@ -5646,9 +5911,13 @@ private final class FloatingRoomWindowController {
         pendingShrink?.cancel()
         pendingShrink = nil
 
-        let height = FloatingMetrics.windowHeight(for: model.floatingPanelHeight)
+        let expanded = model.floatingSection != .collapsed && !model.permissionNotice
+        let height = expanded ? preferredExpandedSize.height : FloatingMetrics.windowHeight(for: model.floatingPanelHeight)
+        let width = expanded ? preferredExpandedSize.width : FloatingMetrics.windowWidth
+        panel.minSize = NSSize(width: FloatingMetrics.windowWidth, height: expanded ? 440 : height)
+        panel.maxSize = expanded ? NSSize(width: 1800, height: 1400) : NSSize(width: width, height: height)
         guard abs(panel.frame.height - height) > 0.5
-                || abs(panel.frame.width - FloatingMetrics.windowWidth) > 0.5 else { return }
+                || abs(panel.frame.width - width) > 0.5 else { return }
         let shouldAnimate = animated
             && panel.isVisible
             && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -5673,14 +5942,25 @@ private final class FloatingRoomWindowController {
         let fixedBottomEdge = panel.frame.minY
         let screenFrame = (panel.screen ?? NSScreen.main)?.visibleFrame
         var frame = panel.frame
-        frame.size = NSSize(width: FloatingMetrics.windowWidth, height: height)
+        let expanded = model.floatingSection != .collapsed && !model.permissionNotice
+        frame.size = NSSize(width: expanded ? preferredExpandedSize.width : FloatingMetrics.windowWidth, height: height)
         frame.origin.y = fixedBottomEdge
         if let screenFrame {
+            frame.size.width = min(frame.width, screenFrame.width)
             frame.origin.x = min(max(frame.origin.x, screenFrame.minX), screenFrame.maxX - frame.width)
             frame.origin.y = max(frame.origin.y, screenFrame.minY)
             frame.size.height = min(frame.height, screenFrame.maxY - frame.origin.y)
         }
+        adjustingFrame = true
         panel.setFrame(frame, display: true)
+        adjustingFrame = false
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) {
+        guard !adjustingFrame, model.floatingSection != .collapsed, !model.permissionNotice else { return }
+        preferredExpandedSize = panel.frame.size
+        UserDefaults.standard.set(preferredExpandedSize.width, forKey: "room.expanded.width")
+        UserDefaults.standard.set(preferredExpandedSize.height, forKey: "room.expanded.height")
     }
 }
 
@@ -6603,3 +6883,31 @@ private extension NSColor {
         )
     }
 }
+
+#if DEBUG
+/// Isolated presentation harness: no room discovery, sockets, capture or outgoing messages.
+@MainActor
+enum RoomPresentationPreview {
+    static func run() {
+        let app = NSApplication.shared
+        app.setActivationPolicy(.regular)
+        let model = ALOViewModel(discoverRooms: false)
+        model.roomName = "Offline preview"
+        model.phase = .live
+        model.floatingSection = .chat
+        model.floatingBarHidden = false
+        model.currentParticipantID = "preview-local"
+        model.currentUserName = "You"
+        model.participants = [RoomParticipant(id: "preview-local", name: "You"), RoomParticipant(id: "preview-peer", name: "Luna")]
+        model.messages = [
+            RoomMessage(senderID: "preview-peer", sender: "Luna", text: "Music, conversation, or a quick round?", sentNanos: 1),
+            RoomMessage(senderID: "preview-local", sender: "You", text: "Let’s try Rift Arena.", sentNanos: 2)
+        ]
+        let controller = FloatingRoomWindowController(model: model)
+        controller.show()
+        app.activate(ignoringOtherApps: true)
+        withExtendedLifetime(controller) { app.run() }
+        model.arena.disconnect()
+    }
+}
+#endif

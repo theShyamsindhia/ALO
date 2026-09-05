@@ -48,7 +48,7 @@ final class AppUpdater {
         }
     }
 
-    nonisolated static let repository = "theShyamsindhia/WERAI"
+    nonisolated static let repository = "theShyamsindhia/ALO"
     nonisolated static let teamID = "R9QFK9NM3Y"
     nonisolated static let bundleID = "in.werai.audio"
     nonisolated static let developerIDRequirement = """

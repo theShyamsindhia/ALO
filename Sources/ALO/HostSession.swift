@@ -232,6 +232,10 @@ final class HostSession {
         host?.removeQueueItem(id: id)
     }
 
+    func setMusicDucked(_ ducked: Bool) {
+        localReceiver?.setMusicDucked(ducked)
+    }
+
     func setParticipantLevel(id: String, volume: Double, muted: Bool) {
         host?.setParticipantLevel(id: id, volume: volume, muted: muted)
     }

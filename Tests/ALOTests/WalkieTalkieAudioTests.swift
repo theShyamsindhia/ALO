@@ -43,7 +43,7 @@ struct WalkieTalkieAudioTests {
             participantsHandler: { _ in },
             mediaStateHandler: { _ in },
             nowPlayingHandler: { _ in },
-            chatHandler: { _, _, _, _ in },
+            chatHandler: { _, _, _, _, _ in },
             queueHandler: { _ in },
             videoHandler: { _ in }
         )
