@@ -20,7 +20,13 @@ struct ArenaPanel: View {
                     Button("Return to room") { session.closeExpanded() }.buttonStyle(.bordered)
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if session.selectedGameID == nil {
-                GameLibraryView(store: session.library, onPlay: session.openGame)
+                GameLibraryView(store: session.library, lobbies: session.lobbies, names: session.names,
+                    onPlay: session.openGame,
+                    onJoin: { lobby, spectate in
+                        guard let pack = session.library.installed["rift-arena"] else { return }
+                        session.openGame(pack)
+                        session.join(lobby, spectate: spectate)
+                    })
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if session.loadingGame {
                 VStack(spacing: 10) {
@@ -171,19 +177,33 @@ struct ArenaPanel: View {
                     }
                     Text("4 player slots · 8 spectators. Late joiners can take over a live bot; a full match opens in spectate mode.")
                         .font(.system(size: 10)).foregroundStyle(.secondary)
+                    if !session.lobbies.isEmpty {
+                        Label("Live arenas in this room", systemImage: "dot.radiowaves.left.and.right")
+                            .font(.system(size: 12, weight: .semibold)).foregroundStyle(accent)
+                    }
                     ForEach(session.lobbies) { lobby in
-                        Button { session.join(lobby) } label: {
-                            HStack {
+                        HStack(spacing: 10) {
+                            VStack(alignment: .leading, spacing: 3) {
                                 Text("\(session.names[lobby.peerID] ?? "Room member") · \(lobby.map.title)")
-                                Spacer(); Text(lobby.availableSlots > 0 ? (lobby.started ? "Take bot slot" : "Join") : "Spectate").foregroundStyle(accent)
-                            }.font(.system(size: 12)).padding(12).background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
-                        }.buttonStyle(.plain)
+                                    .font(.system(size: 12, weight: .semibold))
+                                Text(lobby.started ? "Match in progress · \(lobby.humanCount) playing" : "Waiting for players · \(lobby.humanCount)/4 joined")
+                                    .font(.system(size: 10)).foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 8)
+                            if lobby.availableSlots > 0 {
+                                Button(lobby.started ? "Join match" : "Join") { session.join(lobby) }.buttonStyle(.borderedProminent)
+                            }
+                            Button("Watch") { session.join(lobby, spectate: true) }.buttonStyle(.bordered)
+                        }.controlSize(.small).padding(10).background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
                     }
                 }
                 if session.mode == .picker && !session.notice.isEmpty { Text(session.notice).font(.system(size: 11)).foregroundStyle(accent) }
                 DisclosureGroup("How to play") {
-                    Text("Build damage and launch your opponent off the arena. Three lives each. Move A/D, jump Space, aim W/S, attack J/K, dodge L. You have two air jumps and W + K recovery. Esc opens players, controls and settings.")
-                        .font(.system(size: 11)).foregroundStyle(.white.opacity(0.6)).padding(.top, 6)
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Build damage and launch your opponent off the arena. Three lives each. W/S aim upward or downward attacks; they do not jump. Space jumps by default.")
+                            .font(.system(size: 11)).foregroundStyle(.white.opacity(0.6))
+                        ArenaBindingGrid(session: session)
+                    }.padding(.top, 8)
                 }.font(.system(size: 11))
             }.padding(14).frame(maxWidth: detached ? 720 : .infinity).frame(maxWidth: .infinity)
         }
@@ -210,9 +230,9 @@ struct ArenaPanel: View {
                         }
                         Spacer(minLength: 0)
                         Button { session.host(botCount: configuredBots) } label: {
-                            Label("Create room match", systemImage: "person.2.fill")
+                            Label(configuredBots == 0 ? "Open empty arena" : "Create room match", systemImage: "person.2.fill")
                         }.buttonStyle(.borderedProminent).disabled(session.send == nil)
-                            .help("Invites your room. Everyone readies up, then late joiners can replace bots.")
+                            .help(configuredBots == 0 ? "Open a waiting lobby so room members can join before anyone readies up." : "Invites your room. Everyone readies up, then late joiners can replace bots.")
                     }
                     if session.send == nil { Text("Join a live room to create a match.").font(.system(size: 10)).foregroundStyle(.secondary) }
                 } else if session.mode == .hosting || session.mode == .readyHost || session.mode == .readyGuest {
@@ -220,7 +240,7 @@ struct ArenaPanel: View {
                         ForEach(session.playerSlots, id: \.index) { slot in
                             VStack(spacing: 3) {
                                 Text(slot.name).lineLimit(1)
-                                Text(slot.isBot ? "Bot" : slot.ready ? "Ready" : "Not ready").foregroundStyle(.secondary)
+                                Text(slot.isBot ? "Bot" : (!session.canReadyUp && slot.index == session.localIndex) ? "Waiting for player" : slot.ready ? "Ready" : "Not ready").foregroundStyle(.secondary)
                             }.font(.system(size: 10)).frame(maxWidth: .infinity)
                         }
                     }
@@ -231,7 +251,8 @@ struct ArenaPanel: View {
                         }
                         Spacer(minLength: 0)
                         Button("Leave") { session.leave() }
-                        Button(session.localReady ? "Unready" : "Ready up") { session.readyUp() }.buttonStyle(.borderedProminent)
+                        Button(session.canReadyUp ? (session.localReady ? "Unready" : "Ready up") : "Waiting for player") { session.readyUp() }
+                            .buttonStyle(.borderedProminent).disabled(!session.canReadyUp)
                     }.font(.system(size: 11))
                 } else {
                     HStack { ProgressView().controlSize(.small); Text(session.notice).font(.system(size: 12)); Spacer(); Button("Cancel") { session.leave() } }
@@ -292,16 +313,18 @@ final class ArenaSKView: SKView {
         guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty else {
             super.keyDown(with: event); return
         }
-        if event.keyCode == 35 || event.keyCode == 53 {
+        keyboard.bindings = session?.keyBindings ?? .defaults
+        if event.keyCode == 53 || event.keyCode == keyboard.bindings[.menu] {
             if !event.isARepeat { resetKeyboard(); session?.togglePause() }
             return
         }
-        guard ArenaKeyboardInput.handledKeys.contains(event.keyCode) else { super.keyDown(with: event); return }
         guard session?.showsMenu != true, session?.paused != true else { resetKeyboard(); return }
         keyboard.press(event.keyCode); session?.setInput(keyboard.input)
+        // The focused arena owns unmodified gameplay keystrokes. Consuming
+        // unknown keys prevents AppKit's "no command" alert sound.
     }
     override func keyUp(with event: NSEvent) {
-        guard ArenaKeyboardInput.handledKeys.contains(event.keyCode) else { super.keyUp(with: event); return }
+        keyboard.bindings = session?.keyBindings ?? .defaults
         keyboard.release(event.keyCode); session?.setInput(keyboard.input)
     }
     private func resetKeyboard() { keyboard.reset(); session?.clearInput() }

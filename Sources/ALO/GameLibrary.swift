@@ -199,7 +199,10 @@ final class GamePackRedirectPolicy: NSObject, URLSessionTaskDelegate {
 struct GameLibraryView: View {
     @ObservedObject var store: GameLibraryStore
     @ObservedObject var records = ArenaRecordStore.shared
+    var lobbies: [ArenaSession.Lobby]
+    var names: [String: String]
     var onPlay: (InstalledGamePack) -> Void
+    var onJoin: (ArenaSession.Lobby, Bool) -> Void
     @State private var showsLeaderboard = false
     private let ink = Color.white.opacity(0.9)
     private let secondary = Color.white.opacity(0.5)
@@ -221,6 +224,7 @@ struct GameLibraryView: View {
                 LazyVStack(spacing: 14) {
                     if showsLeaderboard { leaderboard }
                     else {
+                        if !lobbies.isEmpty { liveArenas }
                         ForEach(store.games) { game in card(game) }
                         if !store.catalogNotice.isEmpty {
                             Text(store.catalogNotice).font(.system(size: 10)).foregroundStyle(secondary).frame(maxWidth: .infinity, alignment: .leading)
@@ -232,6 +236,46 @@ struct GameLibraryView: View {
         .foregroundStyle(ink)
         .background(Color(red: 0.15, green: 0.155, blue: 0.17))
         .task { store.refresh() }
+    }
+
+    private var liveArenas: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("Live in this room", systemImage: "dot.radiowaves.left.and.right")
+                    .font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Text("\(lobbies.count) arena\(lobbies.count == 1 ? "" : "s")")
+                    .font(.system(size: 10)).foregroundStyle(secondary)
+            }
+            ForEach(lobbies.sorted {
+                if $0.started != $1.started { return $0.started && !$1.started }
+                return $0.seen > $1.seen
+            }.prefix(8)) { lobby in
+                HStack(spacing: 10) {
+                    Circle().fill(lobby.started ? Color.green : accent).frame(width: 7, height: 7)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(names[lobby.peerID] ?? "Room member").font(.system(size: 11, weight: .semibold)).lineLimit(1)
+                        Text(lobby.started
+                             ? "Playing \(lobby.map.title) · \(lobby.humanCount) player\(lobby.humanCount == 1 ? "" : "s")"
+                             : "Waiting in \(lobby.map.title) · \(lobby.humanCount)/4 joined")
+                            .font(.system(size: 10)).foregroundStyle(secondary).lineLimit(1)
+                    }
+                    Spacer(minLength: 8)
+                    if store.installed["rift-arena"] != nil {
+                        if lobby.availableSlots > 0 {
+                            Button(lobby.started ? "Join match" : "Join") { onJoin(lobby, false) }
+                                .buttonStyle(.borderedProminent).tint(accent.opacity(0.85))
+                        }
+                        Button("Watch") { onJoin(lobby, true) }.buttonStyle(.bordered)
+                    } else {
+                        Text("Download Rift Arena to join").font(.system(size: 9)).foregroundStyle(secondary)
+                    }
+                }.controlSize(.small).padding(10)
+                    .background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 9))
+            }
+        }.padding(12)
+            .background(accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(accent.opacity(0.22), lineWidth: 0.8))
     }
 
     private func tab(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
@@ -339,14 +383,18 @@ struct GameLibraryView: View {
             HStack {
                 Text("Rift Arena").font(.system(size: 15, weight: .semibold))
                 Spacer()
-                Text("On this Mac").font(.system(size: 10)).foregroundStyle(secondary)
+                let matchCount = records.results.filter { $0.gameID == "rift-arena" }.count
+                Text(matchCount == 0 ? "On this Mac" : "\(matchCount) match\(matchCount == 1 ? "" : "es") · On this Mac")
+                    .font(.system(size: 10)).foregroundStyle(secondary)
             }
             if standings.isEmpty {
                 VStack(spacing: 9) {
                     Image(systemName: "trophy").font(.system(size: 26, weight: .light)).foregroundStyle(accent)
-                    Text("Your first result starts here").font(.system(size: 13, weight: .medium))
-                    Text("Finish a room match with at least two people to see player wins. Practice does not count.")
+                    Text("No ranked room matches yet").font(.system(size: 13, weight: .medium))
+                    Text("The leaderboard updates after a match finishes with at least two real room members. Practice and bot-only matches stay unranked.")
                         .font(.system(size: 11)).foregroundStyle(secondary).multilineTextAlignment(.center)
+                    Label("Results are stored only on this Mac", systemImage: "internaldrive")
+                        .font(.system(size: 9)).foregroundStyle(secondary)
                 }.frame(maxWidth: .infinity).padding(.vertical, 28)
             } else {
                 Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {

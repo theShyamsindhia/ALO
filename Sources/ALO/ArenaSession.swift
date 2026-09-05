@@ -54,6 +54,9 @@ final class ArenaSession: ObservableObject {
     private var peerProbe: Double?
     private var measuredProbe: Double?
     @Published var selected: ArenaFighterKind = .nova
+    @Published var keyBindings: ArenaKeyBindings = .load() {
+        didSet { keyBindings.save() }
+    }
     @Published var notice = ""
     @Published var lobbies: [Lobby] = []
     @Published var paused = false { didSet { configureTimer() } }
@@ -98,6 +101,10 @@ final class ArenaSession: ObservableObject {
     private var announcedSessions = Set<String>()
     var canAddBot: Bool { [.hosting, .readyHost].contains(mode) && simulation.fighters.count < 4 }
     var canRemoveBot: Bool { [.hosting, .readyHost].contains(mode) && !botSlots.isEmpty }
+    var canReadyUp: Bool {
+        if mode == .readyGuest { return true }
+        return [.hosting, .readyHost].contains(mode) && simulation.fighters.count >= 2
+    }
     var readyPlayerCount: Int { playerSlots.filter(\.ready).count }
     var isActivityHost: Bool { [.hosting, .readyHost, .host].contains(mode) }
     var availableSlots: Int {
@@ -207,7 +214,9 @@ final class ArenaSession: ObservableObject {
         simulation = ArenaSimulation(kinds: [selected] + (0..<count).map { botKind(slot: $0 + 1) }, map: selectedMap)
         botSlots = Set(1..<simulation.fighters.count)
         mode = count > 0 ? .readyHost : .hosting
-        notice = "Room arena open. Add bots or invite people, then ready up."
+        notice = count == 0
+            ? "Arena open. Waiting for another room member to join."
+            : "Room arena open. Invite people or ready up with your bots."
         refreshSlots(); activate(); advertise()
     }
     func addBot() {
@@ -223,6 +232,7 @@ final class ArenaSession: ObservableObject {
         botSlots = Set(botSlots.filter { $0 != index }.map { $0 > index ? $0 - 1 : $0 })
         for id in members.keys where members[id]!.slot > index { members[id]!.slot -= 1 }
         mode = simulation.fighters.count > 1 ? .readyHost : .hosting
+        if !canReadyUp { localReady = false }
         refreshSlots(); sendRoster(); advertise()
     }
     func join(_ lobby: Lobby, spectate: Bool = false) {
@@ -244,7 +254,7 @@ final class ArenaSession: ObservableObject {
         mode = .readyHost; refreshSlots(); sendRoster(); advertise()
     }
     func readyUp() {
-        guard [.hosting, .readyHost, .readyGuest].contains(mode) else { return }
+        guard canReadyUp else { return }
         localReady.toggle()
         if isActivityHost { refreshSlots(); sendRoster(); startIfReady() }
         else { transmit(.ready, ready: localReady) }
@@ -294,6 +304,14 @@ final class ArenaSession: ObservableObject {
         localInput = input
     }
     func clearInput() { localInput = ArenaInput(); bufferedActions = ArenaInput() }
+    func assignKey(_ keyCode: UInt16, to action: ArenaKeyAction) {
+        keyBindings.assign(keyCode, to: action)
+        clearInput()
+    }
+    func resetKeyBindings() {
+        keyBindings = .defaults
+        clearInput()
+    }
     func sampledInput() -> ArenaInput {
         var input = inputWithController()
         if showsMenu { return ArenaInput() }
@@ -538,7 +556,7 @@ final class ArenaSession: ObservableObject {
             NSApp.activate(ignoringOtherApps: true); return
         }
         clearInput(); expanded = true
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
+        let w = ArenaWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
                          styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
         w.title = "Rift Arena · ALO"
         w.collectionBehavior = [.fullScreenPrimary]
@@ -553,6 +571,23 @@ final class ArenaSession: ObservableObject {
     }
     func fullscreen() { window?.toggleFullScreen(nil) }
     func closeExpanded() { window?.close() }
+}
+
+/// Menu-bar apps do not always have AppKit's standard Close Window menu item.
+/// Keep the platform shortcut available inside the detached game regardless.
+final class ArenaWindow: NSWindow {
+    static func isCloseShortcut(_ event: NSEvent) -> Bool {
+        event.type == .keyDown
+            && event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command)
+            && event.charactersIgnoringModifiers?.lowercased() == "w"
+    }
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if Self.isCloseShortcut(event) {
+            close()
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
 }
 
 @MainActor

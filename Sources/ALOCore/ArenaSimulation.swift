@@ -335,8 +335,20 @@ public struct ArenaSimulation: Codable, Equatable, Sendable {
         let f = fighters[a], target = fighters[b]
         guard f.stocks > 0, attackActive(a), !f.attackConnected, f.respawn == 0, target.respawn == 0,
               target.invulnerable == 0, target.stocks > 0 else { return false }
-        let box = attackCenter(a)
-        return abs(target.x - box.x) < box.radius + 17 && abs(target.y + 25 - box.y) < box.radius + 25
+        return attackContains(fighter: f, move: attackProfile(a), targetX: target.x, targetY: target.y)
+    }
+
+    /// Long weapons strike along their visible shaft as well as at the tip.
+    /// Treating every move as a single circle at `reach` created a large blind
+    /// spot directly in front of Ember, especially against narrow Wisp.
+    private func attackContains(fighter: ArenaFighter, move: ArenaAttackProfile,
+                                targetX: Double, targetY: Double) -> Bool {
+        let endX = fighter.x + fighter.facing * move.reach
+        let startX = fighter.x + fighter.facing * min(18, abs(move.reach))
+        let lowX = min(startX, endX) - move.radius - 17
+        let highX = max(startX, endX) + move.radius + 17
+        let centerY = fighter.y + 25 + move.lift
+        return targetX > lowX && targetX < highX && abs(targetY + 25 - centerY) < move.radius + 25
     }
     private mutating func hit(_ a: Int, _ b: Int) {
         let f = fighters[a]
@@ -401,8 +413,8 @@ public struct ArenaSimulation: Codable, Equatable, Sendable {
         let expectedX = foe.x + foe.vx * anticipation
         let expectedY = foe.y + foe.vy * anticipation
         let direction = result.horizontal != 0 ? Double(result.horizontal) : bot.facing
-        let centerX = bot.x + direction * move.reach, centerY = bot.y + 25 + move.lift
-        let inRange = abs(expectedX - centerX) <= move.radius + 17 && abs(expectedY + 25 - centerY) <= move.radius + 25
+        var aimedBot = bot; aimedBot.facing = direction
+        let inRange = attackContains(fighter: aimedBot, move: move, targetX: expectedX, targetY: expectedY)
         if inRange && (!heavy || !danger || difficulty == .easy) {
             result.heavy = heavy; result.light = !heavy
         }

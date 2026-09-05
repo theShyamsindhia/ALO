@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import ALOCore
 
@@ -203,24 +204,13 @@ struct ArenaMenuOverlay: View {
 
     private var controls: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("The arena takes focus when play starts or resumes. Click it to refocus after using other controls. J/K/L and Z/X/C are interchangeable; these are Rift Arena controls.")
+            Text("Click a key to replace it, then press the new key. Bindings are saved on this Mac and apply only while the arena has focus.")
                 .font(.system(size: 11)).foregroundStyle(ArenaAppearance.secondary)
-            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 9) {
-                GridRow {
-                    Text("Action").fontWeight(.semibold)
-                    Text("Keyboard").fontWeight(.semibold)
-                    Text("Controller").fontWeight(.semibold)
-                }.foregroundStyle(ArenaAppearance.secondary)
-                controlRow("Move", "A / D or ← / →", "Left stick / D-pad")
-                controlRow("Aim attack", "W / S or ↑ / ↓", "Stick up / down")
-                controlRow("Jump / air jump", "Space", "A / Cross")
-                controlRow("Light attack", "J / Z", "X / Square")
-                controlRow("Signature / aerial heavy", "K / X", "Y / Triangle")
-                controlRow("Dodge", "L / C", "RB / R1")
-                controlRow("Drop through", "S or ↓", "Stick down")
-                controlRow("Recovery", "W + K / X", "Up + Y / Triangle")
-                controlRow("Game menu", "P / Esc", "Menu / Options")
-            }.font(.system(size: 10)).frame(maxWidth: .infinity, alignment: .leading)
+            ArenaBindingGrid(session: session)
+            Text("Aim up does not jump: hold it with an attack for an upward move. Aim down selects downward attacks and drops through upper platforms. Use your Jump binding to leave the ground.")
+                .font(.system(size: 11)).foregroundStyle(ArenaAppearance.accent)
+            Text("Controller: left stick or D-pad moves and aims; A/Cross jumps, X/Square uses light attacks, Y/Triangle uses signatures, and RB/R1 dodges.")
+                .font(.system(size: 10)).foregroundStyle(ArenaAppearance.secondary)
             Text("You have two air jumps and one recovery before landing. Higher damage means stronger knockback. Use dodge to avoid a hit, then recover toward a platform.")
                 .font(.system(size: 11)).foregroundStyle(ArenaAppearance.secondary)
             Divider()
@@ -235,21 +225,13 @@ struct ArenaMenuOverlay: View {
                     let heavy = ArenaAttackProfile.resolve(kind: controlsFighter, heavy: true, direction: direction, aerial: aerial)
                     HStack(alignment: .top) {
                         Text(aim).frame(width: 48, alignment: .leading)
-                        Text("J · \(light.title)").frame(maxWidth: .infinity, alignment: .leading)
-                        Text("K · \(heavy.title)").frame(maxWidth: .infinity, alignment: .leading)
+                        Text("\(ArenaKeyBindings.displayName(for: session.keyBindings[.light])) · \(light.title)").frame(maxWidth: .infinity, alignment: .leading)
+                        Text("\(ArenaKeyBindings.displayName(for: session.keyBindings[.heavy])) · \(heavy.title)").frame(maxWidth: .infinity, alignment: .leading)
                     }.font(.system(size: 10)).foregroundStyle(ArenaAppearance.secondary)
                 }
             }
             Text("Controller button names depend on the connected gamepad. macOS must recognize an extended gamepad.")
                 .font(.system(size: 9)).foregroundStyle(ArenaAppearance.secondary)
-        }
-    }
-
-    private func controlRow(_ action: String, _ keyboard: String, _ controller: String) -> some View {
-        GridRow {
-            Text(action).foregroundStyle(.white.opacity(0.86))
-            Text(keyboard).foregroundStyle(ArenaAppearance.accent)
-            Text(controller).foregroundStyle(ArenaAppearance.secondary)
         }
     }
 
@@ -275,6 +257,88 @@ struct ArenaMenuOverlay: View {
                     .font(.system(size: 10)).foregroundStyle(ArenaAppearance.accent)
             }
         }
+    }
+}
+
+struct ArenaBindingGrid: View {
+    @ObservedObject var session: ArenaSession
+    var body: some View {
+        VStack(spacing: 8) {
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 8) {
+                ForEach(ArenaKeyAction.allCases) { action in
+                    HStack(spacing: 8) {
+                        Text(action.title).font(.system(size: 10)).lineLimit(1)
+                        Spacer(minLength: 4)
+                        ArenaKeyRecorder(session: session, action: action).frame(width: 82, height: 24)
+                    }.padding(.leading, 9).padding(.trailing, 3).frame(height: 30)
+                        .background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 7))
+                }
+            }
+            HStack {
+                Text("Esc always opens the menu.").font(.system(size: 9)).foregroundStyle(ArenaAppearance.secondary)
+                Spacer()
+                Button("Restore defaults") { session.resetKeyBindings() }.buttonStyle(.plain)
+                    .font(.system(size: 10)).foregroundStyle(ArenaAppearance.accent)
+            }
+        }
+    }
+}
+
+private struct ArenaKeyRecorder: NSViewRepresentable {
+    @ObservedObject var session: ArenaSession
+    let action: ArenaKeyAction
+
+    func makeNSView(context: Context) -> ArenaKeyRecorderButton {
+        let button = ArenaKeyRecorderButton()
+        button.bezelStyle = .rounded
+        button.font = .monospacedSystemFont(ofSize: 10, weight: .medium)
+        button.controlSize = .small
+        button.session = session
+        button.actionToRecord = action
+        button.refreshTitle()
+        return button
+    }
+
+    func updateNSView(_ button: ArenaKeyRecorderButton, context: Context) {
+        button.session = session
+        button.actionToRecord = action
+        if !button.isRecording { button.refreshTitle() }
+    }
+}
+
+@MainActor
+private final class ArenaKeyRecorderButton: NSButton {
+    weak var session: ArenaSession?
+    var actionToRecord: ArenaKeyAction = .jump
+    var isRecording = false
+    override var acceptsFirstResponder: Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        isRecording = true
+        title = "Press key…"
+        toolTip = "Press a key for \(actionToRecord.title), or Escape to cancel"
+        window?.makeFirstResponder(self)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        guard isRecording else { return }
+        guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty else { return }
+        if event.keyCode != 53 { session?.assignKey(event.keyCode, to: actionToRecord) }
+        isRecording = false
+        refreshTitle()
+    }
+
+    override func resignFirstResponder() -> Bool {
+        isRecording = false
+        refreshTitle()
+        return super.resignFirstResponder()
+    }
+
+    func refreshTitle() {
+        guard let session else { return }
+        title = ArenaKeyBindings.displayName(for: session.keyBindings[actionToRecord])
+        toolTip = "Change \(actionToRecord.title)"
+        setAccessibilityLabel("\(actionToRecord.title), \(title). Click, then press a new key.")
     }
 }
 

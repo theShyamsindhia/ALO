@@ -71,6 +71,16 @@ import Testing
         for _ in 0..<8 { sim.tick([ArenaInput(), ArenaInput()]) }
         #expect(sim.fighters[1].hitSerial == 1)
     }
+    @Test func emberSpearConnectsWithNearbyWispAlongTheWeapon() {
+        var sim = ArenaSimulation(kinds: [.ember, .wisp]); sim.countdown = 0
+        for i in sim.fighters.indices { sim.fighters[i].y = 150; sim.fighters[i].grounded = true }
+        sim.fighters[0].x = 350; sim.fighters[0].facing = 1
+        sim.fighters[1].x = 390
+        var thrust = ArenaInput(); thrust.light = true
+        for _ in 0..<9 { sim.tick([thrust, ArenaInput()]) }
+        #expect(sim.fighters[1].damage > 0)
+        #expect(sim.fighters[1].hitSerial == 1)
+    }
     @Test func dodgeAvoidsActiveAttackAndCannotBeSpammed() {
         var sim = started(); sim.fighters[1].x = 405
         var light = ArenaInput(); light.light = true
@@ -171,6 +181,20 @@ import Testing
         #expect(spectator.mode == .spectator); #expect(host.spectatorCount == 1)
         host.leave(); wire.drain()
         #expect(guest.mode == .picker); #expect(spectator.mode == .picker)
+    }
+    @Test func emptyArenaAdvertisesButCannotReadyUntilSomeoneJoins() throws {
+        let host = ArenaSession(), guest = ArenaSession(), wire = Wire()
+        defer { host.disconnect(); guest.disconnect() }
+        wire.add("host", host); wire.add("guest", guest)
+        host.host(botCount: 0); wire.drain()
+        #expect(host.mode == .hosting)
+        #expect(!host.canReadyUp && !host.localReady)
+        #expect(guest.lobbies.first?.started == false)
+        #expect(guest.lobbies.first?.humanCount == 1)
+        host.readyUp()
+        #expect(!host.localReady)
+        guest.join(try #require(guest.lobbies.first)); wire.drain()
+        #expect(host.canReadyUp && guest.canReadyUp)
     }
     @Test func rematchRejectsOldRoundAndKeepsSpectators() throws {
         let host = ArenaSession(), guest = ArenaSession(), watcher = ArenaSession(), wire = Wire()
