@@ -1,20 +1,50 @@
 import Foundation
 
+/// Timing at the image-handler boundary, not a measurement of physical display
+/// scanout or speaker-to-screen skew. No new frames can mean a static screen.
+struct VideoPresentationTimingSnapshot: Sendable, Equatable {
+    let measuredAtNanos: UInt64
+    let latestHandoffAtNanos: UInt64?
+    let latestDeadlineMissNanos: UInt64?
+    let maximumDeadlineMissNanos: UInt64
+    let presentedCount: UInt64
+    let pendingCount: Int
+    let oldestPendingDeadlineNanos: UInt64?
+}
+
 /// One timer owns a bounded set of frames. Reset releases them immediately,
 /// including frames whose remote timestamp would otherwise retain them for years.
 final class VideoPresentationQueue<Image> {
     static var maximumLeadNanos: UInt64 { 2_000_000_000 }
     private struct Frame { let image: Image; let deadline: UInt64; let bytes: Int; let isCurrent: () -> Bool }
     private let lock = NSLock()
-    private let queue = DispatchQueue(label: "in.werai.video.presentation", qos: .userInteractive)
+    private let queue: DispatchQueue
     private var frames = [Frame]()
     private var timer: DispatchSourceTimer?
     private let handler: (Image) -> Void
     private let now: () -> UInt64
+    private var latestHandoffAtNanos: UInt64?
+    private var latestDeadlineMissNanos: UInt64?
+    private var maximumDeadlineMissNanos: UInt64 = 0
+    private var presentedCount: UInt64 = 0
     var pendingCount: Int { lock.withLock { frames.count } }
 
-    init(now: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds }, handler: @escaping (Image) -> Void) {
-        self.now = now; self.handler = handler
+    var timingSnapshot: VideoPresentationTimingSnapshot {
+        lock.withLock {
+            VideoPresentationTimingSnapshot(measuredAtNanos: now(),
+                latestHandoffAtNanos: latestHandoffAtNanos,
+                latestDeadlineMissNanos: latestDeadlineMissNanos,
+                maximumDeadlineMissNanos: maximumDeadlineMissNanos,
+                presentedCount: presentedCount, pendingCount: frames.count,
+                oldestPendingDeadlineNanos: frames.first?.deadline)
+        }
+    }
+
+    // The clock must be thread-safe. Deliver directly on the UI executor so a
+    // blocked main thread retains bounded frames here, not unbounded UI closures.
+    init(now: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
+         deliveryQueue: DispatchQueue = .main, handler: @escaping (Image) -> Void) {
+        self.now = now; self.queue = deliveryQueue; self.handler = handler
     }
     deinit { timer?.cancel() }
 
@@ -56,7 +86,11 @@ final class VideoPresentationQueue<Image> {
     }
 
     func reset() {
-        lock.withLock { frames.removeAll(); timer?.cancel(); timer = nil }
+        lock.withLock {
+            frames.removeAll(); timer?.cancel(); timer = nil
+            latestHandoffAtNanos = nil; latestDeadlineMissNanos = nil
+            maximumDeadlineMissNanos = 0; presentedCount = 0
+        }
     }
 
     private func drain() {
@@ -68,6 +102,15 @@ final class VideoPresentationQueue<Image> {
             return due
         }
         // Present the most recent frame after a scheduler delay, avoiding a burst of stale UI work.
-        if let frame = due.last, frame.isCurrent() { handler(frame.image) }
+        if let frame = due.last, frame.isCurrent() {
+            lock.withLock {
+                let time = now()
+                let miss = time > frame.deadline ? time - frame.deadline : 0
+                latestHandoffAtNanos = time; latestDeadlineMissNanos = miss
+                maximumDeadlineMissNanos = max(maximumDeadlineMissNanos, miss)
+                if presentedCount < .max { presentedCount += 1 }
+            }
+            handler(frame.image)
+        }
     }
 }

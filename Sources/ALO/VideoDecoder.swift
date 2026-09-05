@@ -65,6 +65,8 @@ public final class VideoDecoder {
 
     var requiresKeyframeForTesting: Bool { admissionLock.withLock { needsKeyframe } }
 
+    var presentationTimingSnapshot: VideoPresentationTimingSnapshot { presentations.timingSnapshot }
+
     public init(imageHandler: @escaping ImageHandler) {
         self.imageHandler = imageHandler
         self.presentations = VideoPresentationQueue(handler: imageHandler)

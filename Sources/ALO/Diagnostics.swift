@@ -80,6 +80,9 @@ struct ReceiverTimingDiagnostics: Sendable, Equatable {
     let latenessMilliseconds: Double
     let latePacketCount: UInt64
     let resyncCount: UInt64
+    var currentDriftMilliseconds: Double? = nil
+    var driftMeasurementAgeMilliseconds: Double? = nil
+    var video: VideoPresentationTimingSnapshot? = nil
 }
 
 struct HostListenerTimingDiagnostics: Sendable, Equatable {
@@ -95,6 +98,9 @@ struct HostListenerTimingDiagnostics: Sendable, Equatable {
     var audioAdmissionRejected: UInt64 = 0
     var audioReplaced: UInt64 = 0
     var audioDiscardedBoundary: UInt64 = 0
+    var driftMilliseconds: Double? = nil
+    var driftSampleAgeMilliseconds: Double? = nil
+    var playbackReportAgeMilliseconds: Double? = nil
 }
 
 struct HostTimingDiagnostics: Sendable, Equatable {
@@ -113,6 +119,7 @@ struct SessionTimingDiagnostics: Sendable, Equatable {
 }
 
 struct DiagnosticRoomContext: Sendable, Equatable {
+    private static let driftWarningMilliseconds = Double(SynchronizedPlayer.hardResyncThresholdNanos) / 1_000_000
     enum Role: String, Sendable {
         case none
         case broadcaster
@@ -155,6 +162,17 @@ struct DiagnosticRoomContext: Sendable, Equatable {
             }
             parts.append("lateness \(Self.milliseconds(receiver.latenessMilliseconds))")
             parts.append("late \(receiver.latePacketCount), resyncs \(receiver.resyncCount)")
+            if let drift = receiver.currentDriftMilliseconds,
+               let age = receiver.driftMeasurementAgeMilliseconds {
+                parts.append("render drift \(Self.milliseconds(drift)), sample age \(Self.milliseconds(age))")
+            } else {
+                parts.append("render drift not currently measured")
+            }
+            if let video = receiver.video, video.presentedCount > 0 || video.pendingCount > 0 {
+                let miss = video.latestDeadlineMissNanos.map { Self.milliseconds(Double($0) / 1_000_000) } ?? "not measured"
+                parts.append("screen UI handoff lateness \(miss), peak \(Self.milliseconds(Double(video.maximumDeadlineMissNanos) / 1_000_000)), \(video.pendingCount) pending")
+                parts.append("UI handoff timing is not a physical display or lip-sync measurement")
+            }
         }
         if let host = timing?.host {
             parts.append("room buffer \(Self.milliseconds(host.groupBufferMilliseconds))")
@@ -166,14 +184,57 @@ struct DiagnosticRoomContext: Sendable, Equatable {
                 let age = listener.reportAgeMilliseconds.map(Self.milliseconds) ?? "not reported"
                 parts.append("listener \(index + 1): network \(Self.milliseconds(listener.recommendedBufferMilliseconds)), hardware floor \(Self.milliseconds(listener.hardwareFloorMilliseconds)), network vote \(listener.isTimingEligible ? "eligible" : "late join"), report age \(age)")
                 parts.append("audio packets: \(listener.audioSent)/\(listener.audioEnqueued) submitted, wait expired \(listener.audioExpiredWait), capture expired \(listener.audioExpiredAge), local-send budget rejected \(listener.audioAdmissionRejected), congestion replaced \(listener.audioReplaced), transition discarded \(listener.audioDiscardedBoundary)")
+                if let drift = listener.driftMilliseconds {
+                    parts.append("listener \(index + 1) render drift \(Self.milliseconds(drift))")
+                }
             }
         }
-        let ready = hasBroadcaster && (role == .broadcaster || timing?.receiver?.roundTripMilliseconds != nil)
+        // A connected clock is not evidence of timely rendering. Unknown or
+        // stale samples remain a warning; historical counters alone do not fail
+        // a recovered stream, and a static screen is not inferred to be stalled.
+        var ready = hasBroadcaster
+        if let receiver = timing?.receiver {
+            ready = ready && audioIsRendering && receiver.roundTripMilliseconds != nil
+                && Self.isFreshDrift(receiver.currentDriftMilliseconds, age: receiver.driftMeasurementAgeMilliseconds)
+                && receiver.latenessMilliseconds < Self.driftWarningMilliseconds
+            if let video = receiver.video, Self.videoIsCurrentlyLate(video) { ready = false }
+        } else if role == .listener {
+            ready = false
+        }
+        if role == .broadcaster {
+            if let host = timing?.host {
+                ready = ready && host.listenerCount > 0
+                    && host.reportingListenerCount == host.listenerCount
+                    && host.listeners.count == host.listenerCount
+                    && host.maximumLatenessMilliseconds < Self.driftWarningMilliseconds
+                    && host.listeners.allSatisfy { listener in
+                        guard let reportAge = listener.playbackReportAgeMilliseconds,
+                              reportAge.isFinite, reportAge >= 0, reportAge <= 2_500 else { return false }
+                        return Self.isFreshDrift(listener.driftMilliseconds, age: listener.driftSampleAgeMilliseconds)
+                    }
+            } else { ready = false }
+        }
+        if !ready { parts.append("Timely playback is not currently verified; inspect drift, playback state, and sample age") }
         return DiagnosticCheckResult(
             outcome: ready ? .passed : .warning,
             detail: parts.joined(separator: " · "),
             checkedAt: Date()
         )
+    }
+
+    private static func isFreshDrift(_ drift: Double?, age: Double?) -> Bool {
+        guard let drift, let age else { return false }
+        return drift.isFinite && drift >= 0 && drift < driftWarningMilliseconds
+            && age.isFinite && age >= 0 && age <= 500
+    }
+
+    private static func videoIsCurrentlyLate(_ video: VideoPresentationTimingSnapshot) -> Bool {
+        let threshold = SynchronizedPlayer.hardResyncThresholdNanos
+        if let deadline = video.oldestPendingDeadlineNanos, video.measuredAtNanos >= deadline,
+           video.measuredAtNanos - deadline >= threshold { return true }
+        guard let handoff = video.latestHandoffAtNanos, let miss = video.latestDeadlineMissNanos,
+              video.measuredAtNanos >= handoff, video.measuredAtNanos - handoff <= 2_000_000_000 else { return false }
+        return miss >= threshold
     }
 
     private static func milliseconds(_ value: Double) -> String {

@@ -23,7 +23,7 @@ struct DeterministicAudioFanoutTests {
         #expect(direct.minimumPackets >= 190)
         #expect(directBounded.finalAge < 100_000_000)
         #expect(directBounded.maximumDeadlineMiss < 50_000_000)
-        if wakeOversleep == 0 { #expect(directBounded.minimumPackets >= 190) }
+        #expect(directBounded.minimumPackets >= 190)
         #expect(shapedOne.finalAge < 100_000_000)
         #expect(unboundedEight.finalAge > shapedOne.finalAge + 1_000_000_000)
         #expect(unboundedEight.finalAge > SynchronizedPlayer.targetLatencyNanos)

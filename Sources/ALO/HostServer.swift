@@ -74,6 +74,7 @@ final class HostServer {
         var audioDiscardedBoundary: UInt64 = 0
         var lastAudioAgeWarningNanos: UInt64?
         var syncReport: PlaybackSyncReport?
+        var lastPlaybackReportNanos: UInt64?
         var lastResyncCommandNanos: UInt64 = 0
         var lastManualResyncRequestNanos: UInt64 = 0
 
@@ -212,7 +213,10 @@ final class HostServer {
                         audioEnqueued: client.audioEnqueued, audioSent: client.audioSent,
                         audioExpiredWait: client.audioExpiredWait, audioExpiredAge: client.audioExpiredAge,
                         audioAdmissionRejected: client.audioAdmissionRejected,
-                        audioReplaced: client.audioReplaced, audioDiscardedBoundary: client.audioDiscardedBoundary
+                        audioReplaced: client.audioReplaced, audioDiscardedBoundary: client.audioDiscardedBoundary,
+                        driftMilliseconds: client.syncReport?.driftNanos.map { Double($0) / 1_000_000 },
+                        driftSampleAgeMilliseconds: client.syncReport?.driftSampleAgeNanos.map { Double($0) / 1_000_000 },
+                        playbackReportAgeMilliseconds: client.lastPlaybackReportNanos.map { Double(now >= $0 ? now - $0 : 0) / 1_000_000 }
                     )
                 }
             )
@@ -636,6 +640,7 @@ final class HostServer {
             let receiverAlreadyResynced = report.resyncCount > previousResyncCount
             client.syncReport = report
             let now = MonotonicClock.nowNanos()
+            client.lastPlaybackReportNanos = now
             if client.id != localParticipantID,
                report.latenessNanos > SynchronizedPlayer.hardResyncThresholdNanos,
                !receiverAlreadyResynced,

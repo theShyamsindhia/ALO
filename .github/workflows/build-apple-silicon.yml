@@ -30,9 +30,9 @@ jobs:
         run: test "$(uname -m)" = "arm64"
 
       - name: Verify Mac regressions, room network and lifecycle scenarios
-        # Audio deadlines are measured against the shipped optimized code, not
-        # debug-only PCM parsing and generic bounds-check overhead.
-        run: swift test -c release --no-parallel
+        # The transport timing probe reads packet headers only; full PCM decode
+        # remains on receivers instead of adding test-only sender queue load.
+        run: swift test --no-parallel
 
       - name: Install Developer ID Application certificate
         id: import-application-certificate

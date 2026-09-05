@@ -2930,7 +2930,10 @@ final class ALOViewModel: ObservableObject {
 
     private var videoCallback: (CGImage) -> Void {
         { [weak self] image in
-            DispatchQueue.main.async { self?.videoFrame = image }
+            // Scheduled decoder presentation already runs on main; another
+            // asynchronous hop would escape its bounded queue and reset gate.
+            if Thread.isMainThread { self?.videoFrame = image }
+            else { DispatchQueue.main.async { self?.videoFrame = image } }
         }
     }
 

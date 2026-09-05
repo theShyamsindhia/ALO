@@ -250,7 +250,10 @@ final class Receiver {
                 outputChannelCount: outputFormat?.channelCount,
                 latenessMilliseconds: Double(report.latenessNanos) / 1_000_000,
                 latePacketCount: report.latePacketCount,
-                resyncCount: report.resyncCount
+                resyncCount: report.resyncCount,
+                currentDriftMilliseconds: report.driftNanos.map { Double($0) / 1_000_000 },
+                driftMeasurementAgeMilliseconds: report.driftSampleAgeNanos.map { Double($0) / 1_000_000 },
+                video: videoDecoder.presentationTimingSnapshot
             )
         }
     }

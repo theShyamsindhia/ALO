@@ -115,17 +115,25 @@ public struct PlaybackSyncReport: Codable, Sendable, Equatable {
     public let latenessNanos: UInt64
     public let latePacketCount: UInt64
     public let resyncCount: UInt64
+    /// Current render-timeline error, independent of packet underflow history.
+    /// Optional so older peers can still decode and send the original report.
+    public let driftNanos: UInt64?
+    public let driftSampleAgeNanos: UInt64?
 
     public init(
         measuredAtNanos: UInt64,
         latenessNanos: UInt64,
         latePacketCount: UInt64,
-        resyncCount: UInt64
+        resyncCount: UInt64,
+        driftNanos: UInt64? = nil,
+        driftSampleAgeNanos: UInt64? = nil
     ) {
         self.measuredAtNanos = measuredAtNanos
         self.latenessNanos = latenessNanos
         self.latePacketCount = latePacketCount
         self.resyncCount = resyncCount
+        self.driftNanos = driftNanos
+        self.driftSampleAgeNanos = driftSampleAgeNanos
     }
 }
 

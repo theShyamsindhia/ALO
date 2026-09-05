@@ -4,6 +4,24 @@ import Testing
 
 @Suite("Privacy-conscious diagnostics")
 struct DiagnosticsTests {
+    @Test("A clock connection alone must not mark late or absent playback ready")
+    func connectedButDesynchronizedPlaybackNeedsAttention() {
+        for (lateness, rendering) in [(150.0, true), (0.0, false)] {
+            let receiver = ReceiverTimingDiagnostics(
+                roundTripMilliseconds: 2, clockOffsetMilliseconds: 0,
+                jitterMilliseconds: 0, recommendedBufferMilliseconds: 250,
+                outputLatencyMilliseconds: 10, renderHeadroomMilliseconds: 25,
+                outputSampleRate: 48_000, outputChannelCount: 2,
+                latenessMilliseconds: lateness, latePacketCount: 0, resyncCount: 0)
+            let room = DiagnosticRoomContext(isActive: true, role: .listener,
+                participantCount: 2, remotePeerCount: 1, syncLabel: "Synced",
+                audioIsRendering: rendering, hasBroadcaster: true,
+                timing: SessionTimingDiagnostics(receiver: receiver, host: nil))
+            #expect(room.result.outcome == .warning,
+                "RTT proves connectivity, not timely playback")
+        }
+    }
+
     @Test func keyDerivedIdentifiersAreRedactedWithoutUUIDVersionAssumptions() {
         #expect(DiagnosticRedactor.redact("peer FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF") == "peer <redacted-id>")
     }
@@ -69,7 +87,9 @@ struct DiagnosticsTests {
                     outputChannelCount: 2,
                     latenessMilliseconds: 0,
                     latePacketCount: 1,
-                    resyncCount: 0
+                    resyncCount: 0,
+                    currentDriftMilliseconds: 2,
+                    driftMeasurementAgeMilliseconds: 20
                 ),
                 host: nil
             )
@@ -82,6 +102,53 @@ struct DiagnosticsTests {
         #expect(result.detail.contains("output 12 ms + 25 ms render"))
         #expect(result.detail.contains("48000 Hz/2 ch"))
         #expect(result.detail.contains("2 remote peers"))
+    }
+
+    @Test("Drift detection rejects missing or stale measurements and recovers with fresh samples")
+    func continuousDriftAndPresentationHealth() {
+        func context(drift: Double? = 0, age: Double? = 20,
+                     video: VideoPresentationTimingSnapshot? = nil) -> DiagnosticRoomContext {
+            DiagnosticRoomContext(isActive: true, role: .listener, participantCount: 2,
+                remotePeerCount: 1, syncLabel: "Synced", audioIsRendering: true,
+                hasBroadcaster: true, timing: SessionTimingDiagnostics(
+                    receiver: ReceiverTimingDiagnostics(roundTripMilliseconds: 2,
+                        clockOffsetMilliseconds: 0, jitterMilliseconds: 0,
+                        recommendedBufferMilliseconds: 250, outputLatencyMilliseconds: 10,
+                        renderHeadroomMilliseconds: 25, outputSampleRate: 48_000,
+                        outputChannelCount: 2, latenessMilliseconds: 0,
+                        latePacketCount: 15, resyncCount: 3,
+                        currentDriftMilliseconds: drift, driftMeasurementAgeMilliseconds: age,
+                        video: video), host: nil))
+        }
+        #expect(context(drift: 150).result.outcome == .warning)
+        #expect(context(drift: 100).result.outcome == .warning)
+        #expect(context(drift: nil).result.outcome == .warning)
+        #expect(context(age: 501).result.outcome == .warning)
+        #expect(context(age: nil).result.outcome == .warning)
+        #expect(context(drift: .nan).result.outcome == .warning)
+        #expect(context(drift: 2).result.outcome == .passed,
+            "Historical late/resync counters must not keep a recovered stream unhealthy")
+        let late = VideoPresentationTimingSnapshot(measuredAtNanos: 1_000_000_000,
+            latestHandoffAtNanos: 1_000_000_000, latestDeadlineMissNanos: 150_000_000,
+            maximumDeadlineMissNanos: 150_000_000, presentedCount: 1,
+            pendingCount: 0, oldestPendingDeadlineNanos: nil)
+        #expect(context(video: late).result.outcome == .warning)
+        let recovered = VideoPresentationTimingSnapshot(measuredAtNanos: 1_050_000_000,
+            latestHandoffAtNanos: 1_050_000_000, latestDeadlineMissNanos: 0,
+            maximumDeadlineMissNanos: 150_000_000, presentedCount: 2,
+            pendingCount: 0, oldestPendingDeadlineNanos: nil)
+        #expect(context(video: recovered).result.outcome == .passed)
+        let idle = VideoPresentationTimingSnapshot(measuredAtNanos: 8_000_000_000,
+            latestHandoffAtNanos: 1_000_000_000, latestDeadlineMissNanos: 150_000_000,
+            maximumDeadlineMissNanos: 150_000_000, presentedCount: 1,
+            pendingCount: 0, oldestPendingDeadlineNanos: nil)
+        #expect(context(video: idle).result.outcome == .passed,
+            "A static screen without pending work is not an inferred stall")
+        let blocked = VideoPresentationTimingSnapshot(measuredAtNanos: 1_000_000_000,
+            latestHandoffAtNanos: nil, latestDeadlineMissNanos: nil,
+            maximumDeadlineMissNanos: 0, presentedCount: 0,
+            pendingCount: 2, oldestPendingDeadlineNanos: 850_000_000)
+        #expect(context(video: blocked).result.outcome == .warning)
     }
 
     @Test("Room diagnostics explain when no live room exists")
