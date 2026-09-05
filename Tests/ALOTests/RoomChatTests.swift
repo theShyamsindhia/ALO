@@ -64,6 +64,48 @@ struct RoomChatTests {
         #expect(!accepted)
         #expect(doc.messages.isEmpty)
     }
+
+    @Test func attachmentMessagesRoundTripAndReassembleBoundedChunks() throws {
+        let bytes = Data((0..<(RoomChatAttachmentPacket.chunkBytes * 2 + 17)).map { UInt8($0 % 251) })
+        let metadata = RoomChatAttachment(fileName: "../photo.bin", contentType: "application/octet-stream", byteCount: bytes.count)
+        let operation = RoomChatOperation(kind: .message, text: "", timestamp: 1, attachment: metadata)
+        let wire = try #require(operation.encoded)
+        let decoded = try #require(RoomChatOperation.decode(wire))
+        #expect(decoded.attachment?.fileName == "photo.bin")
+
+        var document = RoomChatDocument()
+        apply(operation, to: &document)
+        #expect(document.messages.first?.attachment == metadata)
+        #expect(document.messages.first?.previewText == "Sent a file · photo.bin")
+
+        let payload = try #require(RoomChatAttachmentPayload(attachment: metadata, data: bytes))
+        let packets = RoomChatAttachmentPacket.packets(for: payload)
+        #expect(packets.count == 3)
+        #expect(try packets.allSatisfy {
+            try MeshEnvelope(type: "chat_attachment", nodeID: "alice", chatAttachmentPacket: $0)
+                .encodedLine().count <= MeshEnvelopeDecoder.maximumLineBytes
+        })
+        var assembler = RoomChatAttachmentAssembler()
+        var result: RoomChatAttachmentPayload?
+        for packet in packets { result = assembler.receive(senderID: "alice", packet: packet) ?? result }
+        #expect(result == payload)
+    }
+
+    @Test func attachmentAssemblerRejectsMissingOrCorruptChunks() throws {
+        let bytes = Data(repeating: 0x2A, count: RoomChatAttachmentPacket.chunkBytes + 1)
+        let metadata = RoomChatAttachment(fileName: "archive.zip", byteCount: bytes.count)
+        let payload = try #require(RoomChatAttachmentPayload(attachment: metadata, data: bytes))
+        let packets = RoomChatAttachmentPacket.packets(for: payload)
+        var assembler = RoomChatAttachmentAssembler()
+        #expect(assembler.receive(senderID: "alice", packet: packets[1]) == nil)
+        #expect(assembler.receive(senderID: "alice", packet: packets[0]) == nil)
+        var corrupt = packets[1]
+        corrupt = RoomChatAttachmentPacket(attachment: corrupt.attachment, digest: corrupt.digest,
+                                           chunkIndex: corrupt.chunkIndex, chunkCount: corrupt.chunkCount,
+                                           bytes: Data([0]))
+        #expect(assembler.receive(senderID: "alice", packet: corrupt) == nil)
+        #expect(!RoomChatAttachment(id: "../escape", fileName: "file.txt", byteCount: 1).isValid)
+    }
     @Test func mentionsRespectNamesAndNotificationPreferences() {
         #expect(RoomChatPresentation.containsMention(of: "jolly-walrus-715", in: "Hi @Jolly-Walrus-715!"))
         #expect(!RoomChatPresentation.containsMention(of: "alice", in: "name@alice.example.com"))

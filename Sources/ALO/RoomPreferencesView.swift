@@ -15,7 +15,7 @@ struct RoomPreferencesView: View {
             VStack(alignment: .leading, spacing: 14) {
                 Text("Room settings").font(.headline)
 
-                sectionTitle("This Mac")
+                sectionTitle("Playback on this Mac")
                 Toggle(isOn: Binding(get: { model.automaticAudioSync }, set: model.setAutomaticAudioSync)) {
                     settingLabel("Automatically keep this Mac in sync",
                                  help: "Corrects drift above 40 ms after one second, with eight seconds between corrections. Other Macs keep their own setting.")
@@ -47,6 +47,45 @@ struct RoomPreferencesView: View {
 
                 Divider()
 
+                sectionTitle("Voice and shared audio")
+                Picker(selection: microphoneSelection) {
+                    Text(systemDefaultMicrophoneLabel).tag("")
+                    ForEach(model.voiceInputDevices) { input in
+                        Text(input.menuName).tag(input.id)
+                    }
+                } label: {
+                    settingLabel("Microphone input", help: "Choose the microphone used for Talk and Open Line on this Mac.")
+                }
+                .pickerStyle(.menu)
+
+                Picker(selection: audioSourceSelection) {
+                    Text("All system audio").tag("")
+                    if let selectedID = model.selectedAudioSourceBundleID,
+                       !model.audioSourceApplications.contains(where: { $0.bundleIdentifier == selectedID }) {
+                        Text("\(model.selectedAudioSourceName ?? "Selected app") · unavailable").tag(selectedID)
+                    }
+                    ForEach(model.audioSourceApplications) { application in
+                        Text(application.name).tag(application.bundleIdentifier)
+                    }
+                } label: {
+                    settingLabel("Audio to share", help: "Share all system audio or only audio from one currently audible app.")
+                }
+                .pickerStyle(.menu)
+                .disabled(model.isHost)
+
+                if model.isHost {
+                    Text("Stop broadcasting to change the shared-audio source.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if model.audioSourceApplications.isEmpty {
+                    Text("Play audio in an app, then refresh the list.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+
+                HStack(spacing: 8) {
+                    Button("Refresh microphones", action: model.refreshVoiceInputs)
+                    Button("Refresh audible apps", action: model.refreshAudioSourceApplications)
+                }
+
                 Toggle(isOn: Binding(get: { model.musicDuckingEnabled }, set: model.setMusicDuckingEnabled)) {
                     settingLabel("Lower music during voice",
                                  help: "Reduces incoming room music while someone is speaking.")
@@ -65,14 +104,33 @@ struct RoomPreferencesView: View {
                 }
                 HStack(spacing: 8) {
                     Button("Turn microphone off", action: model.silenceMicrophone)
-                    Button(model.incomingMediaMuted && model.incomingCallsMuted ? "Unmute room audio" : "Mute room audio",
-                           action: model.toggleAllIncomingAudio)
+                    Button(model.incomingCallsMuted ? "Unmute incoming voice" : "Mute incoming voice",
+                           action: model.toggleIncomingCallsMute)
                 }
+                Button(model.incomingMediaMuted ? "Unmute room media" : "Mute room media",
+                       action: model.toggleIncomingMediaMute)
+
+                Divider()
+
+                sectionTitle("Interface")
+                HStack(spacing: 8) {
+                    Button(model.walkieBarHidden ? "Show Talk bar" : "Hide Talk bar") {
+                        model.walkieBarHidden ? model.showWalkieBar() : model.hideWalkieBar()
+                    }
+                    Button(model.floatingBarHidden ? "Show media bar" : "Hide media bar") {
+                        model.floatingBarHidden ? model.showFloatingBar() : model.hideFloatingBar()
+                    }
+                }
+                HStack(spacing: 8) {
+                    Button("Shortcut Mapper…", action: model.showShortcutMapper)
+                    Button("Diagnostics…", action: model.showDiagnostics)
+                }
+                Button("App settings…", action: model.showAppSettings)
 
                 Divider()
 
                 Toggle(isOn: $lyrics.enabled) {
-                    settingLabel("Show lyrics in chat", help: LyricsController.privacyNotice)
+                    settingLabel("Show lyrics below the player", help: LyricsController.privacyNotice)
                 }
 
                 Divider()
@@ -92,6 +150,38 @@ struct RoomPreferencesView: View {
         }
         .frame(width: 330)
         .frame(maxHeight: 500)
+        .onAppear {
+            model.refreshVoiceInputs()
+            model.refreshAudioSourceApplications()
+        }
+    }
+
+    private var microphoneSelection: Binding<String> {
+        Binding(
+            get: { model.selectedVoiceInputUID ?? "" },
+            set: { model.selectVoiceInput($0.isEmpty ? nil : $0) }
+        )
+    }
+
+    private var audioSourceSelection: Binding<String> {
+        Binding(
+            get: { model.selectedAudioSourceBundleID ?? "" },
+            set: { bundleIdentifier in
+                guard !bundleIdentifier.isEmpty else {
+                    model.selectAudioSource(nil)
+                    return
+                }
+                guard let application = model.audioSourceApplications.first(where: {
+                    $0.bundleIdentifier == bundleIdentifier
+                }) else { return }
+                model.selectAudioSource(application)
+            }
+        )
+    }
+
+    private var systemDefaultMicrophoneLabel: String {
+        VoiceInputCatalog.automaticInputName().map { "Automatic — \($0)" }
+            ?? "Automatic Microphone"
     }
 
     private var microphoneStatusColor: Color {

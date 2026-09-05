@@ -1,10 +1,12 @@
 # Room chat
 
-The room chat panel provides search over retained local history, replies, six emoji reactions, author-only edit/delete controls, and collaborative pins. Right-click a message to open its actions. Pins are visible to all updated room members. Search includes message text and sender names. The @ menu inserts a member mention; the bell menu selects all messages, mentions only, or muted incoming previews across rooms. Unread counts remain available. These controls govern the existing in-app previews, not operating-system notifications.
+The room chat panel provides search over retained local history, replies, six emoji reactions, author-only edit/delete controls, collaborative pins, and file attachments. Right-click a message to open its actions. Pins are visible to all updated room members. Search includes message text, sender names, and attachment names. The @ menu inserts a member mention; the bell menu selects all messages, mentions only, or muted incoming previews across rooms. Unread counts remain available.
 
 Chat drafts persist when switching between chat and activities. The original transcript scroll behavior remains in use; search results and pinned-only views do not mark the complete conversation as read.
 
 Web links have local host/path cards and open in the default browser only when clicked. No preview metadata is fetched. Drop up to three http/https URLs into the composer to share them as text; credential-bearing and non-web URLs are rejected.
+
+The composer accepts any regular, non-empty file up to 8 MB through the plus button or drag and drop. It shows an image thumbnail or file card before sending, and the attachment can be removed while keeping the draft. File data travels in bounded authenticated chunks directly to members connected at send time, is verified with SHA-256 before use, and is cached locally with a 128 MB per-room pruning budget. The durable chat event retains attachment metadata, while the file itself is not added to durable room history; a later joiner needs the sender to share it again.
 
 ## Compatibility and retention
 
@@ -20,8 +22,8 @@ These checks inherit the room transport's identity guarantees; they are not cryp
 
 ## Follow-up work
 
-Image/file attachments, website metadata/image previews, and operating-system mention notifications are not implemented. Search covers the retained history available on this device. Cross-device usability testing and older-client capability negotiation remain needed before a mixed-version rollout.
+Website metadata/image previews are not implemented. Search covers the retained history available on this device. Cross-device usability testing and older-client capability negotiation remain needed before a mixed-version rollout.
 
 ## Verification
 
-`swift test --filter 'RoomChatTests|ChatScrollTests|ChatTranscriptLayoutTests'` covers convergence, author checks, deletion, reactions, legacy identity, malformed payloads, message size bounds, draft retention, and native scroll behavior.
+`swift test --filter 'RoomChatTests|ChatScrollTests|ChatTranscriptLayoutTests|SecureMeshTests'` covers convergence, author checks, deletion, reactions, legacy identity, malformed payloads, message size bounds, attachment chunking and authenticated transfer, draft retention, and native scroll behavior.

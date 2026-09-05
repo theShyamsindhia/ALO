@@ -14,9 +14,11 @@ public struct RoomChatOperation: Codable, Sendable, Equatable {
     public let enabled: Bool?
     public let timestamp: UInt64
     public let mentionedParticipantIDs: [String]?
+    public let attachment: RoomChatAttachment?
 
-    public init(id: UUID = UUID(), kind: Kind, target: UUID? = nil, text: String? = nil, enabled: Bool? = nil, timestamp: UInt64 = UInt64(Date().timeIntervalSince1970 * 1000), mentionedParticipantIDs: [String]? = nil) {
+    public init(id: UUID = UUID(), kind: Kind, target: UUID? = nil, text: String? = nil, enabled: Bool? = nil, timestamp: UInt64 = UInt64(Date().timeIntervalSince1970 * 1000), mentionedParticipantIDs: [String]? = nil, attachment: RoomChatAttachment? = nil) {
         self.mentionedParticipantIDs = mentionedParticipantIDs
+        self.attachment = attachment
         self.id = id; self.kind = kind; self.target = target
         self.text = text; self.enabled = enabled; self.timestamp = timestamp
     }
@@ -39,13 +41,21 @@ public struct RoomChatOperation: Codable, Sendable, Equatable {
                   ids.reduce(0, { $0 + $1.utf8.count }) <= 512 else { return false }
         }
         switch kind {
-        case .message, .edit:
-            guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, text.count <= Self.maximumTextLength,
+        case .message:
+            let cleanText = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !cleanText.isEmpty || attachment?.isValid == true,
+                  cleanText.count <= Self.maximumTextLength,
+                  !cleanText.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) && $0 != "\n" && $0 != "\t" }) else { return false }
+            return attachment == nil || attachment?.isValid == true
+        case .edit:
+            guard attachment == nil, target != nil, let text,
+                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  text.count <= Self.maximumTextLength,
                   !text.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) && $0 != "\n" && $0 != "\t" }) else { return false }
-            return kind == .message || target != nil
-        case .delete: return target != nil
-        case .reaction: return target != nil && Self.emoji.contains(text ?? "") && enabled != nil
-        case .pin: return target != nil && enabled != nil
+            return true
+        case .delete: return target != nil && attachment == nil
+        case .reaction: return target != nil && Self.emoji.contains(text ?? "") && enabled != nil && attachment == nil
+        case .pin: return target != nil && enabled != nil && attachment == nil
         }
     }
 }
@@ -58,14 +68,22 @@ public struct RoomChatMessage: Identifiable, Equatable, Sendable {
     public let sentNanos: UInt64
     public var replyTo: UUID?
     public var mentionedParticipantIDs: [String]?
+    public var attachment: RoomChatAttachment?
     public var edited = false
     public var deleted = false
     public var pinned = false
     public var reactions: [String: Set<String>] = [:]
-    public init(id: UUID = UUID(), senderID: String, sender: String, text: String, sentNanos: UInt64, replyTo: UUID? = nil, mentionedParticipantIDs: [String]? = nil) {
+    public init(id: UUID = UUID(), senderID: String, sender: String, text: String, sentNanos: UInt64, replyTo: UUID? = nil, mentionedParticipantIDs: [String]? = nil, attachment: RoomChatAttachment? = nil) {
         self.mentionedParticipantIDs = mentionedParticipantIDs
+        self.attachment = attachment
         self.id = id; self.senderID = senderID; self.sender = sender
         self.text = text; self.sentNanos = sentNanos; self.replyTo = replyTo
+    }
+
+    public var previewText: String {
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !clean.isEmpty { return clean }
+        return attachment.map { "Sent a file · \($0.fileName)" } ?? "Message"
     }
 }
 
@@ -111,7 +129,7 @@ public struct RoomChatDocument: Sendable {
         var order: [UUID] = []
         for entry in ordered where entry.operation.kind == .message {
             let op = entry.operation
-            result[op.id] = RoomChatMessage(id: op.id, senderID: entry.senderID, sender: entry.sender, text: op.text ?? "", sentNanos: entry.sentNanos, replyTo: op.target, mentionedParticipantIDs: op.mentionedParticipantIDs)
+            result[op.id] = RoomChatMessage(id: op.id, senderID: entry.senderID, sender: entry.sender, text: op.text ?? "", sentNanos: entry.sentNanos, replyTo: op.target, mentionedParticipantIDs: op.mentionedParticipantIDs, attachment: op.attachment)
             order.append(op.id)
         }
         for entry in ordered where entry.operation.kind != .message {
@@ -121,7 +139,7 @@ public struct RoomChatDocument: Sendable {
             case .edit:
                 if entry.senderID == message.senderID { message.text = op.text ?? message.text; message.mentionedParticipantIDs = op.mentionedParticipantIDs; message.edited = true }
             case .delete:
-                if entry.senderID == message.senderID { message.deleted = true; message.text = "Message deleted"; message.mentionedParticipantIDs = nil; message.reactions = [:]; message.pinned = false }
+                if entry.senderID == message.senderID { message.deleted = true; message.text = "Message deleted"; message.mentionedParticipantIDs = nil; message.attachment = nil; message.reactions = [:]; message.pinned = false }
             case .reaction:
                 let emoji = op.text ?? ""
                 if op.enabled == true { message.reactions[emoji, default: []].insert(entry.senderID) }

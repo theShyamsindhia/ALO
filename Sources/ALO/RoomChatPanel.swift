@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 import ALOCore
 
 /// The complete chat surface is independent of room navigation and playback.
@@ -13,6 +14,8 @@ struct RoomChatPanel: View {
     let accent: Color
     let onLatestVisibilityChanged: (UUID, Bool) -> Void
     let send: (RoomChatOperation) -> Bool
+    let sendAttachment: (RoomChatOperation, URL) -> Bool
+    let attachmentURL: (RoomChatMessage) -> URL?
     @State private var query = ""
     @State private var onlyPins = false
     @State private var showsSearch = false
@@ -22,6 +25,9 @@ struct RoomChatPanel: View {
     @State private var selectedSuggestion = 0
     @State private var dismissedMentionDraft: String?
     @State private var chosenMentionIDs = Set<String>()
+    @State private var pendingAttachment: PendingChatAttachment?
+    @State private var choosesAttachment = false
+    @State private var attachmentDropTargeted = false
     @Binding var draft: String
     @Binding var notificationMode: ChatNotificationMode
     let mentionNames: [String]
@@ -41,10 +47,17 @@ struct RoomChatPanel: View {
         return Array(RoomMentionCompletion.suggestions(for: token, members: mentionMembers).prefix(6))
     }
     private var filtered: [RoomChatMessage] {
-        messages.filter { (!onlyPins || $0.pinned) && (query.isEmpty || (!$0.deleted && ($0.text.localizedCaseInsensitiveContains(query) || $0.sender.localizedCaseInsensitiveContains(query)))) }
+        messages.filter { message in
+            (!onlyPins || message.pinned) && (query.isEmpty || (!message.deleted
+                && (message.text.localizedCaseInsensitiveContains(query)
+                    || message.sender.localizedCaseInsensitiveContains(query)
+                    || (message.attachment?.fileName.localizedCaseInsensitiveContains(query) ?? false))))
+        }
     }
     private var validDraft: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.count <= RoomChatOperation.maximumTextLength
+        let hasText = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return (hasText || (editing == nil && pendingAttachment != nil))
+            && draft.count <= RoomChatOperation.maximumTextLength
     }
     var body: some View {
         VStack(spacing: 0) {
@@ -94,7 +107,17 @@ struct RoomChatPanel: View {
                 }.font(.caption).padding(.horizontal, 14).padding(.top, 8)
             }
             if !mentionSuggestions.isEmpty { mentionPicker }
+            if let pendingAttachment { pendingAttachmentPreview(pendingAttachment) }
             HStack(alignment: .center, spacing: 8) {
+                Button { choosesAttachment = true } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.plain)
+                .disabled(editing != nil)
+                .help("Attach a file up to 8 MB")
+                .accessibilityLabel("Attach file")
                 messageAvatar(id: currentParticipantID ?? "", name: "You", size: 22)
                     .accessibilityHidden(true)
                 TextField("Message \(roomTitle)", text: $draft, axis: .vertical)
@@ -125,10 +148,32 @@ struct RoomChatPanel: View {
 
         }
         .dropDestination(for: URL.self) { urls, _ in
+            if let file = urls.first(where: \.isFileURL), selectAttachment(file) {
+                return true
+            }
             let links = urls.filter(RoomChatPresentation.isWebURL).prefix(3).map(\.absoluteString).joined(separator: " ")
             let proposed = draft + (draft.isEmpty ? "" : " ") + links
             guard !links.isEmpty, proposed.count <= RoomChatOperation.maximumTextLength else { return false }
             draft = proposed; focused = true; return true
+        } isTargeted: { targeted in
+            attachmentDropTargeted = targeted
+        }
+        .overlay {
+            if attachmentDropTargeted {
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(accent.opacity(0.08))
+                    .overlay {
+                        Label("Drop file to attach", systemImage: "paperclip")
+                            .font(.headline).foregroundStyle(accent)
+                            .padding(14).background(.regularMaterial, in: Capsule())
+                    }
+                    .overlay(RoundedRectangle(cornerRadius: 16).stroke(accent, style: StrokeStyle(lineWidth: 2, dash: [7])))
+                    .padding(5).allowsHitTesting(false)
+            }
+        }
+        .fileImporter(isPresented: $choosesAttachment, allowedContentTypes: [.data], allowsMultipleSelection: false) { result in
+            guard case .success(let urls) = result, let url = urls.first else { return }
+            _ = selectAttachment(url)
         }
         .alert("Message not sent", isPresented: $sendFailed) {
             Button("OK", role: .cancel) { }
@@ -215,6 +260,7 @@ struct RoomChatPanel: View {
                 Text("Room history").font(.headline)
                 Text("Up to 500 chat events are retained. Edits and reactions count toward this limit; older messages may disappear.")
                 Text("Pins do not bypass retention. All members need an updated app for replies, reactions and edits.")
+                Text("Files up to 8 MB are transferred directly to members currently connected to the room and cached on each Mac.")
                 Text("Collapsed chat previews show incoming snippets in the compact room bar. This setting applies across rooms; unread counts remain visible when muted.")
                     .foregroundStyle(.secondary)
             }.font(.system(size: 11)).fixedSize(horizontal: false, vertical: true)
@@ -248,8 +294,13 @@ struct RoomChatPanel: View {
                     Label(original.map { "\($0.sender): \($0.text)" } ?? "Earlier message unavailable", systemImage: "arrowshape.turn.up.left")
                         .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
                 }
-                Text(message.text).font(.system(size: 12)).textSelection(.enabled)
-                    .foregroundStyle(message.deleted ? .secondary : .primary)
+                if !message.text.isEmpty || message.deleted {
+                    Text(message.text).font(.system(size: 12)).textSelection(.enabled)
+                        .foregroundStyle(message.deleted ? .secondary : .primary)
+                }
+                if !message.deleted, let attachment = message.attachment {
+                    attachmentCard(attachment, localURL: attachmentURL(message))
+                }
                 if !message.deleted {
                     ForEach(RoomChatPresentation.links(in: message.text), id: \.absoluteString) { url in
                         Button {
@@ -295,7 +346,7 @@ struct RoomChatPanel: View {
                     Menu("React") { ForEach(RoomChatOperation.emoji, id: \.self) { emoji in Button(emoji) { react(emoji, to: message) } } }
                     Button(message.pinned ? "Unpin for room" : "Pin for room", systemImage: "pin") { _ = send(.init(kind: .pin, target: message.id, enabled: !message.pinned)) }
                     if own {
-                        Button("Edit", systemImage: "pencil") { editing = message.id; replyTo = nil; draft = message.text; chosenMentionIDs = Set(message.mentionedParticipantIDs ?? []); focused = true }
+                        Button("Edit", systemImage: "pencil") { editing = message.id; replyTo = nil; pendingAttachment = nil; draft = message.text; chosenMentionIDs = Set(message.mentionedParticipantIDs ?? []); focused = true }
                         Button("Delete message", systemImage: "trash", role: .destructive) { _ = send(.init(kind: .delete, target: message.id)) }
                     }
                 }
@@ -314,12 +365,107 @@ struct RoomChatPanel: View {
             guard RoomChatPresentation.containsMention(of: member.name, in: draft) else { return false }
             return chosenMentionIDs.contains(member.id) || mentionMembers.filter { $0.name.caseInsensitiveCompare(member.name) == .orderedSame }.count == 1
         }.map(\.id)
-        let operation = RoomChatOperation(kind: editing == nil ? .message : .edit, target: editing ?? replyTo, text: draft.trimmingCharacters(in: .whitespacesAndNewlines), mentionedParticipantIDs: Array(Set(ids)).sorted())
+        let operation = RoomChatOperation(kind: editing == nil ? .message : .edit,
+                                          target: editing ?? replyTo,
+                                          text: draft.trimmingCharacters(in: .whitespacesAndNewlines),
+                                          mentionedParticipantIDs: Array(Set(ids)).sorted(),
+                                          attachment: editing == nil ? pendingAttachment?.metadata : nil)
         guard operation.encoded != nil else {
             sendError = ids.count > 8 ? "Use at most eight mentions in one message. Your draft has been kept." : "This message is too large to send with its mentions. Shorten it and try again."
             sendFailed = true; return
         }
-        guard send(operation) else { sendError = "There is no active room connection. Your draft has been kept."; sendFailed = true; return }
-        draft = ""; editing = nil; replyTo = nil; chosenMentionIDs = []; focused = true
+        let sent = pendingAttachment.map { sendAttachment(operation, $0.url) } ?? send(operation)
+        guard sent else { sendError = "The message or attachment could not be sent. Your draft has been kept."; sendFailed = true; return }
+        draft = ""; editing = nil; replyTo = nil; chosenMentionIDs = []; pendingAttachment = nil; focused = true
     }
+
+    private func selectAttachment(_ url: URL) -> Bool {
+        guard editing == nil, url.isFileURL else { return false }
+        let accessed = url.startAccessingSecurityScopedResource()
+        defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .contentTypeKey]),
+              values.isRegularFile == true, let bytes = values.fileSize, bytes > 0 else {
+            sendError = "Choose a regular file that is not empty."
+            sendFailed = true
+            return false
+        }
+        guard bytes <= RoomChatAttachment.maximumBytes else {
+            sendError = "Attachments can be up to 8 MB."
+            sendFailed = true
+            return false
+        }
+        let metadata = RoomChatAttachment(fileName: url.lastPathComponent,
+                                          contentType: values.contentType?.identifier,
+                                          byteCount: bytes)
+        guard metadata.isValid else {
+            sendError = "That file cannot be attached."
+            sendFailed = true
+            return false
+        }
+        pendingAttachment = PendingChatAttachment(url: url, metadata: metadata)
+        focused = true
+        return true
+    }
+
+    private func pendingAttachmentPreview(_ attachment: PendingChatAttachment) -> some View {
+        HStack(spacing: 9) {
+            filePreview(url: attachment.url, contentType: attachment.metadata.contentType)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(attachment.metadata.fileName).lineLimit(1)
+                Text(ByteCountFormatter.string(fromByteCount: Int64(attachment.metadata.byteCount), countStyle: .file))
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+            Button { pendingAttachment = nil } label: { Image(systemName: "xmark.circle.fill") }
+                .buttonStyle(.plain).help("Remove attachment").accessibilityLabel("Remove attachment")
+        }
+        .font(.system(size: 11))
+        .padding(.horizontal, 12).padding(.vertical, 7)
+        .background(accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+        .padding(.horizontal, 10).padding(.top, 6)
+    }
+
+    private func attachmentCard(_ attachment: RoomChatAttachment, localURL: URL?) -> some View {
+        Button {
+            if let localURL { NSWorkspace.shared.open(localURL) }
+        } label: {
+            HStack(spacing: 9) {
+                filePreview(url: localURL, contentType: attachment.contentType)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(attachment.fileName).font(.system(size: 11, weight: .semibold)).lineLimit(1)
+                    Text(localURL == nil
+                         ? "Waiting for file…"
+                         : ByteCountFormatter.string(fromByteCount: Int64(attachment.byteCount), countStyle: .file))
+                        .font(.system(size: 9)).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: localURL == nil ? "arrow.down.circle" : "arrow.up.right.square")
+                    .font(.system(size: 11)).foregroundStyle(accent)
+            }
+            .padding(8).frame(minWidth: 190)
+            .background(accent.opacity(0.09), in: RoundedRectangle(cornerRadius: 9))
+        }
+        .buttonStyle(.plain)
+        .disabled(localURL == nil)
+        .help(localURL == nil ? "The sender must be connected for this file to transfer" : "Open attachment")
+    }
+
+    @ViewBuilder
+    private func filePreview(url: URL?, contentType: String?) -> some View {
+        if let url, contentType.flatMap(UTType.init)?.conforms(to: .image) == true,
+           let image = NSImage(contentsOf: url) {
+            Image(nsImage: image).resizable().scaledToFill()
+                .frame(width: 34, height: 34).clipShape(RoundedRectangle(cornerRadius: 7))
+        } else {
+            Image(systemName: "doc.fill")
+                .font(.system(size: 16)).foregroundStyle(accent)
+                .frame(width: 34, height: 34)
+                .background(accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
+        }
+    }
+}
+
+private struct PendingChatAttachment {
+    let url: URL
+    let metadata: RoomChatAttachment
 }
