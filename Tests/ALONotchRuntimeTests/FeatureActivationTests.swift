@@ -45,6 +45,42 @@ final class FeatureActivationTests: XCTestCase {
         XCTAssertFalse(container.downloadViewModel.hasStartedMonitoring)
     }
 
+    func testFeaturePreferenceAutomaticallyStartsAndStopsWhileMasterIsEnabled() async {
+        let name = "ALONotchAutomaticActivationTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        let container = AppContainer(isRunningUITests: true, defaults: defaults)
+        let settings = container.settingsViewModel
+        XCTAssertTrue(settings.objectWillChange === settings.objectWillChange)
+        let activation = FeatureActivation(container: container)
+        defer { activation.setEnabled(false) }
+        activation.setEnabled(true)
+        XCTAssertFalse(container.downloadViewModel.hasStartedMonitoring)
+
+        settings.mediaAndFiles.isDownloadsLiveActivityEnabled = true
+        let startDeadline = Date().addingTimeInterval(2)
+        while !container.downloadViewModel.hasStartedMonitoring && Date() < startDeadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(container.downloadViewModel.hasStartedMonitoring)
+        XCTAssertEqual(activation.running, ["downloads"])
+
+        settings.mediaAndFiles.isDownloadsLiveActivityEnabled = false
+        let stopDeadline = Date().addingTimeInterval(2)
+        while container.downloadViewModel.hasStartedMonitoring && Date() < stopDeadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertFalse(container.downloadViewModel.hasStartedMonitoring)
+        XCTAssertTrue(activation.running.isEmpty)
+
+        activation.setEnabled(false)
+        settings.mediaAndFiles.isDownloadsLiveActivityEnabled = true
+        // Let the queued settings notification reconcile while master is off.
+        try? await Task.sleep(for: .milliseconds(100))
+        XCTAssertFalse(container.downloadViewModel.hasStartedMonitoring)
+        XCTAssertTrue(activation.running.isEmpty)
+    }
+
     func testAllActivitiesDefaultOffAndAllPagesOptIn() async {
         let name = "ALONotchRuntimeTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: name)!

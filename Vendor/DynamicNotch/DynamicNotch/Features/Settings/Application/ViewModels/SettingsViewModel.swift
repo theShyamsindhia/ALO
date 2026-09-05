@@ -3,6 +3,10 @@ import Foundation
 
 @MainActor
 final class SettingsViewModel: ObservableObject, NotchSettingsProviding {
+    // This forwarding model has no @Published storage. A stable publisher is
+    // required for settings UI and automatic feature lifecycle subscriptions.
+    let objectWillChange = ObservableObjectPublisher()
+
     // ARC only: these settings own values, publishers and defaults, with no
     // executor-bound cleanup. Avoid isolated-deinit backdeployment on macOS 15
     // when a synchronous dispatch callback releases the last reference.
