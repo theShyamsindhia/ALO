@@ -91,11 +91,24 @@ final class RoomPlaybackAdapterTests: XCTestCase {
             lyricsProvider: InactiveLyricsProvider(),
             favoritesStore: defaults
         )
+        var lyricsDemand = [Bool]()
+        model.configureExternalLyrics { lyricsDemand.append($0) }
         let artworkURL = NotchResources.bundle.url(forResource: "backgroundDark", withExtension: "png")
         service.update(RoomPlaybackSnapshot(title: "Room playback", artist: "Shared with your room",
             artworkData: try artworkURL.map { try Data(contentsOf: $0) }, isPlaying: true, elapsed: 47, duration: 224,
             canTogglePlayback: true, canSkipNext: true, canSkipPrevious: true, canSeek: true))
         model.startMonitoring()
+        model.applyRoomLyrics(RoomLyricsPayload(
+            title: "Room playback",
+            artist: "Shared with your room",
+            state: .ready,
+            lines: [
+                .init(seconds: 0, text: "The room wakes up in rhythm"),
+                .init(seconds: 42, text: "Every listener hears this line"),
+                .init(seconds: 84, text: "The next lyric waits below")
+            ],
+            hasPlaybackClock: true
+        ))
         defer { model.stopMonitoring() }
         for island in [false, true] {
             let notch = NotchViewModel(settings: settings.application, hideDelay: 0, queueDelay: 0,
@@ -132,7 +145,12 @@ final class RoomPlaybackAdapterTests: XCTestCase {
             try await render(island ? "original-room-player-island-compact.png" : "original-room-player-notch-compact.png")
             notch.expandActiveLiveActivity()
             try await Task.sleep(for: .milliseconds(500))
+            guard case .loaded(let lyrics) = model.lyricsState else {
+                return XCTFail("The expanded player must retain shared room lyrics")
+            }
+            XCTAssertEqual(lyrics.activeLineIndex(at: 47), 1)
             try await render(island ? "original-room-player-island.png" : "original-room-player-notch.png")
+            XCTAssertTrue(lyricsDemand.contains(true), "Rendering the expanded player must request room lyrics")
             notch.setActivityEventsEnabled(false)
         }
     }

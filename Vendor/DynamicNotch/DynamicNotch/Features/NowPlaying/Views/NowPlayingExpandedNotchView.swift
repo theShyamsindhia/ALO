@@ -44,12 +44,14 @@ struct NowPlayingExpandedNotchView: View {
                 true,
                 source: detailedPresentationSource
             )
+            nowPlayingViewModel.setLyricsPresentationActive(true)
         }
         .onDisappear {
             nowPlayingViewModel.setDetailedPresentationActive(
                 false,
                 source: detailedPresentationSource
             )
+            nowPlayingViewModel.setLyricsPresentationActive(false)
         }
     }
 
@@ -70,7 +72,10 @@ struct NowPlayingExpandedNotchView: View {
             Spacer()
 
             headerSection(snapshot: snapshot, appearance: appearance)
-            
+
+            lyricsSection(elapsedTime: displayedElapsedTime)
+                .frame(height: 34)
+
             Spacer()
 
             PlayerProgressBar(
@@ -110,6 +115,73 @@ struct NowPlayingExpandedNotchView: View {
         .padding(.horizontal, isDynamicIsland ? 25 : 55)
         .padding(.top, isDynamicIsland ? 15 : 25)
         .padding(.bottom, 15)
+    }
+
+    @ViewBuilder
+    private func lyricsSection(elapsedTime: TimeInterval) -> some View {
+        if nowPlayingViewModel.snapshot == nil {
+            Color.clear
+                .accessibilityHidden(true)
+        } else {
+            switch nowPlayingViewModel.lyricsState {
+            case .idle:
+                Color.clear
+                    .accessibilityHidden(true)
+
+            case .loading:
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.mini)
+                    Text("Finding lyrics…")
+                }
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.white.opacity(0.45))
+                .accessibilityElement(children: .combine)
+
+            case .loaded(let lyrics):
+                lyricLines(lyrics, elapsedTime: elapsedTime)
+
+            case .notFound:
+                lyricsStatus("Lyrics unavailable", systemImage: "quote.bubble")
+
+            case .failed:
+                lyricsStatus("Lyrics didn't load", systemImage: "exclamationmark.arrow.triangle.2.circlepath")
+            }
+        }
+    }
+
+    private func lyricLines(_ lyrics: TrackLyrics, elapsedTime: TimeInterval) -> some View {
+        let activeIndex = lyrics.activeLineIndex(at: elapsedTime) ?? 0
+        let activeLine = lyrics.lines.indices.contains(activeIndex) ? lyrics.lines[activeIndex] : nil
+        let nextIndex = activeIndex + 1
+        let nextLine = lyrics.isSynced && lyrics.lines.indices.contains(nextIndex) ? lyrics.lines[nextIndex] : nil
+
+        return VStack(spacing: 1) {
+            Text(activeLine?.text ?? "Lyrics unavailable")
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(activeLine == nil ? 0.4 : 0.86))
+                .lineLimit(1)
+                .contentTransition(.opacity)
+
+            if let nextLine {
+                Text(nextLine.text)
+                    .font(.system(size: 10, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.34))
+                    .lineLimit(1)
+                    .contentTransition(.opacity)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .animation(.easeInOut(duration: 0.22), value: activeIndex)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(activeLine.map { "Lyrics: \($0.text)" } ?? "Lyrics unavailable")
+    }
+
+    private func lyricsStatus(_ title: String, systemImage: String) -> some View {
+        Label(title, systemImage: systemImage)
+            .font(.system(size: 10.5, weight: .medium))
+            .foregroundStyle(.white.opacity(0.38))
+            .lineLimit(1)
     }
 
     @ViewBuilder
