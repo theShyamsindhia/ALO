@@ -125,6 +125,10 @@ jobs:
           xcrun stapler validate dist/ALO.app
           xcrun stapler validate dist/ALO-macos-arm64.dmg
           spctl --assess --type execute --verbose=4 dist/ALO.app
+          if zipinfo -l dist/ALO-macos-arm64.zip | awk '$1 ~ /^l/ { print; found=1 } END { exit !found }'; then
+            echo "Release ZIP contains a symbolic link rejected by older ALO updaters" >&2
+            exit 1
+          fi
 
       - name: Upload app
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

@@ -86,10 +86,40 @@ run_codesign() {
     return "$codesign_status"
 }
 
+# Older ALO updaters deliberately reject archive links. Materialize only links
+# whose targets stay inside the built resource bundle before signing so the
+# release remains installable from those versions without weakening that guard.
+copy_resource_bundle_without_symlinks() {
+    local source="$1"
+    local destination="$2"
+    local source_root link resolved framework
+    source_root="$(/bin/realpath "$source")"
+    while IFS= read -r -d '' link; do
+        resolved="$(/bin/realpath "$link")" || return 1
+        if [[ "$resolved" != "$source_root"/* ]]; then
+            echo "Refusing resource link outside its bundle: $link" >&2
+            return 1
+        fi
+    done < <(/usr/bin/find "$source" -type l -print0)
+    /bin/cp -RLp "$source" "$destination"
+    # A versioned framework becomes ambiguous if both its materialized root
+    # aliases and Versions tree remain. Keep the standard flat representation
+    # that codesign and the runtime loader both understand.
+    while IFS= read -r -d '' framework; do
+        if [[ -d "$framework/Versions" ]]; then
+            /bin/chmod -R u+w "$framework/Versions"
+            /bin/rm -R "$framework/Versions"
+        fi
+    done < <(/usr/bin/find "$destination" -type d -name '*.framework' -prune -print0)
+    if [[ -n "$(/usr/bin/find "$destination" -type l -print -quit)" ]]; then
+        echo "Resource bundle still contains a symbolic link: $destination" >&2
+        return 1
+    fi
+}
+
 # Resource bundles contain the original notch assets and the MediaRemote helper.
-# Sign nested native code before sealing either the bundle or its containing app.
-# Preserve framework symlinks, and do not give helpers ALO's bundle identifier or
-# microphone/camera entitlements.
+# Sign nested native code before sealing either the bundle or its containing app,
+# and do not give helpers ALO's bundle identifier or microphone/camera entitlements.
 sign_runtime_code() {
     local resource_directory="$1"
     local native_file framework
@@ -119,7 +149,7 @@ resource_bundles=()
 for built_resource_bundle in .build/${architectures[1]}-apple-macosx/release/*.bundle(N); do
     packaged_resource_bundle="dist/${built_resource_bundle:t}"
     rm -rf "$packaged_resource_bundle"
-    ditto "$built_resource_bundle" "$packaged_resource_bundle"
+    copy_resource_bundle_without_symlinks "$built_resource_bundle" "$packaged_resource_bundle"
     sign_runtime_code "$packaged_resource_bundle"
     resource_bundles+=("$packaged_resource_bundle")
 done
