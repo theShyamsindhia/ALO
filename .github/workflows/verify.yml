@@ -20,6 +20,8 @@ jobs:
   mac-tests:
     runs-on: macos-15
     timeout-minutes: 30
+    env:
+      ALO_UI_RENDER_DIR: ${{ runner.temp }}/alo-ui-renders
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Verify pinned toolchain
@@ -52,6 +54,13 @@ jobs:
           grep -Eq 'Test run with [1-9][0-9]* tests?( in [0-9]+ suites)? passed' "$RUNNER_TEMP/alo-tests.log"
       - name: Run repeatable room scenarios
         run: bash Scripts/test_room_scenarios.sh
+      - name: Export native UI renders
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: alo-ui-renders
+          path: ${{ runner.temp }}/alo-ui-renders
+          if-no-files-found: warn
       - name: Show XCTest crash reports on failure
         if: failure()
         run: |
