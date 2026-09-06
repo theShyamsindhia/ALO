@@ -112,7 +112,7 @@ extension NativePresentationTests {
             }
         }
 
-        @Test("Black Talk bar keeps a complete unread badge in light and dark appearances",
+        @Test("Translucent Talk bar keeps a complete unread badge in light and dark appearances",
               arguments: [false, true], [(0, false), (1, false), (27, false), (100, false), (27, true)])
         func talkBarBadge(dark: Bool, state: (Int, Bool)) async throws {
             _ = NSApplication.shared
@@ -140,9 +140,14 @@ extension NativePresentationTests {
             let backgroundY: CGFloat = floating ? 7 : 3
             let background = try #require(bitmap.colorAt(x: bitmap.pixelsWide / 2, y: Int(backgroundY * scale))?
                 .usingColorSpace(.deviceRGB))
-            #expect(background.redComponent < 0.01)
-            #expect(background.greenComponent < 0.01)
-            #expect(background.blueComponent < 0.01)
+            if floating {
+                // With no artwork, the native material stays neutral.
+                #expect(abs(background.redComponent - background.greenComponent) < 0.02)
+                #expect(abs(background.greenComponent - background.blueComponent) < 0.02)
+            } else {
+                // The embedded strip must let its parent's material show through.
+                #expect(background.alphaComponent < 0.01)
+            }
 
             var redRows = Set<Int>()
             for y in 0..<bitmap.pixelsHigh {
