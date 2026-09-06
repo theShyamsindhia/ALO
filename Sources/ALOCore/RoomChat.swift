@@ -104,6 +104,9 @@ public struct RoomChatDocument: Sendable {
 
     @discardableResult
     public mutating func receive(senderID: String, sender: String, text: String, sentNanos: UInt64, version: MeshVersion) -> Bool {
+        // Tray mutations share the durable chat transport for compatibility,
+        // but are reduced by RoomTrayDocument and must never appear as messages.
+        if text.hasPrefix(RoomTrayOperation.prefix) { return false }
         let operation: RoomChatOperation
         if text.hasPrefix(RoomChatOperation.prefix) {
             guard let decoded = RoomChatOperation.decode(text) else { return false }

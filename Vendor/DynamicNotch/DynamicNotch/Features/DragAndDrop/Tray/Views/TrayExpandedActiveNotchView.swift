@@ -140,6 +140,12 @@ struct TrayExpandedActiveNotchView: View {
                     withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                         fileTrayViewModel.remove(item)
                     }
+                },
+                onDownload: {
+                    fileTrayViewModel.requestDownload(item)
+                },
+                onExport: {
+                    export(item)
                 }
             )
             .transition(
@@ -148,6 +154,16 @@ struct TrayExpandedActiveNotchView: View {
                     .combined(with: .opacity)
             )
         }
+    }
+
+    private func export(_ item: FileTrayItem) {
+        guard item.isAvailable else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = item.displayName
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        guard panel.runModal() == .OK, let destinationURL = panel.url else { return }
+        fileTrayViewModel.export(item, to: destinationURL)
     }
 }
 
@@ -159,11 +175,13 @@ private struct TrayExpandedItemView: View {
     let onMoveCompleted: ([FileTrayItem]) -> Void
     let onSelect: () -> Void
     let onRemove: () -> Void
+    let onDownload: () -> Void
+    let onExport: () -> Void
     
     @State private var isPressed = false
     
     var body: some View {
-        VStack(spacing: 7) {
+        VStack(spacing: 5) {
             Image(nsImage: item.icon)
                 .resizable()
                 .scaledToFit()
@@ -174,9 +192,10 @@ private struct TrayExpandedItemView: View {
             Text(item.displayName)
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.white.opacity(0.86))
-                .lineLimit(2)
+                .lineLimit(1)
                 .multilineTextAlignment(.center)
-                .frame(width: 72, height: 28)
+                .frame(width: 72, height: 14)
+            Spacer(minLength: 15)
         }
         .frame(width: 80, height: 94)
         .background(
@@ -185,15 +204,22 @@ private struct TrayExpandedItemView: View {
         )
         .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay {
-            TrayExpandedItemDragView(
-                draggedItems: draggedItems,
-                showsRemoveButton: showsRemoveButton,
-                onMoveCompleted: onMoveCompleted,
-                onSelect: onSelect,
-                onPressedChange: { isPressed in
-                    self.isPressed = isPressed
-                }
-            )
+            if item.isAvailable {
+                TrayExpandedItemDragView(
+                    draggedItems: draggedItems,
+                    showsRemoveButton: showsRemoveButton,
+                    showsFileActionButton: true,
+                    onMoveCompleted: onMoveCompleted,
+                    onSelect: onSelect,
+                    onPressedChange: { isPressed in
+                        self.isPressed = isPressed
+                    }
+                )
+            } else {
+                Button(action: onSelect) { Color.clear }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Select \(item.displayName)")
+            }
         }
         .overlay(alignment: .topTrailing) {
             if showsRemoveButton {
@@ -208,15 +234,48 @@ private struct TrayExpandedItemView: View {
                 .padding(.trailing, 5)
             }
         }
+        .overlay(alignment: .bottom) {
+            if item.isAvailable {
+                Button(action: onExport) {
+                    Label("Save", systemImage: "square.and.arrow.down")
+                        .font(.system(size: 8, weight: .semibold))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white.opacity(0.72))
+                .padding(.bottom, 3)
+                .help("Save a copy of \(item.displayName)")
+                .accessibilityLabel("Save \(item.displayName)")
+            } else {
+                Button(action: onDownload) {
+                    if item.transferState == .downloading {
+                        HStack(spacing: 3) {
+                            ProgressView().controlSize(.mini)
+                            Text(verbatim: "Downloading")
+                                .font(.system(size: 8, weight: .semibold))
+                        }
+                    } else {
+                        Label("Download", systemImage: "arrow.down.circle.fill")
+                            .font(.system(size: 8, weight: .semibold))
+                    }
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white.opacity(0.82))
+                .allowsHitTesting(item.transferState != .downloading)
+                .padding(.bottom, 3)
+                .help(item.transferState == .downloading ? "Downloading \(item.displayName)" : "Download \(item.displayName)")
+                .accessibilityLabel(item.transferState == .downloading ? "Downloading \(item.displayName)" : "Download \(item.displayName)")
+            }
+        }
         .scaleEffect(isPressed ? 0.9 : 1)
         .animation(.spring(response: 0.22, dampingFraction: 0.58), value: isPressed)
-        .help(item.url.path)
+        .help(item.localURL?.path ?? "Download \(item.displayName) to use this file")
     }
 }
 
 private struct TrayExpandedItemDragView: NSViewRepresentable {
     let draggedItems: () -> [FileTrayItem]
     let showsRemoveButton: Bool
+    let showsFileActionButton: Bool
     let onMoveCompleted: ([FileTrayItem]) -> Void
     let onSelect: () -> Void
     let onPressedChange: (Bool) -> Void
@@ -225,6 +284,7 @@ private struct TrayExpandedItemDragView: NSViewRepresentable {
         let view = TrayExpandedItemDragNSView()
         view.draggedItems = draggedItems
         view.showsRemoveButton = showsRemoveButton
+        view.showsFileActionButton = showsFileActionButton
         view.onMoveCompleted = onMoveCompleted
         view.onSelect = onSelect
         view.onPressedChange = onPressedChange
@@ -234,6 +294,7 @@ private struct TrayExpandedItemDragView: NSViewRepresentable {
     func updateNSView(_ nsView: TrayExpandedItemDragNSView, context: Context) {
         nsView.draggedItems = draggedItems
         nsView.showsRemoveButton = showsRemoveButton
+        nsView.showsFileActionButton = showsFileActionButton
         nsView.onMoveCompleted = onMoveCompleted
         nsView.onSelect = onSelect
         nsView.onPressedChange = onPressedChange
@@ -243,6 +304,7 @@ private struct TrayExpandedItemDragView: NSViewRepresentable {
 private final class TrayExpandedItemDragNSView: NSView, NSDraggingSource, QLPreviewPanelDataSource, QLPreviewPanelDelegate {
     var draggedItems: () -> [FileTrayItem] = { [] }
     var showsRemoveButton = true
+    var showsFileActionButton = true
     var onMoveCompleted: ([FileTrayItem]) -> Void = { _ in }
     var onSelect: () -> Void = {}
     var onPressedChange: (Bool) -> Void = { _ in }
@@ -259,6 +321,9 @@ private final class TrayExpandedItemDragNSView: NSView, NSDraggingSource, QLPrev
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         if showsRemoveButton && closeButtonHitRect.contains(point) {
+            return nil
+        }
+        if showsFileActionButton && fileActionButtonHitRect.contains(point) {
             return nil
         }
         
@@ -327,13 +392,13 @@ private final class TrayExpandedItemDragNSView: NSView, NSDraggingSource, QLPrev
     }
     
     func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int {
-        return draggedItems().count
+        draggedItems().filter(\.isAvailable).count
     }
     
     func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> QLPreviewItem! {
-        let items = draggedItems()
+        let items = draggedItems().compactMap(\.localURL)
         guard index < items.count else { return nil }
-        return items[index].url as NSURL
+        return items[index] as NSURL
     }
     
     func previewPanel(_ panel: QLPreviewPanel!, sourceFrameOnScreenFor item: QLPreviewItem!) -> NSRect {
@@ -390,7 +455,7 @@ private final class TrayExpandedItemDragNSView: NSView, NSDraggingSource, QLPrev
     }
     
     private func beginDragging(with event: NSEvent) {
-        let items = draggedItems()
+        let items = draggedItems().filter(\.isAvailable)
         guard items.isEmpty == false else {
             return
         }
@@ -398,7 +463,7 @@ private final class TrayExpandedItemDragNSView: NSView, NSDraggingSource, QLPrev
         activeDragItems = items
 
         let point = convert(event.locationInWindow, from: nil)
-        let draggingItems = items.enumerated().map { index, item in
+        let draggingItems = items.enumerated().compactMap { index, item in
             makeDraggingItem(for: item, index: index, at: point)
         }
         
@@ -418,7 +483,8 @@ private final class TrayExpandedItemDragNSView: NSView, NSDraggingSource, QLPrev
         for item: FileTrayItem,
         index: Int,
         at point: NSPoint
-    ) -> NSDraggingItem {
+    ) -> NSDraggingItem? {
+        guard let localURL = item.localURL else { return nil }
         let dragSize = NSSize(width: 48, height: 48)
         let offset = CGFloat(min(index, 4)) * 4
         let frame = NSRect(
@@ -428,7 +494,7 @@ private final class TrayExpandedItemDragNSView: NSView, NSDraggingSource, QLPrev
             height: dragSize.height
         )
         let draggingItem = NSDraggingItem(
-            pasteboardWriter: FileTrayPasteboardWriter(url: item.url)
+            pasteboardWriter: FileTrayPasteboardWriter(url: localURL)
         )
         
         draggingItem.setDraggingFrame(frame, contents: dragImage(for: item, size: dragSize))
@@ -448,5 +514,9 @@ private final class TrayExpandedItemDragNSView: NSView, NSDraggingSource, QLPrev
             width: 30,
             height: 30
         )
+    }
+
+    private var fileActionButtonHitRect: NSRect {
+        NSRect(x: 0, y: 0, width: bounds.width, height: 26)
     }
 }

@@ -39,6 +39,12 @@ public final class EmbeddedNotchRuntime: ObservableObject {
     @Published public private(set) var isLocked = false
 
     public var onRoomLyricsDemandChanged: ((Bool) -> Void)?
+    /// ALO owns room membership and file transport. These callbacks let the
+    /// original tray UI request room operations without duplicating that state.
+    public var onRoomTrayAddRequested: (([URL]) -> Void)?
+    public var onRoomTrayRemoveRequested: (([String]) -> Void)?
+    public var onRoomTrayDownloadRequested: ((String) -> Void)?
+    public var onRoomTrayExportRequested: ((String, URL) -> Void)?
     private var roomLyricsPayload: RoomLyricsPayload?
     private var roomPlaybackSnapshot: RoomPlaybackSnapshot?
     private var roomPlaybackCommand: @MainActor (RoomPlaybackCommand) -> Void = { _ in }
@@ -73,6 +79,18 @@ public final class EmbeddedNotchRuntime: ObservableObject {
         let delegate = AppDelegate()
         self.delegate = delegate
         self.activation = FeatureActivation(container: delegate.container)
+        delegate.container.fileTrayViewModel.onRoomAddRequested = { [weak self] urls in
+            self?.onRoomTrayAddRequested?(urls)
+        }
+        delegate.container.fileTrayViewModel.onRoomRemoveRequested = { [weak self] itemIDs in
+            self?.onRoomTrayRemoveRequested?(itemIDs)
+        }
+        delegate.container.fileTrayViewModel.onRoomDownloadRequested = { [weak self] itemID in
+            self?.onRoomTrayDownloadRequested?(itemID)
+        }
+        delegate.container.fileTrayViewModel.onRoomExportRequested = { [weak self] itemID, url in
+            self?.onRoomTrayExportRequested?(itemID, url)
+        }
         AppDelegate.embeddedInstance = delegate
         Self.activeInstance = self
         delegate.notchViewModel.$notchModel
@@ -127,6 +145,12 @@ public final class EmbeddedNotchRuntime: ObservableObject {
                 self.delegate.notchViewModel.isLocked = locked
             }
             .store(in: &observations)
+    }
+
+    /// Supplying a snapshot makes the tray room-backed. Pass `nil` after
+    /// leaving a room to restore the standalone local tray.
+    public func updateRoomTray(_ snapshot: RoomTraySnapshot?) {
+        delegate.container.fileTrayViewModel.applyRoomSnapshot(snapshot)
     }
 
     /// Feature choices remain persisted when the master switch is turned off.

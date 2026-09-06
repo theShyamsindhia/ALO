@@ -43,15 +43,17 @@ private enum FileTrayRemovalPolicy: String, Codable {
 }
 
 struct FileTrayItem: Identifiable, Equatable {
-    let id: UUID
-    let url: URL
+    let id: String
+    let localURL: URL?
     let displayName: String
     let isDirectory: Bool
+    let byteCount: Int?
+    let transferState: RoomTraySnapshot.Item.TransferState
     fileprivate let removalPolicy: FileTrayRemovalPolicy
 
     fileprivate init(
         url: URL,
-        id: UUID = UUID(),
+        id: String = UUID().uuidString,
         removalPolicy: FileTrayRemovalPolicy = .deleteCopy
     ) {
         let standardizedURL = url.standardizedFileURL
@@ -63,20 +65,43 @@ struct FileTrayItem: Identifiable, Equatable {
         )
 
         self.id = id
-        self.url = standardizedURL
+        self.localURL = standardizedURL
         self.displayName = standardizedURL.lastPathComponent.isEmpty ?
         standardizedURL.deletingLastPathComponent().lastPathComponent :
         standardizedURL.lastPathComponent
         self.isDirectory = isDirectoryValue.boolValue
+        self.byteCount = try? standardizedURL.resourceValues(forKeys: [.fileSizeKey]).fileSize
+        self.transferState = .available
         self.removalPolicy = removalPolicy
     }
 
-    var icon: NSImage {
-        NSWorkspace.shared.icon(forFile: url.path)
+    fileprivate init(snapshot: RoomTraySnapshot.Item) {
+        let candidateURL = snapshot.localFileURL?.standardizedFileURL
+        var isDirectoryValue: ObjCBool = false
+        let hasLocalFile = candidateURL.map {
+            FileManager.default.fileExists(atPath: $0.path, isDirectory: &isDirectoryValue)
+        } ?? false
+
+        id = snapshot.id
+        localURL = hasLocalFile ? candidateURL : nil
+        displayName = URL(fileURLWithPath: snapshot.fileName).lastPathComponent
+        isDirectory = hasLocalFile && isDirectoryValue.boolValue
+        byteCount = snapshot.byteCount
+        transferState = hasLocalFile ? .available :
+            (snapshot.transferState == .available ? .unavailable : snapshot.transferState)
+        removalPolicy = .deleteCopy
     }
 
-    var itemProvider: NSItemProvider {
-        let provider = NSItemProvider(object: url as NSURL)
+    var icon: NSImage {
+        if let localURL {
+            return NSWorkspace.shared.icon(forFile: localURL.path)
+        }
+        return NSWorkspace.shared.icon(for: .data)
+    }
+
+    var itemProvider: NSItemProvider? {
+        guard let localURL else { return nil }
+        let provider = NSItemProvider(object: localURL as NSURL)
         provider.suggestedName = displayName
         provider.registerDataRepresentation(
             forTypeIdentifier: FileTrayPasteboard.localDragTypeIdentifier,
@@ -91,14 +116,16 @@ struct FileTrayItem: Identifiable, Equatable {
     var movesOutOfTrayOnDrag: Bool {
         removalPolicy == .trashMovedOriginal
     }
+
+    var isAvailable: Bool { localURL != nil }
 }
 
 private struct FileTrayStoredItem: Codable {
-    let id: UUID
+    let id: String
     let path: String
     let removalPolicy: FileTrayRemovalPolicy
 
-    init(id: UUID, path: String, removalPolicy: FileTrayRemovalPolicy) {
+    init(id: String, path: String, removalPolicy: FileTrayRemovalPolicy) {
         self.id = id
         self.path = path
         self.removalPolicy = removalPolicy
@@ -107,7 +134,11 @@ private struct FileTrayStoredItem: Codable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
 
-        id = try container.decode(UUID.self, forKey: .id)
+        if let stringID = try? container.decode(String.self, forKey: .id) {
+            id = stringID
+        } else {
+            id = try container.decode(UUID.self, forKey: .id).uuidString
+        }
         path = try container.decode(String.self, forKey: .path)
         removalPolicy = try container.decodeIfPresent(
             FileTrayRemovalPolicy.self,
@@ -127,6 +158,12 @@ final class FileTrayViewModel: ObservableObject {
 
     private static let persistedItemsKey = "settings.live.tray.persistedItems"
     private let defaults: UserDefaults
+    private var localItems: [FileTrayItem] = []
+    private(set) var isRoomBacked = false
+    var onRoomAddRequested: (([URL]) -> Void)?
+    var onRoomRemoveRequested: (([String]) -> Void)?
+    var onRoomDownloadRequested: ((String) -> Void)?
+    var onRoomExportRequested: ((String, URL) -> Void)?
 
     init(defaults: UserDefaults = .aloNotch) {
         self.defaults = defaults
@@ -137,8 +174,17 @@ final class FileTrayViewModel: ObservableObject {
     func activate() {
         guard !hasLoadedItems else { return }
         hasLoadedItems = true
-        restorePersistedItems()
-        FileTrayStorage.removeUntrackedItems(keeping: items.map(\.url))
+        if isRoomBacked {
+            let sharedItems = items
+            restorePersistedItems()
+            localItems = items
+            items = sharedItems
+            selectedItemIDs.formIntersection(Set(sharedItems.map(\.id)))
+            FileTrayStorage.removeUntrackedItems(keeping: localItems.compactMap(\.localURL))
+        } else {
+            restorePersistedItems()
+            FileTrayStorage.removeUntrackedItems(keeping: items.compactMap(\.localURL))
+        }
     }
 
     var onItemsChange: (([FileTrayItem]) -> Void)? {
@@ -168,7 +214,13 @@ final class FileTrayViewModel: ObservableObject {
     }
 
     private func add(_ urls: [URL], removalPolicy: FileTrayRemovalPolicy) {
-        var knownIdentities = Set(items.map { Self.identity(for: $0.url) })
+        if isRoomBacked {
+            let files = urls.map(\.standardizedFileURL).filter(\.isFileURL)
+            if !files.isEmpty { onRoomAddRequested?(files) }
+            return
+        }
+
+        var knownIdentities = Set(items.compactMap(\.localURL).map { Self.identity(for: $0) })
         let newItems = urls.compactMap { url -> FileTrayItem? in
             let standardizedURL = url.standardizedFileURL
             guard standardizedURL.isFileURL else { return nil }
@@ -185,6 +237,12 @@ final class FileTrayViewModel: ObservableObject {
     }
 
     func add(_ urls: [URL], mode: FileTrayUsageMode) throws {
+        if isRoomBacked {
+            // Room files are uploaded from their original URLs. Never apply the
+            // standalone tray's destructive move mode to a member's file.
+            add(urls, removalPolicy: .deleteCopy)
+            return
+        }
         switch mode {
         case .copy:
             let importedURLs = try FileTrayStorage.importItems(from: urls, moveOriginals: false)
@@ -221,6 +279,10 @@ final class FileTrayViewModel: ObservableObject {
     }
 
     func remove(_ item: FileTrayItem) {
+        if isRoomBacked {
+            onRoomRemoveRequested?([item.id])
+            return
+        }
         updateItems(items.filter { $0.id != item.id })
         removeStoredFiles(for: [item])
     }
@@ -229,6 +291,10 @@ final class FileTrayViewModel: ObservableObject {
         guard hasSelection else { return }
 
         let removedItems = items.filter { selectedItemIDs.contains($0.id) }
+        if isRoomBacked {
+            onRoomRemoveRequested?(removedItems.map(\.id))
+            return
+        }
         let remainingItems = items.filter { selectedItemIDs.contains($0.id) == false }
 
         updateItems(remainingItems)
@@ -238,11 +304,17 @@ final class FileTrayViewModel: ObservableObject {
     func clear() {
         let removedItems = items
 
+        if isRoomBacked {
+            onRoomRemoveRequested?(removedItems.map(\.id))
+            return
+        }
+
         updateItems([])
         removeStoredFiles(for: removedItems)
     }
 
     func forgetMovedOutItems(_ movedItems: [FileTrayItem]) {
+        guard !isRoomBacked else { return }
         let movedItemIDs = Set(
             movedItems
                 .filter(\.movesOutOfTrayOnDrag)
@@ -256,11 +328,46 @@ final class FileTrayViewModel: ObservableObject {
         updateItems(items.filter { movedItemIDs.contains($0.id) == false })
     }
 
+    func requestDownload(_ item: FileTrayItem) {
+        guard isRoomBacked, !item.isAvailable, item.transferState != .downloading else { return }
+        onRoomDownloadRequested?(item.id)
+    }
 
-    private func updateItems(_ newItems: [FileTrayItem]) {
+    func export(_ item: FileTrayItem, to destinationURL: URL) {
+        guard let sourceURL = item.localURL else { return }
+        if isRoomBacked {
+            onRoomExportRequested?(item.id, destinationURL.standardizedFileURL)
+            return
+        }
+        try? FileManager.default.copyItem(at: sourceURL, to: destinationURL.standardizedFileURL)
+    }
+
+    func applyRoomSnapshot(_ snapshot: RoomTraySnapshot?) {
+        if let snapshot {
+            if !isRoomBacked { localItems = items }
+            isRoomBacked = true
+            var knownIDs = Set<String>()
+            let validItems = snapshot.items.compactMap { item -> FileTrayItem? in
+                guard !item.id.isEmpty,
+                      knownIDs.insert(item.id).inserted,
+                      !item.fileName.isEmpty,
+                      URL(fileURLWithPath: item.fileName).lastPathComponent == item.fileName,
+                      item.byteCount > 0 else { return nil }
+                return FileTrayItem(snapshot: item)
+            }
+            updateItems(validItems, persist: false)
+        } else if isRoomBacked {
+            isRoomBacked = false
+            updateItems(localItems, persist: false)
+            localItems = []
+        }
+    }
+
+
+    private func updateItems(_ newItems: [FileTrayItem], persist: Bool = true) {
         items = newItems
         selectedItemIDs.formIntersection(Set(newItems.map(\.id)))
-        persistItems()
+        if persist { persistItems() }
         onItemsChange?(newItems)
     }
 
@@ -272,20 +379,25 @@ final class FileTrayViewModel: ObservableObject {
         for item in removedItems {
             switch item.removalPolicy {
             case .deleteCopy:
-                FileTrayStorage.deleteIfStoredInTray(item.url)
+                if let localURL = item.localURL {
+                    FileTrayStorage.deleteIfStoredInTray(localURL)
+                }
 
             case .trashMovedOriginal:
-                FileTrayStorage.trashIfStoredInTray(item.url)
+                if let localURL = item.localURL {
+                    FileTrayStorage.trashIfStoredInTray(localURL)
+                }
             }
         }
     }
 
 
     private func persistItems() {
-        let storedItems = items.map {
-            FileTrayStoredItem(
+        let storedItems: [FileTrayStoredItem] = items.compactMap {
+            guard let localURL = $0.localURL else { return nil }
+            return FileTrayStoredItem(
                 id: $0.id,
-                path: $0.url.path,
+                path: localURL.path,
                 removalPolicy: $0.removalPolicy
             )
         }

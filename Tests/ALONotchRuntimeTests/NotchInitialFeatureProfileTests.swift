@@ -16,6 +16,9 @@ final class NotchInitialFeatureProfileTests: XCTestCase {
         XCTAssertTrue(settings.battery.isChargerTemporaryActivityEnabled)
         XCTAssertTrue(settings.connectivity.isBluetoothTemporaryActivityEnabled)
         XCTAssertTrue(settings.connectivity.isWifiTemporaryActivityEnabled)
+        XCTAssertTrue(settings.mediaAndFiles.isDragAndDropLiveActivityEnabled)
+        XCTAssertTrue(settings.mediaAndFiles.isTrayLiveActivityEnabled)
+        XCTAssertEqual(settings.mediaAndFiles.dragAndDropActivityMode, .combined)
         XCTAssertEqual(settings.lockScreen.widgetAppearanceStyle, .liquidGlass)
         XCTAssertTrue(settings.homePage.isHomePageLiveActivityEnabled)
         XCTAssertEqual(Set(HomePages.allCases).subtracting(settings.homePage.homePageDisabled), [.localTimer])
@@ -37,6 +40,9 @@ final class NotchInitialFeatureProfileTests: XCTestCase {
         settings.battery.isChargerTemporaryActivityEnabled = false
         settings.connectivity.isBluetoothTemporaryActivityEnabled = false
         settings.connectivity.isWifiTemporaryActivityEnabled = false
+        settings.mediaAndFiles.isDragAndDropLiveActivityEnabled = false
+        settings.mediaAndFiles.isTrayLiveActivityEnabled = false
+        settings.mediaAndFiles.dragAndDropActivityMode = .airDrop
         settings.lockScreen.widgetAppearanceStyle = .ultraThickMaterial
         settings.homePage.homePageDisabled = Set(HomePages.allCases)
         XCTAssertTrue(NotchInitialFeatureProfile.apply(defaults: defaults, domainName: suite, settings: settings))
@@ -44,6 +50,9 @@ final class NotchInitialFeatureProfileTests: XCTestCase {
         XCTAssertFalse(settings.battery.isChargerTemporaryActivityEnabled)
         XCTAssertFalse(settings.connectivity.isBluetoothTemporaryActivityEnabled)
         XCTAssertFalse(settings.connectivity.isWifiTemporaryActivityEnabled)
+        XCTAssertFalse(settings.mediaAndFiles.isDragAndDropLiveActivityEnabled)
+        XCTAssertFalse(settings.mediaAndFiles.isTrayLiveActivityEnabled)
+        XCTAssertEqual(settings.mediaAndFiles.dragAndDropActivityMode, .airDrop)
         XCTAssertEqual(settings.lockScreen.widgetAppearanceStyle, .ultraThickMaterial)
         XCTAssertFalse(settings.homePage.isHomePageLiveActivityEnabled)
         XCTAssertEqual(settings.homePage.homePageDisabled, Set(HomePages.allCases))

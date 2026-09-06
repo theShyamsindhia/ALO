@@ -7,13 +7,16 @@ enum NotchInitialFeatureProfile {
     static let appliedKey = "alo.notch.initialFeatureProfile.v1"
     static let lockScreenAppliedKey = "alo.notch.lockScreenFeatureProfile.v1"
     static let connectivityGlassAppliedKey = "alo.notch.connectivityGlassProfile.v1"
+    static let sharedRoomTrayAppliedKey = "alo.notch.sharedRoomTrayProfile.v1"
 
     static func apply(defaults: UserDefaults, domainName: String, settings: SettingsViewModel) -> Bool {
         let updatedLockDefaults = applyLockScreenDefaults(defaults: defaults, domainName: domainName, settings: settings)
         let updatedConnectivityGlassDefaults = applyConnectivityAndGlassDefaults(
             defaults: defaults, domainName: domainName, settings: settings)
+        let updatedRoomTrayDefaults = applySharedRoomTrayDefaults(
+            defaults: defaults, domainName: domainName, settings: settings)
         guard !defaults.bool(forKey: appliedKey) else {
-            return updatedLockDefaults || updatedConnectivityGlassDefaults
+            return updatedLockDefaults || updatedConnectivityGlassDefaults || updatedRoomTrayDefaults
         }
         // Registered upstream defaults are not user choices. Inspect only the
         // persistent suite so inherited false defaults can acquire this profile.
@@ -32,6 +35,26 @@ enum NotchInitialFeatureProfile {
             settings.homePage.isHomePageLiveActivityEnabled = true
         }
         defaults.set(true, forKey: appliedKey)
+        return true
+    }
+
+    private static func applySharedRoomTrayDefaults(
+        defaults: UserDefaults,
+        domainName: String,
+        settings: SettingsViewModel
+    ) -> Bool {
+        guard !defaults.bool(forKey: sharedRoomTrayAppliedKey) else { return false }
+        let saved = defaults.persistentDomain(forName: domainName) ?? [:]
+        if saved[GeneralSettingsStorage.Keys.dragAndDropLiveActivityEnabled] == nil {
+            settings.mediaAndFiles.isDragAndDropLiveActivityEnabled = true
+        }
+        if saved[GeneralSettingsStorage.Keys.trayLiveActivityEnabled] == nil {
+            settings.mediaAndFiles.isTrayLiveActivityEnabled = true
+        }
+        if saved[GeneralSettingsStorage.Keys.dragAndDropActivityMode] == nil {
+            settings.mediaAndFiles.dragAndDropActivityMode = .combined
+        }
+        defaults.set(true, forKey: sharedRoomTrayAppliedKey)
         return true
     }
 

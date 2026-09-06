@@ -24,7 +24,9 @@ final class ALONotchFeatureBridge: ObservableObject {
             model.$phase.map { _ in () }.eraseToAnyPublisher(),
             model.$audioIsRendering.map { _ in () }.eraseToAnyPublisher(),
             model.$statusText.map { _ in () }.eraseToAnyPublisher(),
-            model.$roomName.map { _ in () }.eraseToAnyPublisher()
+            model.$roomName.map { _ in () }.eraseToAnyPublisher(),
+            model.$roomTrayItems.map { _ in () }.eraseToAnyPublisher(),
+            model.$roomTrayDownloadingIDs.map { _ in () }.eraseToAnyPublisher()
         ]
         Publishers.MergeMany(changes)
             .debounce(for: .milliseconds(30), scheduler: RunLoop.main)
@@ -43,6 +45,10 @@ final class ALONotchFeatureBridge: ObservableObject {
                 self?.model?.lyrics.setExternalDemand(demand)
             }
             runtime.onSettingsRequested = { [weak self] in self?.showSettings() }
+            runtime.onRoomTrayAddRequested = { [weak self] urls in self?.model?.addRoomTrayFiles(urls) }
+            runtime.onRoomTrayRemoveRequested = { [weak self] ids in self?.model?.removeRoomTrayItems(ids) }
+            runtime.onRoomTrayDownloadRequested = { [weak self] id in self?.model?.requestRoomTrayItem(id) }
+            runtime.onRoomTrayExportRequested = { [weak self] id, url in self?.model?.exportRoomTrayItem(id, to: url) }
             runtime.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &observations)
             self.runtime = runtime
         }
@@ -70,6 +76,28 @@ final class ALONotchFeatureBridge: ObservableObject {
             }
         }
         updateRoomLyrics()
+        updateRoomTray()
+    }
+
+    private func updateRoomTray() {
+        guard let runtime, runtime.isEnabled else { return }
+        guard let model, model.phase == .live else {
+            runtime.updateRoomTray(nil)
+            return
+        }
+        let downloading = model.roomTrayDownloadingIDs
+        runtime.updateRoomTray(RoomTraySnapshot(items: model.roomTrayItems.map { item in
+            let localURL = model.roomTrayFileURL(itemID: item.id)
+            let state: RoomTraySnapshot.Item.TransferState = localURL != nil
+                ? .available : (downloading.contains(item.id) ? .downloading : .unavailable)
+            return RoomTraySnapshot.Item(
+                id: item.id,
+                fileName: item.attachment.fileName,
+                byteCount: item.attachment.byteCount,
+                localFileURL: localURL,
+                transferState: state
+            )
+        }))
     }
 
     private func updateRoomLyrics() {

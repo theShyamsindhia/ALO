@@ -237,6 +237,7 @@ final class MeshSession {
         nowPlayingHandler: @escaping (NowPlayingMedia) -> Void,
         chatHandler: @escaping (String, String, String, UInt64, MeshVersion) -> Void,
         chatAttachmentHandler: @escaping (String, RoomChatAttachmentPayload) -> Void = { _, _ in },
+        roomTrayFileRequestHandler: @escaping (String, RoomTrayFileRequest) -> Void = { _, _ in },
         queueHandler: @escaping ([RoomQueueItem]) -> Void,
         videoHandler: @escaping (CGImage) -> Void,
         annotationSceneHandler: @escaping (AnnotationSceneModel?) -> Void = { _ in },
@@ -338,6 +339,9 @@ final class MeshSession {
             chatAttachmentHandler: { sender, payload in
                 DispatchQueue.main.async { chatAttachmentHandler(sender, payload) }
             },
+            roomTrayFileRequestHandler: { sender, request in
+                DispatchQueue.main.async { roomTrayFileRequestHandler(sender, request) }
+            },
             roomStatePersistenceHandler: roomStatePersistenceHandler,
             installationIdentity: installationIdentity,
             peerPins: peerPins,
@@ -438,7 +442,10 @@ final class MeshSession {
     func sendArena(_ data: Data, targetID: String?) { control.publishArena(data, targetID: targetID) }
 
     func sendChat(_ text: String) { control.publishChat(text) }
-    func sendChatAttachment(_ payload: RoomChatAttachmentPayload) { control.publishChatAttachment(payload) }
+    func sendChatAttachment(_ payload: RoomChatAttachmentPayload, targetID: String? = nil) {
+        control.publishChatAttachment(payload, targetID: targetID)
+    }
+    func requestRoomTrayFile(_ request: RoomTrayFileRequest) { control.publishRoomTrayFileRequest(request) }
     func addQueueItem(_ item: RoomQueueItem) {
         control.publishQueueAdd(RoomQueueItem(
             id: item.id,

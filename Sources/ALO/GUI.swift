@@ -1480,6 +1480,11 @@ final class ALOViewModel: ObservableObject {
     @Published var participants = [RoomParticipant]()
     @Published var messages = [RoomMessage]()
     private var chatDocument = RoomChatDocument()
+    @Published private(set) var roomTrayItems = [RoomTrayItem]()
+    @Published private(set) var roomTrayDownloadingIDs = Set<String>()
+    private var roomTrayDocument = RoomTrayDocument()
+    private let roomTrayStore = RoomTrayStore()
+    private var roomTrayDownloadTasks = [String: Task<Void, Never>]()
     @Published var chatNotificationMode = ChatNotificationMode(rawValue: UserDefaults.standard.string(forKey: "chatNotificationMode") ?? "all") ?? .all {
         didSet { UserDefaults.standard.set(chatNotificationMode.rawValue, forKey: "chatNotificationMode") }
     }
@@ -1968,6 +1973,9 @@ final class ALOViewModel: ObservableObject {
             chatHandler: chatCallback,
             chatAttachmentHandler: { [weak self] senderID, payload in
                 self?.receiveChatAttachment(payload, senderID: senderID)
+            },
+            roomTrayFileRequestHandler: { [weak self] senderID, request in
+                self?.receiveRoomTrayFileRequest(request, senderID: senderID)
             },
             queueHandler: queueCallback,
             videoHandler: videoCallback,
@@ -2911,6 +2919,90 @@ final class ALOViewModel: ObservableObject {
         return ChatAttachmentStore.existingURL(for: attachment, roomID: roomID, senderID: message.senderID)
     }
 
+    func addRoomTrayFiles(_ urls: [URL]) {
+        guard phase == .live, let meshSession, let roomID = activeRoomConfiguration?.id else { return }
+        let remainingItemSlots = max(0, RoomTrayDocument.maximumActiveItems - roomTrayItems.count)
+        var remainingBytes = max(
+            0,
+            RoomTrayDocument.maximumActiveBytes - roomTrayItems.reduce(0) { $0 + $1.attachment.byteCount }
+        )
+        guard remainingItemSlots > 0, remainingBytes > 0 else {
+            statusText = "The room tray is full. Remove a file before adding another."
+            return
+        }
+        var shared = 0
+        var skipped = 0
+        for sourceURL in urls.prefix(remainingItemSlots) {
+            let accessed = sourceURL.startAccessingSecurityScopedResource()
+            defer { if accessed { sourceURL.stopAccessingSecurityScopedResource() } }
+            do {
+                let imported = try roomTrayStore.importFile(at: sourceURL, roomID: roomID)
+                guard imported.descriptor.byteCount <= remainingBytes else {
+                    try? roomTrayStore.remove(itemID: imported.descriptor.itemID, roomID: roomID)
+                    skipped += 1
+                    continue
+                }
+                let contentType = UTType(filenameExtension: sourceURL.pathExtension)?.preferredMIMEType
+                let attachment = RoomChatAttachment(
+                    id: imported.descriptor.itemID.uuidString,
+                    fileName: imported.descriptor.fileName,
+                    contentType: contentType,
+                    byteCount: imported.descriptor.byteCount
+                )
+                let metadata = RoomTrayItemMetadata(attachment: attachment, digest: imported.descriptor.sha256)
+                guard metadata.isValid, let operation = RoomTrayOperation.add(metadata).encoded,
+                      let data = try? Data(contentsOf: imported.url, options: [.mappedIfSafe]),
+                      let payload = RoomChatAttachmentPayload(attachment: attachment, data: data)
+                else {
+                    try? roomTrayStore.remove(itemID: imported.descriptor.itemID, roomID: roomID)
+                    continue
+                }
+                meshSession.sendChat(operation)
+                meshSession.sendChatAttachment(payload)
+                shared += 1
+                remainingBytes -= imported.descriptor.byteCount
+            } catch {
+                statusText = "Could not add \(sourceURL.lastPathComponent) to the tray: \(error.localizedDescription)"
+            }
+        }
+        if shared > 0 {
+            let summary = shared == 1 ? "Shared 1 file in the room tray" : "Shared \(shared) files in the room tray"
+            statusText = skipped == 0 ? summary : summary + "; skipped \(skipped) that would exceed the room limit"
+        }
+    }
+
+    func removeRoomTrayItems(_ itemIDs: [String]) {
+        guard phase == .live, let meshSession else { return }
+        for itemID in Set(itemIDs) {
+            guard roomTrayDocument.item(id: itemID) != nil,
+                  let wire = RoomTrayOperation.remove(itemID: itemID).encoded else { continue }
+            meshSession.sendChat(wire)
+        }
+    }
+
+    func requestRoomTrayItem(_ itemID: String) {
+        guard phase == .live, let meshSession,
+              let item = roomTrayDocument.item(id: itemID),
+              roomTrayFileURL(itemID: itemID) == nil else { return }
+        roomTrayDownloadingIDs.insert(itemID)
+        meshSession.requestRoomTrayFile(RoomTrayFileRequest(itemID: itemID, digest: item.digest))
+    }
+
+    func exportRoomTrayItem(_ itemID: String, to destinationURL: URL) {
+        guard let roomID = activeRoomConfiguration?.id, let uuid = UUID(uuidString: itemID) else { return }
+        do {
+            _ = try roomTrayStore.export(itemID: uuid, roomID: roomID, to: destinationURL)
+            statusText = "Saved \(destinationURL.lastPathComponent)"
+        } catch {
+            statusText = "Could not save \(destinationURL.lastPathComponent): \(error.localizedDescription)"
+        }
+    }
+
+    func roomTrayFileURL(itemID: String) -> URL? {
+        guard let roomID = activeRoomConfiguration?.id, let uuid = UUID(uuidString: itemID) else { return nil }
+        return roomTrayStore.fileURL(itemID: uuid, roomID: roomID)
+    }
+
     func roomActivity(for participantID: String) -> ParticipantRoomActivity {
         Self.roomActivity(for: participantID, messages: messages)
     }
@@ -2932,11 +3024,61 @@ final class ALOViewModel: ObservableObject {
     }
 
     private func receiveChatAttachment(_ payload: RoomChatAttachmentPayload, senderID: String) {
-        guard let roomID = activeRoomConfiguration?.id,
-              Self.shouldAcceptChatAttachment(payload, senderID: senderID, messages: messages),
-              let stored = try? ChatAttachmentStore.save(payload, roomID: roomID,
-                                                         senderID: senderID) else { return }
-        chatAttachmentURLs[chatAttachmentKey(senderID: senderID, attachmentID: payload.attachment.id)] = stored
+        guard let roomID = activeRoomConfiguration?.id else { return }
+        if Self.shouldAcceptChatAttachment(payload, senderID: senderID, messages: messages),
+           let stored = try? ChatAttachmentStore.save(payload, roomID: roomID, senderID: senderID) {
+            chatAttachmentURLs[chatAttachmentKey(senderID: senderID, attachmentID: payload.attachment.id)] = stored
+            return
+        }
+        guard let trayItem = roomTrayDocument.item(id: payload.attachment.id),
+              trayItem.attachment == payload.attachment,
+              let uuid = UUID(uuidString: trayItem.id),
+              let descriptor = RoomTrayFileDescriptor(
+                itemID: uuid,
+                fileName: trayItem.attachment.fileName,
+                byteCount: trayItem.attachment.byteCount,
+                sha256: trayItem.digest
+              ),
+              (try? roomTrayStore.storeIncoming(payload.data, descriptor: descriptor, roomID: roomID)) != nil
+        else { return }
+        roomTrayDownloadTasks.removeValue(forKey: trayItem.id)?.cancel()
+        roomTrayDownloadingIDs.remove(trayItem.id)
+    }
+
+    private func receiveRoomTrayFileRequest(_ request: RoomTrayFileRequest, senderID: String) {
+        guard let meshSession, request.isValid,
+              roomTrayDocument.contains(itemID: request.itemID, digest: request.digest),
+              let item = roomTrayDocument.item(id: request.itemID),
+              let url = roomTrayFileURL(itemID: request.itemID),
+              let data = try? Data(contentsOf: url, options: [.mappedIfSafe]),
+              let payload = RoomChatAttachmentPayload(attachment: item.attachment, data: data)
+        else { return }
+        meshSession.sendChatAttachment(payload, targetID: senderID)
+    }
+
+    private func applyRoomTrayEvent(senderID: String, sender: String, text: String, version: MeshVersion) {
+        let previousIDs = Set(roomTrayItems.map(\.id))
+        guard roomTrayDocument.receive(senderID: senderID, sender: sender, text: text, version: version) else { return }
+        roomTrayItems = roomTrayDocument.items
+        let currentIDs = Set(roomTrayItems.map(\.id))
+        roomTrayDownloadingIDs.formIntersection(currentIDs)
+        if let roomID = activeRoomConfiguration?.id {
+            for removedID in previousIDs.subtracting(currentIDs) {
+                roomTrayDownloadTasks.removeValue(forKey: removedID)?.cancel()
+                if let uuid = UUID(uuidString: removedID) {
+                    try? roomTrayStore.remove(itemID: uuid, roomID: roomID)
+                }
+            }
+        }
+        for item in roomTrayItems where roomTrayFileURL(itemID: item.id) == nil
+            && roomTrayDownloadTasks[item.id] == nil {
+            roomTrayDownloadTasks[item.id] = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(700))
+                guard !Task.isCancelled else { return }
+                self?.requestRoomTrayItem(item.id)
+                self?.roomTrayDownloadTasks.removeValue(forKey: item.id)
+            }
+        }
     }
 
     static func shouldAcceptChatAttachment(_ payload: RoomChatAttachmentPayload, senderID: String,
@@ -3408,6 +3550,7 @@ final class ALOViewModel: ObservableObject {
         { [weak self] senderID, sender, text, sentNanos, version in
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.applyRoomTrayEvent(senderID: senderID, sender: sender, text: text, version: version)
                 let isNewMessage = self.chatDocument.receive(senderID: senderID, sender: sender, text: text, sentNanos: sentNanos, version: version)
                 self.messages = self.chatDocument.messages
                 guard isNewMessage, let receivedMessage = self.messages.first(where: { $0.senderID == senderID && $0.sentNanos == sentNanos }) else { return }
@@ -3543,6 +3686,11 @@ final class ALOViewModel: ObservableObject {
         messages = []
         chatAttachmentURLs.removeAll()
         chatDocument = RoomChatDocument()
+        roomTrayDownloadTasks.values.forEach { $0.cancel() }
+        roomTrayDownloadTasks.removeAll()
+        roomTrayDownloadingIDs.removeAll()
+        roomTrayItems.removeAll()
+        roomTrayDocument = RoomTrayDocument()
         chatViewportsAtLatest.removeAll()
         unreadMessageCount = 0
         firstUnreadMessageID = nil

@@ -37,6 +37,17 @@ final class OriginalActivityRenderTests: XCTestCase {
         let tray = FileTrayViewModel(defaults: defaults)
         tray.add(urls) // References only the fixtures; does not import or clean persistent tray storage.
         let trayContent = TrayActiveNotchContent(fileTrayViewModel: tray, mediaSettings: settings.mediaAndFiles)
+        let sharedTray = FileTrayViewModel(defaults: defaults)
+        sharedTray.applyRoomSnapshot(.init(items: [
+            .init(id: UUID().uuidString, fileName: "Demo Notes.txt", byteCount: 31,
+                  localFileURL: urls[0], transferState: .available),
+            .init(id: UUID().uuidString, fileName: "From Luna.zip", byteCount: 2_048,
+                  transferState: .downloading)
+        ]))
+        let sharedTrayContent = TrayActiveNotchContent(
+            fileTrayViewModel: sharedTray,
+            mediaSettings: settings.mediaAndFiles
+        )
 
         let cases: [(String, any NotchContentProtocol, Bool, Bool)] = [
             ("original-player-compact", player, false, false),
@@ -44,7 +55,8 @@ final class OriginalActivityRenderTests: XCTestCase {
             ("original-player-island-compact", player, false, true),
             ("original-player-island-expanded", player, true, true),
             ("original-battery-14-percent", battery, false, false),
-            ("original-file-tray-expanded", trayContent, true, false)
+            ("original-file-tray-expanded", trayContent, true, false),
+            ("shared-room-tray-expanded", sharedTrayContent, true, false)
         ]
         for (name, content, expanded, island) in cases {
             let model = NotchViewModel(settings: settings.application,
@@ -72,6 +84,7 @@ final class OriginalActivityRenderTests: XCTestCase {
         }
         XCTAssertFalse(power.isMonitoring)
         XCTAssertEqual(tray.count, 2)
+        XCTAssertEqual(sharedTray.count, 2)
     }
 
     private func render<V: View>(_ view: V, name: String, activitySize: CGSize) async throws {

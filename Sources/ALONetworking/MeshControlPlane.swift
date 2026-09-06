@@ -168,6 +168,8 @@ public final class MeshControlPlane: @unchecked Sendable {
         var arenaReceiveWindow: UInt64 = 0
         var arenaReceiveCount = 0
         var chatAttachmentReceiveAdmission = ChatAttachmentReceiveAdmission()
+        var roomTrayRequestWindow: UInt64 = 0
+        var roomTrayRequestCount = 0
         var legacyVoiceDownsamplers = [String: LegacyVoiceDownsampler]()
         var remoteVersionVector: [String: UInt64]?
         let roomStateSyncSession: RoomStateSyncSession
@@ -255,6 +257,7 @@ public final class MeshControlPlane: @unchecked Sendable {
     private let roomStateReceiveCompletedHandler: ([MeshRoomEvent]) -> Void
     private let arenaHandler: (String, Data) -> Void
     private let chatAttachmentHandler: (String, RoomChatAttachmentPayload) -> Void
+    private let roomTrayFileRequestHandler: (String, RoomTrayFileRequest) -> Void
     private var chatAttachmentAssembler = RoomChatAttachmentAssembler()
     private let roomStateDowngradeHandler: (String?) -> Void
     private let disableRoomStateSyncDuringAuthenticationForTesting: Bool
@@ -322,6 +325,7 @@ public final class MeshControlPlane: @unchecked Sendable {
         openLineHandler: @escaping (OpenLineMessage) -> Void = { _ in },
         arenaHandler: @escaping (String, Data) -> Void = { _, _ in },
         chatAttachmentHandler: @escaping (String, RoomChatAttachmentPayload) -> Void = { _, _ in },
+        roomTrayFileRequestHandler: @escaping (String, RoomTrayFileRequest) -> Void = { _, _ in },
         roomStatePersistenceHandler: @escaping (Data) -> Void = { _ in },
         roomStateSyncOverride: (any RoomStateSync)? = nil,
         roomStateReceiveCompletedHandler: @escaping ([MeshRoomEvent]) -> Void = { _ in },
@@ -359,6 +363,7 @@ public final class MeshControlPlane: @unchecked Sendable {
         self.eventPolicy = eventPolicy
         self.arenaHandler = arenaHandler
         self.chatAttachmentHandler = chatAttachmentHandler
+        self.roomTrayFileRequestHandler = roomTrayFileRequestHandler
         let durableState: any RoomStateSync = roomStateSyncOverride
             ?? AutomergeRoomStateSync.recovering(
                 roomID: room.id,
@@ -721,24 +726,33 @@ public final class MeshControlPlane: @unchecked Sendable {
         )
     }
 
-    public func publishChatAttachment(_ payload: RoomChatAttachmentPayload) {
+    public func publishChatAttachment(_ payload: RoomChatAttachmentPayload, targetID: String? = nil) {
         let packets = RoomChatAttachmentPacket.packets(for: payload)
         guard localPermits(.chat), !packets.isEmpty else { return }
         queue.async { [weak self] in
             guard let self, !self.isStopped else { return }
             let wires = packets.compactMap {
-                try? MeshEnvelope(type: "chat_attachment", nodeID: self.nodeID,
+                try? MeshEnvelope(type: "chat_attachment", nodeID: self.nodeID, targetID: targetID,
                                   chatAttachmentPacket: $0).encodedLine()
             }
             guard wires.count == packets.count,
                   wires.allSatisfy({ $0.count <= MeshEnvelopeDecoder.maximumLineBytes }) else { return }
-            for link in self.peers.values where link.authenticated {
+            for link in self.peers.values where link.authenticated && (targetID == nil || link.nodeID == targetID) {
                 let addedBytes = wires.reduce(0) { $0 + $1.count }
                 guard addedBytes <= 12 * 1_024 * 1_024 - link.chatAttachmentQueuedBytes else { continue }
                 link.chatAttachmentSendQueue.append(contentsOf: wires)
                 link.chatAttachmentQueuedBytes += addedBytes
                 self.drainChatAttachments(to: link)
             }
+        }
+    }
+
+    public func publishRoomTrayFileRequest(_ request: RoomTrayFileRequest) {
+        guard localPermits(.chat), request.isValid else { return }
+        queue.async { [weak self] in
+            guard let self, !self.isStopped else { return }
+            self.broadcast(MeshEnvelope(type: "room_tray_file_request", nodeID: self.nodeID,
+                                        roomTrayFileRequest: request))
         }
     }
 
@@ -1553,7 +1567,8 @@ public final class MeshControlPlane: @unchecked Sendable {
             link.arenaReceiveCount += 1
             arenaHandler(remoteID, data)
         case "chat_attachment":
-            guard envelope.nodeID == remoteID, let packet = envelope.chatAttachmentPacket,
+            guard envelope.nodeID == remoteID, envelope.targetID == nil || envelope.targetID == nodeID,
+                  let packet = envelope.chatAttachmentPacket,
                   permitsTransient(envelope, from: link, capability: .chat),
                   link.chatAttachmentReceiveAdmission.permits(
                     packetBytes: packet.bytes.count,
@@ -1562,6 +1577,18 @@ public final class MeshControlPlane: @unchecked Sendable {
                   let payload = chatAttachmentAssembler.receive(senderID: remoteID, packet: packet) else { return }
             link.chatAttachmentReceiveAdmission.completedTransfer()
             chatAttachmentHandler(remoteID, payload)
+        case "room_tray_file_request":
+            guard envelope.nodeID == remoteID, let request = envelope.roomTrayFileRequest,
+                  request.isValid, permitsTransient(envelope, from: link, capability: .chat) else { return }
+            let now = MonotonicClock.nowNanos()
+            if link.roomTrayRequestWindow == 0 || now < link.roomTrayRequestWindow
+                || now - link.roomTrayRequestWindow >= 60_000_000_000 {
+                link.roomTrayRequestWindow = now
+                link.roomTrayRequestCount = 0
+            }
+            guard link.roomTrayRequestCount < 32 else { return }
+            link.roomTrayRequestCount += 1
+            roomTrayFileRequestHandler(remoteID, request)
         case "room_icon":
             if let icon = envelope.roomIcon { mergeRoomIcon(icon) }
         case "sync":

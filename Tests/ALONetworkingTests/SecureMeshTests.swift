@@ -86,6 +86,29 @@ struct SecureMeshTests {
         #expect(receiver.state.read { $0.chatAttachments[sender.id]?.data == data })
     }
 
+    @Test func authenticatedPeersRequestAndReceiveLateRoomTrayFiles() async throws {
+        let room = RoomConfiguration.secure(name: "Late tray download")
+        let holder = try SecureMeshNode(room: room), requester = try SecureMeshNode(room: room)
+        defer { holder.stop(); requester.stop() }
+        try holder.start(); try requester.start()
+        let port = try await holder.readyPort()
+        requester.control.connectForTesting(to: .hostPort(host: "127.0.0.1", port: port), expectedNodeID: holder.id)
+        try await meshEventually { holder.state.read { $0.participants.count == 2 } }
+
+        let attachment = RoomChatAttachment(fileName: "late.txt", byteCount: 9)
+        let payload = try #require(RoomChatAttachmentPayload(attachment: attachment, data: Data("late file".utf8)))
+        let digest = try #require(RoomChatAttachmentPacket.packets(for: payload).first?.digest)
+        let request = RoomTrayFileRequest(itemID: attachment.id, digest: digest)
+        requester.control.publishRoomTrayFileRequest(request)
+        try await meshEventually { holder.state.read { $0.roomTrayRequests[requester.id] == request } }
+
+        holder.control.publishChatAttachment(payload, targetID: requester.id)
+        try await meshEventually {
+            requester.state.read { $0.chatAttachments[holder.id]?.attachment == attachment }
+        }
+        #expect(requester.state.read { $0.chatAttachments[holder.id]?.data == payload.data })
+    }
+
     @Test func simultaneousPublicDialsAgreeOnOneConnection() async throws {
         let room = RoomConfiguration.secure(name: "Public mesh", isPrivate: false)
         let a = try SecureMeshNode(room: room), b = try SecureMeshNode(room: room)
@@ -293,6 +316,7 @@ private final class MeshTestState: @unchecked Sendable {
         var mediaError: String?
         var payload: Data?
         var chatAttachments = [String: RoomChatAttachmentPayload]()
+        var roomTrayRequests = [String: RoomTrayFileRequest]()
         var connectionAttempts = 0
     }
     private let lock = NSLock()
@@ -321,6 +345,9 @@ private final class SecureMeshNode {
             participantsHandler: { participants in observation.update { $0.participants = participants } },
             chatAttachmentHandler: { sender, payload in
                 observation.update { $0.chatAttachments[sender] = payload }
+            },
+            roomTrayFileRequestHandler: { sender, request in
+                observation.update { $0.roomTrayRequests[sender] = request }
             },
             disableRoomStateSyncDuringAuthenticationForTesting: disableStateSync,
             connectionAttemptHandler: { observation.update { $0.connectionAttempts += 1 } },

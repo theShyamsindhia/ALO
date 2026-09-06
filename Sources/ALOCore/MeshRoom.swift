@@ -507,6 +507,7 @@ public struct MeshEnvelope: Codable, Sendable {
     public let playbackTiming: PeerPlaybackTiming?
     public let arenaData: Data?
     public let chatAttachmentPacket: RoomChatAttachmentPacket?
+    public let roomTrayFileRequest: RoomTrayFileRequest?
 
     public init(
         type: String,
@@ -545,7 +546,8 @@ public struct MeshEnvelope: Codable, Sendable {
         meshPeerDirectory: [MeshPeerDirectoryHint]? = nil,
         playbackTiming: PeerPlaybackTiming? = nil,
         arenaData: Data? = nil,
-        chatAttachmentPacket: RoomChatAttachmentPacket? = nil
+        chatAttachmentPacket: RoomChatAttachmentPacket? = nil,
+        roomTrayFileRequest: RoomTrayFileRequest? = nil
     ) {
         self.type = type
         self.roomIcon = roomIcon
@@ -584,6 +586,7 @@ public struct MeshEnvelope: Codable, Sendable {
         self.playbackTiming = playbackTiming
         self.arenaData = arenaData
         self.chatAttachmentPacket = chatAttachmentPacket
+        self.roomTrayFileRequest = roomTrayFileRequest
     }
 
     public func encodedLine() throws -> Data {
