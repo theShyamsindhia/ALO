@@ -159,6 +159,15 @@ struct SettingsRootView: View {
                 }
             }
             .padding(.horizontal, 14).padding(.vertical, 10)
+            if !embeddedDetailVisible {
+                Text("Activities appear briefly when something changes. Open a feature to choose its behavior.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 9)
+                    .accessibilityIdentifier("settings.embedded.activityExplanation")
+            }
             Divider()
             Group {
                 if embeddedDetailVisible {

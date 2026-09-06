@@ -6,11 +6,16 @@ import Foundation
 enum NotchInitialFeatureProfile {
     static let appliedKey = "alo.notch.initialFeatureProfile.v1"
     static let lockScreenAppliedKey = "alo.notch.lockScreenFeatureProfile.v1"
+    static let connectivityGlassAppliedKey = "alo.notch.connectivityGlassProfile.v1"
     static let roomMediaKey = "alo.roomMedia.enabled"
 
     static func apply(defaults: UserDefaults, domainName: String, settings: SettingsViewModel) -> Bool {
         let updatedLockDefaults = applyLockScreenDefaults(defaults: defaults, domainName: domainName, settings: settings)
-        guard !defaults.bool(forKey: appliedKey) else { return updatedLockDefaults }
+        let updatedConnectivityGlassDefaults = applyConnectivityAndGlassDefaults(
+            defaults: defaults, domainName: domainName, settings: settings)
+        guard !defaults.bool(forKey: appliedKey) else {
+            return updatedLockDefaults || updatedConnectivityGlassDefaults
+        }
         // Registered upstream defaults are not user choices. Inspect only the
         // persistent suite so inherited false defaults can acquire this profile.
         let saved = defaults.persistentDomain(forName: domainName) ?? [:]
@@ -31,6 +36,26 @@ enum NotchInitialFeatureProfile {
             settings.homePage.isHomePageLiveActivityEnabled = true
         }
         defaults.set(true, forKey: appliedKey)
+        return true
+    }
+
+    private static func applyConnectivityAndGlassDefaults(
+        defaults: UserDefaults,
+        domainName: String,
+        settings: SettingsViewModel
+    ) -> Bool {
+        guard !defaults.bool(forKey: connectivityGlassAppliedKey) else { return false }
+        let saved = defaults.persistentDomain(forName: domainName) ?? [:]
+        if saved[GeneralSettingsStorage.Keys.bluetoothTemporaryActivityEnabled] == nil {
+            settings.connectivity.isBluetoothTemporaryActivityEnabled = true
+        }
+        if saved[GeneralSettingsStorage.Keys.wifiTemporaryActivityEnabled] == nil {
+            settings.connectivity.isWifiTemporaryActivityEnabled = true
+        }
+        if saved[LockScreenSettings.widgetAppearanceStyleKey] == nil {
+            settings.lockScreen.widgetAppearanceStyle = .liquidGlass
+        }
+        defaults.set(true, forKey: connectivityGlassAppliedKey)
         return true
     }
 
