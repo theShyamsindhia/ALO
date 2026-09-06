@@ -22,7 +22,7 @@ struct RoomChatPanel: View {
     @State private var showsSearch = false
     @State private var showsHistory = false
     @State private var sendFailed = false
-    @State private var sendError = "There is no active room connection. Your draft has been kept."
+    @State private var sendError = "There is no active channel connection. Your draft has been kept."
     @State private var selectedSuggestion = 0
     @State private var dismissedMentionDraft: String?
     @State private var chosenMentionIDs = Set<String>()
@@ -67,7 +67,7 @@ struct RoomChatPanel: View {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                     TextField("Search messages", text: $query).textFieldStyle(.plain).focused($searchFocused)
                         .onKeyPress(keys: [.escape], phases: .down) { _ in closeSearch(); return .handled }
-                        .accessibilityLabel("Search room history")
+                        .accessibilityLabel("Search channel history")
                     Button(action: closeSearch) { Image(systemName: "xmark") }
                         .buttonStyle(.plain).help("Close search").accessibilityLabel("Close search")
                 } else if onlyPins {
@@ -94,7 +94,7 @@ struct RoomChatPanel: View {
                         VStack(spacing: 7) {
                             Image(systemName: onlyPins ? "pin" : "bubble.left.and.bubble.right").font(.title2)
                             Text(messages.isEmpty ? "Start the conversation" : "No matching messages").font(.callout)
-                            if messages.isEmpty { Text("Everyone in the room can see your messages.").font(.caption) }
+                            if messages.isEmpty { Text("Everyone in the channel can see your messages.").font(.caption) }
                         }.foregroundStyle(.secondary).allowsHitTesting(false)
                     }
                 }
@@ -237,7 +237,7 @@ struct RoomChatPanel: View {
                 onlyPins.toggle(); query = ""; showsSearch = false
             }
             Menu("Mention a member") {
-                if mentionMembers.isEmpty { Text("No other room members") }
+                if mentionMembers.isEmpty { Text("No other channel members") }
                 ForEach(mentionMembers) { member in
                     Button(member.name) { insertMention(member) }
                 }
@@ -246,7 +246,7 @@ struct RoomChatPanel: View {
                 Picker("Show a snippet while chat is collapsed", selection: $notificationMode) {
                     ForEach(ChatNotificationMode.allCases, id: \.self) { mode in Text(mode.label).tag(mode) }
                 }
-                Text("Controls snippets in the compact room bar. Direct mentions also notify you when ALO is in the background, if macOS notifications are allowed.")
+                Text("Controls snippets in the compact channel bar. Direct mentions also notify you when ALO is in the background, if macOS notifications are allowed.")
             }
             Divider()
             Button("History", systemImage: "info.circle") { showsHistory = true }
@@ -258,11 +258,11 @@ struct RoomChatPanel: View {
         .help("Chat options").accessibilityLabel("Chat options")
         .popover(isPresented: $showsHistory) {
             VStack(alignment: .leading, spacing: 9) {
-                Text("Room history").font(.headline)
+                Text("Channel history").font(.headline)
                 Text("Up to 500 chat events are retained. Edits and reactions count toward this limit; older messages may disappear.")
                 Text("Pins do not bypass retention. All members need an updated app for replies, reactions and edits.")
-                Text("Files up to 8 MB are transferred directly to members currently connected to the room and cached on each Mac.")
-                Text("Collapsed chat previews show incoming snippets in the compact room bar. This setting applies across rooms; unread counts remain visible when muted.")
+                Text("Files up to 8 MB are transferred directly to members currently connected to the channel and cached on each Mac.")
+                Text("Collapsed chat previews show incoming snippets in the compact channel bar. This setting applies across channels; unread counts remain visible when muted.")
                     .foregroundStyle(.secondary)
             }.font(.system(size: 11)).fixedSize(horizontal: false, vertical: true)
                 .padding(16).frame(width: 280)
@@ -346,7 +346,7 @@ struct RoomChatPanel: View {
                 if !message.deleted {
                     Button("Reply", systemImage: "arrowshape.turn.up.left") { replyTo = message.id; editing = nil; focused = true }
                     Menu("React") { ForEach(RoomChatOperation.emoji, id: \.self) { emoji in Button(emoji) { react(emoji, to: message) } } }
-                    Button(message.pinned ? "Unpin for room" : "Pin for room", systemImage: "pin") { _ = send(.init(kind: .pin, target: message.id, enabled: !message.pinned)) }
+                    Button(message.pinned ? "Unpin for channel" : "Pin for channel", systemImage: "pin") { _ = send(.init(kind: .pin, target: message.id, enabled: !message.pinned)) }
                     if own {
                         Button("Edit", systemImage: "pencil") { editing = message.id; replyTo = nil; pendingAttachment = nil; draft = message.text; chosenMentionIDs = Set(message.mentionedParticipantIDs ?? []); focused = true }
                         Button("Delete message", systemImage: "trash", role: .destructive) { _ = send(.init(kind: .delete, target: message.id)) }

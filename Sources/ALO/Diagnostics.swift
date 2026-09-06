@@ -24,7 +24,7 @@ enum DiagnosticCheckID: String, CaseIterable, Hashable, Sendable {
         case .microphone: "Microphone input"
         case .output: "Speaker output"
         case .network: "Peer and network reachability"
-        case .roomSync: "Room synchronization"
+        case .roomSync: "Channel synchronization"
         }
     }
 
@@ -147,7 +147,7 @@ struct DiagnosticRoomContext: Sendable, Equatable {
         guard isActive else {
             return DiagnosticCheckResult(
                 outcome: .warning,
-                detail: "Open a room to inspect its live clock and synchronization state.",
+                detail: "Open a channel to inspect its live clock and synchronization state.",
                 checkedAt: Date()
             )
         }
@@ -186,11 +186,11 @@ struct DiagnosticRoomContext: Sendable, Equatable {
             }
         }
         if let host = timing?.host {
-            parts.append("room buffer \(Self.milliseconds(host.groupBufferMilliseconds))")
+            parts.append("channel buffer \(Self.milliseconds(host.groupBufferMilliseconds))")
             parts.append("\(host.reportingListenerCount)/\(host.listenerCount) listeners reporting")
             parts.append("max lateness \(Self.milliseconds(host.maximumLatenessMilliseconds))")
             parts.append("resyncs \(host.totalResyncCount)")
-            parts.append("room timing changes \(host.roomTimingChangeCount)")
+            parts.append("channel timing changes \(host.roomTimingChangeCount)")
             for (index, listener) in host.listeners.enumerated() {
                 let age = listener.reportAgeMilliseconds.map(Self.milliseconds) ?? "not reported"
                 parts.append("listener \(index + 1): network \(Self.milliseconds(listener.recommendedBufferMilliseconds)), hardware floor \(Self.milliseconds(listener.hardwareFloorMilliseconds)), network vote \(listener.isTimingEligible ? "eligible" : "late join"), report age \(age)")
@@ -333,9 +333,9 @@ enum DiagnosticReportBuilder {
             "macOS: \(context.operatingSystem)",
             "Architecture: \(context.architecture)",
             "",
-            "Privacy: Room names, device names, peer identifiers, addresses, message content, media metadata, and access keys are not included.",
+            "Privacy: Channel names, device names, peer identifiers, addresses, message content, media metadata, and access keys are not included.",
             "",
-            "Current room",
+            "Current channel",
             "- Active: \(context.room.isActive ? "yes" : "no")",
             "- Role: \(context.room.role.rawValue)",
             "- Participants: \(context.room.participantCount) total / \(context.room.remotePeerCount) remote",
@@ -507,9 +507,9 @@ final class DiagnosticsRunner: ObservableObject {
                 return
             }
             if room.remotePeerCount > 0 {
-                set(.network, .passed, "Network is available and \(room.remotePeerCount) remote room peer\(room.remotePeerCount == 1 ? " is" : "s are") reachable.")
+                set(.network, .passed, "Network is available and \(room.remotePeerCount) remote channel peer\(room.remotePeerCount == 1 ? " is" : "s are") reachable.")
             } else {
-                set(.network, .warning, "Network is available, but no remote room peer is currently reachable.")
+                set(.network, .warning, "Network is available, but no remote channel peer is currently reachable.")
             }
         }
     }
@@ -525,7 +525,7 @@ final class DiagnosticsRunner: ObservableObject {
         } else {
             let guidance: (DiagnosticOutcome, String)
             if !isActive {
-                guidance = (.warning, "Open a room to inspect its live clock and synchronization state.")
+                guidance = (.warning, "Open a channel to inspect its live clock and synchronization state.")
             } else if isPaused {
                 guidance = (.warning, "Playback is paused; resume to measure current synchronization.")
             } else if !hasBroadcaster {
@@ -626,7 +626,7 @@ private struct DiagnosticsView: View {
                     section("Permissions & capture", ids: [.screenPermission, .screenPicker, .systemAudio])
                     microphoneSection
                     section("Playback & connection", ids: [.output, .network])
-                    section("Current room", ids: [.roomSync])
+                    section("Current channel", ids: [.roomSync])
                     roomSyncMonitorSection
                 }
                 .padding(24)
@@ -659,7 +659,7 @@ private struct DiagnosticsView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("Diagnostics")
                     .font(.title2.weight(.bold))
-                Text("Test each part of an ALO room without sending audio or content to peers.")
+                Text("Test each part of an ALO channel without sending audio or content to peers.")
                     .foregroundStyle(.secondary)
                     .font(.callout)
             }
@@ -680,7 +680,7 @@ private struct DiagnosticsView: View {
 
     private var privacyNotice: some View {
         Label {
-            Text("Reports exclude room and device names, peer IDs, network addresses, chats, media details, profile images, and private-room keys.")
+            Text("Reports exclude channel and device names, peer IDs, network addresses, chats, media details, profile images, and private-channel keys.")
                 .font(.callout)
         } icon: {
             Image(systemName: "hand.raised.fill")
@@ -750,7 +750,7 @@ private struct DiagnosticsView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Label(model.phase == .live ? "Live" : "Last room",
+                Label(model.phase == .live ? "Live" : "Last channel",
                       systemImage: model.phase == .live ? "dot.radiowaves.left.and.right" : "clock.arrow.circlepath")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(model.phase == .live ? .green : .secondary)
@@ -916,11 +916,11 @@ private struct RoomSyncMonitorCard: View {
 
             if monitor.orderedTraces.isEmpty {
                 ContentUnavailableView {
-                    Label("Waiting for room timing", systemImage: "waveform.path.ecg")
+                    Label("Waiting for channel timing", systemImage: "waveform.path.ecg")
                 } description: {
                     Text(isRoomActive
-                         ? "Start room audio to see each Mac's measured playback line."
-                         : "Join a room and start audio to record live alignment.")
+                         ? "Start channel audio to see each Mac's measured playback line."
+                         : "Join a channel and start audio to record live alignment.")
                 }
                 .frame(maxWidth: .infinity, minHeight: 150)
             } else {

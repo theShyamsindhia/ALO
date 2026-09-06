@@ -10,19 +10,24 @@ Share what’s playing on your Mac. Hear it together, in sync.
 
 Free and open source. Made for macOS. Audio, screens, voice, and chat between locally connected Macs.
 
-## One room, together
+## Your networks. Your channels.
 
 ALO creates a persistent local group with synchronized 48 kHz stereo audio, optional
 full-screen video sharing, current album artwork, a per-Mac mixer, participant presence, group
 chat, and a shared media queue. There is no permanent host: any member can begin
-broadcasting, and the room remains available when its creator leaves. Exactly one Mac
-broadcasts media at a time while every connected Mac replicates the room's control,
+broadcasting, and the channel remains available when its creator leaves. Exactly one Mac
+broadcasts media at a time while every connected Mac replicates the channel's control,
 chat, and queue state.
 
-Rooms are public on the local network by default. A creator can instead make a private
-room protected by an invite key. Saved room details appear again when the app opens;
-private invite keys are stored in the macOS Keychain, while recent chat and durable
-queue state are stored locally.
+**Networks** are the membership boundary, like servers. Each starts with a **Main
+channel**. Public channels are open to network members—not everyone on the Wi-Fi.
+Private channels have explicit user allowlists. The owner adds/removes identities
+and creates channels; existing members can keep using them while the owner is offline.
+
+One cryptographic **identity** can authorize multiple devices, each with its own
+transport key. Save the **unencrypted identity recovery file** during setup. Anyone
+holding it can impersonate you; keep it private. See [identity](docs/identity.md)
+and [network authority](docs/network-authority.md).
 
 ## Requirements
 
@@ -32,31 +37,34 @@ queue state are stored locally.
   recommended setup; client isolation or firewall rules can block connections.
 
 ALO enables Apple's peer-to-peer networking for discovery and authenticated
-connections where the operating system makes those paths available. Room traffic
+connections where the operating system makes those paths available. Channel traffic
 does not require an internet connection or a cloud relay. Wi-Fi hardware must
 remain available for nearby wireless paths; this is not Bluetooth audio transport
-between room members. Router-free reachability depends on devices, radio
+between channel members. Router-free reachability depends on devices, radio
 conditions and OS policy—it is not guaranteed by turning on airplane mode.
 
 The 0.14 integration includes an iPhone/iPad receiver and voice client for iOS 17+
 in [the iOS project](iOS/README.md). Device installation requires its own signing
-setup; the Mac download does not install an iOS app. Saved Mac rooms automatically
-upgrade to the current secure system. All participants must use a compatible
-current room-protocol generation (0.14.13 or newer for this generation); older
-clients cannot join. There is no legacy transport fallback. Private-room members
-with the same saved invite key migrate to the same upgraded credentials.
+setup; the Mac download does not install an iOS app. This source generation requires
+network protocol **4** on every participant. Old Spaces, invite keys and saved-room
+selections do not migrate. Everyone completes identity setup and creates or imports
+a new network invitation. There is no old-client fallback. Legacy data is left
+inert; received files, Downloads and recovery files are never deleted by setup.
 
 ## Run the Mac app
 
 Download the latest disk image, drag **ALO** into **Applications**, and open it.
-If you built from source, open `dist/ALO.app`. The first screen lists nearby rooms
-and rooms previously saved on this Mac:
+If you built from source, open `dist/ALO.app`:
 
-- Select a nearby or saved room to rejoin it.
-- Choose **Create Room** for a new public room, or enable **Private** to generate an
-  invite-key-protected room.
-- In an open room, choose **Broadcast** to share this Mac's system audio. Any member
-  may take over broadcasting; leaving does not delete the room.
+- Create an identity, or restore one using its recovery file. Save the recovery
+  file privately and acknowledge its warning.
+- Create a network, or send its owner your **public identity**. After verifying
+  the fingerprint, the owner grants membership and sends a recipient-bound invitation.
+  Verify the owner's fingerprint before importing it. Never send your recovery file as an invitation.
+- Select and join a channel. The last joined channel can reopen on the next launch
+  only if your current identity still has access.
+- Broadcast media, talk, chat or send files. Leaving does not delete the network.
+  New grants and revocations require an owner-signed policy to reach other devices.
 
 The first time a Mac broadcasts, macOS asks for **System Audio Recording Only** permission.
 ALO uses one Core Audio tap both to capture the room stream and replace that Mac's immediate
@@ -96,17 +104,27 @@ transparency, increased contrast, and the user-selected control accent.
 
 ## Build it
 
-The Swift package and app module are `ALO`, shared Swift code is `ALOCore`, and
-the executable is `alo`. After packaging, `./alo` runs `dist/alo`; the old
-`./werai` launcher forwards to it for compatibility.
+The executable is `alo`. Shared Swift targets have explicit responsibilities:
+
+| Module | Owns |
+| --- | --- |
+| `ALOIdentity` | User roots, signed device bindings, recovery and Keychain |
+| `ALORooms` | Signed network/channel policy, invitations and persistence |
+| `ALONetworking` | Discovery, TLS admission and standard peer/media/voice/file APIs |
+| `ALOTiming` | Four-timestamp clock estimator; no sockets or UI |
+| `ALOAppModel` | Shared identity/network/channel application API |
+| `ALONetworkUI` | Native SwiftUI onboarding, navigation and forms |
+| `ALOCore` / `ALOAppleMedia` | Media/state models and platform media adapters |
+
+After packaging, `./alo` runs `dist/alo`.
 
 ### Rebrand compatibility
 
 ALO intentionally retains the `in.werai.audio` production bundle ID, separate
-`in.werai.audio.dev` development ID, existing `WERAI` / `WERAI-Dev` data folders,
-Keychain services, Bonjour service types, and legacy driver/shared-memory ABI.
-Changing those names cosmetically would lose existing permissions, saved rooms,
-or interoperability with installed versions. `ALO_*` signing settings are preferred;
+`in.werai.audio.dev` development ID, installation Keychain services, Bonjour
+types and driver/shared-memory ABI. These are technical identifiers, not UI names.
+Changing the bundle identity would lose macOS permissions. Network/channel data
+uses fresh versioned storage; old Spaces are not authorization. `ALO_*` signing settings are preferred;
 existing `WERAI_*` settings remain supported as fallbacks.
 
 The canonical repository is [theShyamsindhia/ALO](https://github.com/theShyamsindhia/ALO).
@@ -130,25 +148,31 @@ cd ALO
 swift build -c release
 ```
 
-The terminal interface remains available. On the source Mac:
+The terminal interface uses the same identity and network authorization as the
+app. Complete setup and import the network invitation in the app first. Use the
+packaged executable so it has the same bundle-scoped identity storage:
 
 ```sh
-./alo host "My Room"
+/Applications/ALO.app/Contents/MacOS/alo channel "Studio / #Main" --broadcast
 ```
 
 On every other Mac:
 
 ```sh
-./alo join "My Room"
+/Applications/ALO.app/Contents/MacOS/alo channel "Studio / #Main"
 ```
 
-The room name is optional. Without one, a receiver joins the first room it finds.
+Pass the channel UUID instead of its full displayed name if preferred. The old
+`host`, `join`, and `room` commands cannot bypass network membership. Omit the
+channel only to choose the first channel already authorized to your identity;
+this never joins an arbitrary discovered network.
 
-Broadcasting audio uses ScreenCaptureKit and needs **Screen & System Audio Recording**.
-ALO requests access when a member first chooses **Broadcast**, before claiming the room's
-media timeline. When the active broadcaster also enables video, ALO opens the native macOS
+Audio broadcasting uses a Core Audio tap and **System Audio Recording Only**.
+ALO requests access when a member first chooses **Broadcast**, before claiming the channel's
+media timeline. Screen video uses ScreenCaptureKit and separately needs **Screen & System
+Audio Recording**. When the active broadcaster also enables video, ALO opens the native macOS
 sharing picker. Choose one display or one window; cancelling the picker leaves video off.
-The selected content is then streamed to the room.
+The selected content is then streamed to the channel.
 Every Mac may also ask for **Local Network** access.
 Grant recording access in System Settings → Privacy & Security, then use **Restart ALO**
 before the first broadcast.
@@ -161,21 +185,23 @@ retain stale privacy records for those development builds.
 Video sharing intentionally requires the user's Screen Recording consent. ALO excludes
 its own windows from the native picker.
 
-Every open room also has a compact walkie-talkie bar. Hold a colored device icon to talk
-only to that Mac, or hold the people icon to talk to everyone. **Open line** keeps the selected
-voice line open; enable it on both Macs for a two-way line. Choose the active hardware microphone from
+Every joined channel also has compact communication controls. In the menu-bar
+popover, click a device to toggle sending voice; in the floating bar, hold a device
+to talk temporarily, or hold the people icon to talk to everyone currently present.
+**Open line** offers a one-to-one conversation: incoming voice is audible, but
+the recipient must pick up before sending their microphone back. Choose the active hardware microphone from
 the labeled microphone menu. Voice targets stay in ALO's unified popover or optional floating
 controls. Incoming speakers highlight clearly. The incoming-audio menu can mute
 Music & Video, Voice Lines, or everything. Microphone access is requested only when voice
 transmission starts; if it was previously denied, ALO links directly to Microphone settings.
 
-Use **Customize this Mac** on the room picker to change
-its generated device name, emoji, color, and optional profile photo. Identity changes persist on that Mac
-and propagate to the current room immediately. The walkie bar can be dismissed with its
+Device appearance settings control the device name, emoji, color, and optional
+profile photo. These are not the cryptographic user identity. Appearance changes
+persist on that Mac and propagate to the current channel. The walkie bar can be dismissed with its
 close button; the same controls remain available from ALO's menu-bar popover.
 
 Right-click a device and choose **Send file…** to send it a file directly (up to
-1 GB; both Macs need ALO 0.14.12 or newer). Other files require **Accept** or
+1 GB; both Macs must support the current network generation). Other files require **Accept** or
 **Decline**, followed by a save destination, and never open automatically.
 Supported images, movies, and audio are accepted into a temporary inbox and
 shown in a pinned, borderless media window after content validation. Hover to
@@ -202,12 +228,12 @@ AirDropped ad-hoc-signed development build, build from source on that Mac.
 The packaged app uses a stable local designated requirement (`in.werai.audio`) so a
 new ALO build does not silently become a different app in macOS privacy settings.
 
-## Mesh room architecture
+## Network and channel architecture
 
-ALO separates room coordination from the high-rate media stream:
+ALO separates channel coordination from the high-rate media stream:
 
-- Every member advertises and discovers the room over Bonjour and maintains direct
-  authenticated TLS control links in secure-v2 rooms. A deterministic peer-ID rule
+- Every member advertises and discovers authorized channels over Bonjour and maintains direct
+  authenticated TLS control links. A deterministic peer-ID rule
   prevents duplicate links. Nearby paths use the same protocol as LAN paths.
 - Durable chat and queue state synchronize through **Automerge**, with a separate
   sync session for each reliable peer connection. A replacement connection starts
@@ -231,13 +257,20 @@ ALO separates room coordination from the high-rate media stream:
 - Each Mac retains durable queue state and up to 500 chat events, including edits
   and reactions. This count-based cache is not a permanent archive. Transient broadcaster ownership is deliberately not restored after relaunch.
 
-Secure-v2 public rooms are discoverable and joinable on reachable local links;
-private rooms additionally require the room's 32-byte invite secret. Both use
-installation identities, pinned peer keys, TLS 1.3 admission and session-bound
-AES-GCM datagrams with replay protection. A public room is encrypted in transit,
-but is not access-restricted. First-contact trust is not independent verification
-of a person's identity. Legacy rooms retain their older, weaker channel protection.
-See the [channel-by-channel audit](docs/room-privacy.md).
+Every connection role uses `NetworkChannelAuthorization`: signed network policy →
+user membership → channel access → signed device binding → actual TLS key. The
+handshake transcript binds these claims. Bonjour exposes opaque reachability and
+version hints, not channel names, members or media. Old generations are rejected.
+
+Highest verified policy revisions persist. Rollback/owner substitution fail closed;
+same-revision conflicts quarantine the network. Signed updates propagate through
+admitted connections and revoke access. Offline revocation is not instantaneous:
+a disconnected group cannot know about an update until it receives one. Existing
+history remains, but revoked authors cannot inject new events through allowed relays.
+
+Transport remains TLS 1.3 and session-bound AES-GCM datagrams with replay checks.
+Identity adds authorization, not another cipher. See [privacy](docs/room-privacy.md)
+and [sync invariants](docs/local-audio-sync.md).
 
 Per-person **Voice on this Mac** levels persist independently of media volume. Room
 settings include optional music ducking during incoming speech and local microphone
@@ -249,6 +282,9 @@ routing details. Status dots in People show per-device state; hover for details.
 - Eight rapid clock samples are taken when a Mac joins, followed by a continuous sample
   every second. A low-latency clock model estimates both offset and drift while rejecting
   Wi-Fi spikes.
+- Four timestamps exclude host processing and application send-queue residence
+  from clock offset/RTT. Probe IDs never reset; echoed send times must match.
+  Gaps force reacquisition; new media anchors cannot freshen old clock evidence.
 - The room establishes one shared playout target before audio begins. A joining
   device adopts that timing; a slow late joiner's network estimate cannot retime
   healthy listeners. A larger hardware-output floor uses one announced future
@@ -269,8 +305,9 @@ routing details. Status dots in People show per-device state; hover for details.
 - Audio uses about 1.54 Mb/s per receiving Mac. Video targets about 4 Mb/s at up to
   1280×720 and 30 fps using Apple’s hardware H.264 encoder.
 - Packet loss becomes a short silence rather than delaying every receiver.
-- Room traffic stays on local network paths without a cloud media relay. Encryption
-  varies by channel; see [room privacy](docs/room-privacy.md).
+- Channel traffic stays on local network paths without a cloud media relay. All
+  current-generation channel connections require authenticated encryption; see
+  [privacy](docs/room-privacy.md).
 - Spotify artwork is resolved once per track through Spotify’s public HTTPS artwork
   endpoint; no Spotify account token is used. Other players use macOS Now Playing data
   when the system makes it available.
@@ -314,15 +351,15 @@ This keeps per-run logs and checks mixed media/voice/chat traffic, repeated late
 joins, disk restoration, delayed links, offline edits, and convergence after
 network partitions. See [scenario coverage and hardware-test limits](docs/room-scenario-testing.md).
 
-For automated two-Mac QA without UI automation, save or join the room once in
+For automated two-Mac QA without UI automation, set up identity and join the channel once in
 the app on each Mac, then run the signed app binary on either Mac:
 
 ```sh
-/Applications/ALO.app/Contents/MacOS/alo room "Room Name"
+/Applications/ALO.app/Contents/MacOS/alo channel "Studio / #Main"
 # Start as broadcaster when no one is sharing:
-/Applications/ALO.app/Contents/MacOS/alo room "Room Name" --broadcast
+/Applications/ALO.app/Contents/MacOS/alo channel "Studio / #Main" --broadcast
 # Join first, then claim the newer broadcaster epoch for a handoff test:
-/Applications/ALO.app/Contents/MacOS/alo room "Room Name" --take-over
+/Applications/ALO.app/Contents/MacOS/alo channel "Studio / #Main" --take-over
 ```
 
 This opens the same mesh control plane, receiver, clock synchronization, and

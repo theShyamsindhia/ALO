@@ -12,6 +12,11 @@ let package = Package(
     products: [
         .executable(name: "alo", targets: ["ALO"]),
         .library(name: "ALOCore", targets: ["ALOCore"]),
+        .library(name: "ALOTiming", targets: ["ALOTiming"]),
+        .library(name: "ALOIdentity", targets: ["ALOIdentity"]),
+        .library(name: "ALONetworkUI", targets: ["ALONetworkUI"]),
+        .library(name: "ALOAppModel", targets: ["ALOAppModel"]),
+        .library(name: "ALORooms", targets: ["ALORooms"]),
         .library(name: "ALONetworking", targets: ["ALONetworking"]),
         .library(name: "ALOAppleMedia", targets: ["ALOAppleMedia"])
     ],
@@ -22,9 +27,19 @@ let package = Package(
         )
     ],
     targets: [
+        .target(name: "ALOTiming"),
+        .target(name: "ALOIdentity"),
+        .target(name: "ALONetworkUI"),
+        .target(name: "ALOAppModel", dependencies: ["ALOIdentity", "ALORooms", "ALONetworking"]),
+        .testTarget(name: "ALOIdentityTests", dependencies: ["ALOIdentity"]),
+        .testTarget(name: "ALORoomsTests", dependencies: ["ALORooms", "ALOIdentity"]),
+        .testTarget(name: "ALOAppModelTests", dependencies: ["ALOAppModel", "ALOIdentity", "ALORooms", "ALONetworking"]),
+        .target(name: "ALORooms", dependencies: ["ALOCore", "ALOIdentity"]),
+        .testTarget(name: "ALOTimingTests", dependencies: ["ALOTiming"]),
         .target(
             name: "ALOCore",
             dependencies: [
+                "ALOTiming",
                 .product(name: "Automerge", package: "automerge-swift")
             ]
         ),
@@ -48,11 +63,11 @@ let package = Package(
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         .target(name: "ALOSharedAudioClient"),
-        .target(name: "ALONetworking", dependencies: ["ALOCore"]),
+        .target(name: "ALONetworking", dependencies: ["ALOCore", "ALOTiming", "ALOIdentity", "ALORooms"]),
         .target(name: "ALOAppleMedia", dependencies: ["ALOCore"]),
         .executableTarget(
             name: "ALO",
-            dependencies: ["ALOCore", "ALONetworking", "ALOAppleMedia", "ALOSharedAudioClient", "ALONotchRuntime"],
+            dependencies: ["ALOCore", "ALOIdentity", "ALOAppModel", "ALONetworkUI", "ALORooms", "ALONetworking", "ALOAppleMedia", "ALOSharedAudioClient", "ALONotchRuntime"],
             exclude: ["Resources/AppIcons"],
             resources: [.copy("Resources/Breach")],
             linkerSettings: [

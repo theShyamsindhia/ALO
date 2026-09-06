@@ -249,7 +249,7 @@ struct GameLibraryView: View {
                         VStack(alignment: .leading, spacing: 3) {
                             Text("Choose a game")
                                 .font(.system(size: 14, weight: .semibold))
-                            Text("Installed locally. Room members can join when they have the same game.")
+                            Text("Installed locally. Channel members can join when they have the same game.")
                                 .font(.system(size: 10)).foregroundStyle(secondary)
                         }
                         LazyVGrid(columns: [
@@ -300,7 +300,7 @@ struct GameLibraryView: View {
                 }.controlSize(.small)
                 if !stickFight.lobbies.isEmpty {
                     Button(action: onPlayStickFight) {
-                        Label("Live in this room · \(stickFight.lobbies.count) match\(stickFight.lobbies.count == 1 ? "" : "es")", systemImage: "dot.radiowaves.left.and.right")
+                        Label("Live in this channel · \(stickFight.lobbies.count) match\(stickFight.lobbies.count == 1 ? "" : "es")", systemImage: "dot.radiowaves.left.and.right")
                             .font(.system(size: 11, weight: .medium)).foregroundStyle(.green)
                     }.buttonStyle(.plain)
                 }
@@ -326,13 +326,13 @@ struct GameLibraryView: View {
             HStack {
                 Button { BreachWindowController.shared.show(session: breach) } label: { Label("Play", systemImage: "play.fill") }
                     .buttonStyle(.borderedProminent)
-                Text("Room play + bots").font(.caption).foregroundStyle(.secondary)
+                Text("Channel play + bots").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Image(systemName: "arrow.up.left.and.arrow.down.right").help("Opens in a dedicated window")
             }.padding(.horizontal, 12)
             ForEach(breach.lobbies) { lobby in
                 HStack {
-                    Text(breach.names[lobby.peerID] ?? "Room match").font(.caption).lineLimit(1)
+                    Text(breach.names[lobby.peerID] ?? "Channel match").font(.caption).lineLimit(1)
                     Spacer()
                     Button(lobby.availableSlots > 0 ? "Join" : "Watch") {
                         breach.join(lobby, spectate: lobby.availableSlots == 0)
@@ -349,7 +349,7 @@ struct GameLibraryView: View {
     private var liveArenas: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Label("Live in this room", systemImage: "dot.radiowaves.left.and.right")
+                Label("Live in this channel", systemImage: "dot.radiowaves.left.and.right")
                     .font(.system(size: 13, weight: .semibold))
                 Spacer()
                 Text("\(lobbies.count) arena\(lobbies.count == 1 ? "" : "s")")
@@ -362,7 +362,7 @@ struct GameLibraryView: View {
                 HStack(spacing: 10) {
                     Circle().fill(lobby.started ? Color.green : accent).frame(width: 7, height: 7)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(names[lobby.peerID] ?? "Room member").font(.system(size: 11, weight: .semibold)).lineLimit(1)
+                        Text(names[lobby.peerID] ?? "Channel member").font(.system(size: 11, weight: .semibold)).lineLimit(1)
                         Text(lobby.started
                              ? "Playing \(lobby.map.title) · \(lobby.humanCount) player\(lobby.humanCount == 1 ? "" : "s")"
                              : "Waiting in \(lobby.map.title) · \(lobby.humanCount)/4 joined")
@@ -563,8 +563,8 @@ struct GameLibraryView: View {
             if standings.isEmpty {
                 VStack(spacing: 9) {
                     Image(systemName: "trophy").font(.system(size: 26, weight: .light)).foregroundStyle(accent)
-                    Text("No ranked room matches yet").font(.system(size: 13, weight: .medium))
-                    Text("The leaderboard updates after a match finishes with at least two real room members. Practice and bot-only matches stay unranked.")
+                    Text("No ranked channel matches yet").font(.system(size: 13, weight: .medium))
+                    Text("The leaderboard updates after a match finishes with at least two real channel members. Practice and bot-only matches stay unranked.")
                         .font(.system(size: 11)).foregroundStyle(secondary).multilineTextAlignment(.center)
                     Label("Results are stored only on this Mac", systemImage: "internaldrive")
                         .font(.system(size: 9)).foregroundStyle(secondary)
@@ -589,7 +589,7 @@ struct GameLibraryView: View {
                         }.font(.system(size: 11)).monospacedDigit()
                     }
                 }
-                Text("Room matches with at least two people · up to 1,000 recent results on this Mac. Bots have no ranking.")
+                Text("Channel matches with at least two people · up to 1,000 recent results on this Mac. Bots have no ranking.")
                     .font(.system(size: 9)).foregroundStyle(secondary)
             }
             if let error = records.lastError { Text(error).font(.system(size: 10)).foregroundStyle(secondary) }

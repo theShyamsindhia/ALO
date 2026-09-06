@@ -22,7 +22,7 @@ struct DJLiveDeckView: View {
             }
             VStack(alignment: .leading, spacing: 5) {
                 Text("Broadcast input").font(.headline)
-                Text(live.stage == .broadcast ? "Your changes are heard by the whole room" : "Your changes are heard only on this Mac")
+                Text(live.stage == .broadcast ? "Your changes are heard by the whole channel" : "Your changes are heard only on this Mac")
                     .font(.caption).foregroundStyle(.secondary)
             }
             if deck.isRecordingClip {

@@ -129,10 +129,10 @@ struct DJStudioView: View {
             Image(systemName: "square.grid.3x3.fill").font(.system(size: 26)).foregroundStyle(.cyan)
             VStack(alignment: .leading, spacing: 3) {
                 Text("DJ STUDIO").font(.system(size: 23, weight: .bold, design: .rounded))
-                Text("Two decks. Sixteen pads. Your room.").font(.callout).foregroundStyle(.secondary)
+                Text("Two decks. Sixteen pads. Your channel.").font(.callout).foregroundStyle(.secondary)
             }
             Spacer()
-            Label(studio.sharing || studio.liveSnapshot.stage == .broadcast ? "Sharing with room" : "Local listening mix", systemImage: studio.sharing || studio.liveSnapshot.stage == .broadcast ? "dot.radiowaves.left.and.right" : "headphones")
+            Label(studio.sharing || studio.liveSnapshot.stage == .broadcast ? "Sharing with channel" : "Local listening mix", systemImage: studio.sharing || studio.liveSnapshot.stage == .broadcast ? "dot.radiowaves.left.and.right" : "headphones")
                 .font(.caption.weight(.semibold)).foregroundStyle(studio.sharing ? .green : .secondary)
             Button { showsKeys = true } label: { Label("Keys", systemImage: "keyboard") }
                 .help("Edit and save DJ key bindings")
@@ -216,26 +216,26 @@ struct DJStudioView: View {
                     }
                 }.frame(width: 46, height: 46).clipShape(RoundedRectangle(cornerRadius: 8))
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(model.hasBroadcaster || studio.liveEnabled ? (model.nowPlaying.title ?? "Live room audio") : "No song broadcasting")
+                    Text(model.hasBroadcaster || studio.liveEnabled ? (model.nowPlaying.title ?? "Live channel audio") : "No song broadcasting")
                         .font(.headline).lineLimit(2)
-                    Text(model.hasBroadcaster || studio.liveEnabled ? (model.nowPlaying.artist ?? "Shared with the room") : "Start a room broadcast to listen")
+                    Text(model.hasBroadcaster || studio.liveEnabled ? (model.nowPlaying.artist ?? "Shared with the channel") : "Start a channel broadcast to listen")
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 }
             }
             if model.hasBroadcaster {
                 TimelineView(.periodic(from: .now, by: 1)) { context in
                     if let progress = model.roomPlaybackProgress(at: context.date) {
-                        ProgressView(value: progress).tint(.cyan).accessibilityLabel("Current room song progress")
+                        ProgressView(value: progress).tint(.cyan).accessibilityLabel("Current channel song progress")
                     }
                 }
                 HStack(spacing: 18) {
                     Button { model.sendRoomMediaCommand(.previousTrack) } label: { Image(systemName: "backward.end.fill") }
-                        .help("Previous room song").accessibilityLabel("Previous room song")
+                        .help("Previous channel song").accessibilityLabel("Previous channel song")
                     Button { model.toggleRoomPlayback() } label: { Image(systemName: model.roomIsPlaying ? "pause.fill" : "play.fill") }
-                        .help(model.roomIsPlaying ? "Pause room song" : "Play room song")
-                        .accessibilityLabel(model.roomIsPlaying ? "Pause room song" : "Play room song")
+                        .help(model.roomIsPlaying ? "Pause channel song" : "Play channel song")
+                        .accessibilityLabel(model.roomIsPlaying ? "Pause channel song" : "Play channel song")
                     Button { model.playNextRoomTrack() } label: { Image(systemName: "forward.end.fill") }
-                        .help("Next room song").accessibilityLabel("Next room song")
+                        .help("Next channel song").accessibilityLabel("Next channel song")
                     Spacer()
                 }.disabled(!model.canControlRoomPlayback)
                 if !model.canControlRoomPlayback {
@@ -251,10 +251,10 @@ struct DJStudioView: View {
                 Button { model.startDJBroadcast() } label: { Label("Share DJ mix", systemImage: "dot.radiowaves.left.and.right") }
                     .buttonStyle(.borderedProminent).tint(.cyan)
                     .disabled(model.phase != .live || model.hasBroadcaster || model.mediaSwitchBusy)
-                Text(studio.liveEnabled ? (model.isHost ? "Live input, deck B and pads feed your room broadcast." : "Live input, deck B and pads blend in your listening mix on this Mac.") : model.hasBroadcaster ? "Select Live broadcast on deck A to mix the current room audio." : model.phase != .live ? "Join a room to share your mix." : "Share both decks and pads with the room.")
+                Text(studio.liveEnabled ? (model.isHost ? "Live input, deck B and pads feed your channel broadcast." : "Live input, deck B and pads blend in your listening mix on this Mac.") : model.hasBroadcaster ? "Select Live broadcast on deck A to mix the current channel audio." : model.phase != .live ? "Join a channel to share your mix." : "Share both decks and pads with the channel.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Text(studio.liveEnabled ? "Scrub and loop the recent live buffer on deck A. Room song controls above operate the original source." : "Load songs on the decks, or select the current live broadcast on deck A.")
+            Text(studio.liveEnabled ? "Scrub and loop the recent live buffer on deck A. Channel song controls above operate the original source." : "Load songs on the decks, or select the current live broadcast on deck A.")
                 .font(.caption2).foregroundStyle(.secondary)
         }.padding(18).frame(maxWidth: .infinity, alignment: .leading).djCard()
     }

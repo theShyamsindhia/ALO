@@ -6,12 +6,17 @@ import Foundation
 /// voice intentionally stay on ALO's latency-sensitive control plane.
 public struct RoomStateSnapshot: Sendable, Equatable {
     public let events: [MeshRoomEvent]
+    /// Cryptographically validated records, including records that are not
+    /// currently authorized to affect the local UI/queue. Never project these
+    /// directly; they exist for replication, archive and receipt retention only.
+    public let retainedEvents: [MeshRoomEvent]
     public let chatEvents: [MeshRoomEvent]
     public let queue: [RoomQueueItem]
 
-    public init(events: [MeshRoomEvent]) {
+    public init(events: [MeshRoomEvent], retainedEvents: [MeshRoomEvent]? = nil) {
         let replica = MeshRoomReplica(events: events)
         self.events = replica.events
+        self.retainedEvents = retainedEvents ?? replica.events
         self.chatEvents = replica.chatEvents
         self.queue = replica.queue
     }
@@ -73,6 +78,7 @@ public final class AutomergeRoomStateSync: RoomStateSync, @unchecked Sendable {
     private static let keyPrefix = "event:"
     private let roomID: String
     private let eventValidator: @Sendable (MeshRoomEvent) -> Bool
+    private let eventProjector: @Sendable (MeshRoomEvent) -> Bool
     private var document: Document
     private var actorID: ActorId
     private var cachedEventsByID = [String: MeshRoomEvent]()
@@ -89,9 +95,11 @@ public final class AutomergeRoomStateSync: RoomStateSync, @unchecked Sendable {
         roomID: String,
         savedDocument: Data? = nil,
         legacyEvents: [MeshRoomEvent] = [],
-        eventValidator: @escaping @Sendable (MeshRoomEvent) -> Bool = { _ in true }
+        eventValidator: @escaping @Sendable (MeshRoomEvent) -> Bool = { _ in true },
+        eventProjector: @escaping @Sendable (MeshRoomEvent) -> Bool = { _ in true }
     ) throws {
         self.eventValidator = eventValidator
+        self.eventProjector = eventProjector
         self.roomID = roomID
         if let savedDocument {
             document = try Document(savedDocument)
@@ -117,20 +125,25 @@ public final class AutomergeRoomStateSync: RoomStateSync, @unchecked Sendable {
         roomID: String,
         savedDocument: Data?,
         legacyEvents: [MeshRoomEvent],
-        eventValidator: @escaping @Sendable (MeshRoomEvent) -> Bool = { _ in true }
+        eventValidator: @escaping @Sendable (MeshRoomEvent) -> Bool = { _ in true },
+        eventProjector: @escaping @Sendable (MeshRoomEvent) -> Bool = { _ in true }
     ) -> AutomergeRoomStateSync {
         if let savedDocument,
-           let loaded = try? AutomergeRoomStateSync(roomID: roomID, savedDocument: savedDocument, eventValidator: eventValidator) {
+           let loaded = try? AutomergeRoomStateSync(roomID: roomID, savedDocument: savedDocument,
+                eventValidator: eventValidator, eventProjector: eventProjector) {
             _ = try? loaded.ingest(legacyEvents)
             return loaded
         }
-        let empty = AutomergeRoomStateSync(roomID: roomID, document: Document(), eventValidator: eventValidator)
+        let empty = AutomergeRoomStateSync(roomID: roomID, document: Document(), eventValidator: eventValidator,
+                                          eventProjector: eventProjector)
         _ = try? empty.ingest(legacyEvents)
         return empty
     }
 
-    private init(roomID: String, document: Document, eventValidator: @escaping @Sendable (MeshRoomEvent) -> Bool) {
+    private init(roomID: String, document: Document, eventValidator: @escaping @Sendable (MeshRoomEvent) -> Bool,
+                 eventProjector: @escaping @Sendable (MeshRoomEvent) -> Bool) {
         self.eventValidator = eventValidator
+        self.eventProjector = eventProjector
         self.roomID = roomID
         self.document = document
         self.actorID = document.actor
@@ -138,7 +151,10 @@ public final class AutomergeRoomStateSync: RoomStateSync, @unchecked Sendable {
     }
 
     public func snapshot() throws -> RoomStateSnapshot {
-        withLock { RoomStateSnapshot(events: Array(cachedEventsByID.values)) }
+        withLock {
+            let retained = cachedEventsByID.values.sorted(by: eventPrecedes)
+            return RoomStateSnapshot(events: retained.filter(eventProjector), retainedEvents: retained)
+        }
     }
 
     @discardableResult
@@ -317,8 +333,9 @@ public final class AutomergeRoomStateSync: RoomStateSync, @unchecked Sendable {
             throw RoomStateSyncError.documentTooLarge
         }
         let next = try decoded ?? validatedEvents(in: candidate)
-        let visibleChats = next.values.filter { $0.kind == .chat }
-        let visibleQueueEvents = next.values.filter {
+        let projected = next.values.filter(eventProjector)
+        let visibleChats = projected.filter { $0.kind == .chat }
+        let visibleQueueEvents = projected.filter {
             $0.kind == .queueAdd || $0.kind == .queueRemove
         }.sorted(by: eventPrecedes)
         let retainedQueueByItemID = visibleQueueEvents.reduce(into: [String: MeshRoomEvent]()) {
@@ -331,8 +348,12 @@ public final class AutomergeRoomStateSync: RoomStateSync, @unchecked Sendable {
                 guard current == old else { throw RoomStateSyncError.immutableEventChanged }
                 continue
             }
+            // Removing an inert record cannot remove local authorized state.
+            // This also lets peers with already-accepted historical receipts
+            // prune their older history without poisoning a fresh peer's sync.
+            guard eventProjector(old) else { continue }
             if old.kind == .queueReorder,
-               next.values.contains(where: { $0.kind == .queueReorder && eventPrecedes(old, $0) }) { continue }
+               projected.contains(where: { $0.kind == .queueReorder && eventPrecedes(old, $0) }) { continue }
             if old.kind == .chat {
                 let newerCount = visibleChats.lazy.filter { self.eventPrecedes(old, $0) }.count
                 guard newerCount >= Self.maximumChatEvents else {
@@ -371,7 +392,12 @@ public final class AutomergeRoomStateSync: RoomStateSync, @unchecked Sendable {
         eventsByID: inout [String: MeshRoomEvent]
     ) throws -> Bool {
         var changed = false
-        let chats = eventsByID.values.filter { $0.kind == .chat }.sorted(by: eventPrecedes)
+        // Cryptographic provenance alone must NEVER enable a queue tombstone,
+        // order, retention eviction, or Lamport advancement. Keep inert signed
+        // records for CRDT convergence, bounded by maximumDocumentBytes, but
+        // apply effects/retention only to the authorized local projection.
+        let projected = eventsByID.values.filter(eventProjector)
+        let chats = projected.filter { $0.kind == .chat }.sorted(by: eventPrecedes)
         let excess = chats.count - Self.maximumChatEvents
         if excess > 0 {
             for event in chats.prefix(excess) {
@@ -381,14 +407,14 @@ public final class AutomergeRoomStateSync: RoomStateSync, @unchecked Sendable {
             }
         }
 
-        let orders = eventsByID.values.filter { $0.kind == .queueReorder }.sorted(by: eventPrecedes)
+        let orders = projected.filter { $0.kind == .queueReorder }.sorted(by: eventPrecedes)
         for event in orders.dropLast() {
             try document.delete(obj: ObjId.ROOT, key: Self.keyPrefix + event.id)
             eventsByID.removeValue(forKey: event.id)
             changed = true
         }
         var queueEventsByItem = [String: [MeshRoomEvent]]()
-        for event in eventsByID.values where event.kind == .queueAdd || event.kind == .queueRemove {
+        for event in projected where event.kind == .queueAdd || event.kind == .queueRemove {
             guard let itemID = event.queueItem?.id ?? event.queueItemID else { continue }
             queueEventsByItem[itemID, default: []].append(event)
         }
@@ -401,7 +427,7 @@ public final class AutomergeRoomStateSync: RoomStateSync, @unchecked Sendable {
                 changed = true
             }
         }
-        let queueEvents = eventsByID.values.filter {
+        let queueEvents = eventsByID.values.filter(eventProjector).filter {
             $0.kind == .queueAdd || $0.kind == .queueRemove
         }.sorted(by: eventPrecedes)
         let queueExcess = queueEvents.count - Self.maximumQueueEvents
@@ -423,19 +449,21 @@ public final class AutomergeRoomStateSync: RoomStateSync, @unchecked Sendable {
         _ event: MeshRoomEvent,
         given retained: [String: MeshRoomEvent]
     ) -> Bool {
+        guard eventProjector(event) else { return false }
+        let projected = retained.values.filter(eventProjector)
         if event.kind == .queueReorder,
-           let current = retained.values.filter({ $0.kind == .queueReorder }).max(by: eventPrecedes) {
+           let current = projected.filter({ $0.kind == .queueReorder }).max(by: eventPrecedes) {
             return !eventPrecedes(current, event)
         }
         if event.kind == .chat {
-            let chats = retained.values.filter { $0.kind == .chat }
+            let chats = projected.filter { $0.kind == .chat }
             guard chats.count >= Self.maximumChatEvents,
                   let oldest = chats.min(by: eventPrecedes)
             else { return false }
             return !eventPrecedes(oldest, event)
         }
         guard event.kind == .queueAdd || event.kind == .queueRemove else { return false }
-        let queueEvents = retained.values.filter {
+        let queueEvents = projected.filter {
             $0.kind == .queueAdd || $0.kind == .queueRemove
         }
         guard let itemID = event.queueItem?.id ?? event.queueItemID else { return false }

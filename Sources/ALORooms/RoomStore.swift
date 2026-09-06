@@ -2,13 +2,13 @@ import Foundation
 import Security
 import ALOCore
 
-protocol RoomSecretStoring {
+public protocol RoomSecretStoring {
     func read(roomID: String) -> String?
     func write(_ value: String, roomID: String) throws
     func remove(roomID: String)
 }
 
-final class RoomStore {
+public final class RoomStore {
     private struct StoredRoom: Codable {
         let id: String
         let name: String
@@ -31,7 +31,7 @@ final class RoomStore {
     private var writeScheduled = false
     private var forgottenRoomIDs = Set<String>()
 
-    init(fileURL: URL? = nil, secretStore: (any RoomSecretStoring)? = nil) {
+    public init(fileURL: URL? = nil, secretStore: (any RoomSecretStoring)? = nil) {
         self.secrets = secretStore ?? RoomSecretStore()
         if let fileURL {
             self.fileURL = fileURL
@@ -49,7 +49,7 @@ final class RoomStore {
         Bundle.main.bundleIdentifier == "in.werai.audio.dev" ? "WERAI-Dev" : "WERAI"
     }
 
-    func load() -> [RoomConfiguration] {
+    public func load() -> [RoomConfiguration] {
         guard let records = try? storedRecords() else { return [] }
         return records.compactMap { record in
             let key = record.isPrivate ? secrets.read(roomID: record.id) : nil
@@ -77,7 +77,7 @@ final class RoomStore {
         }.sorted { $0.joinedAt > $1.joinedAt }
     }
 
-    func save(_ room: RoomConfiguration) throws {
+    public func save(_ room: RoomConfiguration) throws {
         let current = try room.upgradedToCurrentSystem()
         if room.transportPolicy != .secureV2,
            try storedRecords().first(where: { $0.id == room.id })?.transportPolicy == .secureV2,
@@ -106,7 +106,7 @@ final class RoomStore {
 
     /// Explicit migration entry point. Normal saves and renames cannot change policy.
     @discardableResult
-    func migrate(roomID: String, to policy: RoomTransportPolicy) throws -> RoomConfiguration? {
+    public func migrate(roomID: String, to policy: RoomTransportPolicy) throws -> RoomConfiguration? {
         guard policy == .secureV2 else { throw RoomSecurityPolicyError.explicitMigrationRequired }
         guard let previous = load().first(where: { $0.id == roomID }) else { return nil }
         let migrated = try previous.upgradedToCurrentSystem()
@@ -115,7 +115,7 @@ final class RoomStore {
     }
 
     @discardableResult
-    func rename(roomID: String, to name: String) throws -> Bool {
+    public func rename(roomID: String, to name: String) throws -> Bool {
         var rooms = load()
         guard let index = rooms.firstIndex(where: { $0.id == roomID }) else { return false }
         let room = rooms[index]
@@ -133,7 +133,7 @@ final class RoomStore {
         return true
     }
 
-    func forget(roomID: String) throws {
+    public func forget(roomID: String) throws {
         try persist(load().filter { $0.id != roomID }, removingRoomIDs: [roomID])
         roomStateIOQueue.sync { [self] in
             forgottenRoomIDs.insert(roomID)
@@ -145,7 +145,7 @@ final class RoomStore {
     }
 
     @discardableResult
-    func mergeIcon(_ icon: RoomIcon, roomID: String) throws -> Bool {
+    public func mergeIcon(_ icon: RoomIcon, roomID: String) throws -> Bool {
         var rooms = load()
         guard let index = rooms.firstIndex(where: { $0.id == roomID }),
               icon.supersedes(rooms[index].icon) else { return false }
@@ -154,7 +154,7 @@ final class RoomStore {
         return true
     }
 
-    func loadEvents(roomID: String) -> [MeshRoomEvent] {
+    public func loadEvents(roomID: String) -> [MeshRoomEvent] {
         roomStateIOQueue.sync {
             drainPendingWrites()
             guard let data = try? Data(contentsOf: eventsURL(roomID: roomID)) else { return [] }
@@ -162,7 +162,7 @@ final class RoomStore {
         }
     }
 
-    func saveEvents(_ events: [MeshRoomEvent], roomID: String) {
+    public func saveEvents(_ events: [MeshRoomEvent], roomID: String) {
         enqueue(roomID: roomID) { $0.events = events }
     }
 
@@ -191,14 +191,14 @@ final class RoomStore {
         try? data.write(to: eventsURL(roomID: roomID), options: .atomic)
     }
 
-    func loadRoomStateDocument(roomID: String) -> Data? {
+    public func loadRoomStateDocument(roomID: String) -> Data? {
         roomStateIOQueue.sync {
             drainPendingWrites()
             return try? Data(contentsOf: roomStateURL(roomID: roomID))
         }
     }
 
-    func saveRoomStateDocument(_ document: Data, roomID: String) {
+    public func saveRoomStateDocument(_ document: Data, roomID: String) {
         guard !document.isEmpty else { return }
         enqueue(roomID: roomID) { $0.document = document }
     }
@@ -261,12 +261,12 @@ final class RoomStore {
     }
 }
 
-final class RoomSecretStore: RoomSecretStoring {
+public final class RoomSecretStore: RoomSecretStoring {
     private let service = Bundle.main.bundleIdentifier == "in.werai.audio.dev"
         ? "in.werai.audio.dev.room"
         : "in.werai.audio.room"
 
-    func read(roomID: String) -> String? {
+    public func read(roomID: String) -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -284,13 +284,13 @@ final class RoomSecretStore: RoomSecretStoring {
     private let update: (CFDictionary, CFDictionary) -> OSStatus
     private let add: (CFDictionary) -> OSStatus
 
-    init(update: @escaping (CFDictionary, CFDictionary) -> OSStatus = SecItemUpdate,
+    public init(update: @escaping (CFDictionary, CFDictionary) -> OSStatus = SecItemUpdate,
          add: @escaping (CFDictionary) -> OSStatus = { SecItemAdd($0, nil) }) {
         self.update = update
         self.add = add
     }
 
-    func write(_ value: String, roomID: String) throws {
+    public func write(_ value: String, roomID: String) throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -313,7 +313,7 @@ final class RoomSecretStore: RoomSecretStoring {
         }
     }
 
-    func remove(roomID: String) {
+    public func remove(roomID: String) {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

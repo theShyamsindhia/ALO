@@ -5,6 +5,18 @@ import Testing
 
 @Suite("Media receiver bootstrap and replacement")
 struct MediaReceiverSessionTests {
+    @Test func anchorRefreshDoesNotRefreshClockObservationAge() throws {
+        let h = try MediaReceiverHarness()
+        try h.queue.sync {
+            try h.activate()
+            let observed = try #require(h.committed.last).clock.sampledAtLocalNanos
+            h.time += 2_000_000_000
+            h.host.refreshTimeline(); try h.pump()
+            let refreshed = try #require(h.preparations.last)
+            #expect(refreshed.clock.sampledAtLocalNanos == observed)
+        }
+    }
+
     @Test func firstHardwareFloorPrecedesRejectedPreparationAndSurvivesTicketCancel() throws {
         let h = try MediaReceiverHarness()
         try h.queue.sync {

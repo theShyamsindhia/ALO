@@ -1,6 +1,7 @@
 import Foundation
 import Network
 import ALOCore
+import ALOTiming
 
 struct AnnotationTrafficBudget {
     private struct Entry { let time: UInt64; let bytes: Int; let snapshot: Bool }
@@ -135,7 +136,7 @@ public final class MediaReceiverSession: @unchecked Sendable {
     private var videoReceiver: MediaVideoReceiver?
     private var videoPreparation: Preparation?
 
-    /// Inline on openMediaChannel's completion executor; handlers are installed
+    /// Inline on openPeerChannel's completion executor; handlers are installed
     /// before this completion fires. Deferred attachment cannot recover early data.
     public static func attach(channel: SecurePeerChannel, expected: Selection, callbacks: Callbacks,
                               completion: @escaping (Result<MediaReceiverSession, Error>) -> Void) {
@@ -210,7 +211,7 @@ public final class MediaReceiverSession: @unchecked Sendable {
         send(.timingReport(stream: lease.stream, report: report))
     }
     /// The opener must return the admitted `.video` channel inline from
-    /// MeshControlPlane.openMediaChannel's completion, before hopping executors.
+    /// RoomPeerConnecting.openPeerChannel's completion, before hopping executors.
     /// Video owns its retry/decoder path; its failures never stop audio.
     public func startVideo(openChannel: @escaping VideoChannelOpener, callbacks: VideoReceiverCallbacks) {
         queue.async {
@@ -298,9 +299,12 @@ public final class MediaReceiverSession: @unchecked Sendable {
         }
         videoReceiver?.tick()
         let interval: UInt64 = clock.isReady ? 1_000_000_000 : 250_000_000
-        if probes.count < 8, lastPing.map({ now >= $0 && now - $0 >= interval }) ?? true {
-            let ping = clock.makePing(at: now)
-            if let id = ping.id { probes[id] = now; lastPing = now; send(.clockPing(id: id, clientTimeNanos: now)) }
+        // Timestamp t1 only when it can enter the transport now. Otherwise our
+        // own control queue would be misclassified as one-way network latency.
+        if probes.count < 8, !sending, outputs.isEmpty,
+           lastPing.map({ now >= $0 && now - $0 >= interval }) ?? true {
+            let ping = clock.makeProbe(at: now)
+            probes[ping.id] = now; lastPing = now; send(.clockPing(id: ping.id, clientTimeNanos: now))
         }
         guard freshClock() != nil else { return }
         let stalled = active.map { $0.committedPreparation?.anchor.state == .running && now >= $0.lastData && now - $0.lastData > 3_000_000_000 } ?? false
@@ -318,7 +322,9 @@ public final class MediaReceiverSession: @unchecked Sendable {
         let now = nowNanos()
         guard clock.isReady, let lastPong, now >= lastPong, now - lastPong <= 5_000_000_000,
               let offset = clock.offsetNanos(at: now), let rtt = clock.bestRoundTripNanos else { return nil }
-        return ClockSnapshot(offsetNanos: offset, sampledAtLocalNanos: now, roundTripNanos: rtt)
+        // Prediction time is not observation time. Renewing a ticket or
+        // refreshing an anchor must not freshen the last real clock exchange.
+        return ClockSnapshot(offsetNanos: offset, sampledAtLocalNanos: lastPong, roundTripNanos: rtt)
     }
     private func hostTime(local: UInt64, offset: Int64) -> UInt64? {
         if offset >= 0 { let value = local.addingReportingOverflow(UInt64(offset)); return value.overflow ? nil : value.partialValue }
@@ -360,10 +366,11 @@ public final class MediaReceiverSession: @unchecked Sendable {
         }
         guard budget(&controlTimes, limit: 32) else { stopOnQueue(failed: true); return }
         switch message {
-        case let .clockPong(id, client, host):
+        case let .clockPong(id, client, host, received):
             let now = nowNanos()
             guard probes.removeValue(forKey: id) == client, now >= client, now - client <= 2_000_000_000,
-                  clock.acceptPong(ControlMessage(type: "pong", id: id, clientNanos: client, hostNanos: host), receivedAt: now) else { return }
+                  clock.acceptReply(id: id, echoedSendNanos: client, hostNanos: host, receivedAt: now,
+                                    hostReceivedNanos: received) else { return }
             lastPong = now; if let snapshot = freshClock() { callbacks.clock(snapshot) }; tick()
         case let .subscribed(id, ticket, port): grant(id: id, ticket: ticket, port: port)
         case .anchor(let anchor): if let lease = lease(anchor.stream) { propose(anchor, lease: lease) }

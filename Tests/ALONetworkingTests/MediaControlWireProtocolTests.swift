@@ -28,7 +28,7 @@ struct MediaControlWireProtocolTests {
             .subscribe(requestID: request, broadcasterEpoch: 7, channels: [.audio, .timing]),
             .renew(requestID: request, stream: context), .cancel(stream: context),
             .clockPing(id: 0, clientTimeNanos: 0),
-            .clockPong(id: 5, clientTimeNanos: 900, hostTimeNanos: 800),
+            .clockPong(id: 5, clientTimeNanos: 900, hostTimeNanos: 800, hostReceivedNanos: 700),
             .anchor(anchor()), .anchor(anchor(state: .paused)),
             .anchorReady(stream: context, frameIndex: 241, captureTimeNanos: 1_000,
                          hostPlaybackTimeNanos: 2_000),
@@ -73,7 +73,7 @@ struct MediaControlWireProtocolTests {
             #expect(throws: SecureTransportError.malformed) { try MediaControlWireMessage(encoded: bytes) }
         }
         let valid = try MediaControlWireMessage.clockPing(id: 0, clientTimeNanos: 5).encoded()
-        for value in [0, 1, 3] {
+        for value in [0, 1, 2, Int(MediaControlWireMessage.version) + 1] {
             let invalid = try rewrite(valid) { $0["version"] = value }
             #expect(throws: SecureTransportError.unsupportedProtocol) { try MediaControlWireMessage(encoded: invalid) }
         }
@@ -157,10 +157,10 @@ struct MediaControlWireProtocolTests {
             }
             #expect(decoded == value)
         }
-        let pong = MediaControlWireMessage.clockPong(id: 1, clientTimeNanos: 9_000_000_000_000, hostTimeNanos: 20)
+        let pong = MediaControlWireMessage.clockPong(id: 1, clientTimeNanos: 9_000_000_000_000, hostTimeNanos: 20, hostReceivedNanos: 10)
         let decoded = try MediaControlWireMessage(encoded: pong.encoded())
-        #expect(decoded.clockControlMessage?.clientNanos == 9_000_000_000_000)
-        #expect(decoded.clockControlMessage?.hostNanos == 20)
+        guard case let .clockPong(_, client, sent, received) = decoded else { Issue.record("Missing pong"); return }
+        #expect(client == 9_000_000_000_000 && sent == 20 && received == 10)
     }
 
     @Test func clockBridgeWorksWithTheExistingEstimator() throws {
@@ -169,9 +169,9 @@ struct MediaControlWireProtocolTests {
         let id = try #require(ping.id)
         let request = MediaControlWireMessage.clockPing(id: id, clientTimeNanos: 1_000)
         #expect(request.clockControlMessage?.type == "ping")
-        let reply = MediaControlWireMessage.clockPong(id: id, clientTimeNanos: 1_000, hostTimeNanos: 2_000)
-        let pong = try #require(reply.clockControlMessage)
-        let accepted = clock.acceptPong(pong, receivedAt: 1_200)
+        let reply = MediaControlWireMessage.clockPong(id: id, clientTimeNanos: 1_000, hostTimeNanos: 2_000, hostReceivedNanos: 1_900)
+        guard case let .clockPong(_, client, host, received) = try MediaControlWireMessage(encoded: reply.encoded()) else { Issue.record("Missing pong"); return }
+        let accepted = clock.acceptReply(id: id, echoedSendNanos: client, hostNanos: host, receivedAt: 1_200, hostReceivedNanos: received)
         #expect(accepted && clock.sampleCount == 1)
         #expect(MediaControlWireMessage.cancel(stream: stream).clockControlMessage == nil)
     }
@@ -181,7 +181,8 @@ struct MediaControlWireProtocolTests {
             .subscribe(requestID: request, broadcasterEpoch: .max, channels: [.audio]),
             .cancel(stream: .init(sessionID: UUID(), broadcasterEpoch: 0, generation: .max)),
             .clockPing(id: .max, clientTimeNanos: 0), .clockPing(id: 0, clientTimeNanos: .max),
-            .clockPong(id: 0, clientTimeNanos: 0, hostTimeNanos: .max),
+            .clockPong(id: 0, clientTimeNanos: 0, hostTimeNanos: .max, hostReceivedNanos: 0),
+            .clockPong(id: 0, clientTimeNanos: 0, hostTimeNanos: 9, hostReceivedNanos: 10),
             .pause(stream: stream, atCaptureTimeNanos: .max),
             .resync(requestID: request, stream: stream, minimumCaptureTimeNanos: .max),
             .requestKeyframe(requestID: request, stream: stream, minimumCaptureTimeNanos: .max)

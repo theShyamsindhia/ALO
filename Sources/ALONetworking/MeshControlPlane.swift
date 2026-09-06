@@ -234,6 +234,7 @@ public final class MeshControlPlane: @unchecked Sendable {
     private let incomingMediaChannelHandler: ((SecurePeerChannel, AuthenticatedPeer) -> Void)?
     private let eventPolicy: SecureRoomEventPolicy?
     private let secureCapabilities: PeerCapabilities
+    private let networkAuthorization: NetworkChannelAuthorization?
     private let incarnationID = UUID()
     private var advertises = false
     private var scanDeadline: DispatchWorkItem?
@@ -335,6 +336,7 @@ public final class MeshControlPlane: @unchecked Sendable {
         installationIdentity: InstallationIdentity? = nil,
         peerPins: (any PeerPinStore)? = nil,
         secureCapabilities: PeerCapabilities = .desktop,
+        networkAuthorization: NetworkChannelAuthorization? = nil,
         incomingMediaChannelHandler: ((SecurePeerChannel, AuthenticatedPeer) -> Void)? = nil,
         secureStateHandler: @escaping (String?, SecurePeerChannelState) -> Void = { _, _ in },
         listenerStateHandler: @escaping (NWListener.State) -> Void = { _ in }
@@ -359,7 +361,8 @@ public final class MeshControlPlane: @unchecked Sendable {
         self.walkieTalkieHandler = walkieTalkieHandler
         self.openLineHandler = openLineHandler
         let eventPolicy = room.transportPolicy == .secureV2
-            ? SecureRoomEventPolicy(roomID: room.id, identity: installationIdentity, capabilities: secureCapabilities) : nil
+            ? SecureRoomEventPolicy(roomID: room.id, identity: installationIdentity, capabilities: secureCapabilities,
+                networkAuthorization: networkAuthorization) : nil
         self.eventPolicy = eventPolicy
         self.arenaHandler = arenaHandler
         self.chatAttachmentHandler = chatAttachmentHandler
@@ -369,11 +372,14 @@ public final class MeshControlPlane: @unchecked Sendable {
                 roomID: room.id,
                 savedDocument: initialRoomStateDocument.flatMap { eventPolicy?.restoreArchive($0) ?? $0 },
                 legacyEvents: initialEvents,
-                eventValidator: { eventPolicy?.accepts($0) ?? true }
+                eventValidator: { eventPolicy?.allowsDurableStorage($0) ?? true },
+                eventProjector: { eventPolicy?.accepts($0) ?? true }
             )
         self.roomStateSync = durableState
         self.roomStateSyncDisabled = false
         let durableEvents = (try? durableState.snapshot().events) ?? []
+        _ = eventPolicy?.rememberAccepted(durableEvents,
+            retainingHistory: (try? durableState.snapshot().retainedEvents) ?? [])
         self.replica = MeshRoomReplica(events: (initialEvents + durableEvents).filter { eventPolicy?.accepts($0) ?? true })
         self.roomStatePersistenceHandler = roomStatePersistenceHandler
         self.roomStateReceiveCompletedHandler = roomStateReceiveCompletedHandler
@@ -385,6 +391,7 @@ public final class MeshControlPlane: @unchecked Sendable {
         self.installationIdentity = installationIdentity
         self.peerPins = peerPins
         self.secureCapabilities = secureCapabilities
+        self.networkAuthorization = networkAuthorization
         self.incomingMediaChannelHandler = incomingMediaChannelHandler
         self.secureStateHandler = secureStateHandler
         self.listenerStateHandler = listenerStateHandler
@@ -406,7 +413,9 @@ public final class MeshControlPlane: @unchecked Sendable {
             guard let installationIdentity, peerPins != nil,
                   UUID(uuidString: nodeID) == installationIdentity.publicIdentity.nodeID,
                   nodeID == installationIdentity.publicIdentity.nodeID.uuidString,
-                  UUID(uuidString: room.id) != nil else { throw SecureTransportError.invalidCredentials }
+                  let channelID = UUID(uuidString: room.id),
+                  let networkAuthorization, networkAuthorization.channelID == channelID else { throw SecureTransportError.invalidCredentials }
+            _ = try networkAuthorization.claim(installationKeyHash: installationIdentity.publicIdentity.publicKeyHash)
         }
         let parameters = try transportParameters(expectedPeerID: nil)
         let listener = try NWListener(using: parameters, on: .any)
@@ -464,7 +473,7 @@ public final class MeshControlPlane: @unchecked Sendable {
     /// direct peer's authenticated listener, never its inbound ephemeral port.
     /// Completion runs on the mesh queue. On success the caller owns the channel,
     /// must install payload/state handlers immediately, and cancel it on leaving.
-    public func openMediaChannel(to peerID: UUID, role: ReliableChannelRole,
+    public func openPeerChannel(to peerID: UUID, role: ReliableChannelRole,
         completion: @escaping (Result<(SecurePeerChannel, AuthenticatedPeer), Error>) -> Void) {
         queue.async { [weak self] in
             guard let self, !self.isStopped, self.room.transportPolicy == .secureV2,
@@ -487,7 +496,7 @@ public final class MeshControlPlane: @unchecked Sendable {
                     ? .privateRoom(secret: self.room.secureJoinSecret ?? Data()) : .publicRoom
                 let configuration = try SecurePeerConfiguration(roomID: roomID, incarnationID: self.incarnationID,
                     admission: admission, offer: ProtocolOffer.current(capabilities: self.secureCapabilities),
-                    direction: .initiator(role))
+                    direction: .initiator(role), networkAuthorization: self.networkAuthorization)
                 let channel = SecurePeerChannel(connection: connection, identity: identity, configuration: configuration,
                     pins: pins, queue: self.queue)
                 let operation = UUID()
@@ -549,7 +558,7 @@ public final class MeshControlPlane: @unchecked Sendable {
                 let session = try DirectedVoiceSession(roomID: roomID, localPeerID: peerID, queue: ownerQueue,
                     callbacks: callbacks, open: { [weak self] remoteID, reply in
                         guard let self else { reply(.failure(SecureTransportError.invalidState)); return }
-                        self.openMediaChannel(to: remoteID, role: .voiceControl) { result in
+                        self.openPeerChannel(to: remoteID, role: .voiceControl) { result in
                             switch result {
                             case .success(let value): VoiceControlConnection.attach(value.0, queue: ownerQueue, completion: reply)
                             case .failure(let error): reply(.failure(error))
@@ -584,7 +593,8 @@ public final class MeshControlPlane: @unchecked Sendable {
         let record = RoomDiscovery.record(
             room: room, nodeID: nodeID, displayName: displayName,
             appVersion: appVersion, accessProof: accessProof, icon: roomIcon,
-            media: replica.broadcaster?.nodeID == nodeID ? replica.nowPlaying : nil
+            media: replica.broadcaster?.nodeID == nodeID ? replica.nowPlaying : nil,
+            networkChannel: networkAuthorization != nil
         )
         guard record != advertisedRecord else { return }
         advertisedRecord = record
@@ -655,7 +665,8 @@ public final class MeshControlPlane: @unchecked Sendable {
                 _ = try? durableState.compactIfNeeded()
                 let document = durableState.save()
                 if let policy {
-                    if let archive = try? policy.archive(document: document) { persist(archive) }
+                    if let retained = try? durableState.snapshot().retainedEvents,
+                       let archive = try? policy.archive(document: document, retainedEvents: retained) { persist(archive) }
                 } else { persist(document) }
                 completion()
             }
@@ -1047,6 +1058,7 @@ public final class MeshControlPlane: @unchecked Sendable {
                 event = signed
             }
             _ = replica.merge([event])
+            guard eventPolicy?.rememberAccepted([event]) ?? true else { return }
             ingestDurableRoomState([event], excluding: nil)
             replicaHandler(replica)
             broadcast(MeshEnvelope(type: "event", event: event))
@@ -1152,7 +1164,8 @@ public final class MeshControlPlane: @unchecked Sendable {
             let roles: Set<ReliableChannelRole> = incomingMediaChannelHandler == nil ? [.roomControl] : [.roomControl, .mediaControl, .video, .voiceControl, .fileTransfer]
             let configuration = try SecurePeerConfiguration(roomID: roomID, incarnationID: incarnationID, admission: admission,
                 offer: ProtocolOffer.current(capabilities: secureCapabilities),
-                direction: link.initiated ? .initiator(.roomControl) : .responder(allowedChannelRoles: roles))
+                direction: link.initiated ? .initiator(.roomControl) : .responder(allowedChannelRoles: roles),
+                networkAuthorization: networkAuthorization)
             let channel = SecurePeerChannel(connection: link.connection, identity: installationIdentity,
                                              configuration: configuration, pins: peerPins, queue: queue)
             link.secureChannel = channel
@@ -1177,7 +1190,8 @@ public final class MeshControlPlane: @unchecked Sendable {
                     return
                 }
                 guard self.eventPolicy?.admit(peer, initiated: link.initiated) ?? true else { self.cancel(link); return }
-                // Saved or relayed events wait for independent admission of their author.
+                // Re-evaluate projected history after admission/policy refresh.
+                // Root-bound durable authors need not currently be online.
                 self.roomStateWorkerQueue.async { [weak self] in
                     guard let self, let events = try? self.roomStateSync.snapshot().events else { return }
                     self.queue.async {
@@ -1806,6 +1820,7 @@ public final class MeshControlPlane: @unchecked Sendable {
         let valid = validRoomEvents(Array(events.prefix(maximumSyncEvents)))
         let inserted = replica.merge(valid)
         guard !inserted.isEmpty else { return }
+        guard eventPolicy?.rememberAccepted(inserted) ?? true else { cancel(source); return }
         if source.roomStateSyncVersion == nil {
             ingestDurableRoomState(inserted, excluding: source)
         }
@@ -1818,7 +1833,8 @@ public final class MeshControlPlane: @unchecked Sendable {
     }
 
     private func localPermits(_ capability: PeerCapabilities) -> Bool {
-        room.transportPolicy != .secureV2 || secureCapabilities.contains(capability)
+        room.transportPolicy != .secureV2 || (secureCapabilities.contains(capability)
+            && eventPolicy?.permits(author: nodeID, capability: capability) == true)
     }
 
     private func permitsTransient(_ envelope: MeshEnvelope, from link: Link, capability: PeerCapabilities) -> Bool {
@@ -2158,6 +2174,7 @@ public final class MeshControlPlane: @unchecked Sendable {
             event = signed
         }
         _ = replica.merge([event])
+        guard eventPolicy?.rememberAccepted([event]) ?? true else { return }
         replicaHandler(replica)
         broadcast(MeshEnvelope(type: "event", event: event))
     }
@@ -2578,6 +2595,10 @@ public final class MeshControlPlane: @unchecked Sendable {
             guard let self else { return }
             do {
                 let inserted = try roomStateSync.ingest(durable)
+                let authorized = inserted.filter { self.eventPolicy?.accepts($0) ?? true }
+                guard eventPolicy?.rememberAccepted(authorized, retainingHistory: try roomStateSync.snapshot().retainedEvents) ?? true else {
+                    throw SecureTransportError.capacity
+                }
                 guard !inserted.isEmpty else { return }
                 let shouldFallback = roomStateSync.requiresLifecycleCompaction()
                 queue.async { [weak self] in
@@ -2666,8 +2687,12 @@ public final class MeshControlPlane: @unchecked Sendable {
                     message,
                     from: link.roomStateSyncSession
                 )
+                let authorized = inserted.filter { self.eventPolicy?.accepts($0) ?? true }
+                guard eventPolicy?.rememberAccepted(authorized, retainingHistory: try roomStateSync.snapshot().retainedEvents) ?? true else {
+                    throw SecureTransportError.capacity
+                }
                 let shouldFallback = roomStateSync.requiresLifecycleCompaction()
-                roomStateReceiveCompletedHandler(inserted)
+                roomStateReceiveCompletedHandler(authorized)
                 queue.async { [weak self] in
                     guard let self, !isStopped else { return }
                     let linkIsLive = links[ObjectIdentifier(link.connection)] === link
@@ -2676,7 +2701,8 @@ public final class MeshControlPlane: @unchecked Sendable {
                         let merged = replica.merge(validRoomEvents(inserted))
                         if !merged.isEmpty {
                             replicaHandler(replica)
-                            // Legacy peers still converge during the rolling upgrade.
+                            // Direct event gossip shares the same current-generation
+                            // authorization as durable document synchronization.
                             for event in merged {
                                 broadcast(MeshEnvelope(type: "event", event: event), excluding: link)
                             }
@@ -2749,7 +2775,8 @@ public final class MeshControlPlane: @unchecked Sendable {
                 guard let self else { return }
                 let document: Data
                 if let eventPolicy {
-                    guard let archive = try? eventPolicy.archive(document: roomStateSync.save()) else { return }
+                    guard let retained = try? roomStateSync.snapshot().retainedEvents,
+                          let archive = try? eventPolicy.archive(document: roomStateSync.save(), retainedEvents: retained) else { return }
                     document = archive
                 } else { document = roomStateSync.save() }
                 queue.async { [weak self] in

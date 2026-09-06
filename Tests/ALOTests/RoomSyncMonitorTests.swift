@@ -40,10 +40,10 @@ struct RoomSyncMonitorTests {
         #expect(titles.contains("Living Room moved out of sync"))
         #expect(titles.contains("You received audio late"))
         #expect(titles.contains("Living Room playback was realigned"))
-        #expect(titles.contains("Room playback buffer changed"))
+        #expect(titles.contains("Channel playback buffer changed"))
         #expect(titles.contains("Network jitter increased"))
         #expect(titles.contains("Audio output timing changed"))
-        #expect(titles.contains("Room timing was recalculated"))
+        #expect(titles.contains("Channel timing was recalculated"))
 
         participants[1].playbackTiming = PeerPlaybackTiming(roundTripMilliseconds: 12, driftMilliseconds: 9)
         monitor.observe(participants: participants, currentParticipantID: localID,

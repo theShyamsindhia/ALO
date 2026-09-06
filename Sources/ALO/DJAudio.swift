@@ -620,7 +620,7 @@ final class DJStudio: ObservableObject {
         guard label == "A" || label == "B" else { return }
         if recordingDeck == label { try finishDeckRecording(); return }
         guard recordingDeck == nil else { throw ALOError("Stop the other deck’s recording first.") }
-        guard let stage, !sharing else { throw ALOError("Start a room broadcast, then press REC to capture its playing audio.") }
+        guard let stage, !sharing else { throw ALOError("Start a channel broadcast, then press REC to capture its playing audio.") }
         if !liveEnabled { setLiveStage(stage) }
         try DJLiveAudio.shared.startRecording()
         recordingDeck = label; recordingMessage = nil

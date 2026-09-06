@@ -17,7 +17,7 @@ struct DiagnosticsTests {
         #expect(runner.results[.roomSync]?.outcome == .running)
         #expect(runner.results[.roomSync]?.detail.contains("Checking") == true)
         runner.acceptLiveRoomResult(nil, isActive: false)
-        #expect(runner.results[.roomSync]?.detail.contains("Open a room") == true)
+        #expect(runner.results[.roomSync]?.detail.contains("Open a channel") == true)
         runner.acceptLiveRoomResult(nil, isPaused: true)
         #expect(runner.results[.roomSync]?.detail.contains("Playback is paused") == true)
         runner.acceptLiveRoomResult(nil, hasBroadcaster: false)
@@ -28,7 +28,7 @@ struct DiagnosticsTests {
             remotePeerCount: 0, syncLabel: "No broadcaster", audioIsRendering: false,
             hasBroadcaster: false, timing: nil)
         runner.testRoom(inactive)
-        #expect(runner.results[.roomSync]?.detail.contains("Open a room") == true,
+        #expect(runner.results[.roomSync]?.detail.contains("Open a channel") == true,
             "Explicit refresh remains available alongside live guidance")
     }
 
@@ -112,7 +112,7 @@ struct DiagnosticsTests {
         #expect(report.contains("<redacted-ip>"))
         #expect(report.contains("<redacted-id>"))
         #expect(report.contains("<redacted-email>"))
-        #expect(report.contains("Room names, device names, peer identifiers"))
+        #expect(report.contains("Channel names, device names, peer identifiers"))
     }
 
     @Test("Live listener timing produces an actionable ready summary")
@@ -267,6 +267,6 @@ struct DiagnosticsTests {
         )
 
         #expect(context.result.outcome == .warning)
-        #expect(context.result.detail.contains("Open a room"))
+        #expect(context.result.detail.contains("Open a channel"))
     }
 }

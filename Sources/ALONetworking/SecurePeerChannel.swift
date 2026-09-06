@@ -1,6 +1,8 @@
 import Foundation
 import Network
 import CryptoKit
+import ALOIdentity
+import ALORooms
 
 public enum SecureRoomAdmission: Sendable {
     case publicRoom
@@ -25,13 +27,22 @@ public struct SecurePeerConfiguration: Sendable {
     public let offer: ProtocolOffer
     public let direction: SecurePeerDirection
     public let timing: ConnectionTimingPolicy
+    public let networkAuthorization: NetworkChannelAuthorization?
     public init(roomID: UUID, incarnationID: UUID, admission: SecureRoomAdmission,
-                offer: ProtocolOffer, direction: SecurePeerDirection, timing: ConnectionTimingPolicy = .init()) throws {
+                offer: ProtocolOffer, direction: SecurePeerDirection, timing: ConnectionTimingPolicy = .init(),
+                networkAuthorization: NetworkChannelAuthorization? = nil) throws {
         guard offer.wireVersions.contains(2) else { throw SecureTransportError.downgradeForbidden }
         if case .privateRoom(let secret) = admission, secret.count != 32 { throw SecureTransportError.invalidCredentials }
         if case .responder(let roles) = direction, roles.isEmpty { throw SecureTransportError.malformed }
+        if offer.stateSyncVersions.contains(ProtocolOffer.currentRoomGeneration) {
+            guard offer.stateSyncVersions == [ProtocolOffer.currentRoomGeneration],
+                  let networkAuthorization, networkAuthorization.channelID == roomID else {
+                throw SecureTransportError.invalidCredentials
+            }
+        } else if networkAuthorization != nil { throw SecureTransportError.unsupportedProtocol }
         self.roomID = roomID; self.incarnationID = incarnationID; self.admission = admission
         self.offer = offer; self.direction = direction; self.timing = timing
+        self.networkAuthorization = networkAuthorization
     }
 }
 
@@ -42,6 +53,7 @@ public struct AuthenticatedPeer: Sendable {
     public let connectionID: UUID
     public let negotiated: NegotiatedProtocol
     public let channelRole: ReliableChannelRole
+    public var userIdentity: PublicUserIdentity? = nil
 }
 
 public enum SecurePeerChannelError: LocalizedError, Equatable, Sendable {
@@ -91,20 +103,23 @@ public final class SecurePeerChannel: @unchecked Sendable {
         let channelRole: ReliableChannelRole
         let admissionKind: RoomAdmissionKind
         let direction: UInt8
+        let networkClaim: NetworkPeerClaim?
         func offer() throws -> ProtocolOffer {
             try ProtocolOffer(wireVersions: wireVersions, stateSyncVersions: stateSyncVersions,
                               capabilities: PeerCapabilities(rawValue: capabilities))
         }
     }
     private struct Frame: Codable {
-        enum Kind: String, Codable { case hello, proof, accepted, payload }
+        enum Kind: String, Codable { case hello, proof, accepted, payload, networkPolicy }
         let kind: Kind
         var hello: Hello? = nil
         var proof: Data? = nil
         var payload: Data? = nil
+        var policy: NetworkManifest? = nil
     }
     private struct Send {
         let bytes: Data
+        let requiresCurrentAuthorization: Bool
         let completion: ((Result<Void, Error>) -> Void)?
     }
     private let connection: NWConnection
@@ -130,6 +145,8 @@ public final class SecurePeerChannel: @unchecked Sendable {
     private var localAckSent = false
     private var deferredPayloads = [Data]()
     private var deferredPayloadBytes = 0
+    private var policyObserver: UUID?
+    private var lastSentPolicyRevision: UInt64 = 0
 
     public init(connection: NWConnection, identity: InstallationIdentity, configuration: SecurePeerConfiguration,
                 pins: PeerPinStore, queue: DispatchQueue) {
@@ -138,12 +155,18 @@ public final class SecurePeerChannel: @unchecked Sendable {
         queue.setSpecific(key: executorKey, value: 1)
     }
 
-    deinit { queue.setSpecific(key: executorKey, value: nil) }
+    deinit {
+        if let policyObserver { configuration.networkAuthorization?.policy.removeObserver(policyObserver) }
+        queue.setSpecific(key: executorKey, value: nil)
+    }
 
     public func start() {
         queue.async {
             guard self.state == .idle else { return }
             self.generation += 1
+            self.policyObserver = self.configuration.networkAuthorization?.policy.observe { [weak self] in
+                self?.queue.async { [weak self] in self?.networkPolicyChanged() }
+            }
             let generation = self.generation
             self.transition(.connecting)
             self.setDeadline(self.configuration.timing.connectTimeout, generation: generation)
@@ -177,6 +200,11 @@ public final class SecurePeerChannel: @unchecked Sendable {
     /// Internal adapters share this executor without exposing it to application
     /// callers. Install their handlers inside the admission callback.
     var mediaExecutor: DispatchQueue { queue }
+    /// Queue-confined backpressure measurement for transport diagnostics/tests.
+    var pendingSendByteCount: Int {
+        dispatchPrecondition(condition: .onQueue(queue))
+        return queuedBytes
+    }
 
     /// Derives only the UDP port from a media grant. The host must be the concrete
     /// remote address of this live admitted TLS path, preserving IPv6 scope.
@@ -201,11 +229,18 @@ public final class SecurePeerChannel: @unchecked Sendable {
     }
 
     public func send(payload: Data, completion: ((Result<Void, Error>) -> Void)? = nil) {
-        queue.async {
+        let action = {
             guard self.state == .authenticated else { completion?(.failure(SecurePeerChannelError.notAuthenticated)); return }
+            guard self.hasCurrentAuthorization else {
+                completion?(.failure(SecurePeerChannelError.admissionFailed)); self.close(.admissionFailed); return
+            }
             guard payload.count <= Self.maximumPayloadBytes else { completion?(.failure(SecurePeerChannelError.oversized)); return }
             self.enqueue(Frame(kind: .payload, payload: payload), completion: completion)
         }
+        // Media clock adapters already run here. A second asynchronous hop
+        // would add unrelated executor backlog AFTER the send timestamp.
+        if DispatchQueue.getSpecific(key: executorKey) == 1 { action() }
+        else { queue.async(execute: action) }
     }
 
     private var isTerminal: Bool {
@@ -226,6 +261,8 @@ public final class SecurePeerChannel: @unchecked Sendable {
     private func close(_ reason: SecurePeerChannelError) {
         guard !isTerminal else { return }
         generation += 1; deadline?.cancel(); deadline = nil
+        if let policyObserver { configuration.networkAuthorization?.policy.removeObserver(policyObserver) }
+        policyObserver = nil
         connection.stateUpdateHandler = nil; connection.cancel()
         let completions = pending.compactMap(\.completion) + [inFlight?.completion].compactMap { $0 }
         pending.removeAll(); inFlight = nil; queuedBytes = 0; receiveBuffer.removeAll()
@@ -243,20 +280,23 @@ public final class SecurePeerChannel: @unchecked Sendable {
             transition(.authenticating)
             setDeadline(configuration.timing.authenticationTimeout, generation: generation)
             if case .initiator(let role) = configuration.direction {
-                let hello = makeHello(connectionID: UUID(), role: role)
+                let hello = try makeHello(connectionID: UUID(), role: role)
                 localHello = hello; enqueue(Frame(kind: .hello, hello: hello))
             }
             receive(generation: generation)
         } catch { close(.admissionFailed) }
     }
 
-    private func makeHello(connectionID: UUID, role: ReliableChannelRole) -> Hello {
-        Hello(roomID: configuration.roomID, peerID: identity.publicIdentity.nodeID,
+    private func makeHello(connectionID: UUID, role: ReliableChannelRole) throws -> Hello {
+        let claim = try configuration.networkAuthorization?.claim(installationKeyHash: identity.publicIdentity.publicKeyHash)
+        lastSentPolicyRevision = claim?.manifest.revision ?? 0
+        return Hello(roomID: configuration.roomID, peerID: identity.publicIdentity.nodeID,
             keyHash: identity.publicIdentity.publicKeyHash, incarnationID: configuration.incarnationID,
             connectionID: connectionID, nonce: SymmetricKey(size: .bits256).withUnsafeBytes { Data($0) },
             wireVersions: configuration.offer.wireVersions, stateSyncVersions: configuration.offer.stateSyncVersions,
             capabilities: configuration.offer.capabilities.rawValue, channelRole: role,
-            admissionKind: configuration.admission.kind, direction: configuration.direction.proofRole.rawValue)
+            admissionKind: configuration.admission.kind, direction: configuration.direction.proofRole.rawValue,
+            networkClaim: claim)
     }
 
     private func receive(generation: UInt64) {
@@ -278,7 +318,8 @@ public final class SecurePeerChannel: @unchecked Sendable {
         while receiveBuffer.count >= 4, !isTerminal {
             var reader = WireReader(data: receiveBuffer)
             let length = Int(try reader.integer(UInt32.self))
-            let maximum = state == .authenticated || (remoteProofAccepted && remoteAck) ? Self.maximumFrameBytes : 8_192
+            let maximum = state == .authenticated || (remoteProofAccepted && remoteAck) ? Self.maximumFrameBytes
+                : (configuration.networkAuthorization == nil ? 8_192 : NetworkManifest.maximumEncodedBytes + 8_192)
             guard length > 0, length <= maximum else { throw SecureTransportError.oversized }
             guard receiveBuffer.count >= 4 + length else { return }
             let body = Data(receiveBuffer.dropFirst(4).prefix(length))
@@ -290,26 +331,38 @@ public final class SecurePeerChannel: @unchecked Sendable {
 
     private func handle(_ frame: Frame) throws {
         switch frame.kind {
+        case .networkPolicy:
+            guard state == .authenticated, frame.hello == nil, frame.proof == nil, frame.payload == nil,
+                  let policy = frame.policy, let authorization = configuration.networkAuthorization else {
+                throw SecureTransportError.invalidState
+            }
+            try authorization.policy.receive(policy)
+            networkPolicyChanged()
         case .hello:
             guard state == .authenticating, remoteHello == nil, let hello = frame.hello,
-                  frame.proof == nil, frame.payload == nil, let peer = tlsPeer,
+                  frame.proof == nil, frame.payload == nil, frame.policy == nil, let peer = tlsPeer,
                   hello.roomID == configuration.roomID, hello.peerID == peer.nodeID, hello.keyHash == peer.publicKeyHash,
                   hello.nonce.count == 32, hello.admissionKind == configuration.admission.kind,
                   hello.direction != configuration.direction.proofRole.rawValue,
                   (hello.direction == 1 || hello.direction == 2) else { throw SecureTransportError.wrongContext }
             _ = try hello.offer()
+            _ = try NegotiatedProtocol.negotiate(initiator: configuration.offer, responder: hello.offer(), policy: .secureV2)
+            if let authorization = configuration.networkAuthorization {
+                guard let claim = hello.networkClaim else { throw SecureTransportError.invalidCredentials }
+                try authorization.validate(claim, installationKeyHash: peer.publicKeyHash)
+            } else if hello.networkClaim != nil { throw SecureTransportError.unsupportedProtocol }
             switch configuration.direction {
             case .initiator(let role):
                 guard hello.channelRole == role, hello.connectionID == localHello?.connectionID else { throw SecureTransportError.wrongContext }
             case .responder(let roles):
                 guard roles.contains(hello.channelRole) else { throw SecureTransportError.wrongContext }
-                let response = makeHello(connectionID: hello.connectionID, role: hello.channelRole)
+                let response = try makeHello(connectionID: hello.connectionID, role: hello.channelRole)
                 localHello = response; enqueue(Frame(kind: .hello, hello: response))
             }
             remoteHello = hello
             try beginAdmission()
         case .proof:
-            guard state == .authenticating, !remoteProofAccepted, frame.hello == nil, frame.payload == nil,
+            guard state == .authenticating, !remoteProofAccepted, frame.hello == nil, frame.payload == nil, frame.policy == nil,
                   let proof = frame.proof, proof.count == 32, let admissionSession else { throw SecureTransportError.invalidState }
             do {
                 switch configuration.admission {
@@ -324,12 +377,15 @@ public final class SecurePeerChannel: @unchecked Sendable {
             }
         case .accepted:
             guard state == .authenticating, remoteProofAccepted, !remoteAck,
-                  frame.hello == nil, frame.proof == nil, frame.payload == nil else { throw SecureTransportError.invalidState }
+                  frame.hello == nil, frame.proof == nil, frame.payload == nil, frame.policy == nil else { throw SecureTransportError.invalidState }
             remoteAck = true; finishAdmissionIfReady()
         case .payload:
-            guard frame.hello == nil, frame.proof == nil,
+            guard frame.hello == nil, frame.proof == nil, frame.policy == nil,
                   let payload = frame.payload, payload.count <= Self.maximumPayloadBytes else { throw SecureTransportError.invalidState }
-            if state == .authenticated { onPayload?(payload) }
+            if state == .authenticated {
+                guard hasCurrentAuthorization else { close(.admissionFailed); return }
+                onPayload?(payload)
+            }
             else {
                 // A peer can receive our ACK before Network delivers its local send completion.
                 // Bound that scheduling overlap and release it only after our admission callback.
@@ -351,7 +407,9 @@ public final class SecurePeerChannel: @unchecked Sendable {
             initiatorNonce: initiator.nonce, responderNonce: responder.nonce,
             initiatorOffer: initiator.offer(), responderOffer: responder.offer(), policy: .secureV2,
             channelRole: initiator.channelRole, admissionKind: configuration.admission.kind,
-            initiatorIncarnationID: initiator.incarnationID, responderIncarnationID: responder.incarnationID)
+            initiatorIncarnationID: initiator.incarnationID, responderIncarnationID: responder.incarnationID,
+            initiatorNetworkClaim: initiator.networkClaim?.transcriptDigest(),
+            responderNetworkClaim: responder.networkClaim?.transcriptDigest())
         let session = try TLSAdmissionSession(connection: connection, identity: identity, transcript: transcript,
             localRole: configuration.direction.proofRole, pins: pins)
         admissionSession = session
@@ -367,21 +425,56 @@ public final class SecurePeerChannel: @unchecked Sendable {
         guard state == .authenticating, remoteProofAccepted, remoteAck, localAckSent,
               let remoteHello, let admissionSession else { return }
         do {
+            if let authorization = configuration.networkAuthorization, let claim = remoteHello.networkClaim {
+                try authorization.validateCurrentAccess(claim.device.userIdentity)
+            }
             let root: SymmetricKey
             switch configuration.admission {
             case .privateRoom(let secret): root = try admissionSession.privateChannelSecret(roomSecret: secret)
             case .publicRoom: root = try admissionSession.publicChannelSecret()
             }
+            let authorization = configuration.networkAuthorization
+            let remoteUser = remoteHello.networkClaim?.device.userIdentity
             credentials = AuthenticatedChannelCredentials(transcript: admissionSession.transcript,
-                localRole: configuration.direction.proofRole, rootSecret: root)
+                localRole: configuration.direction.proofRole, rootSecret: root, stillAuthorized: {
+                    guard let authorization else { return true }
+                    guard let remoteUser else { return false }
+                    return (try? authorization.validateCurrentAccess(remoteUser)) != nil
+                })
         } catch { close(.admissionFailed); return }
         deadline?.cancel(); deadline = nil
         transition(.authenticated)
         onAuthenticated?(AuthenticatedPeer(nodeID: remoteHello.peerID, publicKeyHash: remoteHello.keyHash,
             incarnationID: remoteHello.incarnationID, connectionID: remoteHello.connectionID,
-            negotiated: admissionSession.transcript.negotiated, channelRole: remoteHello.channelRole))
+            negotiated: admissionSession.transcript.negotiated, channelRole: remoteHello.channelRole,
+            userIdentity: remoteHello.networkClaim?.device.userIdentity))
+        networkPolicyChanged()
         let payloads = deferredPayloads; deferredPayloads.removeAll(); deferredPayloadBytes = 0
-        for payload in payloads { onPayload?(payload) }
+        for payload in payloads {
+            guard state == .authenticated, hasCurrentAuthorization else { close(.admissionFailed); return }
+            onPayload?(payload)
+        }
+    }
+
+    private var hasCurrentAuthorization: Bool {
+        guard let authorization = configuration.networkAuthorization else { return true }
+        guard let remote = remoteHello?.networkClaim?.device.userIdentity else { return false }
+        return (try? authorization.validateCurrentAccess(remote)) != nil
+    }
+
+    private func networkPolicyChanged() {
+        guard !isTerminal, let authorization = configuration.networkAuthorization else { return }
+        do {
+            let policy = try authorization.policy.snapshot()
+            try policy.authorize(authorization.localDevice.userIdentity, channelID: configuration.roomID)
+            if let remote = remoteHello?.networkClaim?.device.userIdentity {
+                try authorization.validateCurrentAccess(remote)
+            }
+            if state == .authenticated, policy.revision > lastSentPolicyRevision {
+                lastSentPolicyRevision = policy.revision
+                enqueue(Frame(kind: .networkPolicy, policy: policy))
+            }
+        } catch { close(.admissionFailed) }
     }
 
     private func enqueue(_ frame: Frame, completion: ((Result<Void, Error>) -> Void)? = nil) {
@@ -394,12 +487,21 @@ public final class SecurePeerChannel: @unchecked Sendable {
                   pending.count + (inFlight == nil ? 0 : 1) < Self.maximumQueuedFrames else {
                 completion?(.failure(SecurePeerChannelError.queueFull)); close(.queueFull); return
             }
-            queuedBytes += wire.data.count; pending.append(Send(bytes: wire.data, completion: completion))
+            queuedBytes += wire.data.count
+            pending.append(Send(bytes: wire.data, requiresCurrentAuthorization: frame.kind == .payload,
+                                completion: completion))
             drain()
         } catch { completion?(.failure(error)); close(.protocolViolation) }
     }
     private func drain() {
         guard !isTerminal, inFlight == nil, !pending.isEmpty else { return }
+        // Membership can change while a payload waits behind another write.
+        // Recheck before handing its bytes to Network.framework, not only when
+        // the application enqueues it. Bytes already handed to TLS cannot be recalled.
+        if pending[0].requiresCurrentAuthorization && !hasCurrentAuthorization {
+            close(.admissionFailed)
+            return
+        }
         let send = pending.removeFirst(); inFlight = send
         let generation = self.generation
         connection.send(content: send.bytes, completion: .contentProcessed { [weak self] error in

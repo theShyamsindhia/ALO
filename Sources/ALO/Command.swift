@@ -1,6 +1,7 @@
 import Foundation
 import ALOCore
 import ALONetworking
+import ALOAppModel
 
 struct ALOError: LocalizedError {
     let message: String
@@ -36,7 +37,7 @@ enum ALOCommand {
                 print("Secure Bonjour and local-network declarations verified.")
             case "verify-secure-identity":
                 try InstallationIdentity.verifyKeychainAccess()
-                print("Secure room identity and peer-pin persistence verified.")
+                print("Secure channel identity and peer-pin persistence verified.")
             case "verify-game-resources":
                 try BreachScene.verifyPackagedResources()
 
@@ -50,23 +51,21 @@ enum ALOCommand {
                 ArenaStandalone.run(stickFight: true)
 
             case "host":
-                let roomName = arguments.dropFirst().first ?? Host.current().localizedName ?? "ALO Room"
-                try await runHost(roomName: roomName)
+                throw ALOError("Legacy host discovery is disabled. Set up an identity in ALO, then use 'alo channel <channel-id> --broadcast'.")
 
             case "join":
-                let roomName = arguments.dropFirst().first
-                try runReceiver(roomName: roomName)
+                throw ALOError("Legacy join-by-name is disabled. Join a network in ALO, then use 'alo channel <channel-id>'.")
 
-            case "room":
+            case "channel":
                 let roomArguments = Array(arguments.dropFirst())
                 let flags = roomArguments.filter { $0.hasPrefix("--") }
                 let roomNames = roomArguments.filter { !$0.hasPrefix("--") }
                 let supportedFlags = Set(["--broadcast", "--take-over"])
                 guard flags.allSatisfy(supportedFlags.contains) else {
-                    throw ALOError("Unknown room option. Run 'alo help'.")
+                    throw ALOError("Unknown channel option. Run 'alo help'.")
                 }
                 guard roomNames.count <= 1 else {
-                    throw ALOError("Pass at most one saved room ID or name.")
+                    throw ALOError("Pass at most one saved channel ID or name.")
                 }
                 guard !(flags.contains("--broadcast") && flags.contains("--take-over")) else {
                     throw ALOError("Choose either --broadcast or --take-over, not both.")
@@ -137,8 +136,11 @@ enum ALOCommand {
         broadcastInitially: Bool,
         takeOverAfterJoining: Bool
     ) async throws {
-        let store = RoomStore()
-        let rooms = store.load()
+        let account = NetworkAccountModel()
+        account.resume()
+        guard account.identityReady else { throw NetworkAccountError.setupRequired }
+        let store = RoomStore(fileURL: NetworkChannelStorage.fileURL)
+        let rooms = account.networks.flatMap { $0.channels }.compactMap { account.room(channelID: $0.id.uuidString) }
         let room = if let roomIDOrName {
             rooms.first {
                 $0.id.caseInsensitiveCompare(roomIDOrName) == .orderedSame
@@ -148,24 +150,15 @@ enum ALOCommand {
             rooms.first
         }
         guard let room else {
-            throw ALOError("That room is not saved on this Mac. Open or join it once in ALO first.")
+            throw ALOError("That channel is unavailable to this identity. Import a network invitation in ALO first.")
         }
 
         let defaults = UserDefaults.standard
-        let nodeID: String
-        if let stored = defaults.string(forKey: "meshNodeID"), !stored.isEmpty {
-            nodeID = stored
-        } else {
-            nodeID = UUID().uuidString
-            defaults.set(nodeID, forKey: "meshNodeID")
-        }
-        let displayName: String
-        if let stored = defaults.string(forKey: "meshDeviceDisplayName"), !stored.isEmpty {
-            displayName = stored
-        } else {
-            displayName = DeviceDisplayName.generated(from: nodeID)
-            defaults.set(displayName, forKey: "meshDeviceDisplayName")
-        }
+        let installation = try MacSecureRoomIdentity()
+        let nodeID = installation.identity.publicIdentity.nodeID.uuidString
+        let displayName = account.displayName
+        let authorization = try account.authorization(channelID: room.id,
+            installationHash: installation.identity.publicIdentity.publicKeyHash, deviceName: displayName)
         let generatedAppearance = DeviceAppearance.generated(from: nodeID)
         let appearance = DeviceAppearance(
             icon: defaults.string(forKey: "meshDeviceIcon") ?? generatedAppearance.icon,
@@ -189,6 +182,9 @@ enum ALOCommand {
             deviceIcon: appearance.icon,
             deviceColorHex: appearance.colorHex,
             profileImageData: profileImageData,
+            installationIdentity: installation.identity,
+            peerPins: installation.pins,
+            networkAuthorization: authorization,
             initialEvents: store.loadEvents(roomID: room.id),
             initialRoomStateDocument: store.loadRoomStateDocument(roomID: room.id),
             statusHandler: report,
@@ -256,17 +252,13 @@ enum ALOCommand {
           alo arena               Open the standalone games library
           alo stick-fight          Open standalone Stick Fight
           alo breach              Open Breach tactical FPS bot match
-          alo host [room-name]     Stream this Mac's screen and system audio
-          alo join [room-name]     Find and play a room on the local network
-          alo room [id-or-name] [--broadcast|--take-over]
+          alo channel [id-or-name] [--broadcast|--take-over]
                                    Open a saved mesh room for headless QA
 
         Examples:
-          alo host "Studio"
-          alo join "Studio"
-          alo room "Studio"
-          alo room "Studio" --broadcast
-          alo room "Studio" --take-over
+          alo channel "Studio / #Main"
+          alo channel "Studio / #Main" --broadcast
+          alo channel "Studio / #Main" --take-over
 
         Requirements: macOS 14.2 or newer; all Macs on the same local network.
         """)

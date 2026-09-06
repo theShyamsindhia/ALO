@@ -72,11 +72,19 @@ public enum RoomDiscovery {
 
     public static func record(room: RoomConfiguration, nodeID: String, displayName: String,
                        appVersion: String, accessProof: String?, icon: RoomIcon?,
-                       media: NowPlayingMedia?) -> [String: String] {
+                       media: NowPlayingMedia?, networkChannel: Bool = false) -> [String: String] {
         var record = ["roomID": room.id, "roomName": text(room.name), "nodeID": nodeID,
                        "private": room.isPrivate ? "1" : "0",
                        "version": room.transportPolicy == .secureV2 ? "2" : "1", "appVersion": appVersion]
         if room.transportPolicy == .secureV2 { record["roomGeneration"] = String(ProtocolOffer.currentRoomGeneration) }
+        if networkChannel {
+            // Bonjour is an unauthenticated reachability hint. Even public
+            // channels are private to network members; names/rosters/artwork
+            // must be obtained after identity and membership admission.
+            record["roomName"] = "ALO channel"
+            record["private"] = "1"
+            return record
+        }
         if room.transportPolicy == .legacyOnly, let accessProof { record["accessProof"] = accessProof }
         guard !room.isPrivate else { return record }
         record["memberName"] = text(displayName)
@@ -224,7 +232,7 @@ public final class MeshRoomBrowser {
 
     public static func discoveryErrorMessage(_ error: NWError) -> String {
         if case .dns(let code) = error, code == -65570 {
-            return "Local Network access is blocked. Allow ALO in System Settings → Privacy & Security → Local Network, then refresh spaces."
+            return "Local Network access is blocked. Allow ALO in System Settings → Privacy & Security → Local Network, then refresh channels."
         }
         return error.localizedDescription
     }

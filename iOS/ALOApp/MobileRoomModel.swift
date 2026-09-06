@@ -1,12 +1,13 @@
 import SwiftUI
+import Combine
 import Network
 import ALOCore
 import ALONetworking
 import ALOAppleMedia
+import ALOAppModel
 
 @MainActor final class MobileRoomModel: ObservableObject {
-    @Published private(set) var nearbyRooms: [NearbyPeerHint] = []
-    @Published private(set) var discoveryState: NearbyDiscoveryState = .idle
+    let account: NetworkAccountModel
     @Published private(set) var room: RoomConfiguration?
     @Published private(set) var replica = MeshRoomReplica()
     @Published private(set) var participants: [RoomParticipant] = []
@@ -14,10 +15,9 @@ import ALOAppleMedia
     @Published private(set) var videoImage: CGImage?
     @Published private(set) var videoStatus = "No screen is being shared"
     @Published private(set) var audioConnected = false
-    @Published private(set) var status = "Ready to find a nearby room"
+    @Published private(set) var status = "Choose a channel in your network"
     @Published var errorMessage: String?
-    @Published var displayName = MobileRoomStore.usesTemporarySimulatorIdentity
-        ? "ALO Simulator Test" : UserDefaults.standard.string(forKey: "displayName") ?? "iPhone"
+    var displayName: String { account.displayName }
     @Published var levels = AudioMixLevels() { didSet { audio.levels = levels } }
     let audio: iOSAudioSessionCoordinator
     let voice: MobileVoiceController
@@ -30,10 +30,12 @@ import ALOAppleMedia
     private var identity: InstallationIdentity?
     private var pins: (any PeerPinStore)?
     private var store: MobileRoomStore?
-    private var discovery: DiscoveryCoordinator?
     private var mesh: MeshControlPlane?
     private var generation: UInt64 = 0
     private var foreground = false
+    private var accountAccessObservation: AnyCancellable?
+    private let lastChannelKey = "alo.networks-v1.ios.last-channel"
+    private let lastChannelUserKey = "alo.networks-v1.ios.last-channel-user"
     private var backgroundPlayback = false
     private var backgroundMonitor: Task<Void, Never>?
     private var lastMediaPacketNanos: UInt64?
@@ -58,10 +60,31 @@ import ALOAppleMedia
     private var mediaClock: MediaReceiverSession.ClockSnapshot?
     @Published private(set) var annotationScene: AnnotationSceneModel?
 
-    init() {
+    init(account: NetworkAccountModel) {
+        self.account = account
         let audio = iOSAudioSessionCoordinator()
         self.audio = audio
         voice = MobileVoiceController(audio: audio)
+        accountAccessObservation = Publishers.CombineLatest(account.$networks, account.$identityReady)
+            .dropFirst()
+            .sink { [weak self] _ in
+                // Published values arrive before their properties are updated. Recheck the final
+                // account state on MainActor so revocation also stops the active app lifecycle.
+                Task { @MainActor [weak self] in self?.revalidateCurrentChannelAccess() }
+            }
+    }
+
+    private func revalidateCurrentChannelAccess() {
+        guard let room else { return }
+        guard account.identityReady, account.room(channelID: room.id) != nil else {
+            let reason = account.errorMessage ?? (account.identityReady
+                ? "Your access to this channel is no longer available. Ask the owner for an updated invitation."
+                : "Your identity could not be verified. Complete identity setup before joining a channel.")
+            leave()
+            status = "Channel access ended"
+            errorMessage = reason
+            return
+        }
     }
 
     private enum MediaEvent: Sendable {
@@ -171,6 +194,8 @@ import ALOAppleMedia
     func activate() {
         foreground = true
         backgroundPlayback = false; backgroundMonitor?.cancel(); backgroundMonitor = nil
+        account.resume()
+        guard account.identityReady else { return }
         if !started {
             started = true
             do {
@@ -192,71 +217,72 @@ import ALOAppleMedia
                     guard !lifecycle.canRender else { return }
                     self?.stopMedia()
                 }
-                audio.onError = { [weak self] _ in self?.mediaAvailability = "Audio output needs attention. Retry the room connection." }
-                let scanner = DiscoveryCoordinator(ownPeerID: key.publicIdentity.nodeID)
-                scanner.onChange = { [weak self] state, hints in
-                    guard let self else { return }
-                    self.discoveryState = state
-                    var seen = Set<UUID>()
-                    self.nearbyRooms = hints.filter { seen.insert($0.roomID).inserted }
-                        .sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
+                audio.onError = { [weak self] _ in self?.mediaAvailability = "Audio output needs attention. Retry the channel connection." }
+                // Legacy selected rooms are intentionally ignored. A channel must
+                // be selected from the current identity's verified network policy.
+                if !isTemporarySimulatorSession,
+                   UserDefaults.standard.string(forKey: lastChannelUserKey) == account.identity?.publicIdentity.userID,
+                   let channelID = UserDefaults.standard.string(forKey: lastChannelKey) {
+                    room = account.room(channelID: channelID)
                 }
-                discovery = scanner
-                room = try storage.selectedRoom()
             } catch {
                 let code: String
                 if case IdentityError.keychain(let status) = error { code = "Keychain \(status)" }
                 else if case MobileRoomStore.StoreError.keychain(let status) = error { code = "Keychain \(status)" }
                 else { code = "\(String(describing: type(of: error))) \((error as NSError).code)" }
-                errorMessage = "Device setup failed (\(code)). Your identity and saved room have not been replaced."
+                errorMessage = "Device setup failed (\(code)). Your identity has not been replaced. Retry after unlocking this device."
                 started = false
                 return
             }
         }
-        if let room, mesh == nil { connect(room, selected: nil) }
+        if let room, mesh == nil { connect(room) }
         if mesh != nil { synchronizeVideo() }
         // Browsing is explicit: opening the app does not trigger Local Network permission.
     }
 
-    func scan() {
-        guard foreground, room == nil else { return }
-        if !started { activate() }
-        discovery?.startScanning()
-    }
-
-    func join(_ hint: NearbyPeerHint, secret: String) -> Bool {
-        let name = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty else { errorMessage = "Enter a name for other people in the room to see."; return false }
-        let choice = RoomConfiguration(id: hint.roomID.uuidString, name: hint.displayName,
-            isPrivate: hint.isPrivate, accessKey: secret.trimmingCharacters(in: .whitespacesAndNewlines),
-            transportPolicy: .secureV2)
-        do { try choice.validateForJoining() }
-        catch { errorMessage = "Enter the room’s 32-byte base64 invite secret. Ask a room member for the full secret."; return false }
-        guard let selected = discovery?.select(hint.id) else {
-            errorMessage = "That room is no longer in the current scan. Refresh nearby rooms and try again."
+    @discardableResult
+    func joinChannel(_ channelID: String) -> Bool {
+        guard account.identityReady else {
+            errorMessage = "Complete identity setup before joining a channel."
             return false
         }
-        displayName = String(name.prefix(80))
-        if !isTemporarySimulatorSession { UserDefaults.standard.set(displayName, forKey: "displayName") }
+        if !started { activate() }
+        guard foreground, let identity, let choice = account.room(channelID: channelID) else {
+            errorMessage = "This identity does not have access to that channel. Import an updated invitation from the network owner."
+            return false
+        }
+        do {
+            _ = try account.authorization(channelID: channelID,
+                installationHash: identity.publicIdentity.publicKeyHash, deviceName: UIDevice.current.name)
+        } catch {
+            errorMessage = "Channel access could not be verified. Import an updated invitation and try again."
+            return false
+        }
+        disconnectRuntime()
         errorMessage = nil
         room = choice
-        connect(choice, selected: selected)
+        if !isTemporarySimulatorSession {
+            UserDefaults.standard.set(channelID, forKey: lastChannelKey)
+            UserDefaults.standard.set(account.identity?.publicIdentity.userID, forKey: lastChannelUserKey)
+        }
+        connect(choice)
         return true
     }
 
     func retry() {
         guard foreground, let room else { return }
         disconnectRuntime()
-        connect(room, selected: nil)
+        connect(room)
     }
 
     func leave() {
-        // Clear durable consent first, so a failed Keychain removal is not hidden.
-        do { try store?.clearSelectedRoom() }
-        catch { errorMessage = "Could not forget the saved room. Unlock your device and try Leave again."; return }
+        if !isTemporarySimulatorSession {
+            UserDefaults.standard.removeObject(forKey: lastChannelKey)
+            UserDefaults.standard.removeObject(forKey: lastChannelUserKey)
+        }
         disconnectRuntime()
         room = nil; replica = MeshRoomReplica(); participants = []
-        status = "Ready to find a nearby room"
+        status = "Choose a channel in your network"
     }
 
     func suspend() {
@@ -265,11 +291,10 @@ import ALOAppleMedia
         voice.endOpenLine()
         let canContinue = canContinueBackgroundPlayback
         foreground = false
-        discovery?.stop()
         backgroundPlayback = canContinue
         synchronizeVideo()
         if canContinue {
-            status = "Playing room audio in the background"
+            status = "Playing channel audio in the background"
             let token = generation
             backgroundMonitor?.cancel()
             backgroundMonitor = Task { [weak self] in
@@ -320,15 +345,19 @@ import ALOAppleMedia
         for event in events where !seenChatEvents.contains(event.id) {
             seenChatEvents.insert(event.id)
             _ = chatDocument.receive(senderID: event.senderID ?? event.version.nodeID,
-                sender: event.sender ?? "Room member", text: event.text ?? "",
+                sender: event.sender ?? "Channel member", text: event.text ?? "",
                 sentNanos: event.sentNanos ?? 0, version: event.version)
         }
         chatMessages = chatDocument.messages
     }
 
-    private func connect(_ choice: RoomConfiguration, selected: NearbyPeerHint?) {
-        guard foreground, identity != nil, pins != nil, store != nil else { return }
-        discovery?.stop()
+    private func connect(_ choice: RoomConfiguration) {
+        guard foreground, account.identityReady, identity != nil, pins != nil, store != nil else { return }
+        guard let authorizedChoice = account.room(channelID: choice.id) else {
+            leave()
+            errorMessage = "Your access to this channel is no longer available."
+            return
+        }
         generation &+= 1
         let token = generation
         connected = false; participants = []; status = "Connecting securely…"
@@ -340,16 +369,25 @@ import ALOAppleMedia
             // background/foreground transition, not only an explicit retry.
             await pendingShutdown?.value
             guard let self, self.foreground, self.generation == token else { return }
-            self.startRuntime(choice, selected: selected, token: token)
+            self.startRuntime(authorizedChoice, token: token)
         }
     }
 
-    private func startRuntime(_ choice: RoomConfiguration, selected: NearbyPeerHint?, token: UInt64) {
-        guard let identity, let pins, let store else { return }
+    private func startRuntime(_ choice: RoomConfiguration, token: UInt64) {
+        guard account.identityReady, let identity, let pins, let store else { return }
+        let authorization: NetworkChannelAuthorization
+        do {
+            authorization = try account.authorization(channelID: choice.id,
+                installationHash: identity.publicIdentity.publicKeyHash, deviceName: UIDevice.current.name)
+        } catch {
+            leave()
+            errorMessage = "Channel access could not be verified. Import an updated invitation and try again."
+            return
+        }
         let voiceToken = UUID(), voiceRelay = voice.relay
         let document: Data?
         do { document = try store.document(roomID: choice.id) }
-        catch { errorMessage = "Saved room history could not be read. It will resynchronize from peers."; document = nil }
+        catch { errorMessage = "Saved channel history could not be read. It will resynchronize from peers."; document = nil }
         let runtime = MeshControlPlane(room: choice, nodeID: localID, displayName: displayName,
             deviceIcon: "iphone", initialRoomStateDocument: document,
             replicaHandler: { [weak self] value in
@@ -367,7 +405,7 @@ import ALOAppleMedia
                     self.voice.updateParticipants(value)
                     self.mediaOwner?.updateParticipants(Dictionary(uniqueKeysWithValues: value.map { ($0.id, $0.name) }))
                     self.connected = value.contains { $0.id != self.localID }
-                    self.status = self.connected ? "Connected · encrypted mesh" : "Waiting for a room member…"
+                    self.status = self.connected ? "Connected · encrypted mesh" : "Waiting for a channel member…"
                     if self.connected { self.joinTimeout?.cancel() }
                     self.synchronizeMediaSelection()
                 }
@@ -379,10 +417,11 @@ import ALOAppleMedia
                 catch {
                     Task { @MainActor in
                         guard let self, self.generation == token else { return }
-                        self.errorMessage = "Room history could not be saved on this device."
+                        self.errorMessage = "Channel history could not be saved on this device."
                     }
                 }
             }, installationIdentity: identity, peerPins: pins, secureCapabilities: [.chat, .receiveAudio, .receiveVideo, .voice],
+            networkAuthorization: authorization,
             incomingMediaChannelHandler: { channel, peer in
                 voiceRelay.admit(channel, peer: peer, generation: voiceToken)
             },
@@ -391,13 +430,11 @@ import ALOAppleMedia
                     guard let self, self.generation == token else { return }
                     switch state {
                     case .authenticated:
-                        do { try store.saveSelectedRoom(choice) }
-                        catch { self.errorMessage = "Connected, but this room could not be saved for automatic rejoin." }
                         self.synchronizeMediaSelection()
                     case .failed(let failure):
                         guard !self.connected else { return }
                         self.status = failure == .admissionFailed
-                            ? "Room admission failed. Check the invite secret and peer identity."
+                            ? "Channel admission failed. Check network membership and private channel access."
                             : "Connection interrupted. Retrying securely…"
                     default: break
                     }
@@ -408,7 +445,7 @@ import ALOAppleMedia
                     if case .failed(let error) = state {
                         self.status = "The nearby listener could not start."
                         if case .dns(let code) = error, code == -65570 {
-                            self.errorMessage = "Allow Local Network access in Settings to join nearby rooms."
+                            self.errorMessage = "Allow Local Network access in Settings to join channels on nearby devices."
                         }
                     }
                 }
@@ -417,9 +454,8 @@ import ALOAppleMedia
         do {
             try runtime.start()
             voice.start(mesh: runtime, localID: identity.publicIdentity.nodeID, name: displayName, generation: voiceToken)
-            if let selected { runtime.connect(to: selected.endpoint, expectedPeerID: selected.peerID) }
         } catch {
-            status = "Could not start the secure room connection."
+            status = "Could not start the secure channel connection."
             disconnectRuntime()
             return
         }
@@ -427,7 +463,7 @@ import ALOAppleMedia
         joinTimeout = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 20_000_000_000)
             guard !Task.isCancelled, let self, self.generation == token, !self.connected else { return }
-            self.status = "No room member is connected. Check your network or retry."
+            self.status = "No channel member is connected. Check your local network or retry."
         }
     }
 
@@ -486,7 +522,7 @@ import ALOAppleMedia
             defer { startingAudio = false }
             do { try audio.startListening() }
             catch {
-                mediaAvailability = "Audio output could not start. Retry the room connection."
+                mediaAvailability = "Audio output could not start. Retry the channel connection."
                 mediaSelection = nil
                 return
             }
@@ -512,7 +548,7 @@ import ALOAppleMedia
         let submit: @Sendable (MediaEvent, Int) -> Void = { event, bytes in
             if !bridge.submit(event, byteCount: bytes) { owner.stop() }
         }
-        mesh.openMediaChannel(to: peerID, role: .mediaControl) { result in
+        mesh.openPeerChannel(to: peerID, role: .mediaControl) { result in
             switch result {
             case .failure(let error): submit(.attached(.failure(error)), 0)
             case .success(let (channel, _)):
@@ -668,7 +704,7 @@ import ALOAppleMedia
         videoStatus = "Connecting encrypted screen…"
         receiver.startVideo(openChannel: { reply in
             guard owner.isOpen else { reply(.failure(SecurePeerChannelError.cancelled)); return }
-            mesh.openMediaChannel(to: selection.broadcasterPeerID, role: .video) { result in
+            mesh.openPeerChannel(to: selection.broadcasterPeerID, role: .video) { result in
                 switch result {
                 case .success(let (channel, _)):
                     guard owner.isOpen else { channel.cancel(); reply(.failure(SecurePeerChannelError.cancelled)); return }
