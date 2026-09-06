@@ -86,6 +86,25 @@ public struct RoomConfiguration: Codable, Sendable, Equatable, Hashable, Identif
         return bytes
     }
 
+    /// Upgrade saved rooms consistently on every device. Reuse canonical keys
+    /// so a crash between Keychain and metadata writes is safe to retry.
+    public func upgradedToCurrentSystem() throws -> Self {
+        if transportPolicy == .secureV2 { try validateForJoining(); return self }
+        var key: String?
+        if isPrivate {
+            guard let old = accessKey, !old.isEmpty else { throw RoomSecurityPolicyError.invalidSecureRoomSecret }
+            if let bytes = Data(base64Encoded: old), bytes.count == 32, bytes.base64EncodedString() == old {
+                key = old
+            } else {
+                let derived = HKDF<SHA256>.deriveKey(inputKeyMaterial: SymmetricKey(data: Data(old.utf8)),
+                    salt: Data(id.utf8), info: Data("ALO saved-room secure migration v1".utf8), outputByteCount: 32)
+                key = derived.withUnsafeBytes { Data($0).base64EncodedString() }
+            }
+        }
+        return Self(id: id, name: name, creatorPeerID: creatorPeerID, isPrivate: isPrivate,
+                    accessKey: key, joinedAt: joinedAt, transportPolicy: .secureV2, icon: icon)
+    }
+
     /// Call before transport setup. Legacy UUID-shaped keys remain unchanged.
     public func validateForJoining() throws {
         guard transportPolicy != .migrationRequired else { throw RoomSecurityPolicyError.migrationRequired }

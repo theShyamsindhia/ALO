@@ -46,13 +46,16 @@ final class MobileRoomStore: @unchecked Sendable {
         let status = SecItemCopyMatching(request as CFDictionary, &result)
         if status == errSecItemNotFound { return nil }
         guard status == errSecSuccess, let data = result as? Data else { throw StoreError.keychain(status) }
-        let room = try JSONDecoder().decode(RoomConfiguration.self, from: data)
+        let previous = try JSONDecoder().decode(RoomConfiguration.self, from: data)
+        let room = try previous.upgradedToCurrentSystem()
+        if room != previous { try saveSelectedRoom(room) }
         guard room.transportPolicy == .secureV2, UUID(uuidString: room.id) != nil else { throw StoreError.invalidRoom }
         try room.validateForJoining()
         return room
     }
 
-    func saveSelectedRoom(_ room: RoomConfiguration) throws {
+    func saveSelectedRoom(_ previous: RoomConfiguration) throws {
+        let room = try previous.upgradedToCurrentSystem()
         try room.validateForJoining()
         if Self.usesTemporarySimulatorIdentity {
             memoryLock.lock(); defer { memoryLock.unlock() }; temporaryRoom = room; return

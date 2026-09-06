@@ -65,12 +65,26 @@ final class RoomStore {
                 icon: record.icon
             )
             guard room.transportPolicy != .secureV2 || !room.isPrivate || room.secureJoinSecret != nil else { return nil }
-            return room
+            do {
+                let upgraded = try room.upgradedToCurrentSystem()
+                if upgraded != room {
+                    if let key = upgraded.accessKey { try secrets.write(key, roomID: room.id) }
+                    // persist merges other records, including locked Keychain entries.
+                    try persist([upgraded])
+                }
+                return upgraded
+            } catch { return nil } // Never fall back to legacy transport after an I/O failure.
         }.sorted { $0.joinedAt > $1.joinedAt }
     }
 
     func save(_ room: RoomConfiguration) throws {
-        try save(room, permitsPolicyChange: false)
+        let current = try room.upgradedToCurrentSystem()
+        if room.transportPolicy != .secureV2,
+           try storedRecords().first(where: { $0.id == room.id })?.transportPolicy == .secureV2,
+           room.isPrivate, secrets.read(roomID: room.id) != current.accessKey {
+            throw RoomSecurityPolicyError.explicitMigrationRequired
+        }
+        try save(current, permitsPolicyChange: true)
     }
 
     private func save(_ room: RoomConfiguration, permitsPolicyChange: Bool) throws {
@@ -93,8 +107,9 @@ final class RoomStore {
     /// Explicit migration entry point. Normal saves and renames cannot change policy.
     @discardableResult
     func migrate(roomID: String, to policy: RoomTransportPolicy) throws -> RoomConfiguration? {
+        guard policy == .secureV2 else { throw RoomSecurityPolicyError.explicitMigrationRequired }
         guard let previous = load().first(where: { $0.id == roomID }) else { return nil }
-        let migrated = previous.migrated(to: policy)
+        let migrated = try previous.upgradedToCurrentSystem()
         try save(migrated, permitsPolicyChange: true)
         return migrated
     }

@@ -20,6 +20,12 @@ public enum ReliableChannelRole: UInt8, Codable, CaseIterable, Sendable { case r
 public enum RoomAdmissionKind: UInt8, Codable, Sendable { case publicRoom = 1, privateRoom = 2 }
 
 public struct ProtocolOffer: Equatable, Sendable {
+    /// Bump for incompatible room-system changes. Production advertises only
+    /// this generation; admission never negotiates an older feature contract.
+    public static let currentRoomGeneration: UInt16 = 2
+    public static func current(capabilities: PeerCapabilities) throws -> Self {
+        try Self(wireVersions: [2], stateSyncVersions: [currentRoomGeneration], capabilities: capabilities)
+    }
     public let wireVersions: [UInt16]
     public let stateSyncVersions: [UInt16]
     public let capabilities: PeerCapabilities

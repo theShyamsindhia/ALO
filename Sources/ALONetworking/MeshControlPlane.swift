@@ -486,7 +486,7 @@ public final class MeshControlPlane: @unchecked Sendable {
                 let admission: SecureRoomAdmission = self.room.isPrivate
                     ? .privateRoom(secret: self.room.secureJoinSecret ?? Data()) : .publicRoom
                 let configuration = try SecurePeerConfiguration(roomID: roomID, incarnationID: self.incarnationID,
-                    admission: admission, offer: ProtocolOffer(wireVersions: [2], stateSyncVersions: [1], capabilities: self.secureCapabilities),
+                    admission: admission, offer: ProtocolOffer.current(capabilities: self.secureCapabilities),
                     direction: .initiator(role))
                 let channel = SecurePeerChannel(connection: connection, identity: identity, configuration: configuration,
                     pins: pins, queue: self.queue)
@@ -1057,6 +1057,7 @@ public final class MeshControlPlane: @unchecked Sendable {
         for result in results.prefix(256) {
             guard case .bonjour(let record) = result.metadata,
                   record["roomID"] == room.id,
+                  room.transportPolicy != .secureV2 || record["roomGeneration"] == String(ProtocolOffer.currentRoomGeneration),
                   let remoteID = record["nodeID"],
                   remoteID != nodeID,
                   (room.transportPolicy == .secureV2 || nodeID < remoteID),
@@ -1150,7 +1151,7 @@ public final class MeshControlPlane: @unchecked Sendable {
             let admission: SecureRoomAdmission = room.isPrivate ? .privateRoom(secret: room.secureJoinSecret ?? Data()) : .publicRoom
             let roles: Set<ReliableChannelRole> = incomingMediaChannelHandler == nil ? [.roomControl] : [.roomControl, .mediaControl, .video, .voiceControl, .fileTransfer]
             let configuration = try SecurePeerConfiguration(roomID: roomID, incarnationID: incarnationID, admission: admission,
-                offer: ProtocolOffer(wireVersions: [2], stateSyncVersions: [1], capabilities: secureCapabilities),
+                offer: ProtocolOffer.current(capabilities: secureCapabilities),
                 direction: link.initiated ? .initiator(.roomControl) : .responder(allowedChannelRoles: roles))
             let channel = SecurePeerChannel(connection: link.connection, identity: installationIdentity,
                                              configuration: configuration, pins: peerPins, queue: queue)

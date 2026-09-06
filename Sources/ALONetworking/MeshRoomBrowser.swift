@@ -63,6 +63,7 @@ public enum RoomDiscovery {
         var record = ["roomID": room.id, "roomName": text(room.name), "nodeID": nodeID,
                        "private": room.isPrivate ? "1" : "0",
                        "version": room.transportPolicy == .secureV2 ? "2" : "1", "appVersion": appVersion]
+        if room.transportPolicy == .secureV2 { record["roomGeneration"] = String(ProtocolOffer.currentRoomGeneration) }
         if room.transportPolicy == .legacyOnly, let accessProof { record["accessProof"] = accessProof }
         guard !room.isPrivate else { return record }
         record["memberName"] = text(displayName)
@@ -82,6 +83,8 @@ public enum RoomDiscovery {
         var rooms = [String: NearbyRoom]()
         var members = [String: Set<String>]()
         for record in records.prefix(256).sorted(by: { ($0["nodeID"] ?? "") < ($1["nodeID"] ?? "") }) {
+            if transportPolicy == .secureV2,
+               record["roomGeneration"] != String(ProtocolOffer.currentRoomGeneration) { continue }
             guard let id = record["roomID"], let name = record["roomName"] else { continue }
             let isPrivate = record["private"] == "1"
             let proof = transportPolicy == .secureV2 ? nil : record["accessProof"]

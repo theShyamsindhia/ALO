@@ -3,8 +3,20 @@ import Testing
 import ALOCore
 @testable import ALO
 
-@Suite("Explicit room transport policy")
+@Suite("Current room system migration")
 struct RoomSecurityPolicyTests {
+    @Test func independentDevicesDeriveTheSamePrivateRoomAndDoNotMixRooms() throws {
+        let key = UUID().uuidString
+        let a = RoomConfiguration(id: UUID().uuidString, name: "Saved", isPrivate: true, accessKey: key)
+        let b = try JSONDecoder().decode(RoomConfiguration.self, from: JSONEncoder().encode(a))
+        let first = try a.upgradedToCurrentSystem(), second = try b.upgradedToCurrentSystem()
+        #expect(first == second)
+        #expect(try first.upgradedToCurrentSystem() == first)
+        let different = try RoomConfiguration(name: "Other", isPrivate: true, accessKey: key).upgradedToCurrentSystem()
+        #expect(different.accessKey != first.accessKey)
+        let publicRoom = try RoomConfiguration(name: "Public").upgradedToCurrentSystem()
+        #expect(publicRoom.transportPolicy == .secureV2 && publicRoom.accessKey == nil)
+    }
     private final class MemorySecrets: RoomSecretStoring {
         var values: [String: String] = [:]
         func read(roomID: String) -> String? { values[roomID] }
@@ -21,7 +33,7 @@ struct RoomSecurityPolicyTests {
         try body(RoomStore(fileURL: file, secretStore: secrets), secrets, file)
     }
 
-    @Test func oldJSONAndUUIDKeyRemainLegacy() throws {
+    @Test func oldSavedJSONAndUUIDKeyAutomaticallyUpgrade() throws {
         let key = UUID().uuidString
         let old = """
         {"id":"old-room","name":"Legacy","creatorPeerID":"creator","isPrivate":true,"accessKey":"\(key)","joinedAt":0}
@@ -40,9 +52,15 @@ struct RoomSecurityPolicyTests {
             """
             let bytes = Data(oldMetadata.utf8)
             try bytes.write(to: file)
-            #expect(store.load().first?.transportPolicy == .legacyOnly)
-            #expect(store.load().first?.accessKey == key)
-            #expect(try Data(contentsOf: file) == bytes)
+            let upgraded = try #require(store.load().first)
+            #expect(upgraded.transportPolicy == .secureV2)
+            #expect(upgraded == (try room.upgradedToCurrentSystem()))
+            #expect(upgraded.secureJoinSecret?.count == 32)
+            #expect(store.load().first == upgraded)
+            #expect(try Data(contentsOf: file) != bytes)
+            // Simulate a crash after the Keychain write but before metadata.
+            try bytes.write(to: file)
+            #expect(store.load().first == upgraded)
         }
     }
 
@@ -102,21 +120,19 @@ struct RoomSecurityPolicyTests {
         #expect(try JSONDecoder().decode(RoomConfiguration.self, from: JSONEncoder().encode(metadata)) == metadata)
     }
 
-    @Test func normalSaveCannotUpgradeOrDowngradeAndMigrationIsExplicit() throws {
+    @Test func normalSaveUpgradesAndExplicitDowngradeIsRejected() throws {
         try withStore { store, _, _ in
             let legacy = RoomConfiguration(name: "Existing", isPrivate: true, accessKey: UUID().uuidString)
             try store.save(legacy)
-            let upgrade = legacy.migrated(to: .secureV2)
-            #expect(throws: RoomSecurityPolicyError.explicitMigrationRequired) { try store.save(upgrade) }
-            #expect(store.load().first == legacy)
+            #expect(store.load().first == (try legacy.upgradedToCurrentSystem()))
             let secure = try #require(try store.migrate(roomID: legacy.id, to: .secureV2))
             #expect(secure.id == legacy.id)
             #expect(secure.secureJoinSecret?.count == 32)
             #expect(secure.accessKey != legacy.accessKey)
             #expect(store.load().first == secure)
-            #expect(throws: RoomSecurityPolicyError.explicitMigrationRequired) { try store.save(secure.migrated(to: .legacyOnly)) }
+            try store.save(secure.migrated(to: .legacyOnly))
             #expect(store.load().first == secure)
-            #expect(try store.migrate(roomID: secure.id, to: .legacyOnly)?.transportPolicy == .legacyOnly)
+            #expect(throws: RoomSecurityPolicyError.explicitMigrationRequired) { try store.migrate(roomID: secure.id, to: .legacyOnly) }
         }
     }
 
@@ -128,7 +144,7 @@ struct RoomSecurityPolicyTests {
         try withStore { store, _, _ in
             try store.save(pending)
             #expect(try store.rename(roomID: pending.id, to: "Still pending"))
-            #expect(store.load().first?.transportPolicy == .migrationRequired)
+            #expect(store.load().first?.transportPolicy == .secureV2)
             let migrated = try #require(try store.migrate(roomID: pending.id, to: .secureV2))
             try migrated.validateForJoining()
             #expect(store.load().first?.transportPolicy == .secureV2)

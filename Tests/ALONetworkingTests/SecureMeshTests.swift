@@ -182,7 +182,7 @@ struct SecureMeshTests {
         #expect(throws: SecureTransportError.invalidCredentials) { try secure.start(advertise: false) }
     }
 
-    @Test func authenticatedVideoRoleBypassesMeshDecoder() async throws {
+    @Test(arguments: [true, false]) func mediaAdmissionEnforcesCurrentGeneration(currentGeneration: Bool) async throws {
         let room = RoomConfiguration.secure(name: "Role routing", isPrivate: false)
         let routed = MeshTestState()
         let server = try SecureMeshNode(room: room, incomingMediaChannelHandler: { channel, peer in
@@ -198,21 +198,30 @@ struct SecureMeshTests {
             identity: identity, expectedPeerID: server.identity.publicIdentity.nodeID, pins: pins,
             firstContact: .explicitRoomJoin, verificationQueue: queue))
         let config = try SecurePeerConfiguration(roomID: try #require(UUID(uuidString: room.id)), incarnationID: UUID(),
-            admission: .publicRoom, offer: ProtocolOffer(wireVersions: [2], stateSyncVersions: [1], capabilities: .mobile),
+            admission: .publicRoom, offer: currentGeneration ? ProtocolOffer.current(capabilities: .mobile) : ProtocolOffer(wireVersions: [2], stateSyncVersions: [1], capabilities: .mobile),
             direction: .initiator(.video))
         let channel = SecurePeerChannel(connection: connection, identity: identity, configuration: config, pins: pins, queue: queue)
         defer { channel.cancel() }
         let payload = Data([0, 1, 2, 255])
         channel.onAuthenticated = { [weak channel] _ in channel?.send(payload: payload) }
         channel.onPayload = { bytes in routed.update { $0.payload = bytes } }
+        channel.onState = { state in
+            if case .failed(let error) = state { routed.update { $0.mediaError = String(describing: error) } }
+        }
         channel.start()
-        try await meshEventually { routed.read { $0.payload == payload } }
+        try await meshEventually { routed.read { $0.payload == payload || $0.mediaError != nil } }
+        if !currentGeneration {
+            #expect(routed.read { $0.payload == nil && $0.mediaPeer == nil && $0.mediaError != nil })
+            #expect(server.state.read { $0.participants.count == 1 })
+            return
+        }
         #expect(routed.read { $0.mediaPeer?.nodeID == identity.publicIdentity.nodeID && $0.mediaPeer?.channelRole == .video })
         #expect(server.state.read { $0.participants.count == 1 })
     }
 
-    @Test func receiverOpensMediaToAnInboundRoomPeersAdvertisedListener() async throws {
-        let room = RoomConfiguration.secure(name: "Independent media connection")
+    @Test(arguments: [ReliableChannelRole.mediaControl, .fileTransfer])
+    func receiverOpensMediaToAnInboundRoomPeersAdvertisedListener(role: ReliableChannelRole) async throws {
+        let room = try RoomConfiguration(name: "Migrated private room", isPrivate: true, accessKey: UUID().uuidString).upgradedToCurrentSystem()
         let routed = MeshTestState()
         let presenter = try SecureMeshNode(room: room, incomingMediaChannelHandler: { channel, peer in
             routed.update { $0.mediaPeer = peer; $0.mediaChannels.append(channel) }
@@ -230,7 +239,7 @@ struct SecureMeshTests {
             expectedPeerID: receiver.identity.publicIdentity.nodeID)
         try await fullMeshEventually([presenter, receiver])
         let payload = Data([42, 12, 83])
-        receiver.control.openMediaChannel(to: presenter.identity.publicIdentity.nodeID, role: .mediaControl) { result in
+        receiver.control.openMediaChannel(to: presenter.identity.publicIdentity.nodeID, role: role) { result in
             do {
                 let (channel, _) = try result.get()
                 routed.update { $0.mediaChannels.append(channel) }
@@ -240,7 +249,7 @@ struct SecureMeshTests {
         }
         try await meshEventually { routed.read { $0.payload == payload || $0.mediaError != nil } }
         #expect(routed.read { $0.mediaError == nil && $0.payload == payload })
-        #expect(routed.read { $0.mediaPeer?.channelRole == .mediaControl })
+        #expect(routed.read { $0.mediaPeer?.channelRole == role })
         #expect(presenter.state.read { $0.participants.count == 2 })
     }
 

@@ -5,6 +5,16 @@ import ALOCore
 @testable import ALO
 
 struct RoomDiscoveryTests {
+    @Test func secureDiscoveryOnlyListsCurrentGeneration() throws {
+        let room = RoomConfiguration.secure(name: "Current", isPrivate: false)
+        let current = RoomDiscovery.record(room: room, nodeID: "a", displayName: "A", appVersion: "current",
+            accessProof: nil, icon: nil, media: nil)
+        var old = current; old.removeValue(forKey: "roomGeneration"); old["nodeID"] = "b"
+        var future = current; future["roomGeneration"] = "999"; future["nodeID"] = "c"
+        let found = RoomDiscovery.rooms(from: [current, old, future].map(NWTXTRecord.init), transportPolicy: .secureV2)
+        #expect(found.count == 1)
+        #expect(found.first?.peerCount == 1)
+    }
     @Test func nearbyActivityAndDuplicateInterfaces() throws {
         let room = RoomConfiguration(id: "room", name: "Music")
         let icon = RoomIcon(symbol: "headphones", version: MeshVersion(counter: 2, nodeID: "a"))

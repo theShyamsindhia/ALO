@@ -154,6 +154,7 @@ jobs:
         run: |
           ditto -x -k dist/ALO-macos-arm64.zip relocated
           relocated/ALO.app/Contents/MacOS/alo verify-game-resources
+          relocated/ALO.app/Contents/MacOS/alo verify-secure-identity
 
   publish-release:
     if: github.event_name == 'release'

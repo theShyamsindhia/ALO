@@ -36,7 +36,7 @@ public final class KeychainPeerPinStore: PeerPinStore, @unchecked Sendable {
         [kSecClass as String: kSecClassGenericPassword,
          kSecAttrService as String: namespace.service + ".peer-pins",
          kSecAttrAccount as String: nodeID.uuidString,
-         kSecUseDataProtectionKeychain as String: true]
+         kSecUseDataProtectionKeychain as String: IdentityKeychainNamespace.usesDataProtectionKeychain]
     }
     private func read(_ nodeID: UUID) throws -> Data? {
         var parameters = query(nodeID)

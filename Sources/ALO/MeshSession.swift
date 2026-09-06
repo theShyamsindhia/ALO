@@ -349,6 +349,11 @@ final class MeshSession {
                 if peer.channelRole == .fileTransfer { fileSharing.receive(channel, peer: peer) }
                 else if peer.channelRole == .voiceControl { secureVoice.admit(channel) }
                 else { secureMediaAdmission.receive(channel, peer: peer) }
+            },
+            secureStateHandler: { _, state in
+                if case .failed(.incompatibleVersion) = state {
+                    statusHandler("Incompatible device: update all devices to the current ALO room system.")
+                }
             }
         )
         relay.replica = { [weak self] in self?.apply($0) }

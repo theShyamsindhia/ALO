@@ -49,7 +49,7 @@ final class DirectFileSharingController: ObservableObject {
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.pendingConnections -= 1; self.progress.removeAll { $0.id == pendingID }
-                    self.message = "Couldn’t send the file. Both devices need the latest ALO. \(error.localizedDescription)"
+                    self.message = "Couldn’t establish a secure connection to this device. Make sure both Macs have updated and rejoined the room. \(error.localizedDescription)"
                 }
             case .success(let (channel, remote)):
                 let transfer = Self.makeTransfer(channel: channel, peer: remote.nodeID, source: url, owner: self)

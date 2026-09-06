@@ -1,5 +1,6 @@
 import Foundation
 import ALOCore
+import ALONetworking
 
 struct ALOError: LocalizedError {
     let message: String
@@ -30,6 +31,9 @@ enum ALOCommand {
             }
 
             switch command {
+            case "verify-secure-identity":
+                try InstallationIdentity.verifyKeychainAccess()
+                print("Secure room identity and peer-pin persistence verified.")
             case "verify-game-resources":
                 try BreachScene.verifyPackagedResources()
 

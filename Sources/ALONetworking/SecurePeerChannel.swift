@@ -44,8 +44,22 @@ public struct AuthenticatedPeer: Sendable {
     public let channelRole: ReliableChannelRole
 }
 
-public enum SecurePeerChannelError: Error, Equatable, Sendable {
+public enum SecurePeerChannelError: LocalizedError, Equatable, Sendable {
     case connectionFailed, timedOut, protocolViolation, admissionFailed, queueFull, oversized, notAuthenticated, cancelled
+    case incompatibleVersion
+    public var errorDescription: String? {
+        switch self {
+        case .incompatibleVersion: return "This device uses an incompatible room system. Update all devices before joining."
+        case .notAuthenticated: return "This device does not have an active secure room connection."
+        case .admissionFailed: return "The device could not authenticate with this room."
+        case .connectionFailed: return "The connection to the device failed."
+        case .timedOut: return "The device did not respond in time."
+        case .protocolViolation: return "The device sent an invalid room message."
+        case .queueFull: return "The connection is busy. Try again shortly."
+        case .oversized: return "The transfer message exceeds the connection limit."
+        case .cancelled: return "The connection was cancelled."
+        }
+    }
 }
 public enum SecurePeerChannelState: Equatable, Sendable {
     case idle, connecting, authenticating, authenticated, failed(SecurePeerChannelError), cancelled
@@ -251,7 +265,9 @@ public final class SecurePeerChannel: @unchecked Sendable {
             guard let self, self.generation == generation, !self.isTerminal else { return }
             if let bytes, !bytes.isEmpty {
                 self.receiveBuffer.append(bytes)
-                do { try self.consumeFrames() } catch { self.close(.protocolViolation); return }
+                do { try self.consumeFrames() }
+                catch SecureTransportError.unsupportedProtocol { self.close(.incompatibleVersion); return }
+                catch { self.close(.protocolViolation); return }
             }
             guard !self.isTerminal else { return }
             if error != nil || complete { self.close(.connectionFailed); return }

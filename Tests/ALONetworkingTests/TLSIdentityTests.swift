@@ -7,6 +7,9 @@ import Testing
 
 @Suite("Installation TLS identity", .serialized)
 struct TLSIdentityTests {
+    @Test func persistentIdentityAndPinsUseAvailablePlatformKeychain() throws {
+        try InstallationIdentity.verifyKeychainAccess()
+    }
     @Test func secureRoomTCPAllowsSimultaneousListenAndDialEndpoints() throws {
         let identity = try InstallationIdentity.ephemeral()
         let parameters = try SecureNetworkParameters.tcp(

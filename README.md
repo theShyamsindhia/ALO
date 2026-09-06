@@ -40,8 +40,11 @@ conditions and OS policy—it is not guaranteed by turning on airplane mode.
 
 The 0.14 integration includes an iPhone/iPad receiver and voice client for iOS 17+
 in [the iOS project](iOS/README.md). Device installation requires its own signing
-setup; the Mac download does not install an iOS app. Legacy rooms remain an
-explicit compatibility mode and cannot silently downgrade a secure room.
+setup; the Mac download does not install an iOS app. Saved Mac rooms automatically
+upgrade to the current secure system. All participants must use a compatible
+current room-protocol generation (0.14.13 or newer for this generation); older
+clients cannot join. There is no legacy transport fallback. Private-room members
+with the same saved invite key migrate to the same upgraded credentials.
 
 ## Run the Mac app
 
@@ -208,7 +211,7 @@ ALO separates room coordination from the high-rate media stream:
   prevents duplicate links. Nearby paths use the same protocol as LAN paths.
 - Durable chat and queue state synchronize through **Automerge**, with a separate
   sync session for each reliable peer connection. A replacement connection starts
-  with fresh sync knowledge; older peers use the bounded legacy event-sync path.
+  with fresh sync knowledge. Incompatible older clients are rejected at admission.
 - Presence, playback commands, broadcaster ownership and voice consent use the
   realtime control plane. Automerge is not the audio clock or media transport.
 - Audio and directed voice use independent, authenticated UDP subscriptions.

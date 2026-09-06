@@ -1689,10 +1689,8 @@ final class ALOViewModel: ObservableObject {
     }
 
     private func updateNearbyRoomChoices() {
-        // Conflicting advertisements must not silently select a weaker policy.
-        let ambiguous = Set(legacyNearbyRooms.map(\.id)).intersection(secureNearbyRooms.map(\.id))
-        nearbyRooms = (legacyNearbyRooms + secureNearbyRooms)
-            .filter { !ambiguous.contains($0.id) }
+        // Old advertisements must neither invite legacy joins nor hide upgraded rooms.
+        nearbyRooms = secureNearbyRooms
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 
@@ -1933,7 +1931,15 @@ final class ALOViewModel: ObservableObject {
         statusText = "Private room invite key copied"
     }
 
-    private func open(_ room: RoomConfiguration, broadcastInitially: Bool) {
+    private func open(_ savedRoom: RoomConfiguration, broadcastInitially: Bool) {
+        let room: RoomConfiguration
+        do {
+            room = try savedRoom.upgradedToCurrentSystem()
+            try roomStore.save(room)
+        } catch {
+            errorMessage = "Could not upgrade this room securely: \(error.localizedDescription)"
+            return
+        }
         resetRoomState()
         let secure: MacSecureRoomIdentity?
         do {

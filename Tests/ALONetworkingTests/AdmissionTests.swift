@@ -5,6 +5,17 @@ import Testing
 
 @Suite("TLS-bound v2 admission")
 struct AdmissionTests {
+    @Test func currentRoomGenerationRejectsOldClientsInBothDirections() throws {
+        let current = try ProtocolOffer.current(capabilities: .desktop)
+        let old = try ProtocolOffer(wireVersions: [2], stateSyncVersions: [1], capabilities: .desktop)
+        #expect(throws: SecureTransportError.unsupportedProtocol) {
+            try NegotiatedProtocol.negotiate(initiator: old, responder: current, policy: .secureV2)
+        }
+        #expect(throws: SecureTransportError.unsupportedProtocol) {
+            try NegotiatedProtocol.negotiate(initiator: current, responder: old, policy: .secureV2)
+        }
+        #expect(try NegotiatedProtocol.negotiate(initiator: current, responder: current, policy: .secureV2).stateSyncVersion == ProtocolOffer.currentRoomGeneration)
+    }
     @Test func proofRequiresActualConnectionExporterAndMatchingRole() throws {
         let transcript = try NetworkFixture.transcript()
         let proof = try TLSBoundAdmissionProof.make(roomSecret: NetworkFixture.secret, transcript: transcript,

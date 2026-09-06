@@ -8,6 +8,16 @@ public enum IdentityError: Error, Equatable {
 }
 
 public struct IdentityKeychainNamespace: Sendable {
+    // Developer-ID Mac bundles use the login Keychain, like saved room keys.
+    // The iOS Data Protection backend requires provisioned access groups;
+    // selecting it in our Mac bundle makes first identity creation fail -34018.
+    public static var usesDataProtectionKeychain: Bool {
+        #if os(macOS)
+        false
+        #else
+        true
+        #endif
+    }
     public enum Environment: String, Sendable { case production, development }
     public let service: String
     public init(applicationID: String, environment: Environment) throws {
@@ -135,12 +145,32 @@ public final class InstallationIdentity {
         return try InstallationIdentity(privateKey: key, now: now)
     }
 
+    /// Smoke test the real backend with isolated, disposable credentials. Used
+    /// by the signed distribution gate; never reads the user's installation key.
+    public static func verifyKeychainAccess() throws {
+        let namespace = try IdentityKeychainNamespace(applicationID: "in.alo.verify.\(UUID().uuidString)", environment: .development)
+        defer {
+            for service in [namespace.service, namespace.service + ".peer-pins"] {
+                let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+                    kSecAttrService as String: service,
+                    kSecUseDataProtectionKeychain as String: IdentityKeychainNamespace.usesDataProtectionKeychain]
+                SecItemDelete(query as CFDictionary)
+            }
+        }
+        let first = try loadOrCreate(namespace: namespace)
+        let second = try loadOrCreate(namespace: namespace)
+        guard first.publicIdentity == second.publicIdentity else { throw IdentityError.changedPeerKey }
+        let pins = KeychainPeerPinStore(namespace: namespace)
+        try pins.recordAfterAdmission(first.publicIdentity)
+        guard try pins.pin(for: first.publicIdentity.nodeID) == first.publicIdentity.publicKeyHash else { throw IdentityError.changedPeerKey }
+    }
+
     public static func loadOrCreate(namespace: IdentityKeychainNamespace, now: Date = Date()) throws -> InstallationIdentity {
         // Generic-password service/account uniqueness is enforced atomically by Keychain.
         // SecKey applicationTag is only a lookup attribute and cannot arbitrate concurrent creators.
         let base: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: namespace.service, kSecAttrAccount as String: "installation-p256-v2",
-            kSecUseDataProtectionKeychain as String: true]
+            kSecUseDataProtectionKeychain as String: IdentityKeychainNamespace.usesDataProtectionKeychain]
         let keyAttributes: [String: Any] = [kSecAttrKeyType as String: kSecAttrKeyTypeECSECPrimeRandom,
             kSecAttrKeyClass as String: kSecAttrKeyClassPrivate, kSecAttrKeySizeInBits as String: 256]
         func load() throws -> SecKey? {
