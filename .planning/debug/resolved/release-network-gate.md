@@ -1,5 +1,5 @@
 ---
-status: investigating
+status: resolved
 trigger: "ALO 0.14.9 release CI must pass without weakening the live networking or audio-delivery gates."
 created: 2026-09-06
 updated: 2026-09-06
@@ -18,7 +18,7 @@ updated: 2026-09-06
 - hypothesis: Listening and dialing peers need reusable local TCP endpoints, and an idle bounded sender rejects a fresh pending burst using the final stale completion sample before its existing idle reset runs.
 - test: Assert local endpoint reuse on all room TCP profiles; reserve the loopback control connection before either media listener; reproduce an idle sender's final slow completion with fresh pending PCM; combine 35ms capture catch-up with batched deterministic completions.
 - expecting: Mesh and loopback sockets stop colliding, every recovering sender gets a fresh probe, the strict 50-packet floor and all existing latency ceilings pass unchanged.
-- next_action: Implement the focused regressions and minimum production fixes, then run release CI.
+- next_action: Resolved in ALO 0.14.11; retain the strict networking, latency, archive and clean-distribution gates.
 
 ## Evidence
 
@@ -44,7 +44,16 @@ updated: 2026-09-06
 
 ## Resolution
 
-- root_cause:
-- fix:
-- verification:
+- root_cause: Loopback helpers could reserve media endpoints before their outbound control connection, causing local TCP collisions and cascading mesh failures. Separately, a fully drained bounded audio sender evaluated fresh pending PCM using the final stale completion sample. One deterministic terminal-sequence assertion also contradicted the policy's intentional stale-tail shedding even though the strict packet floor, packet-age ceiling and continuity checks remained authoritative.
+- fix: Enable local TCP endpoint reuse, reserve loopback control connections before media listeners, clear bounded sender service history only when the path is fully idle, and express terminal behavior through the unchanged delivery floor, 250ms age bound and maximum-gap invariant. The updater package also flattens framework links and CI rejects any ZIP symlink before publication.
+- verification: ALO 0.14.11 run 34038044161 passed 881 optimized tests in 148 suites, Developer ID signing, Apple notarization and stapling, Gatekeeper, arm64 validation, the no-symlink updater check, and clean-machine game-resource launch. Independent verification of the published ZIP and DMG repeated version/build, signature, notarization, Gatekeeper, resource and no-symlink checks successfully.
 - files_changed:
+  - Sources/ALO/HostServer.swift
+  - Sources/ALONetworking/LocalNetworkParameters.swift
+  - Sources/ALONetworking/SecureNetworkParameters.swift
+  - Sources/ALO/RoomMediaSecurity.swift
+  - Tests/ALOTests/AudioSenderBurstTests.swift
+  - Tests/ALOTests/DeterministicAudioFanoutTests.swift
+  - Tests/ALOTests/LoopbackRoomScaleTests.swift
+  - Scripts/package.sh
+  - .github/workflows/build-apple-silicon.yml
