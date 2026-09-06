@@ -12,10 +12,12 @@ extension NativePresentationTests {
         func tintTransparency() throws {
             _ = NSApplication.shared
             let palette = ArtworkPalette(accentHex: "DF6732", secondaryHex: "397DC2", tertiaryHex: "789950")
-            let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
             for dark in [false, true] {
+              for reduced in [false, true] {
                 for artwork in [false, true] {
-                    let renderer = ImageRenderer(content: ArtworkHeaderBackground(palette: artwork ? palette : nil)
+                    // Exercise both fill branches directly: ImageRenderer's
+                    // environment need not match NSWorkspace's global setting.
+                    let renderer = ImageRenderer(content: ArtworkHeaderFill(palette: artwork ? palette : nil, opaque: reduced)
                         .environment(\.colorScheme, dark ? .dark : .light)
                         .frame(width: 120, height: 60))
                     let image = try #require(renderer.nsImage)
@@ -26,6 +28,7 @@ extension NativePresentationTests {
                     else if artwork { #expect(alpha > 0.05 && alpha < 0.3) }
                     else { #expect(alpha < 0.01) }
                 }
+              }
             }
         }
 
@@ -177,8 +180,11 @@ extension NativePresentationTests {
                     - min(color.redComponent, color.greenComponent, color.blueComponent) > 0.09)
             }
             let samples = try [CGFloat(170), 320, 535].map { try pixel(first, x: $0, y: 6) }
-            #expect(distance(samples[0], samples[1]) > 0.04)
-            #expect(distance(samples[1], samples[2]) > 0.04)
+            // The light tint is deliberately lighter than the previous opaque
+            // header. Require distinct hues without restoring its old opacity.
+            let minimumSeparation = dark ? 0.04 : 0.02
+            #expect(distance(samples[0], samples[1]) > minimumSeparation)
+            #expect(distance(samples[1], samples[2]) > minimumSeparation)
             for x in stride(from: CGFloat(150), through: 540, by: 15) {
                 let background = try pixel(first, x: x, y: 6)
                 // The header's smaller detail text, not just its brighter title.

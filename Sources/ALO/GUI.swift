@@ -7118,14 +7118,23 @@ private struct AmbientBackground: View {
 
 struct ArtworkHeaderBackground: View {
     let palette: ArtworkPalette?
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    var body: some View {
+        ArtworkHeaderFill(palette: palette, opaque: reduceTransparency)
+    }
+}
+
+struct ArtworkHeaderFill: View {
+    let palette: ArtworkPalette?
+    let opaque: Bool
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.colorSchemeContrast) private var contrast
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     var body: some View {
         ZStack {
             Color.clear
-            if reduceTransparency { Palette.opaqueSurface }
+            if opaque { Palette.opaqueSurface }
             if let palette {
                 // Tint the native blur; never replace it with an opaque gradient.
                 LinearGradient(colors: palette.hexes.map(Color.deviceIdentity),
