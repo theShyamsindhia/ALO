@@ -8,6 +8,47 @@ import ALOCore
 extension NativePresentationTests {
     @Suite(.serialized) @MainActor
     struct ArtworkHeaderPresentationTests {
+        @Test("Player tint stays transparent without artwork and respects Reduce Transparency")
+        func tintTransparency() throws {
+            _ = NSApplication.shared
+            let palette = ArtworkPalette(accentHex: "DF6732", secondaryHex: "397DC2", tertiaryHex: "789950")
+            for dark in [false, true] {
+              for reduced in [false, true] {
+                for artwork in [false, true] {
+                    // Exercise both fill branches directly: ImageRenderer's
+                    // environment need not match NSWorkspace's global setting.
+                    let renderer = ImageRenderer(content: ArtworkHeaderFill(palette: artwork ? palette : nil, opaque: reduced)
+                        .environment(\.colorScheme, dark ? .dark : .light)
+                        .frame(width: 120, height: 60))
+                    let image = try #require(renderer.nsImage)
+                    let data = try #require(image.tiffRepresentation)
+                    let bitmap = try #require(NSBitmapImageRep(data: data))
+                    let alpha = try #require(bitmap.colorAt(x: 60, y: 30)).alphaComponent
+                    if reduced { #expect(alpha > 0.99) }
+                    else if artwork { #expect(alpha > 0.05 && alpha < 0.3) }
+                    else { #expect(alpha < 0.01) }
+                }
+              }
+            }
+        }
+
+        @Test("Floating player uses active native behind-window blur")
+        func nativeWindowBlur() async throws {
+            _ = NSApplication.shared
+            let hosting = NSHostingView(rootView: PlayerWindowBlur().frame(width: 120, height: 60))
+            hosting.frame = NSRect(x: 0, y: 0, width: 120, height: 60)
+            hosting.layoutSubtreeIfNeeded()
+            await Task.yield()
+            func effect(in view: NSView) -> NSVisualEffectView? {
+                if let result = view as? NSVisualEffectView { return result }
+                return view.subviews.lazy.compactMap { effect(in: $0) }.first
+            }
+            let blur = try #require(effect(in: hosting))
+            #expect(blur.blendingMode == .behindWindow)
+            #expect(blur.material == .popover)
+            #expect(blur.state == .active)
+        }
+
         @Test("Album colours fill the header, change with the track, and keep text readable",
               arguments: [false, true])
         func artworkHeader(dark: Bool) async throws {
@@ -24,6 +65,8 @@ extension NativePresentationTests {
                 FloatingRoomView(model: model, presentation: .menuBar)
                 WalkieTalkieBar(model: model, showsCloseButton: false)
             }
+            .background(ArtworkHeaderBackground(palette: model.roomArtworkPalette))
+            .background(Color(nsColor: .windowBackgroundColor))
             .overlay(alignment: .bottomTrailing) {
                 ArtworkRenderMarker(model: model).frame(width: 4, height: 4)
             }
@@ -137,8 +180,11 @@ extension NativePresentationTests {
                     - min(color.redComponent, color.greenComponent, color.blueComponent) > 0.09)
             }
             let samples = try [CGFloat(170), 320, 535].map { try pixel(first, x: $0, y: 6) }
-            #expect(distance(samples[0], samples[1]) > 0.04)
-            #expect(distance(samples[1], samples[2]) > 0.04)
+            // The light tint is deliberately lighter than the previous opaque
+            // header. Require distinct hues without restoring its old opacity.
+            let minimumSeparation = dark ? 0.04 : 0.02
+            #expect(distance(samples[0], samples[1]) > minimumSeparation)
+            #expect(distance(samples[1], samples[2]) > minimumSeparation)
             for x in stride(from: CGFloat(150), through: 540, by: 15) {
                 let background = try pixel(first, x: x, y: 6)
                 // The header's smaller detail text, not just its brighter title.
@@ -148,7 +194,7 @@ extension NativePresentationTests {
                 #expect((values[1] + 0.05) / (values[0] + 0.05) >= 4.5)
             }
             let talkBackground = try pixel(first, x: 280, y: 91)
-            #expect(max(talkBackground.redComponent, talkBackground.greenComponent, talkBackground.blueComponent) < 0.01)
+            #expect(max(talkBackground.redComponent, talkBackground.greenComponent, talkBackground.blueComponent) > 0.01)
 
             // Metadata-only updates for the same song must not flash the theme away.
             model.nowPlayingCallback(NowPlayingMedia(title: "Colour study", artist: "ALO", isPlaying: false))
@@ -168,7 +214,7 @@ extension NativePresentationTests {
             let middle = try pixel(neutral, x: 320, y: 6)
             #expect(max(middle.redComponent, middle.greenComponent, middle.blueComponent)
                 - min(middle.redComponent, middle.greenComponent, middle.blueComponent) < 0.02)
-            #expect(distance(samples[1], middle) > 0.08)
+            #expect(distance(samples[1], middle) > 0.03)
             #expect(model.phase == .idle)
         }
 

@@ -716,6 +716,7 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateFullScreenVideo(_ enabled: Bool) {
+        guard enabled == model.videoFullscreen else { return }
         guard enabled, model.phase == .live, model.roomHasVideo else {
             fullScreenVideoController?.close()
             fullScreenVideoController = nil
@@ -733,6 +734,7 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateFloatingBar(hidden: Bool) {
+        guard hidden == model.floatingBarHidden else { return }
         if hidden || model.phase != .live {
             roomBarController?.close()
             roomBarController = nil
@@ -817,7 +819,12 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
 
     func presentNotchSettings() {
         model.prepareNotchSettingsForMenuBar()
-        statusMenuController?.showPopover(allowWhenIdle: true)
+        // The settings state must reach SwiftUI before a hidden AppKit popover is
+        // shown, otherwise its first frame contains the previous compact layout.
+        DispatchQueue.main.async { [weak self] in
+            guard self?.model.notchSettingsVisible == true else { return }
+            self?.statusMenuController?.showPopover(allowWhenIdle: true)
+        }
     }
 
     @objc func checkForUpdates(_ sender: Any?) {
@@ -871,23 +878,95 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
 @MainActor
 struct ALOStatusPopoverContent: View {
     @ObservedObject var model: ALOViewModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(spacing: 0) {
             FloatingRoomView(model: model, presentation: .menuBar)
             RoomPlaybackProgressDivider(model: model)
             WalkieTalkieBar(model: model, showsCloseButton: false)
-            if model.notchSettingsVisible {
-                NotchSettingsBelowPlayer(model: model)
-                    .frame(height: model.notchSettingsHeight)
+            if model.notchSettingsContentVisible {
+                ALOAnimatedNotchSettingsSlot(model: model)
             }
         }
-        .background(Palette.opaqueSurface)
+        .background(ArtworkHeaderBackground(palette: model.roomArtworkPalette))
+        .animation(reduceMotion ? nil : .easeInOut(duration: 1.1), value: model.roomArtworkPalette)
+    }
+}
+
+private struct ALOAnimatedNotchSettingsSlot: View {
+    @ObservedObject var model: ALOViewModel
+    @ObservedObject private var notchFeatures = ALONotchFeatureBridge.shared
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var revealsContent = false
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            if revealsContent {
+                NotchSettingsBelowPlayer(model: model)
+                    .transition(settingsTransition)
+            }
+        }
+        .frame(height: model.notchSettingsHeightWhenVisible, alignment: .top)
+        .clipped()
+        .onAppear {
+            guard !revealsContent else { return }
+            if reduceMotion {
+                revealsContent = true
+            } else {
+                DispatchQueue.main.async {
+                    withAnimation(settingsAnimation) { revealsContent = true }
+                }
+            }
+        }
+    }
+
+    private var settingsAnimation: Animation {
+        return notchFeatures.runtime?.embeddedSettingsExpansionAnimation
+            ?? .spring(response: 0.45, dampingFraction: 0.75, blendDuration: 0.18)
+    }
+
+    private var settingsTransition: AnyTransition {
+        guard !reduceMotion else { return .opacity }
+        return notchFeatures.runtime?.embeddedSettingsExpansionTransition
+            ?? .asymmetric(
+                insertion: .modifier(
+                    active: ALOSettingsNotchTransitionModifier(
+                        blur: 20, opacity: 0, offsetY: -53.75,
+                        scaleX: 0.6, scaleY: 0.2
+                    ),
+                    identity: ALOSettingsNotchTransitionModifier()
+                ),
+                removal: .modifier(
+                    active: ALOSettingsNotchTransitionModifier(
+                        blur: 20, opacity: 0, offsetY: -53.75,
+                        scaleX: 0.4, scaleY: 0.2
+                    ),
+                    identity: ALOSettingsNotchTransitionModifier()
+                )
+            )
+    }
+}
+
+private struct ALOSettingsNotchTransitionModifier: ViewModifier {
+    var blur: CGFloat = 0
+    var opacity: Double = 1
+    var offsetY: CGFloat = 0
+    var scaleX: CGFloat = 1
+    var scaleY: CGFloat = 1
+
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(x: scaleX, y: scaleY, anchor: .top)
+            .offset(y: offsetY)
+            .blur(radius: blur)
+            .opacity(opacity)
+            .compositingGroup()
     }
 }
 
 @MainActor
-private final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
+final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
     private var roomTouchBar: RoomTouchBarController?
     private let model: ALOViewModel
     private let toggleMainWindow: () -> Void
@@ -902,6 +981,7 @@ private final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
     private var artworkData: Data?
     private var artwork: NSImage?
     private var artworkPalette: ArtworkPalette?
+    private var notchSettingsResizeGeneration = 0
 
     init(model: ALOViewModel, toggleMainWindow: @escaping () -> Void) {
         self.model = model
@@ -929,8 +1009,9 @@ private final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
         popover.delegate = self
         popover.contentSize = panelSize
         let popoverController = NSHostingController(rootView: ALOStatusPopoverContent(model: model))
+        popoverController.sizingOptions = []
         popoverController.view.wantsLayer = true
-        popoverController.view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        popoverController.view.layer?.backgroundColor = NSColor.clear.cgColor
         popover.contentViewController = popoverController
         let touchBar = RoomTouchBarController(model: model, onGames: { [weak model] in model?.showGamesLibrary() })
         touchBar.attach(to: popoverController)
@@ -994,16 +1075,15 @@ private final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
         .sink { [weak self] _ in self?.resizePopover() }
         .store(in: &observers)
         model.$notchSettingsVisible.removeDuplicates().dropFirst()
-            .sink { [weak self] _ in
-                DispatchQueue.main.async { self?.resizePopover() }
+            .sink { [weak self] visible in
+                self?.scheduleNotchSettingsResize(visible: visible)
             }.store(in: &observers)
     }
 
     func showPopover(allowWhenIdle: Bool = false) {
-        guard (allowWhenIdle || model.phase == .live),
-              let button = statusItem.button,
-              !popover.isShown
-        else { return }
+        guard allowWhenIdle || model.phase == .live else { return }
+        guard let button = statusItem.button, !popover.isShown else { return }
+        resizePopover(atomically: model.notchSettingsVisible)
         popover.contentSize = panelSize
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         model.setMenuBarPopoverVisible(true)
@@ -1033,21 +1113,59 @@ private final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
         popover.isShown ? closePopover() : showPopover()
     }
 
-    private var panelSize: NSSize {
-        NSSize(
+    var contentSize: NSSize { popover.contentSize }
+
+    private var panelSize: NSSize { panelSize(notchSettingsVisible: nil) }
+
+    private func panelSize(notchSettingsVisible: Bool?) -> NSSize {
+        let settingsHeight = (notchSettingsVisible ?? model.notchSettingsVisible)
+            ? model.notchSettingsHeightWhenVisible : 0
+        return NSSize(
             width: FloatingMetrics.width,
             height: model.floatingPanelHeight
                 + FloatingMetrics.menuBarMediaHeight
                 - FloatingMetrics.barHeight
                 + FloatingMetrics.walkieBarHeight
                 + FloatingMetrics.separatorHeight
-                + model.notchSettingsHeight
+                + settingsHeight
         )
     }
 
-    private func resizePopover() {
-        guard popover.contentSize != panelSize else { return }
-        popover.contentSize = panelSize
+    private func resizePopover(to requestedSize: NSSize? = nil, atomically: Bool = false) {
+        let targetSize = requestedSize ?? panelSize
+        guard popover.contentSize != targetSize else { return }
+        let restoresAnimation = atomically && popover.animates
+        if restoresAnimation { popover.animates = false }
+        popover.contentSize = targetSize
+        if restoresAnimation { popover.animates = true }
+    }
+
+    private func scheduleNotchSettingsResize(visible: Bool) {
+        notchSettingsResizeGeneration &+= 1
+        let generation = notchSettingsResizeGeneration
+        let targetSize = panelSize(notchSettingsVisible: visible)
+
+        if !visible {
+            // Remove the tall SwiftUI hierarchy while the window still has room
+            // for it. The next layout pass can then safely collapse the window.
+            model.setNotchSettingsContentVisible(false)
+        }
+
+        // @Published emits before its stored value changes. Resizing in this
+        // callback pairs the new AppKit window size with SwiftUI's previous view
+        // tree, exposing a cropped feature grid on close and a compact jump on
+        // open. Reconcile and lay out the new tree before resizing either way.
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  generation == self.notchSettingsResizeGeneration,
+                  self.model.notchSettingsVisible == visible else { return }
+            self.popover.contentViewController?.view.layoutSubtreeIfNeeded()
+            self.resizePopover(to: targetSize, atomically: true)
+            if visible {
+                // Grow first, then insert the settings using the Notch transition.
+                self.model.setNotchSettingsContentVisible(true)
+            }
+        }
     }
 
     private func syncMotionPreference() {
@@ -1549,7 +1667,9 @@ final class ALOViewModel: ObservableObject {
     @Published var floatingSection: FloatingSection = .collapsed
     @Published var floatingBarHidden: Bool
     @Published var notchSettingsVisible = false
-    var notchSettingsHeight: CGFloat { notchSettingsVisible ? 430 : 0 }
+    @Published private(set) var notchSettingsContentVisible = false
+    let notchSettingsHeightWhenVisible: CGFloat = 430
+    var notchSettingsHeight: CGFloat { notchSettingsVisible ? notchSettingsHeightWhenVisible : 0 }
     @Published private(set) var menuBarPopoverVisible = false
 
     private var roomBrowser: MeshRoomBrowser!
@@ -1808,10 +1928,6 @@ final class ALOViewModel: ObservableObject {
     var selectedAudioSourceTitle: String { selectedSystemAudioSource.title }
     var roomAccentColor: Color {
         roomAccentHex.map(Color.deviceIdentity) ?? Palette.controlAccent
-    }
-    var roomAtmosphereColors: [Color] {
-        roomArtworkPalette?.hexes.map(Color.deviceIdentity)
-            ?? [Palette.controlAccent, Palette.accentSoft, Palette.blueSoft]
     }
     var roomSyncLabel: String {
         if !hasBroadcaster { return "No broadcaster" }
@@ -2759,6 +2875,11 @@ final class ALOViewModel: ObservableObject {
         dismissIncomingMessagePreview()
         floatingSection = .collapsed
         notchSettingsVisible = true
+    }
+
+    func setNotchSettingsContentVisible(_ visible: Bool) {
+        guard notchSettingsContentVisible != visible else { return }
+        notchSettingsContentVisible = visible
     }
 
     func showChatInFloatingBar() {
@@ -4052,7 +4173,6 @@ struct FloatingRoomView: View {
                 }
             } else {
                 roomContent(width: FloatingMetrics.width, height: roomContentHeight)
-                    .background(Palette.opaqueSurface)
             }
         }
         .tint(roomAccent)
@@ -4087,14 +4207,13 @@ struct FloatingRoomView: View {
                         .frame(height: navigationHeight)
                 }
             }
-            .background {
-                if presentation == .floating {
-                    ArtworkHeaderBackground(palette: model.roomArtworkPalette)
-                }
-            }
         }
         .frame(width: width, height: height, alignment: .bottom)
-        .background(ArtworkAtmosphere(colors: model.roomAtmosphereColors))
+        .background {
+            if presentation == .floating {
+                ArtworkHeaderBackground(palette: model.roomArtworkPalette)
+            }
+        }
         .animation(panelAnimation, value: model.floatingSection)
         .animation(panelAnimation, value: model.permissionNotice)
         .animation(panelAnimation, value: model.participants.count)
@@ -4244,11 +4363,6 @@ struct FloatingRoomView: View {
                 menuBarArtworkBackdrop
             }
         }
-        .background {
-            if presentation == .menuBar {
-                ArtworkHeaderBackground(palette: model.roomArtworkPalette)
-            }
-        }
         .clipped()
     }
 
@@ -4327,7 +4441,7 @@ struct FloatingRoomView: View {
                     .aspectRatio(contentMode: .fill)
             } else {
                 ZStack {
-                    roomAccent.opacity(0.18)
+                    Color.clear
                     Image(systemName: "music.note")
                         .font(.system(size: 18, weight: .medium))
                         .foregroundStyle(roomAccent)
@@ -5689,7 +5803,8 @@ struct WalkieTalkieBar: View {
             if showsCloseButton {
                 VStack(spacing: FloatingMetrics.walkieBarHandleGap) {
                     controls
-                        .glass(cornerRadius: 18)
+                        .background(ArtworkHeaderBackground(palette: model.roomArtworkPalette))
+                        .glass(cornerRadius: 18, behindWindow: true)
 
                     Capsule()
                         .fill(Palette.controlIcon.opacity(0.64))
@@ -5726,7 +5841,6 @@ struct WalkieTalkieBar: View {
             minHeight: FloatingMetrics.walkieBarHeight,
             maxHeight: FloatingMetrics.walkieBarHeight
         )
-        .background(embeddedFloating ? Color.clear : Color.black)
         .overlay(alignment: .top) {
             Rectangle()
                 .fill(Palette.glassHighlight.opacity(embeddedFloating ? 0.22 : 0.72))
@@ -6572,70 +6686,31 @@ private struct AmbientBackground: View {
 
 struct ArtworkHeaderBackground: View {
     let palette: ArtworkPalette?
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    var body: some View {
+        ArtworkHeaderFill(palette: palette, opaque: reduceTransparency)
+    }
+}
+
+struct ArtworkHeaderFill: View {
+    let palette: ArtworkPalette?
+    let opaque: Bool
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
         ZStack {
+            Color.clear
+            if opaque { Palette.opaqueSurface }
             if let palette {
-                // Carry every sampled hue through the whole header, rather
-                // than fading one accent into a mostly neutral surface.
+                // Tint the native blur; never replace it with an opaque gradient.
                 LinearGradient(colors: palette.hexes.map(Color.deviceIdentity),
                                startPoint: .topLeading, endPoint: .bottomTrailing)
-                if colorScheme == .dark {
-                    Color.black.opacity(contrast == .increased ? 0.72 : 0.62)
-                } else {
-                    Color.white.opacity(contrast == .increased ? 0.90 : 0.68)
-                }
-            } else {
-                Palette.opaqueSurface
+                    .opacity(contrast == .increased ? 0.08 : colorScheme == .dark ? 0.22 : 0.14)
+                StaticGrain().blendMode(.softLight).opacity(0.06)
             }
-            StaticGrain().blendMode(.softLight).opacity(0.12)
         }
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
-    }
-}
-
-private struct ArtworkAtmosphere: View {
-    let colors: [Color]
-    var strength = 1.0
-
-    var body: some View {
-        let primary = colors.first ?? Palette.controlAccent
-        let secondary = colors.dropFirst().first ?? Palette.accentSoft
-        let tertiary = colors.dropFirst(2).first ?? Palette.blueSoft
-
-        return GeometryReader { geometry in
-            let reach = max(geometry.size.width, geometry.size.height)
-            ZStack {
-                Palette.opaqueSurface
-                RadialGradient(
-                    colors: [primary.opacity(0.34 * strength), .clear],
-                    center: .topLeading,
-                    startRadius: 0,
-                    endRadius: reach * 0.82
-                )
-                RadialGradient(
-                    colors: [secondary.opacity(0.28 * strength), .clear],
-                    center: .bottomTrailing,
-                    startRadius: 0,
-                    endRadius: reach * 0.72
-                )
-                RadialGradient(
-                    colors: [tertiary.opacity(0.18 * strength), .clear],
-                    center: UnitPoint(x: 0.76, y: 0.18),
-                    startRadius: 0,
-                    endRadius: reach * 0.56
-                )
-                Palette.opaqueSurface.opacity(0.42)
-                StaticGrain()
-                    .blendMode(.softLight)
-                    .opacity(0.11 * strength)
-            }
-            .frame(width: geometry.size.width, height: geometry.size.height)
-        }
-        .clipped()
         .allowsHitTesting(false)
         .accessibilityHidden(true)
     }
@@ -6812,9 +6887,22 @@ private struct VideoControlButtonStyle: ButtonStyle {
     }
 }
 
+struct PlayerWindowBlur: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = .popover
+        view.blendingMode = .behindWindow
+        view.state = .active
+        return view
+    }
+
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {}
+}
+
 private struct AdaptiveSurface: ViewModifier {
     let cornerRadius: CGFloat
     let elevated: Bool
+    var behindWindow = false
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     func body(content: Content) -> some View {
@@ -6823,6 +6911,8 @@ private struct AdaptiveSurface: ViewModifier {
                 if reduceTransparency {
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                         .fill(Palette.opaqueSurface)
+                } else if behindWindow {
+                    PlayerWindowBlur()
                 } else {
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                         .fill(.regularMaterial)
@@ -6851,11 +6941,11 @@ private struct AdaptiveSurface: ViewModifier {
 
 private extension View {
     func floatingSurface(cornerRadius: CGFloat) -> some View {
-        modifier(AdaptiveSurface(cornerRadius: cornerRadius, elevated: false))
+        modifier(AdaptiveSurface(cornerRadius: cornerRadius, elevated: false, behindWindow: true))
     }
 
-    func glass(cornerRadius: CGFloat) -> some View {
-        modifier(AdaptiveSurface(cornerRadius: cornerRadius, elevated: true))
+    func glass(cornerRadius: CGFloat, behindWindow: Bool = false) -> some View {
+        modifier(AdaptiveSurface(cornerRadius: cornerRadius, elevated: true, behindWindow: behindWindow))
     }
 }
 
