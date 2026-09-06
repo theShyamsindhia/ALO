@@ -99,6 +99,29 @@ struct AppIconTests {
         #expect(!FileManager.default.fileExists(atPath: context.directory.appendingPathComponent(option.id + ".png").path))
     }
 
+    @Test func openingPanelDownloadsMissingIconsSeriallyWithoutChangingSelection() async throws {
+        let context = try makeContext()
+        defer { context.cleanUp() }
+        let options = Array(AppIconOption.all.dropFirst())
+        let downloads = try Dictionary(uniqueKeysWithValues: options.map { option in
+            (try #require(option.downloadURL), try Data(contentsOf: sourceURL(for: option.id)))
+        })
+        let probe = DownloadProbe(downloads: downloads)
+        let preferences = AppIconPreferences(defaults: context.defaults, directory: context.directory) { url, _ in
+            try await probe.fetch(url)
+        }
+
+        preferences.downloadMissingIcons()
+        try await waitUntilIdle(preferences)
+
+        #expect(preferences.selectedID == "original")
+        #expect(preferences.error == nil)
+        #expect(preferences.installedIDs == Set(options.map(\.id)))
+        let result = await probe.result()
+        #expect(result.maximumConcurrent == 1)
+        #expect(result.urls == options.compactMap(\.downloadURL))
+    }
+
     private func waitUntilIdle(_ preferences: AppIconPreferences) async throws {
         for _ in 0..<200 where preferences.downloadingID != nil {
             try await Task.sleep(nanoseconds: 5_000_000)
@@ -171,5 +194,27 @@ struct AppIconTests {
             defaults.removePersistentDomain(forName: suite)
             try? FileManager.default.removeItem(at: directory)
         }
+    }
+}
+
+private actor DownloadProbe {
+    private let downloads: [URL: Data]
+    private var active = 0
+    private var maximumConcurrent = 0
+    private var urls: [URL] = []
+
+    init(downloads: [URL: Data]) { self.downloads = downloads }
+
+    func fetch(_ url: URL) async throws -> Data {
+        active += 1
+        maximumConcurrent = max(maximumConcurrent, active)
+        urls.append(url)
+        defer { active -= 1 }
+        try await Task.sleep(nanoseconds: 1_000_000)
+        return try #require(downloads[url])
+    }
+
+    func result() -> (maximumConcurrent: Int, urls: [URL]) {
+        (maximumConcurrent, urls)
     }
 }

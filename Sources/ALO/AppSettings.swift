@@ -87,6 +87,7 @@ final class AppIconPreferences: ObservableObject {
     private let fetcher: Fetch
     private var downloadTask: Task<Void, Never>?
     private var downloadToken: UUID?
+    private var requestedSelectionID: String?
     private var previews: [String: NSImage] = [:]
 
     init(defaults: UserDefaults = .standard, directory: URL? = nil, fetcher: Fetch? = nil) {
@@ -115,13 +116,63 @@ final class AppIconPreferences: ObservableObject {
     func select(_ id: String) {
         let resolved = AppIconOption.resolvedID(id)
         if resolved == "original" {
-            cancelDownload()
+            requestedSelectionID = nil
             restoreDefault()
             return
         }
         guard let option = AppIconOption.all.first(where: { $0.id == resolved }) else { return }
-        if applyInstalledIcon(resolved) { return }
+        if applyInstalledIcon(resolved) {
+            requestedSelectionID = nil
+            return
+        }
+        if downloadTask != nil {
+            requestedSelectionID = resolved
+            error = nil
+            return
+        }
         download(option)
+    }
+
+    /// Populate the panel progressively without changing the user's Dock icon.
+    /// A single task deliberately keeps network and image decoding work serial.
+    func downloadMissingIcons() {
+        guard downloadTask == nil,
+              let first = AppIconOption.all.dropFirst().first(where: { !installedIDs.contains($0.id) })
+        else { return }
+        let missing = AppIconOption.all.dropFirst().filter { !installedIDs.contains($0.id) }
+        let token = UUID()
+        downloadToken = token
+        downloadingID = first.id
+        error = nil
+        downloadTask = Task { [weak self] in
+            guard let self else { return }
+            for option in missing {
+                guard !Task.isCancelled, downloadToken == token,
+                      let url = option.downloadURL, let expectedBytes = option.bytes else { break }
+                downloadingID = option.id
+                do {
+                    let data = try await fetcher(url, expectedBytes)
+                    try Task.checkCancellation()
+                    guard downloadToken == token else { return }
+                    try install(data, for: option)
+                    if requestedSelectionID == option.id {
+                        requestedSelectionID = nil
+                        _ = applyInstalledIcon(option.id)
+                    }
+                } catch is CancellationError {
+                    return
+                } catch {
+                    if downloadToken == token {
+                        self.error = "Could not download \(option.name): \(error.localizedDescription)"
+                    }
+                }
+            }
+            guard downloadToken == token else { return }
+            requestedSelectionID = nil
+            downloadingID = nil
+            downloadToken = nil
+            downloadTask = nil
+        }
     }
 
     func preview(for option: AppIconOption) -> NSImage? {
@@ -224,6 +275,7 @@ final class AppIconPreferences: ObservableObject {
         downloadTask = nil
         downloadToken = nil
         downloadingID = nil
+        requestedSelectionID = nil
     }
 
     private func fileURL(for id: String) -> URL {
@@ -345,7 +397,7 @@ private struct AppAppearanceSettingsView: View {
                     Text("App icon").font(.title2.bold())
                     Text("Choose how ALO looks in your Dock. Your choice is saved on this Mac.")
                         .foregroundStyle(.secondary)
-                    Text("Alternative icons download from ALO's GitHub repository only when selected. Finder keeps the default app icon.")
+                    Text("Alternative icons download automatically, one at a time, when this panel opens. Finder keeps the default app icon.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 12)], spacing: 12) {
@@ -385,7 +437,6 @@ private struct AppAppearanceSettingsView: View {
                             .contentShape(RoundedRectangle(cornerRadius: 12))
                         }
                         .buttonStyle(.plain)
-                        .disabled(preferences.downloadingID != nil && option.id != "original")
                         .accessibilityLabel(option.name)
                         .accessibilityValue(selected ? "Selected" : (downloaded ? "Downloaded" : "Not downloaded"))
                         .accessibilityAddTraits(selected ? .isSelected : [])
@@ -409,5 +460,6 @@ private struct AppAppearanceSettingsView: View {
             }
             .padding(24)
         }
+        .onAppear { preferences.downloadMissingIcons() }
     }
 }
