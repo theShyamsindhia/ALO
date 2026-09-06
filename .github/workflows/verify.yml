@@ -32,9 +32,10 @@ jobs:
           flavor: tests
       - name: Compile all optimized tests
         run: |
-          swift build -c release --build-tests \
+          swift test -c release \
             -Xswiftc -Xllvm -Xswiftc -sil-disable-pass=CapturePropagation \
-            -Xswiftc -Xllvm -Xswiftc -sil-disable-pass-only-function=main
+            -Xswiftc -Xllvm -Xswiftc -sil-disable-pass-only-function=main \
+            list > "$RUNNER_TEMP/alo-test-list.txt"
       - uses: ./.github/actions/swift-build-cache
         with:
           flavor: tests
