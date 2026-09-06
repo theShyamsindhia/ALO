@@ -30,6 +30,8 @@ updated: 2026-09-06
   observation: HostServer clears completion evidence only after drainAudio has emptied pending work. When the last in-flight send completes slowly, fresh pending packets are evaluated and rejected before that reset.
 - timestamp: 2026-09-06T18:52:00+05:30
   observation: Release run 34035289490 reproduced the remaining idle-path fault deterministically: two listeners stopped at sequences 176 and 181, a late-join run left an established listener at 40 packets, and a delayed-capture run reached 49. All four failures stayed below the unchanged 250ms latency ceiling and were admission drops, not transport loss.
+- timestamp: 2026-09-06T19:08:00+05:30
+  observation: Run 34035999118 cleared the late-join and delayed-capture packet floors. Its focused idle-path regression showed sequences 8...10 were rejected before the final completion because retry eligibility compared their 80...90ms capture age with the sender's 80ms queue-wait limit, despite zero queue residence and more than 100ms of room admission budget remaining.
 
 ## Eliminated
 

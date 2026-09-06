@@ -1166,11 +1166,14 @@ final class HostServer {
                 // A busy path is not a permanent rejection of fresh capture.
                 // Keep it in the existing bounded FIFO until a completion frees
                 // capacity, even if capture ends before another callback arrives.
-                // Already-old capture cannot consume this recovery window;
-                // the same 80ms freshness/wait bounds still expire it. Every
-                // retry must pass the unchanged delivery-budget checks above.
+                // Queue residence, not acquisition age, owns the 80ms retry
+                // window. Capture must still fit the unchanged room delivery
+                // budget above, and every retry must pass those checks again.
+                let queueWait = submittedAt >= packet.enqueuedAtNanos
+                    ? submittedAt - packet.enqueuedAtNanos : 0
                 if client.audioSendsInFlight > 0,
-                   captureAge < Self.maximumPendingAudioSpanNanos {
+                   captureAge < admissionBudget,
+                   queueWait < Self.maximumPendingAudioWaitNanos {
                     client.pendingAudio.insert(packet, at: 0)
                     break
                 }
