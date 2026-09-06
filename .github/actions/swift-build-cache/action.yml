@@ -4,18 +4,33 @@ inputs:
   flavor:
     description: tests or app; flags must never share a build database
     required: true
+  mode:
+    description: Restore before compilation or save after successful compilation
+    default: restore
 runs:
   using: composite
   steps:
     - name: Verify cache invalidation safety
+      if: inputs.mode == 'restore'
       shell: bash
       run: python3 -B Scripts/test_ci_build_inputs.py
-    - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+    - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      if: inputs.mode == 'restore'
       with:
         path: .build
         key: swift-macos15-${{ runner.arch }}-xcode26.3-${{ inputs.flavor }}-v1-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ github.sha }}
         restore-keys: |
           swift-macos15-${{ runner.arch }}-xcode26.3-${{ inputs.flavor }}-v1-${{ hashFiles('Package.swift', 'Package.resolved') }}-
     - name: Restore timestamps only for content-identical build inputs
+      if: inputs.mode == 'restore'
       shell: bash
       run: python3 Scripts/ci_build_inputs.py restore .build/ci-inputs.json
+    - name: Record successfully compiled inputs
+      if: inputs.mode == 'save'
+      shell: bash
+      run: python3 Scripts/ci_build_inputs.py save .build/ci-inputs.json
+    - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      if: inputs.mode == 'save'
+      with:
+        path: .build
+        key: swift-macos15-${{ runner.arch }}-xcode26.3-${{ inputs.flavor }}-v1-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ github.sha }}

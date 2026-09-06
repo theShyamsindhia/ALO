@@ -1547,6 +1547,7 @@ final class ALOViewModel: ObservableObject {
     @Published private(set) var menuBarPopoverVisible = false
 
     private var roomBrowser: MeshRoomBrowser!
+    private let discoveryEnabled: Bool
     private var secureRoomBrowser: MeshRoomBrowser!
     private var legacyNearbyRooms: [NearbyRoom] = []
     private var secureNearbyRooms: [NearbyRoom] = []
@@ -1594,6 +1595,7 @@ final class ALOViewModel: ObservableObject {
     private static let deviceProfileImageKey = "meshDeviceProfileImageData"
 
     init(discoverRooms: Bool = true) {
+        discoveryEnabled = discoverRooms
         let defaults = UserDefaults.standard
         if let stored = defaults.string(forKey: "meshNodeID") {
             nodeID = stored
@@ -3294,7 +3296,7 @@ final class ALOViewModel: ObservableObject {
     }
 
     func refreshRooms() {
-        guard phase == .idle, !roomsRefreshing else { return }
+        guard discoveryEnabled, phase == .idle, !roomsRefreshing else { return }
         savedRooms = roomStore.load()
         nearbyRooms = []
         legacyNearbyRooms = []
