@@ -35,6 +35,7 @@ struct MediaHostSessionTests {
             let allSecond = try #require(messages.compactMap { if case .anchor(let anchor) = $0 { return anchor }; return nil }.last)
             #expect(allFirst.playbackResetID != nil && allFirst.playbackResetID == allSecond.playbackResetID)
             #expect(allSecond.stream.sessionID == second.sessionID && h.closed.isEmpty)
+            h.ack(allFirst); h.time += 250_000_000; h.host.tick()
             h.host.refreshTimeline()
             #expect(h.anchors.last?.playbackResetID == nil, "Automatic refresh must never request a reset")
         }
@@ -50,6 +51,9 @@ struct MediaHostSessionTests {
             #expect(h.anchors.last?.playbackResetID == nil)
             h.captureAvailable = true; h.time += 100_000_000; h.host.tick()
             #expect(h.anchors.last?.playbackResetID != nil)
+            let resetID = try #require(h.anchors.last?.playbackResetID)
+            h.host.refreshTimeline()
+            #expect(h.anchors.last?.playbackResetID == resetID, "Retain explicit sync until readiness ACK, including failed-preparation retries")
             h.holdNextAnchor = true; h.host.refreshTimeline()
             h.host.refreshTimeline(resetPlayback: true)
             let done = try #require(h.heldAnchorCompletion)

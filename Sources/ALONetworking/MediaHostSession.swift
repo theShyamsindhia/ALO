@@ -369,6 +369,7 @@ public final class MediaHostSession: @unchecked Sendable {
                   (peer.active === lease || lease.deadline > now), localEpoch == stream.broadcasterEpoch,
                   playbackTime >= time || time - playbackTime <= MediaControlWireMessage.maximumAnchorAgeNanos,
                   peer.active == nil || peer.active === lease || playbackTime > time else { return }
+            if lease.pendingPlaybackResetID == anchor.playbackResetID { lease.pendingPlaybackResetID = nil }
             if peer.active === lease {
                 if anchor.state == .paused { lease.committedAnchor = anchor; lease.acknowledgedAnchor = nil }
                 else { lease.acknowledgedAnchor = anchor }
@@ -588,7 +589,10 @@ public final class MediaHostSession: @unchecked Sendable {
             lease.refreshNeeded = true; lease.nextAnchorAttempt = acknowledged.hostPlaybackTimeNanos; return
         }
         // Do not move an already announced pending cutover while its predecessor is live.
-        if peer.pending === lease, lease.proposedAnchor != nil { return }
+        if peer.pending === lease, lease.proposedAnchor != nil {
+            if lease.pendingPlaybackResetID != nil { lease.refreshNeeded = true }
+            return
+        }
         let time = nowNanos()
         lease.nextAnchorAttempt = time + 100_000_000
         guard var anchor = callbacks.currentAnchor(peer.credentials.remotePeerID, lease.stream, time),
@@ -598,7 +602,6 @@ public final class MediaHostSession: @unchecked Sendable {
         else { lease.refreshNeeded = true; return }
         anchor.playbackResetID = lease.pendingPlaybackResetID
         guard let bytes = try? MediaControlWireMessage.anchor(anchor).encoded() else { lease.refreshNeeded = true; return }
-        lease.pendingPlaybackResetID = nil
         lease.refreshNeeded = false
         lease.anchorSending = true; lease.proposedAnchor = anchor
         enqueue(bytes, peer: peer) { [weak self, weak peer, weak lease] result in

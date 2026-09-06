@@ -5,6 +5,29 @@ import Testing
 
 @Suite("Media receiver bootstrap and replacement")
 struct MediaReceiverSessionTests {
+    @Test func explicitSyncRetriesThroughAuthenticatedHostWithoutReplacingSubscription() throws {
+        let h = try MediaReceiverHarness()
+        try h.queue.sync {
+            try h.activate()
+            let before = try #require(h.committed.last)
+            h.time += 250_000_000
+            h.rejectPreparations = true
+            h.host.refreshTimeline(participantID: NetworkFixture.receiver, resetPlayback: true)
+            try h.pump()
+            let resetID = try #require(h.preparations.last?.anchor.playbackResetID)
+            #expect(h.committed.last?.id == before.id && h.states.last == .active)
+            try h.publishPackets(4)
+            #expect(h.audio.count == 8, "Failed preparation keeps the existing stream audible")
+            h.rejectPreparations = false
+            h.time += 1_000_000_000; h.receiver.tick(); try h.pump()
+            let retry = try #require(h.preparations.last)
+            #expect(retry.anchor.playbackResetID == resetID)
+            h.receiver.completePreparationOnQueue(id: retry.id, ready: true)
+            try h.publishPackets(4)
+            #expect(h.committed.last?.id == retry.id && h.states.last == .active)
+            #expect(h.subscriptions.count == 1 && h.cancelled.isEmpty)
+        }
+    }
     @Test func firstHardwareFloorPrecedesRejectedPreparationAndSurvivesTicketCancel() throws {
         let h = try MediaReceiverHarness()
         try h.queue.sync {
