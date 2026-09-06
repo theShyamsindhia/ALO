@@ -61,6 +61,7 @@ public final class MediaHostSession: @unchecked Sendable {
         var validated = false
         var anchorSending = false
         var refreshNeeded = false
+        var pendingPlaybackResetID: UUID?
         var nextAnchorAttempt: UInt64 = 0
         var cutover: UInt64?
         var proposedAnchor: MediaStreamAnchor?
@@ -397,12 +398,18 @@ public final class MediaHostSession: @unchecked Sendable {
     /// refresh supplies startup audio immediately; the receiver must prepare its
     /// renderer before resuming playout. Readiness ACK commits initial/replacement
     /// tickets, not every refresh. Paused tickets may ACK without audio warmup.
-    public func refreshTimeline() {
-        if DispatchQueue.getSpecific(key: executorKey) != 1 { queue.async { self.refreshTimeline() }; return }
+    public func refreshTimeline(participantID: UUID? = nil, resetPlayback: Bool = false) {
+        if DispatchQueue.getSpecific(key: executorKey) != 1 {
+            queue.async { self.refreshTimeline(participantID: participantID, resetPlayback: resetPlayback) }; return
+        }
         assertQueue(); tick()
+        let resetID = resetPlayback ? UUID() : nil
         for peer in Array(peers.values) {
-            if let active = peer.active { sendAnchor(peer, lease: active) }
-            if let pending = peer.pending, pending.validated { sendAnchor(peer, lease: pending) }
+            guard participantID == nil || peer.credentials.remotePeerID == participantID else { continue }
+            for lease in [peer.active, peer.pending].compactMap({ $0 }) where lease.validated {
+                if let resetID { lease.pendingPlaybackResetID = resetID }
+                sendAnchor(peer, lease: lease)
+            }
         }
     }
 
@@ -584,11 +591,14 @@ public final class MediaHostSession: @unchecked Sendable {
         if peer.pending === lease, lease.proposedAnchor != nil { return }
         let time = nowNanos()
         lease.nextAnchorAttempt = time + 100_000_000
-        guard let anchor = callbacks.currentAnchor(peer.credentials.remotePeerID, lease.stream, time),
+        guard var anchor = callbacks.currentAnchor(peer.credentials.remotePeerID, lease.stream, time),
               anchor.stream == lease.stream, anchor.issuedAtHostNanos <= time,
               time - anchor.issuedAtHostNanos <= MediaControlWireMessage.maximumAnchorAgeNanos,
-              peer.active == nil || peer.active === lease || anchor.hostPlaybackTimeNanos > time,
-              let bytes = try? MediaControlWireMessage.anchor(anchor).encoded() else { lease.refreshNeeded = true; return }
+              peer.active == nil || peer.active === lease || anchor.hostPlaybackTimeNanos > time
+        else { lease.refreshNeeded = true; return }
+        anchor.playbackResetID = lease.pendingPlaybackResetID
+        guard let bytes = try? MediaControlWireMessage.anchor(anchor).encoded() else { lease.refreshNeeded = true; return }
+        lease.pendingPlaybackResetID = nil
         lease.refreshNeeded = false
         lease.anchorSending = true; lease.proposedAnchor = anchor
         enqueue(bytes, peer: peer) { [weak self, weak peer, weak lease] result in

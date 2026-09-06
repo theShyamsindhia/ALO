@@ -825,10 +825,6 @@ final class MeshSession {
     }
     func requestResync(participantID: String? = nil) -> Bool {
         guard let broadcaster = replica.broadcaster else { return false }
-        if let secureReceiver, participantID == nodeID {
-            secureReceiver.resynchronize()
-            return true
-        }
         if broadcaster.nodeID == nodeID {
             return receiveResyncRequest(
                 targetID: participantID,
@@ -1134,12 +1130,12 @@ final class MeshSession {
                                 _ = host.performMediaCommand(command)
                             }
                             return true
-                        }, resync: { [weak self, weak host] _, id, epoch in
+                        }, resync: { [weak self, weak host] targetID, id, epoch in
                             guard id == localID, epoch == broadcaster.epoch else { return false }
                             Task { @MainActor in
                                 guard let self, let host, self.secureHost === host,
                                       self.transitionGeneration == generation else { return }
-                                host.requestResync()
+                                host.requestResync(participantID: targetID)
                             }
                             return true
                         })
@@ -1381,7 +1377,7 @@ final class MeshSession {
               broadcaster.nodeID == broadcasterID,
               broadcaster.epoch == broadcasterEpoch
         else { return false }
-        if mediaCommandReady, let secureHost { secureHost.requestResync(); return true }
+        if mediaCommandReady, let secureHost { return secureHost.requestResync(participantID: targetID) }
         guard mediaCommandReady, let hostSession else { return false }
         return hostSession.requestResync(participantID: targetID)
     }

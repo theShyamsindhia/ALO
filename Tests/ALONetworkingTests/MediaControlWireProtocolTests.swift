@@ -4,6 +4,20 @@ import Testing
 
 @Suite("Bounded v2 media-control wire")
 struct MediaControlWireProtocolTests {
+    @Test func explicitResetIsOptionalAndRoundTripsWithoutProtocolVersionChange() throws {
+        var original = anchor()
+        let oldBytes = try JSONEncoder().encode(original)
+        #expect(try JSONDecoder().decode(MediaStreamAnchor.self, from: oldBytes).playbackResetID == nil)
+        original.playbackResetID = UUID()
+        guard case .anchor(let decoded) = try MediaControlWireMessage(encoded: MediaControlWireMessage.anchor(original).encoded()) else {
+            Issue.record("Expected anchor"); return
+        }
+        #expect(decoded == original)
+        var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(original)) as? [String: Any])
+        object.removeValue(forKey: "playbackResetID")
+        let legacy = try JSONDecoder().decode(MediaStreamAnchor.self, from: JSONSerialization.data(withJSONObject: object))
+        #expect(legacy.playbackResetID == nil && legacy.stream == original.stream)
+    }
     private let request = UUID()
     private var stream: MediaStreamIdentifier {
         .init(sessionID: UUID(), broadcasterEpoch: 7, generation: 9)

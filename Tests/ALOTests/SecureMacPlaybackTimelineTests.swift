@@ -16,6 +16,7 @@ struct SecureMacPlaybackTimelineTests {
         var packets: [AudioPacket] = []
         var latencyChanges: [UInt64] = []
         var stops = 0
+        var resyncs: [UInt64?] = []
         var volume: Double = 1
         var muted = false
         var ducking: Double = 1
@@ -30,6 +31,10 @@ struct SecureMacPlaybackTimelineTests {
             packets.append(packet); outstandingPlaybackBufferCount += 1; activity(true)
         }
         func maintainSync() {}
+        func forceResync(atOrAfterCaptureNanos capture: UInt64?) {
+            resyncs.append(capture)
+            packets.removeAll(); outstandingPlaybackBufferCount = 0; pendingPlaybackPacketCount = 0
+        }
         func setTargetLatencyNanos(_ nanos: UInt64) { latencyChanges.append(nanos) }
         func setAutomaticSyncEnabled(_ enabled: Bool) { automaticSyncEnabled = enabled }
         func setLevel(volume: Double, muted: Bool) { self.volume = volume; self.muted = muted }
@@ -78,6 +83,97 @@ struct SecureMacPlaybackTimelineTests {
         let id = UUID()
         try rig.output.prepare(id: id, anchor: anchor(delay: delay), clockOffsetNanos: 0)
         try rig.output.commit(id: id)
+    }
+
+    @Test func explicitSyncClearsBacklogOnlyAtCommitAndPreservesPreferences() throws {
+        let rig = try Rig()
+        try start(rig)
+        rig.output.setLevel(volume: 0.4, muted: true)
+        rig.output.setDuckingGain(0.3)
+        rig.output.setAutomaticSyncEnabled(false)
+        rig.output.accept(packet())
+        var fresh = anchor(capture: 1_010_000_000, frame: 480)
+        fresh.playbackResetID = UUID()
+        let id = UUID()
+        try rig.output.prepare(id: id, anchor: fresh, clockOffsetNanos: 0)
+        rig.output.accept(packet(480, capture: fresh.captureTimeNanos))
+        #expect(rig.players[0].resyncs.isEmpty)
+        #expect(rig.players[0].packets.count == 1, "Hold fresh warmup until the reset commits")
+        try rig.output.commit(id: id)
+        #expect(rig.players[0].resyncs == [fresh.captureTimeNanos])
+        #expect(rig.players[0].packets.map(\.frameIndex) == [480])
+        #expect(rig.players.count == 1 && rig.players[0].stops == 0)
+        #expect(rig.players[0].volume == 0.4 && rig.players[0].muted)
+        #expect(rig.players[0].ducking == 0.3 && !rig.players[0].automaticSyncEnabled)
+        let duplicate = UUID()
+        try rig.output.prepare(id: duplicate, anchor: fresh, clockOffsetNanos: 0)
+        try rig.output.commit(id: duplicate)
+        #expect(rig.players[0].resyncs.count == 1, "Duplicate anchors must not reset twice")
+        let ordinary = UUID()
+        try rig.output.prepare(id: ordinary, anchor: anchor(capture: 1_015_000_000, frame: 720), clockOffsetNanos: 0)
+        try rig.output.commit(id: ordinary)
+        #expect(rig.players[0].resyncs.count == 1, "Background renewal stays seamless")
+    }
+
+    @Test func cancelledOrPausedExplicitSyncDoesNotResetOrResumePlayback() throws {
+        let rig = try Rig()
+        try start(rig)
+        rig.output.accept(packet())
+        var fresh = anchor(capture: 1_010_000_000, frame: 480)
+        fresh.playbackResetID = UUID()
+        let cancelled = UUID()
+        try rig.output.prepare(id: cancelled, anchor: fresh, clockOffsetNanos: 0)
+        rig.output.accept(packet(480, capture: fresh.captureTimeNanos))
+        rig.output.cancelPreparation(id: cancelled)
+        #expect(rig.players[0].resyncs.isEmpty)
+        #expect(rig.players[0].packets.map(\.frameIndex) == [0, 480])
+        var paused = anchor(state: .paused)
+        paused.playbackResetID = UUID()
+        let id = UUID()
+        try rig.output.prepare(id: id, anchor: paused, clockOffsetNanos: 0)
+        try rig.output.commit(id: id)
+        #expect(!rig.players[0].playing && rig.players[0].resyncs.isEmpty)
+    }
+
+    @Test func explicitSyncWithExpiredAnchorLeavesHealthyPlaybackUntouched() throws {
+        let rig = try Rig()
+        try start(rig)
+        rig.output.accept(packet())
+        var fresh = anchor()
+        fresh.playbackResetID = UUID()
+        let id = UUID()
+        try rig.output.prepare(id: id, anchor: fresh, clockOffsetNanos: 0)
+        rig.now = fresh.hostPlaybackTimeNanos
+        #expect(throws: AppleMediaError.invalidAnchor) { try rig.output.commit(id: id) }
+        #expect(rig.players[0].resyncs.isEmpty && rig.players[0].packets.count == 1)
+        #expect(throws: AppleMediaError.invalidAnchor) {
+            try rig.output.prepare(id: UUID(), anchor: fresh, clockOffsetNanos: 0)
+        }
+    }
+
+    @Test func broadcasterManualSyncUsesFreshCaptureWithoutChangingRoomClock() throws {
+        let rig = try Rig()
+        try start(rig)
+        let source = CapturedMediaTimeline()
+        source.observe([packet()])
+        let queue = DispatchQueue(label: "alo.test.host-manual-sync")
+        let renderer = SecureMacMediaHost.LocalRenderer(player: rig.output, timeline: source,
+            epoch: 4, queue: queue, nowNanos: { rig.now })
+        let referenceStream = anchor().stream
+        let before = source.anchor(for: referenceStream, issuedAtHostNanos: rig.now)
+        renderer.requestResync(); renderer.requestResync()
+        queue.sync {
+            renderer.append([packet()]); renderer.drain()
+        }
+        #expect(rig.players[0].resyncs.count == 1, "Repeated clicks coalesce before the next capture drain")
+        #expect(source.anchor(for: referenceStream, issuedAtHostNanos: rig.now) == before)
+        renderer.setPlaying(false)
+        renderer.requestResync()
+        queue.sync { renderer.drain() }
+        #expect(!rig.players[0].playing && rig.players[0].resyncs.count == 1)
+        renderer.stop(); renderer.requestResync()
+        queue.sync { renderer.drain() }
+        #expect(rig.players[0].resyncs.count == 1)
     }
 
     @Test func automaticSyncPreferenceSurvivesSuccessorAndReachesBothCutoverTracks() throws {

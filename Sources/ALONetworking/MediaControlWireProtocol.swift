@@ -35,6 +35,9 @@ public struct MediaStreamAnchor: Codable, Equatable, Sendable {
     public let channelCount: UInt16
     public let framesPerPacket: UInt16
     public let state: State
+    /// Present only for an explicit user sync. Old peers ignore this optional
+    /// field; ordinary anchor refreshes and ticket renewals remain seamless.
+    public var playbackResetID: UUID?
 
     public init(stream: MediaStreamIdentifier, captureTimeNanos: UInt64, frameIndex: UInt64,
                 hostPlaybackTimeNanos: UInt64, issuedAtHostNanos: UInt64,

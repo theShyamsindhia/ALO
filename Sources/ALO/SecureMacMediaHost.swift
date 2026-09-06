@@ -199,7 +199,15 @@ final class SecureMacMediaHost {
         guard ingress.isActive else { return false }
         return playbackController?.perform(command) ?? false
     }
-    func requestResync() { ingress.currentHost?.refreshTimeline() }
+    @discardableResult
+    func requestResync(participantID: String? = nil) -> Bool {
+        guard let host = ingress.currentHost, let owner = ingress.currentBroadcaster else { return false }
+        let target = participantID.flatMap(UUID.init(uuidString:))
+        guard participantID == nil || target != nil else { return false }
+        if target == nil || target == owner.peerID { ingress.renderer?.requestResync() }
+        if target != owner.peerID { host.refreshTimeline(participantID: target, resetPlayback: true) }
+        return true
+    }
     func samplePlaybackReport() async -> PlaybackSyncReport? {
         guard let renderer = ingress.renderer else { return nil }
         return await renderer.report()
@@ -511,6 +519,7 @@ final class SecureMacMediaHost {
         private var stopped = false, playing = true
         private var playbackGeneration = UUID()
         private var pausePending = false
+        private var playbackResetID: UUID?
         private var timer: DispatchSourceTimer?
         /// Read only before start(), while the creating executor owns the player.
         var initialOutputFloor: UInt64 {
@@ -571,6 +580,12 @@ final class SecureMacMediaHost {
         func setMusicDucked(_ ducked: Bool) {
             queue.async { self.player.setDuckingGain(ducked ? 0.3 : 1) }
         }
+        func requestResync() {
+            queue.async {
+                guard self.lock.withLock({ !self.stopped && self.playing && !self.pausePending }) else { return }
+                self.playbackResetID = UUID()
+            }
+        }
         func stage(_ change: CapturedMediaTimeline.PlayoutCutover,
                    authorizeCommit: @escaping (_ commit: () throws -> Void) throws -> Bool,
                    completion: @escaping (Bool) -> Void) {
@@ -599,15 +614,17 @@ final class SecureMacMediaHost {
             guard !batch.2 else { return }
             // A false→true update between drains must still invalidate the old
             // PCM and anchor before admitting the resumed capture reference.
-            if batch.3 { player.setRoomPlayback(playing: false) }
+            if batch.3 { player.setRoomPlayback(playing: false); playbackResetID = nil }
             player.setRoomPlayback(playing: batch.1)
             let now = nowNanos()
-            if batch.1, !batch.0.isEmpty, player.committedAnchor?.state != .running,
-               let anchor = timeline.anchor(for: stream, issuedAtHostNanos: now) {
+            if batch.1, !batch.0.isEmpty, (player.committedAnchor?.state != .running || playbackResetID != nil),
+               var anchor = timeline.anchor(for: stream, issuedAtHostNanos: now) {
                 let id = UUID()
+                anchor.playbackResetID = playbackResetID
                 do {
                     try player.prepare(id: id, anchor: anchor, clockOffsetNanos: 0)
                     try player.commit(id: id)
+                    playbackResetID = nil
                 } catch { player.cancelPreparation(id: id) }
             }
             for packet in batch.0 { player.accept(packet) }

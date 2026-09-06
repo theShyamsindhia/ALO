@@ -4,6 +4,59 @@ import Testing
 
 @Suite("Media host authorization and lifecycle")
 struct MediaHostSessionTests {
+    @Test func manualSyncTargetsOnlySelectedPeerAndAllSharesOneResetID() throws {
+        let h = try MediaHostHarness()
+        try h.queue.sync {
+            h.host.publisherReady(port: 54321)
+            let first = try h.activate()
+            let other = try MediaHostHarness.credentials()
+            var messages: [MediaControlWireMessage] = []
+            try h.host.addPeer(credentials: other.host, send: { bytes, done in
+                if let message = try? MediaControlWireMessage(encoded: bytes) { messages.append(message) }
+                done(.success(()))
+            }, close: {})
+            h.host.receive(try MediaControlWireMessage.subscribe(requestID: UUID(), broadcasterEpoch: 7,
+                channels: [.audio]).encoded(), connectionID: other.host.connectionID)
+            let second = try #require(messages.compactMap { if case .subscribed(_, let ticket, _) = $0 { return ticket }; return nil }.last)
+            try h.validate(second, credentials: other.receiver)
+            let secondAnchor = try #require(messages.compactMap { if case .anchor(let anchor) = $0 { return anchor }; return nil }.last)
+            h.host.receive(try MediaControlWireMessage.anchorReady(stream: secondAnchor.stream,
+                frameIndex: secondAnchor.frameIndex, captureTimeNanos: secondAnchor.captureTimeNanos,
+                hostPlaybackTimeNanos: secondAnchor.hostPlaybackTimeNanos).encoded(), connectionID: other.host.connectionID)
+            h.time += 250_000_000; h.host.tick()
+            let firstCount = h.anchors.count, secondCount = messages.count
+            h.host.refreshTimeline(participantID: UUID(), resetPlayback: true)
+            #expect(h.anchors.count == firstCount && messages.count == secondCount, "Unknown target must not fall back to everyone")
+            h.host.refreshTimeline(participantID: h.publisher.remotePeerID, resetPlayback: true)
+            #expect(h.anchors.count == firstCount + 1 && messages.count == secondCount)
+            #expect(h.anchors.last?.playbackResetID != nil && h.anchors.last?.stream.sessionID == first.sessionID)
+            h.host.refreshTimeline(resetPlayback: true)
+            let allFirst = try #require(h.anchors.last)
+            let allSecond = try #require(messages.compactMap { if case .anchor(let anchor) = $0 { return anchor }; return nil }.last)
+            #expect(allFirst.playbackResetID != nil && allFirst.playbackResetID == allSecond.playbackResetID)
+            #expect(allSecond.stream.sessionID == second.sessionID && h.closed.isEmpty)
+            h.host.refreshTimeline()
+            #expect(h.anchors.last?.playbackResetID == nil, "Automatic refresh must never request a reset")
+        }
+    }
+
+    @Test func manualSyncSurvivesMissingCaptureAndInFlightAnchor() throws {
+        let h = try MediaHostHarness()
+        try h.queue.sync {
+            h.host.publisherReady(port: 54321); _ = try h.activate()
+            h.time += 250_000_000; h.host.tick()
+            h.captureAvailable = false
+            h.host.refreshTimeline(resetPlayback: true)
+            #expect(h.anchors.last?.playbackResetID == nil)
+            h.captureAvailable = true; h.time += 100_000_000; h.host.tick()
+            #expect(h.anchors.last?.playbackResetID != nil)
+            h.holdNextAnchor = true; h.host.refreshTimeline()
+            h.host.refreshTimeline(resetPlayback: true)
+            let done = try #require(h.heldAnchorCompletion)
+            h.heldAnchorCompletion = nil; done(.success(()))
+            #expect(h.anchors.last?.playbackResetID != nil)
+        }
+    }
     @Test func futureActiveAnchorKeepsCommittedAudioUntilAcknowledgedCutover() throws {
         let h = try MediaHostHarness()
         try h.queue.sync {
@@ -531,7 +584,8 @@ final class MediaHostHarness {
     func lastTicket() throws -> MediaSubscriptionTicket {
         try #require(messages.compactMap { if case .subscribed(_, let ticket, _) = $0 { return ticket }; return nil }.last)
     }
-    func validate(_ ticket: MediaSubscriptionTicket) throws {
+    func validate(_ ticket: MediaSubscriptionTicket, credentials: AuthenticatedChannelCredentials? = nil) throws {
+        let receiver = credentials ?? self.receiver
         let flow = UUID(); flows[ticket.sessionID] = flow
         let probe = try receiver.makeReturnPathProbe(ticket: ticket)
         let challenge = try registry.receiveProbe(probe, sessionID: ticket.sessionID, acceptedFlowID: flow, now: seconds)

@@ -16,6 +16,7 @@ protocol SecureMacPlaybackTrack: AnyObject {
     var automaticSyncState: String { get }
     func accept(_ packet: AudioPacket)
     func maintainSync()
+    func forceResync(atOrAfterCaptureNanos: UInt64?)
     func setTargetLatencyNanos(_ nanos: UInt64)
     func setAutomaticSyncEnabled(_ enabled: Bool)
     func setLevel(volume: Double, muted: Bool)
@@ -54,6 +55,7 @@ final class SecureMacPlaybackTimeline {
         let offset: Int64
         let successor: Track?
         let renewal: Bool
+        var resetPlayback = false
         let renderBoundary: UInt64
         let expiresAt: UInt64
         var packets: [AudioPacket] = []
@@ -78,6 +80,7 @@ final class SecureMacPlaybackTimeline {
     private var stopped = false
     private var reportedActivity = false
     private var repairedTarget: RepairTarget?
+    private var appliedPlaybackResetID: UUID?
     /// Uncommitted future PCM is a separate, fixed-size proposal hold.
     static let maximumBufferedPackets = 128
     /// Native played-back completions can lag the audible deadline. Allow one
@@ -150,8 +153,17 @@ final class SecureMacPlaybackTimeline {
         let renewal = continuous && active.anchor?.stream.broadcasterEpoch == anchor.stream.broadcasterEpoch
             && active.delay == delay && anchor.state == .running
         if renewal || anchor.state == .paused {
+            let reset = renewal && anchor.playbackResetID != nil && anchor.playbackResetID != appliedPlaybackResetID
+            var expiry = UInt64.max
+            if reset {
+                let boundary = try renderTime(anchor.hostPlaybackTimeNanos, offset: offset, output: active.player)
+                let headroom = active.player.renderSchedulingHeadroomForTimingNanos
+                let now = nowNanos()
+                guard boundary > now, boundary - now > headroom else { throw AppleMediaError.invalidAnchor }
+                expiry = boundary - headroom
+            }
             proposed = Proposal(id: id, anchor: anchor, offset: offset, successor: nil,
-                renewal: renewal, renderBoundary: 0, expiresAt: .max)
+                renewal: renewal, resetPlayback: reset, renderBoundary: 0, expiresAt: expiry)
             return
         }
         guard !continuous || delay >= active.delay else { throw AppleMediaError.invalidAnchor }
@@ -195,7 +207,16 @@ final class SecureMacPlaybackTimeline {
             proposed = nil
             active.anchor = proposal.anchor
             clockOffsetNanos = proposal.offset
-            // Keep the original capture/frame floor, player, and queued PCM.
+            if proposal.resetPlayback {
+                active.player.forceResync(atOrAfterCaptureNanos: proposal.anchor.captureTimeNanos)
+                active.floor = (proposal.anchor.captureTimeNanos, proposal.anchor.frameIndex)
+                active.captureEnd = nil
+                active.firstAudibleTime = nil
+                appliedPlaybackResetID = proposal.anchor.playbackResetID
+                for packet in proposal.packets { deliver(packet, to: active) }
+                updateActivity()
+            }
+            // Ordinary renewals keep the capture floor, player, and queued PCM.
             return
         }
         if proposal.anchor.state == .paused {
@@ -220,6 +241,7 @@ final class SecureMacPlaybackTimeline {
             active = next
         }
         active.anchor = proposal.anchor
+        appliedPlaybackResetID = proposal.anchor.playbackResetID
         active.floor = (proposal.anchor.captureTimeNanos, proposal.anchor.frameIndex)
         active.delay = proposal.anchor.hostPlaybackTimeNanos - proposal.anchor.captureTimeNanos
         active.player.setTargetLatencyNanos(active.delay) // Only a new or paused player.
@@ -260,7 +282,7 @@ final class SecureMacPlaybackTimeline {
         guard !stopped, playing, valid(packet) else { return }
         expirePreparation()
         retireIfDrained()
-        if var proposal = proposed, !proposal.renewal, proposal.anchor.state == .running,
+        if var proposal = proposed, (!proposal.renewal || proposal.resetPlayback), proposal.anchor.state == .running,
            packet.captureTimeNanos >= proposal.anchor.captureTimeNanos {
             // Warmup may deliver the future tail before its ACK is committed.
             // Do not schedule it on the predecessor or depend on a second copy.
