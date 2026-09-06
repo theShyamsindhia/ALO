@@ -1,0 +1,21 @@
+name: Swift build cache
+description: Restore a toolchain- and build-flavor-specific incremental cache
+inputs:
+  flavor:
+    description: tests or app; flags must never share a build database
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Verify cache invalidation safety
+      shell: bash
+      run: python3 -B Scripts/test_ci_build_inputs.py
+    - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: .build
+        key: swift-macos15-${{ runner.arch }}-xcode26.3-${{ inputs.flavor }}-v1-${{ hashFiles('Package.swift', 'Package.resolved') }}-${{ github.sha }}
+        restore-keys: |
+          swift-macos15-${{ runner.arch }}-xcode26.3-${{ inputs.flavor }}-v1-${{ hashFiles('Package.swift', 'Package.resolved') }}-
+    - name: Restore timestamps only for content-identical build inputs
+      shell: bash
+      run: python3 Scripts/ci_build_inputs.py restore .build/ci-inputs.json

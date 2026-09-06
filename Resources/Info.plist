@@ -13,9 +13,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-	<string>0.14.13</string>
+	<string>0.14.14</string>
     <key>CFBundleVersion</key>
-	<string>93</string>
+	<string>94</string>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © 2026 Shyam Sindiya</string>
     <key>CFBundleIconFile</key>
@@ -48,6 +48,8 @@
     <string>ALO controls media apps and system features only when you use the corresponding enabled notch controls.</string>
     <key>NSBonjourServices</key>
     <array>
+        <string>_alo-peer._tcp</string>
+        <string>_alo-data._udp</string>
         <string>_werai-audio._tcp</string>
         <string>_werai-mesh._tcp</string>
     </array>

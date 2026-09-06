@@ -5,6 +5,16 @@ import ALOCore
 @testable import ALO
 
 struct RoomDiscoveryTests {
+    @Test func packagedServiceDeclarationsCoverTheCurrentNetworkSystem() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let bytes = try Data(contentsOf: root.appendingPathComponent("Resources/Info.plist"))
+        let info = try #require(PropertyListSerialization.propertyList(from: bytes, format: nil) as? [String: Any])
+        try RoomDiscovery.validateApplicationConfiguration(info)
+        var old = info
+        old["NSBonjourServices"] = ["_werai-mesh._tcp", "_werai-audio._tcp"]
+        #expect(throws: RoomDiscovery.ConfigurationError.self) { try RoomDiscovery.validateApplicationConfiguration(old) }
+        #expect(MeshRoomBrowser.discoveryErrorMessage(.dns(-65570)).contains("Local Network"))
+    }
     @Test func secureDiscoveryOnlyListsCurrentGeneration() throws {
         let room = RoomConfiguration.secure(name: "Current", isPrivate: false)
         let current = RoomDiscovery.record(room: room, nodeID: "a", displayName: "A", appVersion: "current",

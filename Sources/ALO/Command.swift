@@ -31,6 +31,9 @@ enum ALOCommand {
             }
 
             switch command {
+            case "verify-network-configuration":
+                try RoomDiscovery.validateApplicationConfiguration(Bundle.main.infoDictionary ?? [:])
+                print("Secure Bonjour and local-network declarations verified.")
             case "verify-secure-identity":
                 try InstallationIdentity.verifyKeychainAccess()
                 print("Secure room identity and peer-pin persistence verified.")

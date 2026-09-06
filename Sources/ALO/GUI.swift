@@ -1469,7 +1469,7 @@ final class ALOViewModel: ObservableObject {
     @Published var selectedRoomID: String?
     @Published var roomsRefreshing = false
     @Published private(set) var completedRoomScans = Set<RoomTransportPolicy>()
-    var roomScanFinished: Bool { completedRoomScans.count == 2 }
+    var roomScanFinished: Bool { completedRoomScans.contains(.secureV2) }
     @Published var roomsRefreshError: String?
     @Published var availableUpdateVersion: String?
     @Published var createPrivateRoom = false
@@ -1685,7 +1685,7 @@ final class ALOViewModel: ObservableObject {
             }, scanFinishedHandler: { [weak self] in
                 DispatchQueue.main.async { self?.completedRoomScans.insert(.secureV2) }
             })
-        if discoverRooms { roomBrowser.start(); secureRoomBrowser.start() }
+        if discoverRooms { secureRoomBrowser.start() }
     }
 
     private func updateNearbyRoomChoices() {
@@ -2114,7 +2114,6 @@ final class ALOViewModel: ObservableObject {
             phase = .failed
             errorMessage = readable(error)
             statusText = "Could not open the room"
-            roomBrowser.start()
             secureRoomBrowser.start()
         }
     }
@@ -3291,7 +3290,6 @@ final class ALOViewModel: ObservableObject {
         errorIsPermissionRelated = false
         phase = .idle
         statusText = "Ready"
-        roomBrowser.restart()
         secureRoomBrowser.restart()
     }
 
@@ -3305,7 +3303,6 @@ final class ALOViewModel: ObservableObject {
         completedRoomScans.removeAll()
         roomsRefreshError = nil
         statusText = "Looking for rooms"
-        roomBrowser.restart()
         secureRoomBrowser.restart()
     }
 
@@ -3751,7 +3748,6 @@ final class ALOViewModel: ObservableObject {
         resetRoomState()
         phase = .idle
         statusText = "Ready"
-        roomBrowser.restart()
         secureRoomBrowser.restart()
     }
 
@@ -4123,7 +4119,10 @@ struct ALOView: View {
             }
         }
         .frame(width: 286, height: 199)
-        .onAppear { focusedRoomID = nil }
+        .onAppear {
+            focusedRoomID = nil
+            model.refreshRooms()
+        }
     }
 
     private var setupRoomListHeight: CGFloat {

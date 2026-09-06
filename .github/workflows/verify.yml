@@ -27,6 +27,9 @@ jobs:
           xcodebuild -version
           swift --version
           test "$(xcodebuild -version | head -n 1)" = "Xcode 26.3"
+      - uses: ./.github/actions/swift-build-cache
+        with:
+          flavor: tests
       - name: Run tests without installing or signing an app
         # Same optimized test-only entrypoint workaround and strict live timing
         # gates as the release workflow; packaging flags remain unchanged.
@@ -39,6 +42,8 @@ jobs:
           grep -Eq 'Test run with [1-9][0-9]* tests?( in [0-9]+ suites)? passed' "$RUNNER_TEMP/alo-tests.log"
       - name: Run repeatable room scenarios
         run: bash Scripts/test_room_scenarios.sh
+      - name: Record incremental build input fingerprints
+        run: python3 Scripts/ci_build_inputs.py save .build/ci-inputs.json
       - name: Show XCTest crash reports on failure
         if: failure()
         run: |
@@ -57,6 +62,22 @@ jobs:
               print(f"\nXCTest crash report: {report.name}\n")
               print(report.read_text(errors="replace")[:100_000])
           PY
+
+  mac-app-build:
+    # Seed the default-branch app cache for release tags. Tag-local caches are
+    # not visible to subsequent tags, so release-only caching would stay cold.
+    if: github.event_name != 'pull_request'
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: ./.github/actions/swift-build-cache
+        with:
+          flavor: app
+      - name: Build distribution code without installing or signing
+        run: swift build -c release --arch arm64
+      - name: Record incremental build input fingerprints
+        run: python3 Scripts/ci_build_inputs.py save .build/ci-inputs.json
 
   ios-app-build:
     runs-on: macos-15

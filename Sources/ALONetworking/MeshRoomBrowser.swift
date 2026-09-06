@@ -46,6 +46,19 @@ public struct NearbyRoom: Identifiable, Equatable, Sendable {
 }
 
 public enum RoomDiscovery {
+    public static func validateApplicationConfiguration(_ info: [String: Any]) throws {
+        let declared = Set(info["NSBonjourServices"] as? [String] ?? [])
+        let required: Set<String> = [MeshRoomBrowser.secureServiceType, SecureMediaDatagramPublisher.serviceType]
+        guard required.isSubset(of: declared),
+              let explanation = info["NSLocalNetworkUsageDescription"] as? String,
+              !explanation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ConfigurationError.missingBonjourDeclarations
+        }
+    }
+    public enum ConfigurationError: LocalizedError {
+        case missingBonjourDeclarations
+        public var errorDescription: String? { "ALO is missing required local-network service declarations." }
+    }
     // TXT entries are limited to 255 bytes including the key. Bound by UTF-8,
     // not Character count, so emoji names cannot invalidate the advertisement.
     public static func text(_ value: String) -> String {
@@ -181,7 +194,7 @@ public final class MeshRoomBrowser {
             switch state {
             case .ready: self.readyHandler()
             case .failed(let error), .waiting(let error):
-                self.errorHandler(error.localizedDescription)
+                self.errorHandler(Self.discoveryErrorMessage(error))
                 // Denied consent is a user state, not an automatic retry loop.
                 if case .dns(let code) = error, code == -65570 {
                     self.stopOnQueue()
@@ -207,6 +220,13 @@ public final class MeshRoomBrowser {
             self?.stopOnQueue()
             self?.beginScan()
         }
+    }
+
+    public static func discoveryErrorMessage(_ error: NWError) -> String {
+        if case .dns(let code) = error, code == -65570 {
+            return "Local Network access is blocked. Allow ALO in System Settings → Privacy & Security → Local Network, then refresh spaces."
+        }
+        return error.localizedDescription
     }
 
     public func stop() {
