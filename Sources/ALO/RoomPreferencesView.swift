@@ -4,6 +4,7 @@ import SwiftUI
 struct RoomPreferencesView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var model: ALOViewModel
+    @ObservedObject private var notch = ALONotchPreferences.shared
     @ObservedObject private var lyrics: LyricsController
     @State private var showsAbout = false
     @State private var selectedSection = SettingsSection.audio
@@ -72,17 +73,6 @@ struct RoomPreferencesView: View {
             .frame(height: 340)
 
             Divider()
-
-            Button {
-                dismiss()
-                ALONotchFeatureBridge.shared.showSettings()
-            } label: {
-                Label("Notch settings…", systemImage: "rectangle.topthird.inset.filled")
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
 
             connectionFooter
                 .padding(.horizontal, 16)
@@ -227,12 +217,19 @@ struct RoomPreferencesView: View {
             preferenceSection("Room controls", systemImage: "rectangle.on.rectangle") {
                 Toggle("Show Talk bar", isOn: talkBarVisible)
                 Toggle("Show media bar", isOn: mediaBarVisible)
-                ALONotchSettingsMenu()
+                Toggle("Enable Notch", isOn: $notch.enabled)
+                    .toggleStyle(.switch).controlSize(.small)
             }
 
             Divider()
 
             preferenceSection("Tools", systemImage: "wrench.and.screwdriver") {
+                if notch.enabled {
+                    navigationButton("Notch settings", systemImage: "rectangle.topthird.inset.filled") {
+                        dismiss()
+                        ALONotchFeatureBridge.shared.showSettings()
+                    }
+                }
                 navigationButton("Shortcut Mapper", systemImage: "keyboard", action: model.showShortcutMapper)
                 navigationButton("Diagnostics", systemImage: "waveform.path.ecg", action: model.showDiagnostics)
                 navigationButton("App settings", systemImage: "gearshape", action: model.showAppSettings)

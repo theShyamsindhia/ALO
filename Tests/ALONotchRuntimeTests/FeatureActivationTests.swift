@@ -11,6 +11,33 @@ final class FeatureActivationTests: XCTestCase {
         await MainActor.run { _ = NSApplication.shared }
     }
 
+    func testLockScreenUsesSharedRoomPlayerAndFallsBackWithoutDuplicateMonitor() async {
+        let name = "ALONotchLockRoomSourceTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        let container = AppContainer(isRunningUITests: true, defaults: defaults)
+        container.settingsViewModel.lockScreen.isLockScreenMediaPanelEnabled = true
+        let activation = FeatureActivation(container: container)
+        let roomService = RoomPlaybackService()
+        roomService.update(RoomPlaybackSnapshot(title: "Shared room track", artist: "Room artist", isPlaying: false))
+        let room = NowPlayingViewModel(service: roomService, lyricsProvider: InactiveLyricsProvider(), favoritesStore: defaults)
+        room.startMonitoring()
+        defer { activation.setEnabled(false); room.stopMonitoring() }
+        activation.setLockScreenMediaSource(room)
+        activation.setEnabled(true)
+        XCTAssertTrue(activation.lockScreenMediaViewModel === room)
+        XCTAssertEqual(activation.lockScreenMediaViewModel.snapshot?.title, "Shared room track")
+        XCTAssertFalse(activation.running.contains("music"), "Room lock-screen media shares the existing room model")
+        XCTAssertTrue(activation.running.contains("lockMediaPanel"))
+        activation.setLockScreenMediaSource(nil)
+        XCTAssertTrue(activation.lockScreenMediaViewModel === container.nowPlayingViewModel)
+        XCTAssertTrue(activation.running.contains("music"))
+        activation.setLockScreenMediaSource(room)
+        XCTAssertFalse(activation.running.contains("music"))
+        activation.setEnabled(false)
+        XCTAssertTrue(activation.running.isEmpty)
+    }
+
     func testMasterSwitchStopsAndRestoresOnlyExplicitlyEnabledFeatures() async {
         let name = "ALONotchRuntimeTests.Activation.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: name)!

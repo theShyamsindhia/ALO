@@ -13,6 +13,19 @@ final class FeatureActivation {
     private(set) var isEnabled = false
     private(set) var running: Set<String> = []
     private var mediaPanel: LockScreenPanelManager?
+    private(set) var roomLockScreenMedia: NowPlayingViewModel?
+    var lockScreenMediaViewModel: NowPlayingViewModel { roomLockScreenMedia ?? container.nowPlayingViewModel }
+
+    /// Share the room player's exact model/artwork/clock/commands with the
+    /// original lock-screen window. Local media is the fallback after leaving.
+    func setLockScreenMediaSource(_ roomModel: NowPlayingViewModel?) {
+        guard roomLockScreenMedia !== roomModel else { return }
+        mediaPanel?.invalidate()
+        mediaPanel = nil
+        running.remove("lockMediaPanel")
+        roomLockScreenMedia = roomModel
+        reconcile()
+    }
     private var lockActivityPanel: LockScreenLiveActivityWindowManager?
 
     init(container: AppContainer) {
@@ -73,7 +86,7 @@ final class FeatureActivation {
                    start: { c.vpnViewModel.startMonitoring() }, stop: { c.vpnViewModel.stopMonitoring() })
         if !isEnabled || !network.isHotspotLiveActivityEnabled { HotspotBatteryMonitor.shared.stopBrowsing() }
         c.nowPlayingViewModel.updateSourceFilter(files.nowPlayingSourceFilter)
-        transition("music", files.isNowPlayingLiveActivityEnabled || s.lockScreen.isLockScreenMediaPanelEnabled,
+        transition("music", files.isNowPlayingLiveActivityEnabled || (s.lockScreen.isLockScreenMediaPanelEnabled && roomLockScreenMedia == nil),
                    start: { c.nowPlayingViewModel.startMonitoring() }, stop: { c.nowPlayingViewModel.stopMonitoring() })
         transition("downloads", files.isDownloadsLiveActivityEnabled,
                    start: { c.downloadViewModel.startMonitoring() }, stop: { c.downloadViewModel.stopMonitoring() })
@@ -115,7 +128,7 @@ final class FeatureActivation {
         transition("lock", lock.isLockScreenLiveActivityEnabled || lock.isLockScreenMediaPanelEnabled || lock.isLockScreenSoundEnabled,
                    start: { c.lockScreenManager.startMonitoring() }, stop: { c.lockScreenManager.stopMonitoring() })
         transition("lockMediaPanel", lock.isLockScreenMediaPanelEnabled, start: {
-            mediaPanel = LockScreenPanelManager(nowPlayingViewModel: c.nowPlayingViewModel, lockScreenManager: c.lockScreenManager, settingsViewModel: s)
+            mediaPanel = LockScreenPanelManager(nowPlayingViewModel: lockScreenMediaViewModel, lockScreenManager: c.lockScreenManager, settingsViewModel: s)
         }, stop: { mediaPanel?.invalidate(); mediaPanel = nil })
         transition("lockActivityPanel", lock.isLockScreenLiveActivityEnabled, start: {
             lockActivityPanel = LockScreenLiveActivityWindowManager(notchViewModel: c.notchViewModel, lockScreenManager: c.lockScreenManager, settingsViewModel: s, airDropViewModel: c.airDropViewModel, airDropController: c.airDropController)

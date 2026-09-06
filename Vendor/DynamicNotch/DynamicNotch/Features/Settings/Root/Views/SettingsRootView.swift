@@ -28,6 +28,8 @@ struct SettingsRootView: View {
     let timerViewModel: TimerViewModel
     let lockScreenManager: LockScreenManager
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var embeddedDetailVisible = false
     private let embedded: Bool
     private let viewModel: SettingsRootViewModel
     
@@ -125,66 +127,94 @@ struct SettingsRootView: View {
         if embedded { compactBody } else { windowBody }
     }
 
-    /// This header lives inside the player, never in its NSWindow toolbar.
     private var compactBody: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Button(action: navigateBack) {
-                    Image(systemName: "chevron.backward")
-                }
-                .buttonStyle(.borderless)
-                .disabled(!canNavigateBack)
-                .accessibilityLabel("Back")
-                .accessibilityIdentifier("settings.embedded.back")
-
-                Picker("Notch settings category", selection: selectionBinding) {
-                    ForEach(viewModel.sections) { section in
-                        Text(localized(section.titleKey, fallback: section.fallbackTitle)).tag(section)
+            HStack(spacing: 10) {
+                if embeddedDetailVisible {
+                    Button {
+                        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
+                            if !navigationPath.isEmpty { navigationPath.removeLast() }
+                            else { embeddedDetailVisible = false; searchText = "" }
+                        }
+                    } label: {
+                        Label("Features", systemImage: "chevron.backward")
                     }
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .frame(maxWidth: 220)
-                .accessibilityIdentifier("settings.embedded.category")
-
-                Spacer(minLength: 4)
-                TextField(localized("settings.search.prompt", fallback: "Search settings"), text: $searchText)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 170)
-                    .accessibilityIdentifier("settings.embedded.search")
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-
-            if let page = navigationPath.last {
-                HStack {
-                    Text(localized(page.titleKey, fallback: page.fallbackTitle))
-                        .font(.subheadline.weight(.semibold))
-                    Spacer()
-                    if page.canReset {
+                    .buttonStyle(.borderless)
+                    .accessibilityIdentifier("settings.embedded.back")
+                    Text("/").foregroundStyle(.tertiary)
+                    Text(embeddedTitle(for: selectedSection))
+                        .font(.subheadline.weight(.semibold)).lineLimit(1)
+                    Spacer(minLength: 4)
+                    if let page = navigationPath.last, page.canReset {
                         Button(localized("settings.reset.action", fallback: "Reset")) { pendingResetSubPage = page }
                             .buttonStyle(.borderless)
                     }
+                } else {
+                    Text("Features").font(.subheadline.weight(.semibold))
+                    Spacer(minLength: 8)
+                    TextField(localized("settings.search.prompt", fallback: "Search features"), text: $searchText)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 210)
+                        .accessibilityIdentifier("settings.embedded.search")
                 }
-                .padding(.horizontal, 14)
-                .padding(.bottom, 8)
             }
+            .padding(.horizontal, 14).padding(.vertical, 10)
             Divider()
-            NavigationStack(path: $navigationPath) {
-                Group {
-                    if filteredSections.isEmpty {
-                        SettingsSearchEmptyState(query: searchText)
-                    } else {
-                        detailView(for: resolvedSelection)
+            Group {
+                if embeddedDetailVisible {
+                    NavigationStack(path: $navigationPath) {
+                        detailView(for: selectedSection)
+                            .navigationBarBackButtonHidden(true)
+                            .navigationDestination(for: SettingsSubPage.self) { page in
+                                subPageView(for: page).navigationBarBackButtonHidden(true)
+                            }
                     }
-                }
-                .navigationBarBackButtonHidden(true)
-                .navigationDestination(for: SettingsSubPage.self) { page in
-                    subPageView(for: page)
-                        .navigationBarBackButtonHidden(true)
+                    .padding(.horizontal, 8)
+                    .transition(.opacity)
+                } else {
+                    ScrollView {
+                        if embeddedSections.isEmpty {
+                            SettingsSearchEmptyState(query: searchText)
+                        } else {
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 10)], spacing: 10) {
+                                ForEach(embeddedSections) { section in
+                                    Button {
+                                        applySelection(section, origin: .sidebar)
+                                        withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.18)) {
+                                            embeddedDetailVisible = true
+                                        }
+                                    } label: {
+                                        VStack(alignment: .leading, spacing: 8) {
+                                            HStack {
+                                                Image(systemName: section.systemImage)
+                                                    .font(.system(size: 17, weight: .semibold))
+                                                    .foregroundStyle(section == .lockScreen ? Color.primary : section.tint)
+                                                    .frame(width: 30, height: 28)
+                                                Spacer()
+                                                Image(systemName: "chevron.right")
+                                                    .font(.caption2.weight(.semibold)).foregroundStyle(.tertiary)
+                                            }
+                                            Text(embeddedTitle(for: section))
+                                                .font(.subheadline.weight(.semibold)).lineLimit(1)
+                                            Text(localized(section.subtitleKey, fallback: section.fallbackSubtitle))
+                                                .font(.caption).foregroundStyle(.secondary)
+                                                .lineLimit(2).frame(height: 30, alignment: .topLeading)
+                                        }
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(12)
+                                        .background(.primary.opacity(colorScheme == .dark ? 0.05 : 0.035), in: RoundedRectangle(cornerRadius: 12))
+                                        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(.primary.opacity(0.07)))
+                                        .contentShape(RoundedRectangle(cornerRadius: 12))
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityIdentifier("settings.embedded.feature.\(section.rawValue)")
+                                }
+                            }
+                        }
+                    }.padding(12)
+                    .transition(.opacity)
                 }
             }
-            .padding(.horizontal, 8)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .background(Color(nsColor: nsBackgroundColor))
@@ -195,12 +225,15 @@ struct SettingsRootView: View {
         .onReceive(NotificationCenter.default.publisher(for: EmbeddedNotchRuntime.settingsRequestNotification)) { _ in
             applyPendingEmbeddedDestination()
         }
-        .onChange(of: searchText) { _, value in syncSelectionWithSearch(query: value) }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("SelectSettingsSection"))) { notification in
-            if let section = notification.object as? SettingsRootViewModel.Section { applySelection(section, origin: .sidebar) }
+            if let section = notification.object as? SettingsRootViewModel.Section {
+                applySelection(section, origin: .sidebar); embeddedDetailVisible = true
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("SelectSettingsSubPage"))) { notification in
-            if let page = notification.object as? SettingsSubPage { navigationPath.append(page) }
+            if let page = notification.object as? SettingsSubPage {
+                navigationPath = [page]; embeddedDetailVisible = true
+            }
         }
         .alert(item: $pendingResetSubPage) { page in
             Alert(title: Text(localized("settings.reset.title")), message: Text(localized("settings.reset.message")),
@@ -209,9 +242,21 @@ struct SettingsRootView: View {
         }
     }
 
+    private var embeddedSections: [SettingsRootViewModel.Section] {
+        let priority = ["nowPlaying", "lockScreen", "general", "homePage", "battery", "hud", "notifications", "downloads", "drop", "calendar", "wifi", "bluetooth", "vpn", "focus", "screenRecording"]
+        return filteredSections.filter { $0.rawValue != "debug" }.sorted {
+            (priority.firstIndex(of: $0.rawValue) ?? priority.count) < (priority.firstIndex(of: $1.rawValue) ?? priority.count)
+        }
+    }
+
+    private func embeddedTitle(for section: SettingsRootViewModel.Section) -> String {
+        section == .nowPlaying ? "Playback" : localized(section.titleKey, fallback: section.fallbackTitle)
+    }
+
     private func applyPendingEmbeddedDestination() {
         guard let destination = EmbeddedNotchRuntime.activeInstance?.requestedSettingsDestination() else { return }
         searchText = ""
+        embeddedDetailVisible = true
         switch destination {
         case .section(let section):
             applySelection(section, origin: .sidebar)
@@ -520,15 +565,36 @@ struct SettingsRootView: View {
         searchText = ""
     }
 
+    private var compactGeneralSettings: some View {
+        let pages: [SettingsSubPage] = [.notch, .appearance, .language, .permissions, .about]
+        return SettingsPageScrollView {
+            ForEach(pages) { page in
+                NavigationLink(value: page) {
+                    HStack {
+                        Text(localized(page.titleKey, fallback: page.fallbackTitle))
+                        Spacer()
+                        Image(systemName: "chevron.right").foregroundStyle(.secondary)
+                    }
+                    .padding(14)
+                    .background(.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
+                }.buttonStyle(.plain)
+            }
+        }
+    }
+
     @ViewBuilder
     private func detailView(for section: SettingsRootViewModel.Section) -> some View {
         switch section {
         case .general:
             detailContainer(for: section) {
-                GeneralSettingsView(
-                    applicationSettings: settingsViewModel.application,
-                    permissionController: permissionController
-                )
+                if embedded {
+                    compactGeneralSettings
+                } else {
+                    GeneralSettingsView(
+                        applicationSettings: settingsViewModel.application,
+                        permissionController: permissionController
+                    )
+                }
             }
 
 

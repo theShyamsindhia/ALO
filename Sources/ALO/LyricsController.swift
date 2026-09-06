@@ -18,7 +18,9 @@ final class LyricsController: ObservableObject {
     static let privacyNotice = "When enabled, track title, artist and album are sent to LRCLIB to find lyrics. Room details and audio are not sent."
     private let preferences: UserDefaults
     private let provider: LyricsProvider
-    private var track: LyricsTrack?
+    private(set) var track: LyricsTrack?
+    private var externalDemand = false
+    private var needsLyrics: Bool { enabled || externalDemand }
     private var task: Task<Void, Never>?
     private var generation = UUID()
 
@@ -34,12 +36,17 @@ final class LyricsController: ObservableObject {
         guard next != track else { return }
         track = next; refresh()
     }
+    func setExternalDemand(_ requested: Bool) {
+        let previouslyNeeded = needsLyrics
+        externalDemand = requested
+        if previouslyNeeded != needsLyrics { refresh() }
+    }
     func retry() { refresh() }
     func cancel() { generation = UUID(); task?.cancel(); task = nil; track = nil; state = enabled ? .missingTrack : .disabled }
 
     private func refresh() {
         generation = UUID(); task?.cancel(); task = nil
-        guard enabled else { state = .disabled; return }
+        guard needsLyrics else { state = .disabled; return }
         guard let track else { state = .missingTrack; return }
         state = .loading
         let token = generation

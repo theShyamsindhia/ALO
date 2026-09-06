@@ -1709,13 +1709,21 @@ final class ALOViewModel: ObservableObject {
         )
     }
     func roomPlaybackProgress(at date: Date) -> Double? {
-        nowPlaying.playbackProgress(elapsedSinceReceipt: date.timeIntervalSince(nowPlayingReceivedAt))
+        guard let duration = nowPlaying.duration, duration.isFinite, duration > 0,
+              let position = roomPlaybackPosition(at: date) else { return nil }
+        return min(1, position / duration)
     }
     func roomPlaybackPosition(at date: Date) -> Double? {
-        guard let elapsed = nowPlaying.elapsedTime, elapsed.isFinite, elapsed >= 0 else { return nil }
-        let advancement = nowPlaying.isPlaying == true ? max(0, date.timeIntervalSince(nowPlayingReceivedAt)) : 0
+        Self.playbackPosition(media: nowPlaying, audioIsRendering: audioIsRendering,
+                              elapsedSinceReceipt: date.timeIntervalSince(nowPlayingReceivedAt))
+    }
+    static func playbackPosition(media: NowPlayingMedia, audioIsRendering: Bool, elapsedSinceReceipt: Double) -> Double? {
+        guard let elapsed = media.elapsedTime, elapsed.isFinite, elapsed >= 0 else { return nil }
+        let playing = effectivePlaybackState(metadataIsPlaying: media.isPlaying,
+            audioIsRendering: audioIsRendering, hasMedia: !media.isEmpty || audioIsRendering)
+        let advancement = playing ? max(0, elapsedSinceReceipt) : 0
         let position = elapsed + advancement
-        if let duration = nowPlaying.duration, duration.isFinite, duration > 0 {
+        if let duration = media.duration, duration.isFinite, duration > 0 {
             return min(position, duration)
         }
         return position
@@ -4534,7 +4542,7 @@ struct FloatingRoomView: View {
         .contentShape(Rectangle())
         if presentation == .floating {
             identity
-                .overlay(WindowDragRegion().accessibilityHidden(true))
+                .background(WindowDragRegion().accessibilityHidden(true))
                 .help("Drag to move ALO")
         } else {
             identity

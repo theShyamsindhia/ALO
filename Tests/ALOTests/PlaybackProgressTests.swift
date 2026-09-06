@@ -5,6 +5,16 @@ import ALOCore
 
 @Suite("Playback progress")
 struct PlaybackProgressTests {
+    @Test @MainActor func roomClockUsesRenderingWhenPlaybackFlagIsMissingButHonorsPause() {
+        let unknown = NowPlayingMedia(title: "Track", elapsedTime: 20, duration: 100)
+        let paused = NowPlayingMedia(title: "Track", isPlaying: false, elapsedTime: 20, duration: 100)
+        #expect(ALOViewModel.playbackPosition(media: unknown, audioIsRendering: true, elapsedSinceReceipt: 5) == 25)
+        #expect(ALOViewModel.playbackPosition(media: unknown, audioIsRendering: false, elapsedSinceReceipt: 5) == 20)
+        #expect(ALOViewModel.playbackPosition(media: paused, audioIsRendering: true, elapsedSinceReceipt: 5) == 20)
+        #expect(ALOViewModel.playbackPosition(media: unknown, audioIsRendering: true, elapsedSinceReceipt: 200) == 100)
+        #expect(ALOViewModel.playbackPosition(media: NowPlayingMedia(title: "Untimed"), audioIsRendering: true, elapsedSinceReceipt: 5) == nil)
+    }
+
     @Test("Progress advances only while playback is active and stays bounded")
     func progressCalculation() throws {
         let playing = NowPlayingMedia(isPlaying: true, elapsedTime: 30, duration: 120)

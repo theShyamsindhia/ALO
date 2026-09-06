@@ -108,7 +108,7 @@ struct LockScreenNowPlayingView: View {
                 progress: displayedProgress,
                 displayedElapsedTime: displayedElapsedTime,
                 duration: snapshot.duration,
-                isInteractive: snapshot.duration > 0,
+                isInteractive: snapshot.duration > 0 && nowPlayingViewModel.canSend(.seek(0)),
                 tintGradient: {
                     switch appearance.progressTintStyle {
                     case .default:
@@ -146,6 +146,7 @@ struct LockScreenNowPlayingView: View {
                     ) {
                         nowPlayingViewModel.previousTrack()
                     }
+                    .disabled(!nowPlayingViewModel.canSend(.previousTrack))
                     
                     PlayerControlButton(
                         systemImage: snapshot.isPlaying ? "pause.fill" : "play.fill",
@@ -155,6 +156,7 @@ struct LockScreenNowPlayingView: View {
                     ) {
                         nowPlayingViewModel.togglePlayPause()
                     }
+                    .disabled(!nowPlayingViewModel.canSend(.togglePlayPause))
                     
                     PlayerControlButton(
                         systemImage: "forward.fill",
@@ -164,6 +166,7 @@ struct LockScreenNowPlayingView: View {
                     ) {
                         nowPlayingViewModel.nextTrack()
                     }
+                    .disabled(!nowPlayingViewModel.canSend(.nextTrack))
                 }
                 
                 HStack {

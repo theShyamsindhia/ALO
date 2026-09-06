@@ -56,7 +56,7 @@ struct LyricsPanel: View {
                     ScrollViewReader { proxy in
                         ScrollView {
                             if !result.lines.isEmpty, position != nil {
-                                LazyVStack(alignment: .leading, spacing: 8) {
+                                VStack(alignment: .leading, spacing: 8) {
                                     ForEach(result.lines) { line in
                                         Text(line.text.isEmpty ? "♪" : line.text)
                                             .font(.system(size: 13, weight: active(result) == line.id ? .semibold : .regular))
@@ -85,6 +85,7 @@ struct LyricsPanel: View {
                             }
                         }
                     }
+                    .id(result.plain + result.lines.map { "\($0.seconds):\($0.text)" }.joined(separator: "\n"))
                     HStack {
                         if position == nil { Text("Timing unavailable").font(.system(size: 9)).foregroundStyle(.tertiary) }
                         Spacer()

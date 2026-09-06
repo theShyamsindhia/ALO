@@ -27,9 +27,13 @@ struct AboutAppSettingsView: View {
     
     var body: some View {
         SettingsPageScrollView {
-            headerCard
-            socialLinksCard
-            contactMeCard
+            if AppDelegate.embeddedInstance != nil {
+                embeddedAbout
+            } else {
+                headerCard
+                socialLinksCard
+                contactMeCard
+            }
         }
         .accessibilityIdentifier("settings.about.root")
         .toolbar {
@@ -44,6 +48,30 @@ struct AboutAppSettingsView: View {
         }
     }
     
+    private var embeddedAbout: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                Image(systemName: "waveform.circle.fill")
+                    .font(.system(size: 42)).foregroundStyle(.blue)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("ALO").font(.title2.weight(.bold))
+                    Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Development build")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                }
+            }
+            Text("Notch features for your music, conversations, and everyday tools.")
+                .foregroundStyle(.secondary)
+            Divider()
+            Text("Open-source credits").font(.headline)
+            Text("ALO embeds DynamicNotch’s original views, animations, and feature engine by Evgeniy Petrukovich. DynamicNotch is distributed under GPL-3.0; its attribution and license are included with ALO.")
+                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Link("DynamicNotch source and license", destination: URL(string: "https://github.com/jackson-storm/DynamicNotch")!)
+            Link("ALO source", destination: URL(string: "https://github.com/theShyamsindhia/ALO")!)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     private var headerCard: some View {
         VStack(spacing: 16) {
             NotchImage("logo")

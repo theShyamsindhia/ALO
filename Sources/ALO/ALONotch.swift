@@ -19,19 +19,6 @@ final class ALONotchPreferences: ObservableObject {
     }
 }
 
-struct ALONotchSettingsMenu: View {
-    @ObservedObject private var preferences = ALONotchPreferences.shared
-    var body: some View {
-        Menu("Notch") {
-            Toggle("Enable notch", isOn: $preferences.enabled)
-            if preferences.enabled {
-                Button("Notch settings…") { ALONotchFeatureBridge.shared.showSettings() }
-                Button("Open activities") { ALONotchFeatureBridge.shared.openActivities() }
-            }
-        }
-    }
-}
-
 /// Uses the repository's original panel, hosting view, sizing and content.
 /// There is no room-bar wrapper, extra toolbar, or second animation system.
 @MainActor

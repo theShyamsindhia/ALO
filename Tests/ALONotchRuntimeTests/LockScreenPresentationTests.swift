@@ -114,6 +114,40 @@ final class LockScreenPresentationTests: XCTestCase {
         XCTAssertEqual(model.lyricsState, .idle)
     }
 
+    func testSharedRoomLyricsNeverFetchAndRejectPreviousTrack() async throws {
+        let provider = LockFixtureLyricsProvider()
+        let service = LockFixtureMusicService()
+        let model = NowPlayingViewModel(service: service, lyricsProvider: provider)
+        var demand: [Bool] = []
+        model.configureExternalLyrics { demand.append($0) }
+        model.startMonitoring()
+        service.onSnapshotChange?(song(rate: 0))
+        model.setLyricsPresentationActive(true)
+        let payload = RoomLyricsPayload(title: "Fixture Song", artist: "Fixture Artist", state: .ready,
+            lines: [.init(seconds: 0, text: "First"), .init(seconds: 80, text: "Current")], hasPlaybackClock: true)
+        model.applyRoomLyrics(payload)
+        guard case .loaded(let lyrics) = model.lyricsState else { return XCTFail("Expected shared lyrics") }
+        XCTAssertEqual(lyrics.activeLineIndex(at: model.elapsedTime(at: .now.addingTimeInterval(50))), 1)
+        XCTAssertTrue(lyrics.isSynced)
+        await Task.yield()
+        XCTAssertEqual(provider.requests, 0)
+        service.onSnapshotChange?(song(rate: 0, title: "Different Song"))
+        for _ in 0..<100 where model.snapshot?.title != "Different Song" {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertEqual(model.snapshot?.title, "Different Song")
+        model.applyRoomLyrics(payload)
+        XCTAssertEqual(model.lyricsState, .idle)
+        model.applyRoomLyrics(.init(title: "Different Song", artist: "Fixture Artist", state: .ready,
+            lines: [.init(seconds: 0, text: "Unclocked")], hasPlaybackClock: false))
+        guard case .loaded(let unclocked) = model.lyricsState else { return XCTFail("Expected text") }
+        XCTAssertFalse(unclocked.isSynced)
+        model.stopMonitoring()
+        XCTAssertEqual(demand, [false, true, false])
+        model.applyRoomLyrics(payload)
+        XCTAssertEqual(model.lyricsState, .idle)
+    }
+
     private func waitForRequests(_ count: Int, provider: LockFixtureLyricsProvider) async throws {
         for _ in 0..<100 where provider.requests < count { try await Task.sleep(nanoseconds: 5_000_000) }
         XCTAssertEqual(provider.requests, count)

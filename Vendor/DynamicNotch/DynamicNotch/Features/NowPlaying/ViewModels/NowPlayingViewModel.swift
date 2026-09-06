@@ -39,6 +39,8 @@ final class NowPlayingViewModel: ObservableObject {
     private var artworkFlipTrackKey: String?
     private var artworkFlipStartedAt: Date?
     private var activeDetailedPresentationSources = Set<String>()
+    private var externalLyricsPayload: RoomLyricsPayload?
+    private var externalLyricsDemand: ((Bool) -> Void)?
     private var isLyricsPresentationActive = false
     private var recentSeekTargetTime: TimeInterval?
     private var recentSeekDate: Date?
@@ -309,6 +311,7 @@ final class NowPlayingViewModel: ObservableObject {
         }
 
         isLyricsPresentationActive = isActive
+        externalLyricsDemand?(isActive)
 
         if isActive {
             loadLyricsIfNeeded(for: snapshot)
@@ -471,6 +474,7 @@ private extension NowPlayingViewModel {
         }
 
         snapshot = newSnapshot
+        if let externalLyricsPayload { applyRoomLyrics(externalLyricsPayload) }
         if let remoteFavorite = newSnapshot?.isFavorite {
             isCurrentTrackFavorite = remoteFavorite
         } else {
@@ -555,6 +559,7 @@ private extension NowPlayingViewModel {
     }
 
     func loadLyricsIfNeeded(for snapshot: NowPlayingSnapshot?) {
+        guard externalLyricsDemand == nil else { return }
         guard let snapshot, let trackKey = snapshot.lyricsLookupKey else {
             cancelLyricsLookup()
             lyricsState = .idle
@@ -660,5 +665,34 @@ private extension NowPlayingViewModel {
         cancelPendingArtworkPresentation()
         artworkImage = NSImage(data: artworkData)
         artworkPalette = NowPlayingArtworkPaletteExtractor.extract(from: artworkData)
+    }
+}
+
+
+extension NowPlayingViewModel {
+    /// Room lyrics come from ALO's existing controller; never issue a second lookup.
+    func configureExternalLyrics(onDemandChanged: @escaping (Bool) -> Void) {
+        cancelLyricsLookup()
+        externalLyricsDemand = onDemandChanged
+        onDemandChanged(isLyricsPresentationActive)
+    }
+
+    func applyRoomLyrics(_ payload: RoomLyricsPayload) {
+        externalLyricsPayload = payload
+        guard externalLyricsDemand != nil, let snapshot,
+              payload.title == snapshot.title.trimmingCharacters(in: .whitespacesAndNewlines),
+              payload.artist == snapshot.artist.trimmingCharacters(in: .whitespacesAndNewlines),
+              let key = snapshot.lyricsLookupKey else { return }
+        switch payload.state {
+        case .idle: lyricsState = .idle
+        case .loading: lyricsState = .loading(trackKey: key)
+        case .unavailable: lyricsState = .notFound(trackKey: key)
+        case .failed: lyricsState = .failed(trackKey: key)
+        case .ready:
+            lyricsState = .loaded(TrackLyrics(trackKey: key,
+                lines: payload.lines.enumerated().map { index, line in
+                    LyricLine(id: index, startTime: line.seconds, text: line.text)
+                }, isSynced: payload.hasPlaybackClock && payload.lines.contains { $0.seconds != nil }))
+        }
     }
 }

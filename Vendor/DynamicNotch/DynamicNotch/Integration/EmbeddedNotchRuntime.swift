@@ -44,6 +44,8 @@ public final class EmbeddedNotchRuntime: ObservableObject {
     @Published public private(set) var displayRevision: UInt = 0
     @Published public private(set) var isLocked = false
 
+    public var onRoomLyricsDemandChanged: ((Bool) -> Void)?
+    private var roomLyricsPayload: RoomLyricsPayload?
     private var roomPlaybackSnapshot: RoomPlaybackSnapshot?
     private var roomPlaybackCommand: @MainActor (RoomPlaybackCommand) -> Void = { _ in }
     private var roomService: RoomPlaybackService?
@@ -241,12 +243,14 @@ public final class EmbeddedNotchRuntime: ObservableObject {
     private func settingsContent(embedded: Bool) -> AnyView {
         guard isEnabled else { return AnyView(EmptyView()) }
         return AnyView(VStack(spacing: 0) {
-            Toggle("Room media", isOn: Binding(get: { self.roomMediaEnabled }, set: { self.roomMediaEnabled = $0 }))
-                .toggleStyle(.switch)
-                .help("Show this room’s player in the notch.")
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Divider()
+            if !embedded {
+                Toggle("Room media", isOn: Binding(get: { self.roomMediaEnabled }, set: { self.roomMediaEnabled = $0 }))
+                    .toggleStyle(.switch)
+                    .help("Show this room’s player in the notch.")
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Divider()
+            }
             SettingsRootView(container: delegate.container, embedded: embedded)
         }.defaultAppStorage(.aloNotch))
     }
@@ -264,8 +268,14 @@ public final class EmbeddedNotchRuntime: ObservableObject {
         reconcileRoomPlayback()
     }
 
+    public func updateRoomLyrics(_ payload: RoomLyricsPayload) {
+        roomLyricsPayload = payload
+        roomViewModel?.applyRoomLyrics(payload)
+    }
+
     private func reconcileRoomPlayback() {
         guard isEnabled, roomMediaEnabled, let snapshot = roomPlaybackSnapshot else {
+            activation.setLockScreenMediaSource(nil)
             roomViewModel?.stopMonitoring()
             roomService?.update(nil)
             if roomContentVisible {
@@ -280,11 +290,16 @@ public final class EmbeddedNotchRuntime: ObservableObject {
             roomViewModel = NowPlayingViewModel(service: service,
                 audioOutputRouting: SystemAudioOutputRoutingService(),
                 lyricsProvider: InactiveLyricsProvider(), playbackSourceOpener: service)
+            roomViewModel?.configureExternalLyrics { [weak self] demand in
+                self?.onRoomLyricsDemandChanged?(demand)
+            }
         }
         guard let service = roomService, let viewModel = roomViewModel else { return }
         service.onCommand = roomPlaybackCommand
         service.update(snapshot)
         viewModel.startMonitoring()
+        if let roomLyricsPayload { viewModel.applyRoomLyrics(roomLyricsPayload) }
+        activation.setLockScreenMediaSource(viewModel)
         if !roomContentVisible {
             let content = NowPlayingNotchContent(nowPlayingViewModel: viewModel,
                 settings: delegate.settingsViewModel.mediaAndFiles,

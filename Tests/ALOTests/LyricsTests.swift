@@ -74,6 +74,30 @@ struct LyricsTests {
         #expect(LyricsProvider.retryDate(nil, now: now) == now.addingTimeInterval(60))
     }
 
+    @MainActor @Test func externalLyricsDemandSharesResultsWithoutChangingUserPreference() async throws {
+        let suite = "lyrics-demand-" + UUID().uuidString
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [LyricsFixtureProtocol.self]
+        let controller = LyricsController(preferences: preferences,
+            provider: LyricsProvider(session: URLSession(configuration: configuration)))
+        controller.update(media: .init(title: "Fast", artist: "Fixture"))
+        controller.setExternalDemand(true)
+        #expect(!controller.enabled)
+        for _ in 0..<100 {
+            if case .ready = controller.state { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        guard case .ready = controller.state else { Issue.record("Expected shared result"); return }
+        let result = controller.state
+        controller.setExternalDemand(true)
+        #expect(controller.state == result)
+        #expect(!preferences.bool(forKey: LyricsController.preferenceKey))
+        controller.setExternalDemand(false)
+        #expect(controller.state == .disabled)
+    }
+
     @MainActor @Test func defaultOffAndLateRequestsCannotReplaceCurrentTrack() async throws {
         let suite = "lyrics-test-" + UUID().uuidString
         let preferences = UserDefaults(suiteName: suite)!

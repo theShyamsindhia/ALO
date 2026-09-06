@@ -16,6 +16,7 @@ final class ALONotchFeatureBridge: ObservableObject {
 
     func configure(model: ALOViewModel) {
         guard self.model !== model else { return }
+        self.model?.lyrics.setExternalDemand(false)
         self.model = model
         roomObservations.removeAll()
         let changes: [AnyPublisher<Void, Never>] = [
@@ -29,17 +30,24 @@ final class ALONotchFeatureBridge: ObservableObject {
             .debounce(for: .milliseconds(30), scheduler: RunLoop.main)
             .sink { [weak self] _ in self?.updateRoomPlayback() }
             .store(in: &roomObservations)
+        model.lyrics.$state.receive(on: RunLoop.main)
+            .sink { [weak self] _ in self?.updateRoomLyrics() }
+            .store(in: &roomObservations)
         updateRoomPlayback()
     }
 
     func setEnabled(_ enabled: Bool) {
         if enabled && runtime == nil {
             let runtime = EmbeddedNotchRuntime()
+            runtime.onRoomLyricsDemandChanged = { [weak self] demand in
+                self?.model?.lyrics.setExternalDemand(demand)
+            }
             runtime.onSettingsRequested = { [weak self] in self?.showSettings() }
             runtime.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &observations)
             self.runtime = runtime
         }
         guard runtime?.isEnabled != enabled else { return }
+        if !enabled { model?.lyrics.setExternalDemand(false) }
         runtime?.setEnabled(enabled)
         updateRoomPlayback()
     }
@@ -62,6 +70,31 @@ final class ALONotchFeatureBridge: ObservableObject {
             case .seek: break // Room transport does not advertise seek support.
             }
         }
+        updateRoomLyrics()
+    }
+
+    private func updateRoomLyrics() {
+        guard let model, let runtime, runtime.isEnabled else { return }
+        runtime.updateRoomLyrics(Self.roomLyricsPayload(controller: model.lyrics,
+            hasPlaybackClock: model.roomPlaybackPosition(at: Date()) != nil))
+    }
+
+    static func roomLyricsPayload(controller: LyricsController, hasPlaybackClock: Bool) -> RoomLyricsPayload {
+        let state: RoomLyricsPayload.State
+        var lines: [RoomLyricsPayload.Line] = []
+        switch controller.state {
+        case .disabled, .missingTrack: state = .idle
+        case .loading: state = .loading
+        case .unavailable: state = .unavailable
+        case .failed: state = .failed
+        case .ready(let result):
+            state = result.instrumental ? .unavailable : .ready
+            lines = result.lines.isEmpty
+                ? result.plain.split(separator: "\n").map { .init(seconds: nil, text: String($0)) }
+                : result.lines.map { .init(seconds: $0.seconds, text: $0.text) }
+        }
+        return RoomLyricsPayload(title: controller.track?.title ?? "", artist: controller.track?.artist ?? "",
+            state: state, lines: lines, hasPlaybackClock: hasPlaybackClock)
     }
 
     static func roomSnapshot(media: NowPlayingMedia, isLive: Bool, audioIsRendering: Bool,
@@ -92,15 +125,11 @@ struct ALONotchFeatureSettings: View {
     @ObservedObject private var preferences = ALONotchPreferences.shared
     var body: some View {
         VStack(spacing: 0) {
-            Toggle("Enable notch", isOn: $preferences.enabled)
-                .toggleStyle(.switch).padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Divider()
             if preferences.enabled, let runtime = features.runtime {
                 runtime.compactSettingsView
             } else {
-                ContentUnavailableView("Notch is disabled", systemImage: "rectangle.topthird.inset.filled",
-                    description: Text("Enable Notch to use the player, battery activity, and home page. Choose more features here."))
+                ContentUnavailableView("Your controls, a glance away", systemImage: "rectangle.topthird.inset.filled",
+                    description: Text("Turn on Notch to choose playback, lock screen, and system activities."))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -112,24 +141,36 @@ struct ALONotchFeatureSettings: View {
 struct NotchSettingsBelowPlayer: View {
     @ObservedObject var model: ALOViewModel
     @ObservedObject private var preferences = ALONotchPreferences.shared
+    @ObservedObject private var features = ALONotchFeatureBridge.shared
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(spacing: 0) {
             Divider()
             HStack {
-                Label("Notch settings", systemImage: "rectangle.topthird.inset.filled")
+                Label("Notch", systemImage: "rectangle.topthird.inset.filled")
                     .font(.headline)
+                Toggle("Enable Notch", isOn: $preferences.enabled)
+                    .labelsHidden().toggleStyle(.switch).controlSize(.mini)
+                    .accessibilityLabel("Enable Notch")
                 Spacer()
-                Button { ALONotchFeatureBridge.shared.openActivities() } label: {
-                    Text("Show notch")
-                }.disabled(!preferences.enabled)
+                if preferences.enabled, let runtime = features.runtime {
+                    Toggle("Room media", isOn: Binding(get: { runtime.roomMediaEnabled }, set: { runtime.roomMediaEnabled = $0 }))
+                        .toggleStyle(.switch).controlSize(.mini).font(.caption)
+                        .help("Show this room's artwork and playback in Notch and on the lock screen.")
+                    Button { features.openActivities() } label: {
+                        Label("Preview", systemImage: "play.rectangle")
+                    }.controlSize(.small)
+                }
                 Button { model.notchSettingsVisible = false } label: {
                     Image(systemName: "xmark")
                 }.buttonStyle(.plain).accessibilityLabel("Close notch settings")
             }.padding(12)
             ALONotchFeatureSettings(features: .shared)
+                .transition(.opacity)
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .accessibilityIdentifier("ALO.Notch.SettingsBelowPlayer")
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: preferences.enabled)
     }
 }
