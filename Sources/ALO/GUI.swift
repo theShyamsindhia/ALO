@@ -438,7 +438,7 @@ func toggleALOSetupWindow(_ window: NSWindow) {
 }
 
 @MainActor
-private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
+final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     private enum SetupWindow {
         static let width: CGFloat = 306
         static let collapseDuration: TimeInterval = 0.28
@@ -563,8 +563,7 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
 
         floatingBarObserver = model.$floatingBarHidden
             .removeDuplicates()
-            .combineLatest(model.$notchSettingsVisible.removeDuplicates())
-            .sink { [weak self] hidden, _ in
+            .sink { [weak self] hidden in
                 DispatchQueue.main.async { self?.updateFloatingBar(hidden: hidden) }
             }
 
@@ -731,7 +730,7 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateFloatingBar(hidden: Bool) {
-        if hidden || (model.phase != .live && !model.notchSettingsVisible) {
+        if hidden || model.phase != .live {
             roomBarController?.close()
             roomBarController = nil
         } else if !model.videoFullscreen {
@@ -810,7 +809,12 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showNotchSettings(_ sender: Any?) {
-        ALONotchFeatureBridge.shared.showSettings()
+        presentNotchSettings()
+    }
+
+    func presentNotchSettings() {
+        model.prepareNotchSettingsForMenuBar()
+        statusMenuController?.showPopover(allowWhenIdle: true)
     }
 
     @objc func checkForUpdates(_ sender: Any?) {
@@ -862,6 +866,24 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
 }
 
 @MainActor
+struct ALOStatusPopoverContent: View {
+    @ObservedObject var model: ALOViewModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            FloatingRoomView(model: model, presentation: .menuBar)
+            RoomPlaybackProgressDivider(model: model)
+            WalkieTalkieBar(model: model, showsCloseButton: false)
+            if model.notchSettingsVisible {
+                NotchSettingsBelowPlayer(model: model)
+                    .frame(height: model.notchSettingsHeight)
+            }
+        }
+        .background(Palette.opaqueSurface)
+    }
+}
+
+@MainActor
 private final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
     private var roomTouchBar: RoomTouchBarController?
     private let model: ALOViewModel
@@ -903,18 +925,7 @@ private final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
         popover.animates = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         popover.delegate = self
         popover.contentSize = panelSize
-        let popoverController = NSHostingController(
-            rootView: VStack(spacing: 0) {
-                FloatingRoomView(model: model, presentation: .menuBar)
-                RoomPlaybackProgressDivider(model: model)
-                WalkieTalkieBar(model: model, showsCloseButton: false)
-                if model.notchSettingsVisible {
-                    NotchSettingsBelowPlayer(model: model)
-                        .frame(height: model.notchSettingsHeight)
-                }
-            }
-            .background(Palette.opaqueSurface)
-        )
+        let popoverController = NSHostingController(rootView: ALOStatusPopoverContent(model: model))
         popoverController.view.wantsLayer = true
         popoverController.view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         popover.contentViewController = popoverController
@@ -985,8 +996,8 @@ private final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
             }.store(in: &observers)
     }
 
-    func showPopover() {
-        guard model.phase == .live,
+    func showPopover(allowWhenIdle: Bool = false) {
+        guard (allowWhenIdle || model.phase == .live),
               let button = statusItem.button,
               !popover.isShown
         else { return }
@@ -2792,11 +2803,10 @@ final class ALOViewModel: ObservableObject {
         UserDefaults.standard.set(false, forKey: Self.floatingBarPreferenceKey)
     }
 
-    func showNotchSettingsBelowPlayer() {
+    func prepareNotchSettingsForMenuBar() {
         dismissIncomingMessagePreview()
         floatingSection = .collapsed
         notchSettingsVisible = true
-        if !menuBarPopoverVisible { showFloatingBar() }
     }
 
     func showChatInFloatingBar() {
@@ -4353,7 +4363,7 @@ struct FloatingRoomView: View {
                 VStack(spacing: 0) {
                     expandedContent
                 }
-                    .frame(width: width, height: max(0, height - roomBarHeight - navigationHeight - FloatingMetrics.separatorHeight - (presentation == .floating ? model.notchSettingsHeight : 0)))
+                    .frame(width: width, height: max(0, height - roomBarHeight - navigationHeight - FloatingMetrics.separatorHeight))
                     .id(expansionIdentity)
                     .transition(panelTransition)
 
@@ -4375,10 +4385,6 @@ struct FloatingRoomView: View {
                 if presentation == .floating {
                     ArtworkHeaderBackground(palette: model.roomArtworkPalette)
                 }
-            }
-            if presentation == .floating, model.notchSettingsVisible {
-                NotchSettingsBelowPlayer(model: model)
-                    .frame(height: model.notchSettingsHeight)
             }
         }
         .frame(width: width, height: height, alignment: .bottom)
@@ -6420,7 +6426,7 @@ private final class FloatingRoomWindowController: NSObject, NSWindowDelegate {
                 x: 0,
                 y: 0,
                 width: FloatingMetrics.windowWidth,
-                height: FloatingMetrics.windowHeight(for: model.floatingPanelHeight + model.floatingNavigationHeight + model.notchSettingsHeight)
+                height: FloatingMetrics.windowHeight(for: model.floatingPanelHeight + model.floatingNavigationHeight)
             ),
             styleMask: [.borderless, .resizable],
             backing: .buffered,
@@ -6465,7 +6471,6 @@ private final class FloatingRoomWindowController: NSObject, NSWindowDelegate {
             model.$incomingMessagePreview.map { $0?.id }.removeDuplicates()
         )
         .combineLatest(model.$floatingNavigationVisible.removeDuplicates())
-        .combineLatest(model.$notchSettingsVisible.removeDuplicates())
         .dropFirst()
         .sink { [weak self] _ in
             DispatchQueue.main.async { self?.resize(animated: true) }
@@ -6498,9 +6503,9 @@ private final class FloatingRoomWindowController: NSObject, NSWindowDelegate {
         pendingShrink = nil
 
         let expanded = model.floatingSection != .collapsed && !model.permissionNotice
-        let height = expanded ? preferredExpandedSize.height + model.notchSettingsHeight : FloatingMetrics.windowHeight(for: model.floatingPanelHeight + model.floatingNavigationHeight + model.notchSettingsHeight)
+        let height = expanded ? preferredExpandedSize.height : FloatingMetrics.windowHeight(for: model.floatingPanelHeight + model.floatingNavigationHeight)
         let width = expanded ? preferredExpandedSize.width : FloatingMetrics.windowWidth
-        panel.minSize = NSSize(width: FloatingMetrics.windowWidth, height: expanded ? 440 + model.notchSettingsHeight : height)
+        panel.minSize = NSSize(width: FloatingMetrics.windowWidth, height: expanded ? 440 : height)
         panel.maxSize = expanded ? NSSize(width: 1800, height: 1400) : NSSize(width: width, height: height)
         guard abs(panel.frame.height - height) > 0.5
                 || abs(panel.frame.width - width) > 0.5 else { return }
@@ -6544,7 +6549,7 @@ private final class FloatingRoomWindowController: NSObject, NSWindowDelegate {
 
     func windowDidEndLiveResize(_ notification: Notification) {
         guard !adjustingFrame, model.floatingSection != .collapsed, !model.permissionNotice else { return }
-        preferredExpandedSize = NSSize(width: panel.frame.width, height: max(440, panel.frame.height - model.notchSettingsHeight))
+        preferredExpandedSize = NSSize(width: panel.frame.width, height: max(440, panel.frame.height))
         UserDefaults.standard.set(preferredExpandedSize.width, forKey: "room.expanded.width")
         UserDefaults.standard.set(preferredExpandedSize.height, forKey: "room.expanded.height")
     }

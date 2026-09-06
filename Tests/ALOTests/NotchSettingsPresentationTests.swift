@@ -5,7 +5,7 @@ import SwiftUI
 
 @Suite(.serialized) @MainActor
 struct NotchSettingsPresentationTests {
-    @Test func nativeFeatureOverviewRendersBelowPlayer() async throws {
+    @Test func nativeFeatureOverviewRendersInMenuBarPopover() async throws {
         _ = NSApplication.shared
         let model = ALOViewModel(discoverRooms: false)
         model.phase = .live
@@ -20,7 +20,7 @@ struct NotchSettingsPresentationTests {
         bridge.setEnabled(true)
         defer { preferences.enabled = wasEnabled; bridge.setEnabled(false) }
         let size = NSSize(width: 568, height: 552)
-        let view = NSHostingView(rootView: FloatingRoomView(model: model)
+        let view = NSHostingView(rootView: ALOStatusPopoverContent(model: model)
             .environment(\.controlActiveState, .active)
             .environment(\.colorScheme, .dark).frame(width: size.width, height: size.height))
         let window = NSWindow(contentRect: NSRect(origin: NSPoint(x: -10000, y: -10000), size: size),
@@ -37,7 +37,7 @@ struct NotchSettingsPresentationTests {
             let directory = URL(fileURLWithPath: path)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try #require(bitmap.representation(using: .png, properties: [:]))
-                .write(to: directory.appendingPathComponent("settings-below-player-redesign.png"))
+                .write(to: directory.appendingPathComponent("notch-settings-menu-bar.png"))
         }
     }
 
@@ -46,7 +46,7 @@ struct NotchSettingsPresentationTests {
         model.setMenuBarPopoverVisible(true)
         model.floatingBarHidden = true
         model.floatingSection = .chat
-        model.showNotchSettingsBelowPlayer()
+        model.prepareNotchSettingsForMenuBar()
         #expect(model.notchSettingsVisible)
         #expect(model.notchSettingsHeight == 430)
         #expect(model.floatingSection == .collapsed)
@@ -55,12 +55,12 @@ struct NotchSettingsPresentationTests {
         #expect(model.notchSettingsHeight == 0)
     }
 
-    @Test func openingOutsideMenuRevealsPlayerEvenWithoutRoomMedia() {
+    @Test func openingNotchSettingsDoesNotRevealTheFloatingMediaBar() {
         let model = ALOViewModel(discoverRooms: false)
         model.floatingBarHidden = true
-        model.showNotchSettingsBelowPlayer()
+        model.prepareNotchSettingsForMenuBar()
         #expect(model.notchSettingsVisible)
-        #expect(!model.floatingBarHidden)
+        #expect(model.floatingBarHidden)
         #expect(model.nowPlaying.isEmpty)
     }
 }

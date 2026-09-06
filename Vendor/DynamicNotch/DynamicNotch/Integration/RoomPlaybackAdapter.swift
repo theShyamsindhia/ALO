@@ -27,13 +27,13 @@ public struct RoomPlaybackSnapshot: Equatable, Sendable {
 }
 
 public enum RoomPlaybackCommand: Equatable, Sendable {
-    case togglePlayback, next, previous, openSource
+    case togglePlayback, next, previous
     case seek(TimeInterval)
 }
 
 /// Only adapts ALO data and commands. Rendering remains the upstream player.
 @MainActor
-final class RoomPlaybackService: NowPlayingMonitoring, NowPlayingCommandAvailabilityProviding, PlaybackSourceOpening {
+final class RoomPlaybackService: NowPlayingMonitoring, NowPlayingCommandAvailabilityProviding {
     var onSnapshotChange: ((NowPlayingSnapshot?) -> Void)?
     var onCommand: @MainActor (RoomPlaybackCommand) -> Void = { _ in }
     private(set) var roomSnapshot: RoomPlaybackSnapshot?
@@ -65,16 +65,11 @@ final class RoomPlaybackService: NowPlayingMonitoring, NowPlayingCommandAvailabi
         default: break
         }
     }
-    func openPlaybackSource(_ source: NowPlayingPlaybackSource) {
-        guard isMonitoring else { return }
-        onCommand(.openSource)
-    }
     private func publish() {
         onSnapshotChange?(roomSnapshot.map { snapshot in
             NowPlayingSnapshot(title: snapshot.title, artist: snapshot.artist, album: snapshot.album,
                 duration: snapshot.duration, elapsedTime: snapshot.elapsed,
                 playbackRate: snapshot.isPlaying ? 1 : 0, artworkData: snapshot.artworkData,
-                playbackSource: NowPlayingPlaybackSource(bundleIdentifier: "in.werai.audio", parentBundleIdentifier: nil, processIdentifier: nil),
                 contentItemIdentifier: "alo-room:" + snapshot.title + ":" + snapshot.artist,
                 supportsFavorite: false, supportsVolumeControl: false, refreshedAt: snapshot.receivedAt)
         })
@@ -90,7 +85,9 @@ struct RoomNowPlayingNotchContent: NotchContentProtocol, DynamicIslandCustomizab
     var priority: Int { original.priority + 1 }
     var strokeColor: Color { original.strokeColor }
     var isExpandable: Bool { original.isExpandable }
-    var windowLink: (@MainActor () -> Void)? { original.windowLink }
+    // ALO is already the playback source. Clicking this content must expand the
+    // Notch, never summon ALO's separate floating room window.
+    var windowLink: (@MainActor () -> Void)? { nil }
     func size(baseWidth: CGFloat, baseHeight: CGFloat) -> CGSize { original.size(baseWidth: baseWidth, baseHeight: baseHeight) }
     func expandedSize(baseWidth: CGFloat, baseHeight: CGFloat) -> CGSize { original.expandedSize(baseWidth: baseWidth, baseHeight: baseHeight) }
     func cornerRadius(baseRadius: CGFloat) -> (top: CGFloat, bottom: CGFloat) { original.cornerRadius(baseRadius: baseRadius) }

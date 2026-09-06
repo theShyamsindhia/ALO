@@ -296,7 +296,7 @@ public final class EmbeddedNotchRuntime: ObservableObject {
             roomService = service
             roomViewModel = NowPlayingViewModel(service: service,
                 audioOutputRouting: SystemAudioOutputRoutingService(),
-                lyricsProvider: InactiveLyricsProvider(), playbackSourceOpener: service)
+                lyricsProvider: InactiveLyricsProvider())
             roomViewModel?.configureExternalLyrics { [weak self] demand in
                 self?.onRoomLyricsDemandChanged?(demand)
             }

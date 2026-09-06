@@ -30,7 +30,11 @@ final class RoomPlaybackAdapterTests: XCTestCase {
         let name = "RoomPlaybackAdapterTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
         defer { defaults.removePersistentDomain(forName: name) }
-        let model = NowPlayingViewModel(service: service, lyricsProvider: InactiveLyricsProvider(), favoritesStore: defaults, playbackSourceOpener: service)
+        let model = NowPlayingViewModel(
+            service: service,
+            lyricsProvider: InactiveLyricsProvider(),
+            favoritesStore: defaults
+        )
         let timestamp = Date()
         service.update(RoomPlaybackSnapshot(title: "Room track", artist: "Shared artist", album: "Room album",
             isPlaying: true, elapsed: 30, duration: 180, receivedAt: timestamp))
@@ -38,6 +42,7 @@ final class RoomPlaybackAdapterTests: XCTestCase {
         XCTAssertEqual(model.snapshot?.title, "Room track")
         XCTAssertEqual(model.snapshot?.artist, "Shared artist")
         XCTAssertEqual(model.snapshot?.elapsedTime(at: timestamp.addingTimeInterval(2)), 32)
+        XCTAssertFalse(model.canOpenPlaybackSource, "ALO room playback must not open the floating media bar")
         model.togglePlayPause()
         model.seek(to: 90)
         XCTAssertTrue(model.snapshot?.isPlaying == true)
@@ -61,12 +66,16 @@ final class RoomPlaybackAdapterTests: XCTestCase {
         XCTAssertEqual(room.dynamicIslandSize(baseWidth: 190, baseHeight: 32), original.dynamicIslandSize(baseWidth: 190, baseHeight: 32))
         XCTAssertEqual(room.expandedDynamicIslandSize(baseWidth: 190, baseHeight: 32), original.expandedDynamicIslandSize(baseWidth: 190, baseHeight: 32))
         XCTAssertNotEqual(room.id, original.id)
+        XCTAssertTrue(room.isExpandable)
+        XCTAssertNil(room.windowLink, "Clicking ALO's Notch must expand it instead of opening another window")
         let engine = NotchEngine(animations: { .default }, hideDelay: 0, queueDelay: 0)
         engine.send(.showLiveActivity(room))
         engine.send(.hideLiveActivity(id: original.id))
         let deadline = Date().addingTimeInterval(2)
         while engine.notchModel.content == nil && Date() < deadline { try await Task.sleep(for: .milliseconds(20)) }
         XCTAssertEqual(engine.notchModel.content?.id, room.id)
+        XCTAssertTrue(engine.canExpandActiveLiveActivity)
+        XCTAssertFalse(engine.canOpenActiveWindowLink)
         engine.setActivityEventsEnabled(false)
     }
 
@@ -77,7 +86,11 @@ final class RoomPlaybackAdapterTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: name) }
         let settings = SettingsViewModel(defaults: defaults)
         let service = RoomPlaybackService()
-        let model = NowPlayingViewModel(service: service, lyricsProvider: InactiveLyricsProvider(), favoritesStore: defaults, playbackSourceOpener: service)
+        let model = NowPlayingViewModel(
+            service: service,
+            lyricsProvider: InactiveLyricsProvider(),
+            favoritesStore: defaults
+        )
         let artworkURL = NotchResources.bundle.url(forResource: "backgroundDark", withExtension: "png")
         service.update(RoomPlaybackSnapshot(title: "Room playback", artist: "Shared with your room",
             artworkData: try artworkURL.map { try Data(contentsOf: $0) }, isPlaying: true, elapsed: 47, duration: 224,

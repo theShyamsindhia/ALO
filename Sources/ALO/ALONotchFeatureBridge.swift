@@ -66,7 +66,6 @@ final class ALONotchFeatureBridge: ObservableObject {
             case .togglePlayback: model.toggleRoomPlayback()
             case .next: model.playNextRoomTrack()
             case .previous: model.sendRoomMediaCommand(.previousTrack)
-            case .openSource: model.showFloatingBar()
             case .seek: break // Room transport does not advertise seek support.
             }
         }
@@ -116,7 +115,11 @@ final class ALONotchFeatureBridge: ObservableObject {
     }
 
     func showSettings() {
-        model?.showNotchSettingsBelowPlayer()
+        if let delegate = NSApp.delegate as? ALOAppDelegate {
+            delegate.presentNotchSettings()
+        } else {
+            model?.prepareNotchSettingsForMenuBar()
+        }
     }
 
     func showRoomMention(sender: String, message: String, roomTitle: String) {
