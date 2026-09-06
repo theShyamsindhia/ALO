@@ -463,7 +463,7 @@ public final class MeshControlPlane: @unchecked Sendable {
         completion: @escaping (Result<(SecurePeerChannel, AuthenticatedPeer), Error>) -> Void) {
         queue.async { [weak self] in
             guard let self, !self.isStopped, self.room.transportPolicy == .secureV2,
-                  role == .mediaControl || role == .video || role == .voiceControl,
+                  role == .mediaControl || role == .video || role == .voiceControl || role == .fileTransfer,
                   let identity = self.installationIdentity, let pins = self.peerPins,
                   let roomID = UUID(uuidString: self.room.id),
                   let peer = self.peers[peerID.uuidString], peer.authenticated,
@@ -1134,7 +1134,7 @@ public final class MeshControlPlane: @unchecked Sendable {
         guard let installationIdentity, let peerPins, let roomID = UUID(uuidString: room.id) else { cancel(link); return }
         do {
             let admission: SecureRoomAdmission = room.isPrivate ? .privateRoom(secret: room.secureJoinSecret ?? Data()) : .publicRoom
-            let roles: Set<ReliableChannelRole> = incomingMediaChannelHandler == nil ? [.roomControl] : [.roomControl, .mediaControl, .video, .voiceControl]
+            let roles: Set<ReliableChannelRole> = incomingMediaChannelHandler == nil ? [.roomControl] : [.roomControl, .mediaControl, .video, .voiceControl, .fileTransfer]
             let configuration = try SecurePeerConfiguration(roomID: roomID, incarnationID: incarnationID, admission: admission,
                 offer: ProtocolOffer(wireVersions: [2], stateSyncVersions: [1], capabilities: secureCapabilities),
                 direction: link.initiated ? .initiator(.roomControl) : .responder(allowedChannelRoles: roles))

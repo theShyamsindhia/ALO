@@ -171,6 +171,17 @@ its generated device name, emoji, color, and optional profile photo. Identity ch
 and propagate to the current room immediately. The walkie bar can be dismissed with its
 close button; the same controls remain available from ALO's menu-bar popover.
 
+Right-click a device and choose **Send file…** to send it a file directly (up to
+1 GB; both Macs need ALO 0.14.12 or newer). Other files require **Accept** or
+**Decline**, followed by a save destination, and never open automatically.
+Supported images, movies, and audio are accepted into a temporary inbox and
+shown in a pinned, borderless media window after content validation. Hover to
+save, choose a display, unpin, or close. Choose **Annotate** to mark up an image
+or paused video frame, then **Send image back** to show the result on the other
+Mac. Media playback starts only when the recipient presses Play. Transfers use
+a separate encrypted, paced connection and are cancelled when leaving the room;
+save anything you want to keep before leaving.
+
 ALO leaves the selected physical output unchanged. Its private Core Audio tap is the single
 authoritative broadcast source: it feeds the room and replaces the broadcaster's immediate
 render with the same synchronized return. No additional device appears in the Sound picker.

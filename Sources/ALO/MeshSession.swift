@@ -22,6 +22,7 @@ final class MeshSession {
     private var deviceColorHex: String
     private var profileImageData: Data?
     private let control: MeshControlPlane
+    let fileSharing: DirectFileSharingController
     private let statusHandler: (String) -> Void
     private let identityHandler: (String, String) -> Void
     private let mediaStateHandler: (Bool) -> Void
@@ -253,6 +254,8 @@ final class MeshSession {
         let relay = CallbackRelay()
         let mediaRelay = MediaActionRelay()
         let secureMediaAdmission = SecureMediaAdmissionRelay()
+        let fileSharing = DirectFileSharingController()
+        self.fileSharing = fileSharing
         self.secureMediaAdmission = secureMediaAdmission
         self.room = room
         self.nodeID = nodeID
@@ -338,12 +341,20 @@ final class MeshSession {
             roomStatePersistenceHandler: roomStatePersistenceHandler,
             installationIdentity: installationIdentity,
             peerPins: peerPins,
-            incomingMediaChannelHandler: { [secureMediaAdmission] channel, peer in
-                if peer.channelRole == .voiceControl { secureVoice.admit(channel) }
+            incomingMediaChannelHandler: { [secureMediaAdmission, fileSharing] channel, peer in
+                if peer.channelRole == .fileTransfer { fileSharing.receive(channel, peer: peer) }
+                else if peer.channelRole == .voiceControl { secureVoice.admit(channel) }
                 else { secureMediaAdmission.receive(channel, peer: peer) }
             }
         )
         relay.replica = { [weak self] in self?.apply($0) }
+        fileSharing.names = { [weak self] in
+            Dictionary((self?.currentParticipants ?? []).map { ($0.id, $0.name) }, uniquingKeysWith: { _, new in new })
+        }
+        fileSharing.openChannel = { [weak control] peer, completion in
+            guard let control else { completion(.failure(DirectFileError.interrupted)); return }
+            control.openMediaChannel(to: peer, role: .fileTransfer, completion: completion)
+        }
         relay.participants = { [weak self] participants in
             participantsHandler(participants)
             guard let self else { return }
@@ -950,6 +961,7 @@ final class MeshSession {
     func stop() async {
         guard !isStopped else { return }
         isStopped = true
+        fileSharing.stop()
         DJStudio.endLiveIfCreated()
         endOpenLine()
         endWalkieTalkie()
@@ -986,6 +998,7 @@ final class MeshSession {
     func stopImmediately() {
         guard !isStopped else { return }
         isStopped = true
+        fileSharing.stop()
         DJStudio.endLiveIfCreated()
         endOpenLine()
         endWalkieTalkie()

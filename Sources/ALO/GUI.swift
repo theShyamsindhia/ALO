@@ -1554,6 +1554,9 @@ final class ALOViewModel: ObservableObject {
     @Published private(set) var localAudioTiming: ReceiverTimingDiagnostics?
     @Published private(set) var automaticAudioSync = UserDefaults.standard.object(forKey: "automaticAudioSync") as? Bool ?? true
     private var meshSession: MeshSession?
+    func sendFile(to participantID: String) {
+        meshSession?.fileSharing.chooseFile(to: participantID)
+    }
     private var liveSyncTask: Task<Void, Never>?
     private let syncHealthLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "in.werai.audio", category: "synchronization")
     private var requestedVideoBroadcast = false
@@ -5846,6 +5849,10 @@ private struct WalkieTalkieTargetIcon: View {
                     if let participant = model.participants.first(where: { $0.id == id }) {
                         model.syncParticipant(participant)
                     }
+                }
+                Divider()
+                Button("Send file…", systemImage: "doc.badge.arrow.up") {
+                    model.sendFile(to: id)
                 }
             }
         }

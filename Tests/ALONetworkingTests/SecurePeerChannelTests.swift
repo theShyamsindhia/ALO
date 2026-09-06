@@ -5,6 +5,16 @@ import Testing
 
 @Suite("Actual secure peer channels", .serialized)
 struct SecurePeerChannelTests {
+    @Test func fileTransferUsesItsOwnAuthenticatedRole() async throws {
+        let payload = try DirectFileWire.chunk(offset: 0, bytes: Data(repeating: 42, count: DirectFileWire.chunkBytes)).encoded()
+        let pair = try SecureChannelPair(clientAdmission: .publicRoom, serverAdmission: .publicRoom,
+            role: .fileTransfer, allowedRoles: [.fileTransfer], payload: payload)
+        defer { pair.cancel() }
+        let outcome = try await pair.run()
+        guard case .delivered(let echo, let client, let server) = outcome else { Issue.record("File admission failed"); return }
+        #expect(client.channelRole == .fileTransfer && server.channelRole == .fileTransfer)
+        #expect(echo == payload)
+    }
     @Test func privateAdmissionDeliversMaximumPayloadWithAuthenticatedIdentity() async throws {
         let payload = Data(repeating: 0xA5, count: SecurePeerChannel.maximumPayloadBytes)
         let pair = try SecureChannelPair(clientAdmission: .privateRoom(secret: NetworkFixture.secret),
