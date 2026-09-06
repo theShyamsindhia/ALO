@@ -230,6 +230,9 @@ final class HostServer {
                         driftMilliseconds: client.syncReport?.driftNanos.map { Double($0) / 1_000_000 },
                         driftSampleAgeMilliseconds: client.syncReport?.driftSampleAgeNanos.map { Double($0) / 1_000_000 },
                         playbackReportAgeMilliseconds: client.lastPlaybackReportNanos.map { Double(now >= $0 ? now - $0 : 0) / 1_000_000 },
+                        latenessMilliseconds: Double(client.syncReport?.latenessNanos ?? 0) / 1_000_000,
+                        latePacketCount: client.syncReport?.latePacketCount ?? 0,
+                        resyncCount: client.syncReport?.resyncCount ?? 0,
                         screenTiming: client.syncReport?.screenTiming
                     )
                 }

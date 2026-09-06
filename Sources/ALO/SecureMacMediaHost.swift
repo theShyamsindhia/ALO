@@ -342,6 +342,9 @@ final class SecureMacMediaHost {
                         driftMilliseconds: playback?.driftNanos.map { Double($0) / 1_000_000 },
                         driftSampleAgeMilliseconds: playback?.driftSampleAgeNanos.map { Double($0 + elapsed) / 1_000_000 },
                         playbackReportAgeMilliseconds: playback == nil ? nil : Double(elapsed) / 1_000_000,
+                        latenessMilliseconds: Double(playback?.latenessNanos ?? 0) / 1_000_000,
+                        latePacketCount: playback?.latePacketCount ?? 0,
+                        resyncCount: playback?.resyncCount ?? 0,
                         screenTiming: playback?.screenTiming)
                 }
                 return HostTimingDiagnostics(listenerCount: peers.count, reportingListenerCount: listeners.filter { $0.reportAgeMilliseconds != nil }.count,

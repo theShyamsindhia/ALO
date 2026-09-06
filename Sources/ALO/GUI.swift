@@ -1508,6 +1508,7 @@ final class ALOViewModel: ObservableObject {
     @Published var localNowPlaying = NowPlayingMedia()
     @Published private(set) var audioIsRendering = false
     @Published private(set) var liveSyncHealth = LiveSyncHealth()
+    @Published private(set) var roomSyncMonitor = RoomSyncMonitor()
     @Published var experience: Experience = .audio
     @Published var mediaSwitchBusy = false
     @Published var permissionNotice = false
@@ -3188,6 +3189,7 @@ final class ALOViewModel: ObservableObject {
         stopLiveSyncMonitoring()
         // Retain incidents after leaving for export; only a new room clears them.
         liveSyncHealth = LiveSyncHealth()
+        roomSyncMonitor.reset()
         liveSyncTask = Task { [weak self, weak session] in
             while !Task.isCancelled {
                 guard self != nil, let session else { return }
@@ -3198,7 +3200,7 @@ final class ALOViewModel: ObservableObject {
                     do { try await Task.sleep(nanoseconds: 2_500_000_000) }
                     catch { return }
                     guard !Task.isCancelled, let session, self?.meshSession === session else { return }
-                    self?.invalidateLiveSyncSample()
+                    self?.invalidateLiveSyncSample(reason: "The timing snapshot did not finish within 2.5 seconds.")
                 }
                 let timing = await session.sampleTimingDiagnostics()
                 freshnessTimeout.cancel()
@@ -3213,7 +3215,9 @@ final class ALOViewModel: ObservableObject {
     private func applyLiveSyncTiming(_ timing: SessionTimingDiagnostics?, from session: MeshSession, sampledAt: UInt64) {
         guard meshSession === session, phase == .live, !isLeavingRoom else { return }
         guard hasBroadcaster, nowPlaying.isPlaying != false else {
-            invalidateLiveSyncSample()
+            invalidateLiveSyncSample(
+                reason: hasBroadcaster ? "Room playback was paused." : "The room broadcaster became unavailable.",
+                kind: hasBroadcaster ? .notice : .warning)
             return
         }
         let now = MonotonicClock.nowNanos()
@@ -3221,11 +3225,15 @@ final class ALOViewModel: ObservableObject {
         // must not become fresh merely because the async call finally completed.
         let freshTiming = now >= sampledAt && now - sampledAt <= 500_000_000 ? timing : nil
         guard let freshTiming else {
-            invalidateLiveSyncSample()
+            invalidateLiveSyncSample(reason: "A timing snapshot arrived too late to be treated as current.")
             return
         }
         session.publishPlaybackTiming(freshTiming.receiver)
         if localAudioTiming != freshTiming.receiver { localAudioTiming = freshTiming.receiver }
+        roomSyncMonitor.observe(participants: participants,
+                                currentParticipantID: currentParticipantID,
+                                timing: freshTiming,
+                                sampledAtNanos: sampledAt)
         let result = diagnosticRoomContext(timing: freshTiming).result
         if liveSyncHealth.recentTransitions.last?.outcome != result.outcome {
             // Anonymous, transition-only evidence; never log peer names or content.
@@ -3238,15 +3246,20 @@ final class ALOViewModel: ObservableObject {
     private func stopLiveSyncMonitoring() {
         liveSyncTask?.cancel()
         liveSyncTask = nil
-        invalidateLiveSyncSample()
+        invalidateLiveSyncSample(reason: "Room timing monitoring stopped.", kind: .notice)
     }
 
-    private func invalidateLiveSyncSample() {
+    private func invalidateLiveSyncSample(reason: String, kind: RoomSyncEvent.Kind = .warning) {
         meshSession?.publishPlaybackTiming(nil)
         if localAudioTiming != nil { localAudioTiming = nil }
         // Guard before mutating the @Published value: even an unchanged inout
         // write would otherwise redraw the whole model on every idle timer tick.
         guard liveSyncHealth.hasCurrentSample else { return }
+        roomSyncMonitor.markUnavailable(participants: participants,
+                                        currentParticipantID: currentParticipantID,
+                                        sampledAtNanos: MonotonicClock.nowNanos(),
+                                        reason: reason,
+                                        kind: kind)
         liveSyncHealth.invalidateCurrentSample()
     }
 

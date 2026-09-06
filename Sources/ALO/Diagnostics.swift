@@ -104,6 +104,9 @@ struct HostListenerTimingDiagnostics: Sendable, Equatable {
     var driftMilliseconds: Double? = nil
     var driftSampleAgeMilliseconds: Double? = nil
     var playbackReportAgeMilliseconds: Double? = nil
+    var latenessMilliseconds: Double = 0
+    var latePacketCount: UInt64 = 0
+    var resyncCount: UInt64 = 0
     var screenTiming: PlaybackScreenTimingReport? = nil
 }
 
@@ -624,6 +627,7 @@ private struct DiagnosticsView: View {
                     microphoneSection
                     section("Playback & connection", ids: [.output, .network])
                     section("Current room", ids: [.roomSync])
+                    roomSyncMonitorSection
                 }
                 .padding(24)
             }
@@ -736,6 +740,22 @@ private struct DiagnosticsView: View {
                     )
                 }
             )
+        }
+    }
+
+    private var roomSyncMonitorSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("LIVE ALIGNMENT")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Label(model.phase == .live ? "Live" : "Last room",
+                      systemImage: model.phase == .live ? "dot.radiowaves.left.and.right" : "clock.arrow.circlepath")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(model.phase == .live ? .green : .secondary)
+            }
+            RoomSyncMonitorCard(monitor: model.roomSyncMonitor, isRoomActive: model.phase == .live)
         }
     }
 
@@ -874,6 +894,238 @@ private struct DiagnosticCheckCard: View {
         case .failed: .red
         }
     }
+}
+
+private struct RoomSyncMonitorCard: View {
+    let monitor: RoomSyncMonitor
+    let isRoomActive: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Playback alignment")
+                        .font(.headline)
+                    Text("Absolute render-clock drift over the last 90 seconds")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                tolerancePill
+            }
+
+            if monitor.orderedTraces.isEmpty {
+                ContentUnavailableView {
+                    Label("Waiting for room timing", systemImage: "waveform.path.ecg")
+                } description: {
+                    Text(isRoomActive
+                         ? "Start room audio to see each Mac's measured playback line."
+                         : "Join a room and start audio to record live alignment.")
+                }
+                .frame(maxWidth: .infinity, minHeight: 150)
+            } else {
+                RoomSyncChart(monitor: monitor)
+                    .frame(height: 210)
+                traceLegend
+                Divider()
+                eventTimeline
+            }
+        }
+        .padding(16)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(.separator.opacity(0.45), lineWidth: 1))
+    }
+
+    private var tolerancePill: some View {
+        HStack(spacing: 6) {
+            Circle().fill(.green).frame(width: 7, height: 7)
+            Text("Within 40 ms")
+        }
+        .font(.caption.weight(.medium))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
+        .background(.green.opacity(0.10), in: Capsule())
+        .help("ALO automatically realigns sustained playback drift at 40 milliseconds.")
+    }
+
+    private var traceLegend: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 10)], alignment: .leading, spacing: 8) {
+            ForEach(Array(monitor.orderedTraces.enumerated()), id: \.element.id) { index, trace in
+                HStack(spacing: 7) {
+                    Circle().fill(SyncTracePalette.color(at: index)).frame(width: 8, height: 8)
+                    Text(trace.name)
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    Text(latestValue(trace))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(latestColor(trace))
+                }
+                .font(.caption.weight(trace.isLocal ? .semibold : .regular))
+            }
+        }
+    }
+
+    private var eventTimeline: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("What changed near the drift")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text("Observed by ALO")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if monitor.events.isEmpty {
+                Text("No timing changes have been recorded yet.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(monitor.events.suffix(8).reversed())) { event in
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: symbol(for: event.kind))
+                            .foregroundStyle(color(for: event.kind))
+                            .frame(width: 18, height: 18)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(event.title).font(.callout.weight(.semibold))
+                            Text(event.detail)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 8)
+                        Text(event.occurredAt, style: .relative)
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                            .fixedSize()
+                    }
+                }
+            }
+        }
+    }
+
+    private func latestValue(_ trace: RoomSyncTrace) -> String {
+        guard let drift = trace.latest?.driftMilliseconds else { return "No sample" }
+        let driftText = drift < 10 ? String(format: "%.1f ms", drift) : String(format: "%.0f ms", drift)
+        guard let roundTrip = trace.latest?.roundTripMilliseconds else { return driftText }
+        let roundTripText = roundTrip < 10
+            ? String(format: "%.1f ms", roundTrip)
+            : String(format: "%.0f ms", roundTrip)
+        return "\(driftText) · RTT \(roundTripText)"
+    }
+
+    private func latestColor(_ trace: RoomSyncTrace) -> Color {
+        guard let drift = trace.latest?.driftMilliseconds else { return .secondary }
+        return drift >= RoomSyncMonitor.correctionThresholdMilliseconds ? .orange : .secondary
+    }
+
+    private func symbol(for kind: RoomSyncEvent.Kind) -> String {
+        switch kind {
+        case .notice: "info.circle.fill"
+        case .warning: "exclamationmark.triangle.fill"
+        case .recovery: "checkmark.circle.fill"
+        case .correction: "arrow.triangle.2.circlepath.circle.fill"
+        }
+    }
+
+    private func color(for kind: RoomSyncEvent.Kind) -> Color {
+        switch kind {
+        case .notice: .blue
+        case .warning: .orange
+        case .recovery: .green
+        case .correction: .purple
+        }
+    }
+}
+
+private struct RoomSyncChart: View {
+    let monitor: RoomSyncMonitor
+
+    var body: some View {
+        Canvas { context, size in
+            guard let latest = monitor.latestSampleNanos else { return }
+            let plot = CGRect(x: 42, y: 10, width: max(1, size.width - 54), height: max(1, size.height - 34))
+            let windowNanos: UInt64 = 90_000_000_000
+            let start = latest > windowNanos ? latest - windowNanos : 0
+            let observedMaximum = monitor.orderedTraces
+                .flatMap(\.samples)
+                .compactMap(\.driftMilliseconds)
+                .max() ?? 0
+            let maximum = max(80, ceil(observedMaximum * 1.15 / 20) * 20)
+            let threshold = RoomSyncMonitor.correctionThresholdMilliseconds
+
+            let thresholdY = yPosition(threshold, maximum: maximum, plot: plot)
+            let healthyBand = CGRect(x: plot.minX, y: thresholdY,
+                                     width: plot.width, height: plot.maxY - thresholdY)
+            context.fill(Path(healthyBand), with: .color(.green.opacity(0.07)))
+
+            for value in [0.0, threshold, maximum] {
+                let y = yPosition(value, maximum: maximum, plot: plot)
+                var grid = Path()
+                grid.move(to: CGPoint(x: plot.minX, y: y))
+                grid.addLine(to: CGPoint(x: plot.maxX, y: y))
+                context.stroke(grid, with: .color(.secondary.opacity(value == threshold ? 0.35 : 0.18)),
+                               style: StrokeStyle(lineWidth: value == threshold ? 1.2 : 1,
+                                                  dash: value == threshold ? [4, 4] : []))
+                let label = value == threshold ? "40" : String(format: "%.0f", value)
+                context.draw(Text(label).font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.secondary), at: CGPoint(x: plot.minX - 8, y: y), anchor: .trailing)
+            }
+
+            for (index, trace) in monitor.orderedTraces.enumerated() {
+                var path = Path()
+                var hasPoint = false
+                for sample in trace.samples where sample.sampledAtNanos >= start {
+                    guard let drift = sample.driftMilliseconds else {
+                        hasPoint = false
+                        continue
+                    }
+                    let elapsed = sample.sampledAtNanos >= start ? sample.sampledAtNanos - start : 0
+                    let x = plot.minX + plot.width * CGFloat(Double(elapsed) / Double(windowNanos))
+                    let y = yPosition(drift, maximum: maximum, plot: plot)
+                    if hasPoint { path.addLine(to: CGPoint(x: x, y: y)) }
+                    else { path.move(to: CGPoint(x: x, y: y)); hasPoint = true }
+                }
+                context.stroke(path, with: .color(SyncTracePalette.color(at: index)),
+                               style: StrokeStyle(lineWidth: trace.isLocal ? 2.6 : 2,
+                                                  lineCap: .round, lineJoin: .round))
+                if let sample = trace.samples.last, let drift = sample.driftMilliseconds {
+                    let elapsed = sample.sampledAtNanos >= start ? sample.sampledAtNanos - start : 0
+                    let point = CGPoint(x: plot.minX + plot.width * CGFloat(Double(elapsed) / Double(windowNanos)),
+                                        y: yPosition(drift, maximum: maximum, plot: plot))
+                    context.fill(Path(ellipseIn: CGRect(x: point.x - 3, y: point.y - 3, width: 6, height: 6)),
+                                 with: .color(SyncTracePalette.color(at: index)))
+                }
+            }
+
+            context.draw(Text("90s ago").font(.system(size: 9)).foregroundStyle(.secondary),
+                         at: CGPoint(x: plot.minX, y: plot.maxY + 15), anchor: .leading)
+            context.draw(Text("now").font(.system(size: 9)).foregroundStyle(.secondary),
+                         at: CGPoint(x: plot.maxX, y: plot.maxY + 15), anchor: .trailing)
+            context.draw(Text("ms").font(.system(size: 9)).foregroundStyle(.secondary),
+                         at: CGPoint(x: plot.minX - 8, y: plot.minY), anchor: .trailing)
+        }
+        .background(Color.primary.opacity(0.025), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Playback alignment graph")
+        .accessibilityValue(accessibilitySummary)
+        .help("Each line is measured render-clock drift. Missing reports create gaps rather than a false zero line.")
+    }
+
+    private func yPosition(_ value: Double, maximum: Double, plot: CGRect) -> CGFloat {
+        plot.maxY - plot.height * CGFloat(min(max(value, 0), maximum) / maximum)
+    }
+
+    private var accessibilitySummary: String {
+        monitor.orderedTraces.map { trace in
+            guard let drift = trace.latest?.driftMilliseconds else { return "\(trace.name), no current sample" }
+            return "\(trace.name), \(Int(drift.rounded())) milliseconds drift"
+        }.joined(separator: "; ")
+    }
+}
+
+private enum SyncTracePalette {
+    private static let colors: [Color] = [.blue, .purple, .pink, .cyan, .orange, .mint, .indigo, .yellow]
+    static func color(at index: Int) -> Color { colors[index % colors.count] }
 }
 
 private final class DiagnosticSampleCounter: @unchecked Sendable {
