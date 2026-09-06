@@ -120,15 +120,43 @@ final class AppSettingsWindowController {
 }
 
 private struct AppSettingsView: View {
+    private enum Section: String, CaseIterable, Identifiable {
+        case appearance = "Appearance"
+        case notch = "Notch"
+
+        var id: Self { self }
+    }
+
+    @State private var selection = Section.appearance
+
     var body: some View {
-        TabView {
-            AppAppearanceSettingsView()
-                .tabItem { Label("Appearance", systemImage: "paintpalette") }
-            ALONotchFeatureSettings(features: .shared)
-                .tabItem { Label("Notch", systemImage: "rectangle.topthird.inset.filled") }
-                .accessibilityIdentifier("ALO.Settings.Notch")
+        VStack(spacing: 0) {
+            Picker("Settings section", selection: $selection) {
+                Label("Appearance", systemImage: "paintpalette")
+                    .tag(Section.appearance)
+                Label("Notch", systemImage: "rectangle.topthird.inset.filled")
+                    .tag(Section.notch)
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .frame(width: 260)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .accessibilityIdentifier("ALO.Settings.SectionPicker")
+
+            Divider()
+
+            Group {
+                switch selection {
+                case .appearance:
+                    AppAppearanceSettingsView()
+                case .notch:
+                    ALONotchFeatureSettings(features: .shared)
+                        .accessibilityIdentifier("ALO.Settings.Notch")
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .padding(12)
     }
 }
 
