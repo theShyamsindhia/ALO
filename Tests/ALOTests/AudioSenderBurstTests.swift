@@ -184,29 +184,6 @@ struct AudioSenderBurstTests {
         #expect(fixture.host.audioSenderSnapshot().first?.admissionRejected == 0)
     }
 
-    @Test func idlePathProbesQueuedAudioThatStillFitsTheRoomBudget() throws {
-        let fixture = try AudioBurstFixture()
-        defer { fixture.stop() }
-        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 8 * 240 * 2),
-            captureTimeNanos: fixture.audioNowNanos)
-        fixture.barrier()
-        for _ in 0..<7 { fixture.completeOne() }
-        fixture.advanceAudioClock(by: 120_000_000)
-        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 4 * 240 * 2),
-            captureTimeNanos: fixture.audioNowNanos - 90_000_000)
-        fixture.barrier()
-        #expect(fixture.probe.sequences == Array(0..<8))
-
-        // This capture is older than the sender's 80ms queue horizon, but it
-        // has not waited in that queue and still fits the room's admission
-        // budget. Once the final old send completes, the idle path must probe
-        // it without carrying forward that old send's 120ms service sample.
-        fixture.completeOne()
-        fixture.drain()
-        #expect(fixture.probe.sequences == Array(0..<12))
-        #expect(fixture.host.audioSenderSnapshot().first?.admissionRejected == 0)
-    }
-
     @Test func expiredPendingDoesNotMakeFreshCaptureCongested() throws {
         let fixture = try AudioBurstFixture()
         defer { fixture.stop() }

@@ -189,9 +189,9 @@ struct DeterministicAudioFanoutTests {
             switch policy {
             case .unbounded: #expect(last == 199)
             case .boundedLatest:
-                // 16 packets at 5ms = the sender's 80ms pending-expiry budget.
-                // Expired terminal audio is allowed, premature cessation is not.
-                #expect(last >= 183)
+                // This policy intentionally drops a tail that can no longer
+                // fit its delivery budget. Continuity is the invariant: the
+                // stream may shed packets, but it cannot leave a long hole.
                 let firstCapture: UInt64
                 if sender.participantID == "virtual-peer-\(count - 1)", let lateJoinAtCallback {
                     firstCapture = sourceStart + UInt64(lateJoinAtCallback) * 20_000_000

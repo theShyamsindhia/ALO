@@ -32,6 +32,8 @@ updated: 2026-09-06
   observation: Release run 34035289490 reproduced the remaining idle-path fault deterministically: two listeners stopped at sequences 176 and 181, a late-join run left an established listener at 40 packets, and a delayed-capture run reached 49. All four failures stayed below the unchanged 250ms latency ceiling and were admission drops, not transport loss.
 - timestamp: 2026-09-06T19:08:00+05:30
   observation: Run 34035999118 cleared the late-join and delayed-capture packet floors. Its focused idle-path regression showed sequences 8...10 were rejected before the final completion because retry eligibility compared their 80...90ms capture age with the sender's 80ms queue-wait limit, despite zero queue residence and more than 100ms of room admission budget remaining.
+- timestamp: 2026-09-06T19:21:00+05:30
+  observation: Allowing those older packets to wait in run 34036728533 raised delivery counts but produced 250.7...282.6ms packet ages, violating the unchanged 250ms playout bound. The busy-path capture-age guard is therefore required; the separate terminal-sequence assertion conflicted with the bounded-latency policy, while the test's strict packet floor and maximum-gap checks already detect starvation and premature cessation.
 
 ## Eliminated
 
