@@ -13,17 +13,20 @@ struct NowPlayingNotchContent: NotchContentProtocol, DynamicIslandCustomizable {
     let settings: MediaAndFilesSettingsStore
     let applicationSettings: ApplicationSettingsStore
     let onOpenPlaybackSource: @MainActor () -> Void
+    let initiallyShowsLyrics: Bool
 
     init(
         nowPlayingViewModel: NowPlayingViewModel,
         settings: MediaAndFilesSettingsStore,
         applicationSettings: ApplicationSettingsStore,
-        onOpenPlaybackSource: @escaping @MainActor () -> Void = {}
+        onOpenPlaybackSource: @escaping @MainActor () -> Void = {},
+        initiallyShowsLyrics: Bool = false
     ) {
         self.nowPlayingViewModel = nowPlayingViewModel
         self.settings = settings
         self.applicationSettings = applicationSettings
         self.onOpenPlaybackSource = onOpenPlaybackSource
+        self.initiallyShowsLyrics = initiallyShowsLyrics
     }
     
     var priority: Int { NotchContentRegistry.Media.nowPlaying.priority }
@@ -51,11 +54,11 @@ struct NowPlayingNotchContent: NotchContentProtocol, DynamicIslandCustomizable {
     }
     
     func expandedSize(baseWidth: CGFloat, baseHeight: CGFloat) -> CGSize {
-        .init(width: baseWidth + 200, height: baseHeight + 160)
+        .init(width: baseWidth + 240, height: baseHeight + 160)
     }
 
     func expandedDynamicIslandSize(baseWidth: CGFloat, baseHeight: CGFloat) -> CGSize {
-        .init(width: baseWidth + 230, height: baseHeight + 160)
+        .init(width: baseWidth + 270, height: baseHeight + 160)
     }
     
     func expandedCornerRadius(baseRadius: CGFloat) -> (top: CGFloat, bottom: CGFloat) {
@@ -87,7 +90,8 @@ struct NowPlayingNotchContent: NotchContentProtocol, DynamicIslandCustomizable {
                 nowPlayingViewModel: nowPlayingViewModel,
                 settings: settings,
                 applicationSettings: applicationSettings,
-                onOpenPlaybackSource: onOpenPlaybackSource
+                onOpenPlaybackSource: onOpenPlaybackSource,
+                initiallyShowsLyrics: initiallyShowsLyrics
             )
         )
     }

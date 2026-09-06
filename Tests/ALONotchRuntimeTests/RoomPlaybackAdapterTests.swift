@@ -113,7 +113,12 @@ final class RoomPlaybackAdapterTests: XCTestCase {
         for island in [false, true] {
             let notch = NotchViewModel(settings: settings.application, hideDelay: 0, queueDelay: 0,
                 screenMetricsProvider: { _ in (width: 1512, topInset: island ? 0 : 32, notchSize: island ? nil : CGSize(width: 190, height: 32)) })
-            let original = NowPlayingNotchContent(nowPlayingViewModel: model, settings: settings.mediaAndFiles, applicationSettings: settings.application)
+            let original = NowPlayingNotchContent(
+                nowPlayingViewModel: model,
+                settings: settings.mediaAndFiles,
+                applicationSettings: settings.application,
+                initiallyShowsLyrics: true
+            )
             notch.send(.showLiveActivity(RoomNowPlayingNotchContent(original: original)))
             let deadline = Date().addingTimeInterval(2)
             while notch.notchModel.content == nil && Date() < deadline { try await Task.sleep(for: .milliseconds(20)) }

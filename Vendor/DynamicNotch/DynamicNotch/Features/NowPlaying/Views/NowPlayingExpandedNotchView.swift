@@ -18,7 +18,22 @@ struct NowPlayingExpandedNotchView: View {
     let onOpenPlaybackSource: @MainActor () -> Void
     
     @State private var scrubProgress: CGFloat?
+    @State private var showsLyrics: Bool
     private let detailedPresentationSource = "nowPlaying.notch.expanded"
+
+    init(
+        nowPlayingViewModel: NowPlayingViewModel,
+        settings: MediaAndFilesSettingsStore,
+        applicationSettings: ApplicationSettingsStore,
+        onOpenPlaybackSource: @escaping @MainActor () -> Void,
+        initiallyShowsLyrics: Bool = false
+    ) {
+        self.nowPlayingViewModel = nowPlayingViewModel
+        self.settings = settings
+        self.applicationSettings = applicationSettings
+        self.onOpenPlaybackSource = onOpenPlaybackSource
+        _showsLyrics = State(initialValue: initiallyShowsLyrics)
+    }
     
     private var resolvedSnapshot: NowPlayingSnapshot {
         nowPlayingViewModel.snapshot ?? NowPlayingSnapshot(
@@ -44,7 +59,7 @@ struct NowPlayingExpandedNotchView: View {
                 true,
                 source: detailedPresentationSource
             )
-            nowPlayingViewModel.setLyricsPresentationActive(true)
+            nowPlayingViewModel.setLyricsPresentationActive(showsLyrics)
         }
         .onDisappear {
             nowPlayingViewModel.setDetailedPresentationActive(
@@ -52,6 +67,9 @@ struct NowPlayingExpandedNotchView: View {
                 source: detailedPresentationSource
             )
             nowPlayingViewModel.setLyricsPresentationActive(false)
+        }
+        .onChange(of: showsLyrics) { _, isVisible in
+            nowPlayingViewModel.setLyricsPresentationActive(isVisible)
         }
     }
 
@@ -71,10 +89,17 @@ struct NowPlayingExpandedNotchView: View {
         return VStack {
             Spacer()
 
-            headerSection(snapshot: snapshot, appearance: appearance)
-
-            lyricsSection(elapsedTime: displayedElapsedTime)
-                .frame(height: 34)
+            Group {
+                if showsLyrics {
+                    lyricsSection(elapsedTime: displayedElapsedTime)
+                        .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                } else {
+                    headerSection(snapshot: snapshot, appearance: appearance)
+                        .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                }
+            }
+            .frame(height: 78)
+            .animation(.easeInOut(duration: 0.2), value: showsLyrics)
 
             Spacer()
 
@@ -112,7 +137,7 @@ struct NowPlayingExpandedNotchView: View {
 
             controlsSection(snapshot: snapshot, appearance: appearance)
         }
-        .padding(.horizontal, isDynamicIsland ? 25 : 55)
+        .padding(.horizontal, isDynamicIsland ? 50 : 70)
         .padding(.top, isDynamicIsland ? 15 : 25)
         .padding(.bottom, 15)
     }
@@ -134,7 +159,7 @@ struct NowPlayingExpandedNotchView: View {
                         .controlSize(.mini)
                     Text("Finding lyrics…")
                 }
-                .font(.system(size: 11, weight: .medium))
+                .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.white.opacity(0.45))
                 .accessibilityElement(children: .combine)
 
@@ -153,20 +178,30 @@ struct NowPlayingExpandedNotchView: View {
     private func lyricLines(_ lyrics: TrackLyrics, elapsedTime: TimeInterval) -> some View {
         let activeIndex = lyrics.activeLineIndex(at: elapsedTime) ?? 0
         let activeLine = lyrics.lines.indices.contains(activeIndex) ? lyrics.lines[activeIndex] : nil
+        let previousIndex = activeIndex - 1
         let nextIndex = activeIndex + 1
+        let previousLine = lyrics.isSynced && lyrics.lines.indices.contains(previousIndex) ? lyrics.lines[previousIndex] : nil
         let nextLine = lyrics.isSynced && lyrics.lines.indices.contains(nextIndex) ? lyrics.lines[nextIndex] : nil
 
-        return VStack(spacing: 1) {
+        return VStack(spacing: 3) {
+            if let previousLine {
+                Text(previousLine.text)
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.24))
+                    .lineLimit(1)
+            }
+
             Text(activeLine?.text ?? "Lyrics unavailable")
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(activeLine == nil ? 0.4 : 0.86))
-                .lineLimit(1)
+                .font(.system(size: 16, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(activeLine == nil ? 0.4 : 0.92))
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
                 .contentTransition(.opacity)
 
             if let nextLine {
                 Text(nextLine.text)
-                    .font(.system(size: 10, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.34))
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.32))
                     .lineLimit(1)
                     .contentTransition(.opacity)
             }
@@ -179,7 +214,7 @@ struct NowPlayingExpandedNotchView: View {
 
     private func lyricsStatus(_ title: String, systemImage: String) -> some View {
         Label(title, systemImage: systemImage)
-            .font(.system(size: 10.5, weight: .medium))
+            .font(.system(size: 12, weight: .medium))
             .foregroundStyle(.white.opacity(0.38))
             .lineLimit(1)
     }
@@ -251,12 +286,12 @@ struct NowPlayingExpandedNotchView: View {
     @ViewBuilder
     private func controlsSection(snapshot: NowPlayingSnapshot, appearance: NowPlayingAppearanceOptions) -> some View {
         ZStack {
-            HStack(spacing: 25) {
+            HStack(spacing: 18) {
                 PlayerControlButton(
                     systemImage: "backward.fill",
-                    fontSize: 22,
-                    width: 42,
-                    height: 42,
+                    fontSize: 20,
+                    width: 38,
+                    height: 38,
                     feedbackStyle: .backward
                 ) {
                     nowPlayingViewModel.previousTrack()
@@ -265,9 +300,9 @@ struct NowPlayingExpandedNotchView: View {
 
                 PlayerControlButton(
                     systemImage: snapshot.isPlaying ? "pause.fill" : "play.fill",
-                    fontSize: 32,
-                    width: 42,
-                    height: 42,
+                    fontSize: 30,
+                    width: 38,
+                    height: 38,
                     feedbackStyle: .playPause
                 ) {
                     nowPlayingViewModel.togglePlayPause()
@@ -276,9 +311,9 @@ struct NowPlayingExpandedNotchView: View {
 
                 PlayerControlButton(
                     systemImage: "forward.fill",
-                    fontSize: 22,
-                    width: 42,
-                    height: 42,
+                    fontSize: 20,
+                    width: 38,
+                    height: 38,
                     feedbackStyle: .forward
                 ) {
                     nowPlayingViewModel.nextTrack()
@@ -287,27 +322,34 @@ struct NowPlayingExpandedNotchView: View {
             }
 
             HStack {
-                if appearance.showsFavoriteButton {
-                    FavoriteTrackButton(
-                        nowPlayingViewModel: nowPlayingViewModel,
-                        width: 42,
-                        height: 42,
-                        fontSize: 21
-                    )
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        showsLyrics.toggle()
+                    }
+                } label: {
+                    Label("Lyrics", systemImage: showsLyrics ? "quote.bubble.fill" : "quote.bubble")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.white.opacity(showsLyrics ? 0.9 : 0.52))
+                        .frame(width: 52, height: 32)
+                        .background(.white.opacity(showsLyrics ? 0.12 : 0))
+                        .clipShape(Capsule())
                 }
+                .buttonStyle(.plain)
+                .help(showsLyrics ? "Hide lyrics" : "Show lyrics")
+                .accessibilityLabel(showsLyrics ? "Hide lyrics" : "Show lyrics")
 
                 Spacer()
 
                 if appearance.showsOutputDeviceButton {
                     AudioOutputRoutePickerButton(
                         nowPlayingViewModel: nowPlayingViewModel,
-                        width: 42,
-                        height: 42,
-                        fontSize: 21
+                        width: 38,
+                        height: 38,
+                        fontSize: 19
                     )
                 }
             }
-            .padding(.horizontal, 5)
+            .padding(.horizontal, 8)
         }
     }
     
