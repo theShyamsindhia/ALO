@@ -28,7 +28,7 @@ struct ContentView: View {
         }
         .safeAreaInset(edge: .bottom) {
             if model.isTemporarySimulatorSession {
-                Label("Simulator test · private identity and local history disappear on quit", systemImage: "hammer")
+                Label("Simulator test · temporary test identity; not restored next launch", systemImage: "hammer")
                     .font(.caption).padding().frame(maxWidth: .infinity)
                     .background(.regularMaterial)
                     .accessibilityIdentifier("temporarySimulatorSession")

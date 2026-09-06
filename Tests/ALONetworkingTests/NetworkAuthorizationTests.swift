@@ -71,6 +71,144 @@ final class NetworkAuthorizationTests: XCTestCase {
         XCTAssertEqual(try fixture.center.snapshot().revision, updated.revision)
     }
 
+    func testStableCommitAndReceiptBlockPolicyPublicationButNotMediaReads() throws {
+        let fixture = try fixture()
+        let revoked = try fixture.manifest.removingMember(userID: fixture.member.publicIdentity.userID, signedBy: fixture.owner)
+        let equivalent = try NetworkManifest.signed(id: fixture.manifest.id, generation: fixture.manifest.generation,
+            revision: fixture.manifest.revision, name: fixture.manifest.name, owner: fixture.owner,
+            members: fixture.manifest.members, channels: fixture.manifest.channels)
+        let enteredCommit = DispatchSemaphore(value: 0)
+        let releaseCommit = DispatchSemaphore(value: 0)
+        let commitFinished = DispatchSemaphore(value: 0)
+        let updateStarted = DispatchSemaphore(value: 0)
+        let updateFinished = DispatchSemaphore(value: 0)
+        let observerFinished = DispatchSemaphore(value: 0)
+        let observer = fixture.center.observe {
+            // This would deadlock if callbacks ran under the policy update lock.
+            fixture.center.withStablePolicy {
+                XCTAssertEqual(try? fixture.center.snapshot().revision, revoked.revision)
+            }
+            observerFinished.signal()
+        }
+        defer { fixture.center.removeObserver(observer); releaseCommit.signal() }
+        DispatchQueue(label: "alo.policy.stable-commit-test").async {
+            fixture.center.withStablePolicy {
+                enteredCommit.signal()
+                XCTAssertEqual(releaseCommit.wait(timeout: .now() + 5), .success)
+                // Simulates the receipt immediately following a raw commit.
+                XCTAssertTrue((try? fixture.center.snapshot().isMember(fixture.member.publicIdentity)) == true)
+            }
+            commitFinished.signal()
+        }
+        XCTAssertEqual(enteredCommit.wait(timeout: .now() + 2), .success)
+        DispatchQueue(label: "alo.policy.waiting-revocation-test").async {
+            updateStarted.signal()
+            defer { updateFinished.signal() }
+            do { try fixture.center.receive(revoked) }
+            catch { XCTFail("Policy revocation failed: \(error)") }
+        }
+        XCTAssertEqual(updateStarted.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(updateFinished.wait(timeout: .now() + 0.1), .timedOut)
+        let readFinished = DispatchSemaphore(value: 0)
+        DispatchQueue(label: "alo.policy.stable-commit-media-read-test").async {
+            XCTAssertEqual(try? fixture.center.snapshot().revision, fixture.manifest.revision)
+            readFinished.signal()
+        }
+        XCTAssertEqual(readFinished.wait(timeout: .now() + 0.5), .success,
+                       "Media snapshot reads must not wait for a durable state commit")
+        let handshakeFinished = DispatchSemaphore(value: 0)
+        DispatchQueue(label: "alo.policy.identical-handshake-test").async {
+            defer { handshakeFinished.signal() }
+            do {
+                try fixture.center.receive(fixture.manifest)
+                try fixture.center.receive(equivalent)
+            }
+            catch { XCTFail("Identical-policy handshake failed: \(error)") }
+        }
+        XCTAssertEqual(handshakeFinished.wait(timeout: .now() + 0.5), .success,
+                       "An identical-policy handshake must not wait for a durable state commit")
+        releaseCommit.signal()
+        XCTAssertEqual(commitFinished.wait(timeout: .now() + 5), .success)
+        XCTAssertEqual(updateFinished.wait(timeout: .now() + 5), .success)
+        XCTAssertEqual(observerFinished.wait(timeout: .now() + 2), .success)
+        XCTAssertFalse(try fixture.center.snapshot().isMember(fixture.member.publicIdentity))
+    }
+
+    func testThrowingStableCommitReleasesPolicyPublicationLock() throws {
+        enum ExpectedFailure: Error { case rejectedReceipt }
+        let fixture = try fixture()
+        XCTAssertThrowsError(try fixture.center.withStablePolicy { throw ExpectedFailure.rejectedReceipt })
+        let updated = try fixture.manifest.renamed(to: "Still writable after failed commit", signedBy: fixture.owner)
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue(label: "alo.policy.failed-commit-update-test").async {
+            defer { finished.signal() }
+            do { try fixture.center.receive(updated) }
+            catch { XCTFail("Policy update failed: \(error)") }
+        }
+        XCTAssertEqual(finished.wait(timeout: .now() + 5), .success)
+        XCTAssertEqual(try fixture.center.snapshot().revision, updated.revision)
+        XCTAssertEqual(fixture.center.withStablePolicy { 42 }, 42)
+    }
+
+    func testTransientReloadStorageFailureDoesNotQuarantineTrustedPolicy() throws {
+        let fixture = try fixture()
+        let backup = fixture.repository.directoryURL.appendingPathExtension("temporarily-unavailable")
+        try FileManager.default.moveItem(at: fixture.repository.directoryURL, to: backup)
+        try Data("A transient mount obstruction".utf8).write(to: fixture.repository.directoryURL)
+        defer {
+            if FileManager.default.fileExists(atPath: backup.path) {
+                try? FileManager.default.removeItem(at: fixture.repository.directoryURL)
+                try? FileManager.default.moveItem(at: backup, to: fixture.repository.directoryURL)
+            }
+        }
+        var notifications = 0
+        let observer = fixture.center.observe { notifications += 1 }
+        defer { fixture.center.removeObserver(observer) }
+        XCTAssertThrowsError(try fixture.center.reload())
+        XCTAssertEqual(try fixture.center.snapshot(), fixture.manifest)
+        XCTAssertEqual(notifications, 0)
+        try FileManager.default.removeItem(at: fixture.repository.directoryURL)
+        try FileManager.default.moveItem(at: backup, to: fixture.repository.directoryURL)
+        XCTAssertNoThrow(try fixture.center.reload())
+        XCTAssertEqual(try fixture.center.snapshot(), fixture.manifest)
+    }
+
+    func testBlockedPolicyWorkerHasBoundedPendingWorkAndEchoesBypassIt() throws {
+        let fixture = try fixture()
+        let updated = try fixture.manifest.renamed(to: "Queued policy", signedBy: fixture.owner)
+        let descriptor = open(fixture.repository.directoryURL.appendingPathComponent(".repository.lock").path, O_RDWR)
+        XCTAssertGreaterThanOrEqual(descriptor, 0)
+        guard descriptor >= 0 else { return }
+        defer { flock(descriptor, LOCK_UN); close(descriptor) }
+        XCTAssertEqual(flock(descriptor, LOCK_EX), 0)
+        let completed = DispatchGroup()
+        for _ in 0..<NetworkPolicyCenter.maximumPendingPolicyWork {
+            completed.enter()
+            fixture.center.receiveAsynchronously(updated) { result in
+                if case .failure(let error) = result { XCTFail("Queued policy failed: \(error)") }
+                completed.leave()
+            }
+        }
+        XCTAssertEqual(fixture.center.pendingPolicyWorkCount, NetworkPolicyCenter.maximumPendingPolicyWork)
+        let overflow = DispatchSemaphore(value: 0)
+        fixture.center.receiveAsynchronously(updated) { result in
+            if case .failure(let error) = result { XCTAssertEqual(error as? NetworkAuthorityError, .limitExceeded) }
+            else { XCTFail("Policy worker accepted unbounded pending work") }
+            overflow.signal()
+        }
+        XCTAssertEqual(overflow.wait(timeout: .now() + 0.5), .success)
+        let echo = DispatchSemaphore(value: 0)
+        fixture.center.receiveAsynchronously(fixture.manifest) { result in
+            if case .failure(let error) = result { XCTFail("Current policy echo failed: \(error)") }
+            echo.signal()
+        }
+        XCTAssertEqual(echo.wait(timeout: .now() + 0.5), .success)
+        XCTAssertEqual(flock(descriptor, LOCK_UN), 0)
+        XCTAssertEqual(completed.wait(timeout: .now() + 5), .success)
+        XCTAssertEqual(fixture.center.pendingPolicyWorkCount, 0)
+        XCTAssertEqual(try fixture.center.snapshot().revision, updated.revision)
+    }
+
     /// Deterministic stand-ins for full hashes obtained from an authenticated TLS connection.
     private func installationHash(_ byte: UInt8) -> Data { Data(repeating: byte, count: 32) }
 

@@ -9,6 +9,8 @@ import CryptoKit
 public enum SecureNetworkParameters {
     public static let applicationProtocol = "alo-peer/2"
 
+    /// Pin stores must support concurrent access. Verification uses bounded
+    /// background workers; TLS completion returns to `verificationQueue`.
     public static func tcp(identity: InstallationIdentity, expectedPeerID: UUID?, pins: PeerPinStore,
                            firstContact: FirstContactPolicy, verificationQueue: DispatchQueue) throws -> NWParameters {
         let tls = NWProtocolTLS.Options()
@@ -22,20 +24,23 @@ public enum SecureNetworkParameters {
         sec_protocol_options_add_tls_application_protocol(options, applicationProtocol)
         sec_protocol_options_set_verify_block(options, { _, trust, completion in
             let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
-            guard let certificates = SecTrustCopyCertificateChain(secTrust) as? [SecCertificate],
-                  certificates.count == 1, let leaf = certificates.first,
-                  CFDataGetLength(SecCertificateCopyData(leaf)) <= 4_096 else { completion(false); return }
-            do {
-                _ = try PeerTrustVerifier.evaluate(certificate: leaf, expectedNodeID: expectedPeerID,
-                                                   pins: pins, firstContact: firstContact)
-                // This is an installation certificate profile, not Web PKI. Anchor the exact
-                // checked leaf, then let Security validate its X.509 structure and usage.
-                guard SecTrustSetPolicies(secTrust, SecPolicyCreateBasicX509()) == errSecSuccess,
-                      SecTrustSetNetworkFetchAllowed(secTrust, false) == errSecSuccess,
-                      SecTrustSetAnchorCertificates(secTrust, [leaf] as CFArray) == errSecSuccess,
-                      SecTrustSetAnchorCertificatesOnly(secTrust, true) == errSecSuccess else { completion(false); return }
-                completion(SecTrustEvaluateWithError(secTrust, nil))
-            } catch { completion(false) }
+            let queued = SecureVerificationWorkPool.submit(completionQueue: verificationQueue, work: {
+                guard let certificates = SecTrustCopyCertificateChain(secTrust) as? [SecCertificate],
+                      certificates.count == 1, let leaf = certificates.first,
+                      CFDataGetLength(SecCertificateCopyData(leaf)) <= 4_096 else { return false }
+                do {
+                    _ = try PeerTrustVerifier.evaluate(certificate: leaf, expectedNodeID: expectedPeerID,
+                                                       pins: pins, firstContact: firstContact)
+                    // Pin lookup and X.509 validation may block. Never run them
+                    // on the caller's shared media/control verification executor.
+                    guard SecTrustSetPolicies(secTrust, SecPolicyCreateBasicX509()) == errSecSuccess,
+                          SecTrustSetNetworkFetchAllowed(secTrust, false) == errSecSuccess,
+                          SecTrustSetAnchorCertificates(secTrust, [leaf] as CFArray) == errSecSuccess,
+                          SecTrustSetAnchorCertificatesOnly(secTrust, true) == errSecSuccess else { return false }
+                    return SecTrustEvaluateWithError(secTrust, nil)
+                } catch { return false }
+            }, completion: completion)
+            if !queued { completion(false) }
         }, verificationQueue)
         let tcp = NWProtocolTCP.Options(); tcp.noDelay = true
         let parameters = NWParameters(tls: tls, tcp: tcp)
@@ -83,6 +88,37 @@ public enum SecureNetworkParameters {
         }
         guard found, certificates.count == 1, let certificate = certificates.first else { throw IdentityError.invalidCertificate }
         return try PeerPublicIdentity.from(certificate: certificate)
+    }
+}
+
+/// Bounds both blocked pin lookups and pending TLS completions across channels.
+/// Network.framework owns cancellation of the TLS verify operation; completion
+/// is delivered exactly once on the requested queue even if the connection was
+/// cancelled meanwhile. SecurePeerChannel generation fences reject late state.
+enum SecureVerificationWorkPool {
+    private static let lock = NSLock()
+    private static let workers = (0..<4).map {
+        DispatchQueue(label: "alo.tls.pin-verification.\($0)", qos: .userInitiated)
+    }
+    private static var pending = 0
+    private static var nextWorker = 0
+
+    static func submit<T>(completionQueue: DispatchQueue, work: @escaping () -> T,
+                          completion: @escaping (T) -> Void) -> Bool {
+        lock.lock()
+        guard pending < 64 else { lock.unlock(); return false }
+        pending += 1
+        let worker = workers[nextWorker]
+        nextWorker = (nextWorker + 1) % workers.count
+        lock.unlock()
+        worker.async {
+            let result = work()
+            completionQueue.async {
+                completion(result)
+                lock.lock(); pending -= 1; lock.unlock()
+            }
+        }
+        return true
     }
 }
 

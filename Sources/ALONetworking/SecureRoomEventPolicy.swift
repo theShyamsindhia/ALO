@@ -33,6 +33,19 @@ final class SecureRoomEventPolicy: @unchecked Sendable {
         let signer: PeerPublicIdentity
         let context: EventContext?
     }
+    private struct VerificationCacheEntry {
+        let encodedEvent: Data
+        let verified: VerifiedEvent
+        var encodedBytes: Int { encodedEvent.count }
+    }
+    static let maximumVerifiedEvents = 2_048
+    static let maximumVerifiedEventBytes = 4 * 1_024 * 1_024
+    private let verificationLock = NSLock()
+    private var verifiedEvents = [String: VerificationCacheEntry]()
+    private var verificationOrder = [String]()
+    private var verificationHead = 0
+    private var verifiedEventBytes = 0
+    private var verificationCount: UInt64 = 0
     private let lock = NSLock()
     private var grants = [String: Grant]()
     private var acceptedHistory = Set<Data>()
@@ -168,9 +181,14 @@ final class SecureRoomEventPolicy: @unchecked Sendable {
         return currentlyAuthorizes(grant)
     }
 
+    /// Pins authorization across a Core transaction, including destructive
+    /// retention. A changed policy must discard the candidate, not merely hide
+    /// its new operations after they removed previously authorized records.
+    var projectionRevision: UInt64? { try? currentManifest().revision }
+
     func accepts(_ event: MeshRoomEvent) -> Bool {
         guard event.roomID == roomID, Self.hasValidAuthorFields(event),
-              let verified = Self.verifiedEvent(event) else { return false }
+              let verified = cachedVerifiedEvent(event) else { return false }
         let digest = networkAuthorization == nil ? nil : try? Self.historyDigest(event)
         let state = lock.withLock { (grants[event.version.nodeID], digest.map { acceptedHistory.contains($0) } ?? false) }
         // Historical receipts preserve exact already-committed bytes after author
@@ -179,6 +197,14 @@ final class SecureRoomEventPolicy: @unchecked Sendable {
             guard let manifest = try? currentManifest(), let context = verified.context,
                   context.authority == Self.authority(for: manifest, channelID: networkAuthorization.channelID) else { return false }
             if state.1 { return true }
+            if let grant = state.0 {
+                guard grant.hash == verified.signer.publicKeyHash, grant.userIdentity == context.device.userIdentity,
+                      grant.capabilities.contains(Self.capability(for: event.kind)) else { return false }
+            } else if !Self.isDurable(event) {
+                // Offline historical proofs never confer live broadcaster or
+                // playback authority without the author's negotiated grant.
+                return false
+            }
             return (try? manifest.authorize(context.device.userIdentity, channelID: networkAuthorization.channelID)) != nil
         }
         guard let grant = state.0, grant.hash == verified.signer.publicKeyHash,
@@ -194,7 +220,7 @@ final class SecureRoomEventPolicy: @unchecked Sendable {
     func allowsDurableStorage(_ event: MeshRoomEvent) -> Bool {
         guard networkAuthorization != nil else { return accepts(event) }
         guard Self.isDurable(event), event.roomID == roomID, Self.hasValidAuthorFields(event),
-              let verified = Self.verifiedEvent(event), let context = verified.context,
+              let verified = cachedVerifiedEvent(event), let context = verified.context,
               let expected = try? archiveAuthority(), context.authority == expected else { return false }
         return true
     }
@@ -214,13 +240,13 @@ final class SecureRoomEventPolicy: @unchecked Sendable {
     @discardableResult
     func rememberAccepted(_ events: [MeshRoomEvent], retainingHistory: [MeshRoomEvent]? = nil) -> Bool {
         guard networkAuthorization != nil else { return true }
-        guard let networkAuthorization, let manifest = try? currentManifest(), events.count <= Self.maximumAcceptedHistory,
-              (retainingHistory?.count ?? 0) <= Self.maximumAcceptedHistory else { return false }
+        guard let networkAuthorization, let manifest = try? currentManifest(),
+              events.count <= Self.maximumAcceptedHistory else { return false }
         let expectedAuthority = Self.authority(for: manifest, channelID: networkAuthorization.channelID)
         var receipts = [(MeshRoomEvent, EventContext, Data)]()
         for event in events where Self.isDurable(event) {
             guard event.roomID == roomID, Self.hasValidAuthorFields(event),
-                  let verified = Self.verifiedEvent(event), let context = verified.context,
+                  let verified = cachedVerifiedEvent(event), let context = verified.context,
                   context.authority == expectedAuthority,
                   let digest = try? Self.historyDigest(event) else { return false }
             receipts.append((event, context, digest))
@@ -234,8 +260,12 @@ final class SecureRoomEventPolicy: @unchecked Sendable {
             // Only a currently authorized projection or an exact prior receipt
             // may become history. Cryptographically valid inert storage is not
             // a permission grant, even after the whole raw document commits.
-            guard receipts.allSatisfy({ _, context, digest in
+            guard receipts.allSatisfy({ event, context, digest in
                 if acceptedHistory.contains(digest) { return true }
+                if let grant = grants[event.version.nodeID] {
+                    guard grant.userIdentity == context.device.userIdentity,
+                          grant.capabilities.contains(Self.capability(for: event.kind)) else { return false }
+                }
                 return (try? manifest.authorize(context.device.userIdentity, channelID: networkAuthorization.channelID)) != nil
             }) else { return false }
             // Only retire receipts that were in the PRIOR committed durable
@@ -289,6 +319,48 @@ final class SecureRoomEventPolicy: @unchecked Sendable {
     }
 
     static func hasValidSignature(_ event: MeshRoomEvent) -> Bool { verifiedEvent(event) != nil }
+
+    /// Internal diagnostics cover crypto work and retained proof bytes only.
+    var verificationCacheState: (count: Int, encodedBytes: Int, verificationCount: UInt64) {
+        verificationLock.withLock { (verifiedEvents.count, verifiedEventBytes, verificationCount) }
+    }
+
+    private func cachedVerifiedEvent(_ event: MeshRoomEvent) -> VerifiedEvent? {
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        guard let encodedEvent = try? encoder.encode(event) else { return nil }
+        let cached: VerifiedEvent? = verificationLock.withLock {
+            // ID is only an index. Compare the complete wire bytes, including
+            // proof: Swift String equality alone folds distinct Unicode encodings
+            // that have different signatures. No digest collisions grant hits.
+            if let entry = verifiedEvents[event.id], entry.encodedEvent == encodedEvent { return entry.verified }
+            verificationCount &+= 1
+            return nil
+        }
+        if let cached { return cached }
+        // Certificate parsing, root-binding verification and ECDSA must never
+        // hold either the cache lock or the grants/receipt lock. Racing misses
+        // may verify independently, but retain only one entry for this ID.
+        guard let verified = Self.verifiedEvent(event) else { return nil }
+        guard encodedEvent.count <= Self.maximumVerifiedEventBytes else { return verified }
+        verificationLock.withLock {
+            if let entry = verifiedEvents[event.id], entry.encodedEvent == encodedEvent { return }
+            if let prior = verifiedEvents[event.id] { verifiedEventBytes -= prior.encodedBytes }
+            else { verificationOrder.append(event.id) }
+            verifiedEvents[event.id] = VerificationCacheEntry(encodedEvent: encodedEvent, verified: verified)
+            verifiedEventBytes += encodedEvent.count
+            while verifiedEvents.count > Self.maximumVerifiedEvents || verifiedEventBytes > Self.maximumVerifiedEventBytes {
+                let oldest = verificationOrder[verificationHead]
+                verificationHead += 1
+                if let removed = verifiedEvents.removeValue(forKey: oldest) { verifiedEventBytes -= removed.encodedBytes }
+            }
+            if verificationHead > 128 && verificationHead * 2 >= verificationOrder.count {
+                verificationOrder.removeFirst(verificationHead); verificationHead = 0
+            }
+        }
+        // Membership, negotiated capabilities, manifest authority and historical
+        // receipts are deliberately rechecked by each caller after this returns.
+        return verified
+    }
 
     private static func hasValidAuthorFields(_ event: MeshRoomEvent) -> Bool {
         if event.kind == .chat, let sender = event.senderID, sender != event.version.nodeID { return false }

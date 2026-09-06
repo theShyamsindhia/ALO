@@ -67,12 +67,12 @@ If you built from source, open `dist/ALO.app`:
   New grants and revocations require an owner-signed policy to reach other devices.
 
 The first time a Mac broadcasts, macOS asks for **System Audio Recording Only** permission.
-ALO uses one Core Audio tap both to capture the room stream and replace that Mac's immediate
+ALO uses one Core Audio tap both to capture the channel stream and replace that Mac's immediate
 source playback with the synchronized return. Screen sharing separately uses **Screen & System
 Audio Recording**. After either first grant, restart ALO if macOS requests it. No speaker output
 or audio driver is installed.
 
-After the room connects, the setup window disappears and the room moves into the
+After the channel connects, the setup window disappears and the channel moves into the
 menu bar. Click the cat to reveal the compact controls; the same surface grows
 downward only when chat, queue, people, or video is requested. A red indicator on the
 menu-bar icon marks unread chat without leaving another window on screen. The optional
@@ -87,15 +87,15 @@ When the source player publishes track information, the active broadcaster sends
 the title, artist, and album artwork to every Mac. Video sharing remains off by
 default. Members control their own output, while shared transport actions are applied
 by the active broadcaster and replicated to the group.
-The menu-bar cat provides the complete room experience without requiring the
+The menu-bar cat provides the complete channel experience without requiring the
 floating bar. Its window button toggles the floating presentation at any time. On
 listening Macs, keyboard, Touch Bar, headphone, and Control Center
 play/pause/previous/next commands are forwarded to the active broadcaster; volume
 buttons continue to control the local Mac.
 ALO checks its GitHub Releases page shortly after launch and every six hours. Choose
-**ALO → Check for Updates…** at any time for a manual check. Room members also advertise
+**ALO → Check for Updates…** at any time for a manual check. Channel members also advertise
 their app version, so seeing a newer member triggers the same official-release check.
-Updates are never copied from another room member: ALO downloads the Apple Silicon ZIP
+Updates are never copied from another channel member: ALO downloads the Apple Silicon ZIP
 from GitHub, verifies GitHub's SHA-256 digest, the `in.werai.audio` bundle identity,
 Developer ID team `R9QFK9NM3Y`, and Gatekeeper acceptance, then replaces and relaunches
 the app. macOS asks for administrator approval only when the app's folder requires it.
@@ -208,11 +208,11 @@ shown in a pinned, borderless media window after content validation. Hover to
 save, choose a display, unpin, or close. Choose **Annotate** to mark up an image
 or paused video frame, then **Send image back** to show the result on the other
 Mac. Media playback starts only when the recipient presses Play. Transfers use
-a separate encrypted, paced connection and are cancelled when leaving the room;
+a separate encrypted, paced connection and are cancelled when leaving the channel;
 save anything you want to keep before leaving.
 
 ALO leaves the selected physical output unchanged. Its private Core Audio tap is the single
-authoritative broadcast source: it feeds the room and replaces the broadcaster's immediate
+authoritative broadcast source: it feeds the channel and replaces the broadcaster's immediate
 render with the same synchronized return. No additional device appears in the Sound picker.
 
 ## Share a ready binary
@@ -247,8 +247,8 @@ ALO separates channel coordination from the high-rate media stream:
   presenter-authoritative vector events, not pixels burned into video or
   Automerge documents. Their bounded lifecycle is independent of audio.
 - The current broadcaster sends timestamped audio and video directly to all listeners.
-  This keeps one shared media timeline without making the room creator a permanent
-  server. If the broadcaster leaves, the room stays connected and silent until any
+  This keeps one shared media timeline without making the channel creator a permanent
+  server. If the broadcaster leaves, the channel stays connected and silent until any
   remaining member chooses **Broadcast**.
 - Concurrent attempts to take over broadcasting are resolved deterministically, so all
   replicas settle on the same source. A later take-over supersedes the prior claim.
@@ -271,8 +271,10 @@ history remains, but revoked authors cannot inject new events through allowed re
 Transport remains TLS 1.3 and session-bound AES-GCM datagrams with replay checks.
 Identity adds authorization, not another cipher. See [privacy](docs/room-privacy.md)
 and [sync invariants](docs/local-audio-sync.md).
+Contributors should also read [module boundaries](docs/module-boundaries.md),
+including the distinction between signed storage and authorized effects.
 
-Per-person **Voice on this Mac** levels persist independently of media volume. Room
+Per-person **Voice on this Mac** levels persist independently of media volume. Channel
 settings include optional music ducking during incoming speech and local microphone
 routing details. Status dots in People show per-device state; hover for details.
 
@@ -285,18 +287,18 @@ routing details. Status dots in People show per-device state; hover for details.
 - Four timestamps exclude host processing and application send-queue residence
   from clock offset/RTT. Probe IDs never reset; echoed send times must match.
   Gaps force reacquisition; new media anchors cannot freshen old clock evidence.
-- The room establishes one shared playout target before audio begins. A joining
+- The channel establishes one shared playout target before audio begins. A joining
   device adopts that timing; a slow late joiner's network estimate cannot retime
   healthy listeners. A larger hardware-output floor uses one announced future
-  capture boundary, with bounded old/new playback ownership rather than a room restart.
+  capture boundary, with bounded old/new playback ownership rather than a channel restart.
 - Output-device latency and render headroom are measured per Mac. Remaining error is
   corrected 20 times per second with a smoothed varispeed adjustment capped at 1%.
 - Each receiver watches the audio render clock while packets are still arriving. If a
   CPU spike stops that clock for 250 ms, or pushes playback more than 100 ms ahead or
-  behind the room timeline, it flushes stale scheduled audio and re-anchors itself.
-- Play and pause in the room bar are shared controls. A member's request is sent to the
-  current broadcaster, applied to its active system media player, and rebroadcast to the room.
-- Listening Macs publish the room as their active macOS Now Playing session, allowing
+  behind the channel timeline, it flushes stale scheduled audio and re-anchors itself.
+- Play and pause in the channel bar are shared controls. A member's request is sent to the
+  current broadcaster, applied to its active system media player, and rebroadcast to the channel.
+- Listening Macs publish the channel as their active macOS Now Playing session, allowing
   system and accessory transport buttons to use the same broadcaster-authoritative command path.
 - Video follows the audio timeline, with bounded send/decode/presentation queues
   and fresh-keyframe recovery. Sync diagnostics report audio render drift and screen
@@ -329,7 +331,7 @@ Run only the fast, deterministic timing model:
 swift test --filter RoomScaleLatencyReproductionTests
 ```
 
-Run the realistic single-Mac room test:
+Run the realistic single-Mac channel test (internal test APIs retain the `Room` name):
 
 ```sh
 swift test --filter LoopbackRoomScaleTests
@@ -377,7 +379,7 @@ tombstones, and bounded chat/queue persistence. It does not advertise on the LAN
 capture audio, prompt for recording permission, or write test credentials to Keychain.
 
 The loopback suite starts the real host plus headless TCP and UDP peers on one Mac. It
-compares an unconstrained room, one receiver on a constrained link, eight receivers
+compares an unconstrained channel, one receiver on a constrained link, eight receivers
 with unbounded buffering, and eight receivers with bounded buffering. It also exercises
 late-playback detection, receiver telemetry, CPU-stall recovery, shared play/pause
 control, and automatic hard resynchronization. It does not need Screen Recording
@@ -385,7 +387,7 @@ permission or additional Macs.
 
 Useful output from the loopback test includes:
 
-- **Final packet age:** must remain below the room's active playout delay.
+- **Final packet age:** must remain below the channel's active playout delay.
 - **Audible lateness:** should remain at zero; a positive value means playback missed
   the shared timeline.
 - **Arrival skew:** shows how far receivers diverged while receiving the same packet.
@@ -399,7 +401,7 @@ Change one control at a time and compare it with the unbounded baseline in
 `LoopbackRoomScaleTests`:
 
 - `RoomTiming.defaultPlayoutDelayNanos`, `maximumPlayoutDelayNanos`, and
-  `timingStepNanos` control the initial shared room buffer before its timeline locks.
+  `timingStepNanos` control the initial shared channel buffer before its timeline locks.
 - `SynchronizedPlayer.hardResyncThresholdNanos` controls when gradual varispeed
   correction gives way to a hard re-anchor.
 - `PlaybackWatchdog.stallThresholdNanos` controls how long an active receiver's render
@@ -417,7 +419,7 @@ After tuning, run all three focused suites at least twice, followed by `swift te
 change should keep the direct eight-peer control lossless, reduce packet age and audible
 lateness in the constrained eight-peer case, and avoid excessive hard resynchronizations.
 
-The broader tests also cover audio and video framing, room media and queue state, mixer
+The broader tests also cover audio and video framing, channel media and queue state, mixer
 state, packetization timing, clock offset and drift, adaptive jitter handling, malformed
 input, and fragmented messages.
 
@@ -454,7 +456,7 @@ Publishing the release automatically attaches notarized and stapled
 `ALO-macos-arm64.zip` and `ALO-macos-arm64.dmg` downloads to the release.
 
 If an older ad-hoc-signed copy appears enabled under **Privacy & Security → Screen &
-System Audio Recording** but still cannot start a room, remove the old ALO entries,
+System Audio Recording** but still cannot broadcast, remove the old ALO entries,
 install the newly signed release in `/Applications`, launch it, and grant recording access
 again. This one-time reset replaces the stale permission record created by the old build.
 
@@ -472,7 +474,7 @@ ALO source is MIT licensed; imported DynamicNotch code is GPL-3.0 and includes i
 
 ## Optional notch presentation
 
-Open **ALO → Settings… → Notch**, or **Room settings → Interface → Notch**, and enable the notch.
+Open **ALO → Settings… → Notch**, or **Channel settings → Interface → Notch**, and enable the notch.
 Every additional feature starts disabled. The full settings window exposes original
 DynamicNotch feature options for media, downloads, timers, file tray/AirDrop, conversion,
 camera, CPU/RAM, battery, Bluetooth, Wi-Fi/hotspot, VPN, Focus, volume/brightness HUDs,
@@ -483,8 +485,8 @@ Enable only the features you want. Features requiring access to camera, calendar
 Contacts, Accessibility, or protected files use the corresponding macOS permission
 flow. Turning off a feature stops its monitor; turning off the notch stops all feature
 services while retaining your choices. Camera and CPU/RAM capture are also tied to
-page visibility. Enable **Room media** inside Notch Settings to show shared room
-playback in the original compact player. Playback buttons use ALO's room commands;
+page visibility. Enable **Channel media** inside Notch Settings to show shared channel
+playback in the original compact player. Playback buttons use ALO's channel commands;
 unsupported seek actions stay disabled. The original battery, tray and other activity
 views use the same renderer and motion. Screens without a notch use its island mode.
 
@@ -495,4 +497,4 @@ licenses are included in packaged builds. See [the feature inventory](docs/dynam
 [validation](docs/notch-validation.md), and [provenance/license](Vendor/README.md).
 ### DJ Studio
 
-Open **People → grid icon** for two song decks, a waveform scrubber, beat and manual-region loopers, a 16-pad launchpad, saved keyboard mappings, and room-song controls. See the [DJ Studio guide](docs/dj-studio.md), or click **Guide** in the studio.
+Open **People → grid icon** for two song decks, a waveform scrubber, beat and manual-region loopers, a 16-pad launchpad, saved keyboard mappings, and channel-song controls. See the [DJ Studio guide](docs/dj-studio.md), or click **Guide** in the studio.

@@ -1840,8 +1840,7 @@ final class ALOViewModel: ObservableObject {
         // and retry loops when this identity loses the active channel.
         if !isLeavingRoom, let active = activeRoomConfiguration,
            account.room(channelID: active.id) == nil {
-            stop()
-            errorMessage = "Your identity no longer has access to this channel. Ask the network owner for a new invitation."
+            stop(preservingNotice: "Your identity no longer has access to this channel. Ask the network owner for a new invitation.")
         }
         objectWillChange.send()
     }
@@ -3327,6 +3326,10 @@ final class ALOViewModel: ObservableObject {
     }
 
     func stop() {
+        stop(preservingNotice: nil)
+    }
+
+    private func stop(preservingNotice notice: String?) {
         DJStudio.stopIfCreated()
         arena.disconnect()
         isLeavingRoom = true
@@ -3338,7 +3341,7 @@ final class ALOViewModel: ObservableObject {
         Task {
             await meshSession?.stop()
             meshSession = nil
-            finishStopping()
+            finishStopping(notice: notice)
         }
     }
 
@@ -3800,10 +3803,11 @@ final class ALOViewModel: ObservableObject {
         incomingMessagePreview = nil
     }
 
-    private func finishStopping() {
+    private func finishStopping(notice: String?) {
         activeRoom = nil
         activeRoomConfiguration = nil
         resetRoomState()
+        errorMessage = notice
         phase = .idle
         statusText = "Ready"
         secureRoomBrowser.restart()

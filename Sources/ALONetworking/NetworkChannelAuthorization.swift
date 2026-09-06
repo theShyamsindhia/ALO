@@ -13,6 +13,10 @@ public final class NetworkPolicyCenter: @unchecked Sendable {
     /// Serializes verification/persistence without holding the snapshot lock
     /// used by per-packet media authorization.
     private let updateLock = NSLock()
+    private let policyWorker = DispatchQueue(label: "alo.network-policy.persistence", qos: .userInitiated)
+    private let workLock = NSLock()
+    private var pendingPolicyWork = 0
+    static let maximumPendingPolicyWork = 32
     private var current: NetworkManifest
     private var invalid = false
     private var observers = [UUID: () -> Void]()
@@ -30,9 +34,19 @@ public final class NetworkPolicyCenter: @unchecked Sendable {
         return current
     }
 
+    /// Keeps one bounded durable commit and its historical receipts on the same
+    /// published policy. Snapshot/media readers never acquire this lock. The
+    /// body must not call receive(), reload(), or reenter withStablePolicy().
+    /// Invoke application callbacks only after this operation has returned.
+    public func withStablePolicy<T>(_ body: () throws -> T) rethrows -> T {
+        updateLock.lock(); defer { updateLock.unlock() }
+        return try body()
+    }
+
     /// A stale peer may learn the latest policy, but cannot replace it with an
     /// older one. Unknown owners and network generations are never admitted.
     public func receive(_ incoming: NetworkManifest) throws {
+        if try alreadyPublished(incoming) { return }
         updateLock.lock()
         var callbacks = [() -> Void]()
         let result = Result<Void, Error> {
@@ -60,12 +74,59 @@ public final class NetworkPolicyCenter: @unchecked Sendable {
         try result.get()
     }
 
+    /// Call from a verification executor, never the media/channel queue. Only
+    /// changed policies enter the bounded serial persistence worker; echoes and
+    /// stale policies complete independently of a blocked disk operation.
+    func receiveAsynchronously(_ incoming: NetworkManifest, completion: @escaping (Result<Void, Error>) -> Void) {
+        do { if try alreadyPublished(incoming) { completion(.success(())); return } }
+        catch { completion(.failure(error)); return }
+        workLock.lock()
+        guard pendingPolicyWork < Self.maximumPendingPolicyWork else {
+            workLock.unlock(); completion(.failure(NetworkAuthorityError.limitExceeded)); return
+        }
+        pendingPolicyWork += 1
+        workLock.unlock()
+        policyWorker.async {
+            let result = Result { try self.receive(incoming) }
+            self.workLock.lock(); self.pendingPolicyWork -= 1; self.workLock.unlock()
+            completion(result)
+        }
+    }
+
+    var pendingPolicyWorkCount: Int {
+        workLock.lock(); defer { workLock.unlock() }
+        return pendingPolicyWork
+    }
+
+    private func alreadyPublished(_ incoming: NetworkManifest) throws -> Bool {
+        // Normal handshakes repeat an immutable policy already authenticated by
+        // this center. They must not queue behind durable history verification.
+        // Access is still checked against a fresh snapshot by the caller.
+        let published = try snapshot()
+        guard incoming.id == anchor.id, incoming.owner == anchor.owner,
+              incoming.generation == anchor.generation else { throw NetworkAuthorityError.ownerChanged }
+        if incoming == published { return true }
+        if incoming.revision < published.revision {
+            try incoming.validateSignature()
+            return true
+        }
+        if incoming.revision == published.revision {
+            try incoming.validateSignature()
+            if try incoming.canonicalBytes() == published.canonicalBytes() { return true }
+        }
+        return false
+    }
+
     /// Call after a local owner mutation/import. Existing connections recheck
     /// access and publish the new signed policy without restarting media.
     public func reload() throws {
         do { try receive(repository.trustedManifest(id: anchor.id)) }
         catch {
+            guard (error as? NetworkAuthorityError) == .revisionConflict
+                    || (error as? NetworkAuthorityError) == .quarantined else { throw error }
+            updateLock.lock()
             lock.lock(); invalid = true; let callbacks = Array(observers.values); lock.unlock()
+            updateLock.unlock()
             callbacks.forEach { $0() }
             throw error
         }

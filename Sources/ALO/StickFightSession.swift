@@ -97,7 +97,7 @@ final class StickFightSession: ObservableObject {
         guard roomConnected else { notice = "Join the channel before joining its fight."; return }
         leave(); hostID = lobby.peerID; sessionID = lobby.sessionID
         wantsSpectate = spectate; mode = .joining; lastRemote = ProcessInfo.processInfo.systemUptime
-        notice = "Connecting to \(names[lobby.peerID] ?? "room host")…"
+        notice = "Connecting to \(names[lobby.peerID] ?? "channel host")…"
         configureTimer(); transmit(spectate ? .spectate : .join)
     }
     func readyUp() {

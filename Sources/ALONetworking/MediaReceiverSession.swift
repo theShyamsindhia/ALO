@@ -103,6 +103,7 @@ public final class MediaReceiverSession: @unchecked Sendable {
         let bytes: Data
         let deadline: UInt64
         let completion: ((Result<Void, Error>) -> Void)?
+        var isClockProbe = false
     }
     public let expected: Selection
     private let credentials: AuthenticatedChannelCredentials
@@ -299,12 +300,14 @@ public final class MediaReceiverSession: @unchecked Sendable {
         }
         videoReceiver?.tick()
         let interval: UInt64 = clock.isReady ? 1_000_000_000 : 250_000_000
-        // Timestamp t1 only when it can enter the transport now. Otherwise our
-        // own control queue would be misclassified as one-way network latency.
-        if probes.count < 8, !sending, outputs.isEmpty,
+        // Reserve one coalesced work item even when all eight regular output
+        // slots are occupied. FIFO prevents later annotations overtaking it;
+        // the existing send deadline bounds how long earlier output can block it.
+        if probes.count < 8, !outputs.contains(where: { $0.isClockProbe }),
            lastPing.map({ now >= $0 && now - $0 >= interval }) ?? true {
-            let ping = clock.makeProbe(at: now)
-            probes[ping.id] = now; lastPing = now; send(.clockPing(id: ping.id, clientTimeNanos: now))
+            outputs.append(Output(bytes: Data(), deadline: now + 2_000_000_000,
+                                  completion: nil, isClockProbe: true))
+            drain()
         }
         guard freshClock() != nil else { return }
         let stalled = active.map { $0.committedPreparation?.anchor.state == .running && now >= $0.lastData && now - $0.lastData > 3_000_000_000 } ?? false
@@ -538,15 +541,29 @@ public final class MediaReceiverSession: @unchecked Sendable {
     }
     private func enqueue(_ bytes: Data, completion: ((Result<Void, Error>) -> Void)? = nil) {
         guard !stopped else { completion?(.failure(SecurePeerChannelError.cancelled)); return }
-        guard outputs.count < 8, outputs.reduce(0, { $0 + $1.bytes.count }) + bytes.count <= 262_144 else {
+        guard outputs.filter({ !$0.isClockProbe }).count < 8,
+              outputs.reduce(0, { $0 + $1.bytes.count }) + bytes.count <= 262_144 else {
             completion?(.failure(SecureTransportError.capacity)); stopOnQueue(failed: true); return
         }
         outputs.append(Output(bytes: bytes, deadline: nowNanos() + 2_000_000_000, completion: completion)); drain()
     }
     private func drain() {
         guard !stopped, !sending, let output = outputs.first else { return }
+        let now = nowNanos()
+        guard output.deadline > now else {
+            stopOnQueue(failed: true, error: SecurePeerChannelError.timedOut); return
+        }
+        var bytes = output.bytes
+        if output.isClockProbe {
+            // Register t1 at actual dequeue, excluding receiver queue residence
+            // from both the synchronizer's RTT and its offset observation.
+            let ping = clock.makeProbe(at: now)
+            guard let stamped = try? MediaControlWireMessage.clockPing(id: ping.id,
+                clientTimeNanos: now).encoded() else { stopOnQueue(failed: true); return }
+            probes[ping.id] = now; lastPing = now; bytes = stamped
+        }
         sending = true; let token = generation
-        sendControl(output.bytes) { [weak self] result in
+        sendControl(bytes) { [weak self] result in
             guard let self, !self.stopped, self.generation == token, self.outputs.first?.id == output.id else { return }; self.assertQueue()
             if case .failure(let error) = result { self.stopOnQueue(failed: true, error: error); return }
             guard output.deadline > self.nowNanos() else {

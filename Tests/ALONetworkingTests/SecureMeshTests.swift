@@ -9,7 +9,9 @@ struct SecureMeshTests {
     @Test func largeSignedSnapshotIsPacedWithoutDisconnecting() async throws {
         let room = RoomConfiguration.secure(name: "Large signed snapshot")
         let identity = try InstallationIdentity.ephemeral()
-        let signer = SecureRoomEventPolicy(roomID: room.id, identity: identity, capabilities: .desktop)
+        let network = try NetworkTestRoomFixture.shared(for: room)
+        let signer = SecureRoomEventPolicy(roomID: room.id, identity: identity, capabilities: .desktop,
+            networkAuthorization: try network.authorization(for: identity))
         var events = [MeshRoomEvent]()
         for index in 1...500 {
             let event = MeshRoomEvent(roomID: room.id, version: .init(counter: UInt64(index), nodeID: identity.publicIdentity.nodeID.uuidString),

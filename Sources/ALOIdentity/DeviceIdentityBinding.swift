@@ -9,7 +9,8 @@ public struct DeviceIdentityBinding: Codable, Hashable, Sendable {
     public let userIdentity: PublicUserIdentity
     public let bindingID: UUID
     public let deviceName: String
-    /// A monotonically increasing authorization generation; network policy decides which are current.
+    /// Reserved signed metadata; current app callers emit 1. No generation floor is enforced.
+    /// Membership revocation applies to the entire user root, not an individual device binding.
     public let generation: UInt64
     public let installationPublicKeyHash: Data
     public let signature: Data

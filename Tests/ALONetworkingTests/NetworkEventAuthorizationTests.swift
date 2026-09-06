@@ -8,6 +8,133 @@ import ALORooms
 
 @Suite("Network authorization for relayed signed events")
 struct NetworkEventAuthorizationTests {
+    @Test func liveMobileGrantCannotPublishDesktopOnlyEvents() throws {
+        let fixture = try NetworkEventFixture()
+        defer { fixture.cleanup() }
+        let mobile = try ProtocolOffer.current(capabilities: .mobile)
+        let desktop = try ProtocolOffer.current(capabilities: .desktop)
+        let peer = AuthenticatedPeer(nodeID: fixture.remoteInstallation.publicIdentity.nodeID,
+            publicKeyHash: fixture.remoteInstallation.publicIdentity.publicKeyHash, incarnationID: UUID(), connectionID: UUID(),
+            negotiated: try NegotiatedProtocol.negotiate(initiator: mobile, responder: desktop, policy: .secureV2),
+            channelRole: .roomControl, userIdentity: fixture.remoteUser.publicIdentity)
+        #expect(fixture.receiver.admit(peer, initiated: false))
+        let author = peer.nodeID.uuidString
+        let roomID = fixture.authorization.channelID.uuidString
+        let queue = try #require(fixture.remoteSigner.sign(MeshRoomEvent(roomID: roomID,
+            version: MeshVersion(counter: 1, nodeID: author), kind: .queueAdd,
+            queueItem: RoomQueueItem(id: "track", title: "Forbidden queue edit", url: "alo-file://track"))))
+        let broadcaster = try #require(fixture.remoteSigner.sign(MeshRoomEvent(roomID: roomID,
+            version: MeshVersion(counter: 2, nodeID: author), kind: .broadcaster, broadcasterID: author)))
+        #expect(fixture.receiver.allowsDurableStorage(queue))
+        #expect(!fixture.receiver.accepts(queue))
+        #expect(!fixture.receiver.accepts(broadcaster))
+        #expect(!fixture.receiver.rememberAccepted([queue]))
+        #expect(fixture.receiver.accepts(try fixture.remoteEvent(counter: 3, text: "Mobile chat is allowed")))
+        let fresh = SecureRoomEventPolicy(roomID: roomID, identity: fixture.localInstallation,
+            capabilities: .desktop, networkAuthorization: fixture.authorization)
+        #expect(fresh.accepts(queue)) // Offline durable history has no live negotiated grant.
+        #expect(!fresh.accepts(broadcaster)) // Transient authority always needs live admission.
+    }
+
+    @Test func fullSignedHistorySurvivesOfflineAuthorRevocationLateJoinAndContinuedEdits() throws {
+        let fixture = try NetworkEventFixture()
+        defer { fixture.cleanup() }
+        let roomID = fixture.authorization.channelID.uuidString
+        var history = [MeshRoomEvent]()
+        for counter in 1...AutomergeRoomStateSync.maximumChatEvents {
+            let text = "Offline listening session message \(counter): chat and queue state must survive reconnects."
+            history.append(try counter.isMultiple(of: 2)
+                ? fixture.localEvent(counter: UInt64(counter), text: text)
+                : fixture.remoteEvent(counter: UInt64(counter), text: text))
+        }
+        let ownerID = fixture.localInstallation.publicIdentity.nodeID.uuidString
+        let offlineAuthorID = fixture.remoteInstallation.publicIdentity.nodeID.uuidString
+        let ownerTrack = RoomQueueItem(id: "owner-track", title: "Shared local track", url: "alo-file://owner-track")
+        let offlineTrack = RoomQueueItem(id: "offline-track", title: "Offline author's track", url: "alo-file://offline-track")
+        history.append(try #require(fixture.receiver.sign(MeshRoomEvent(roomID: roomID,
+            version: MeshVersion(counter: 501, nodeID: ownerID), kind: .queueAdd, queueItem: ownerTrack))))
+        history.append(try #require(fixture.remoteSigner.sign(MeshRoomEvent(roomID: roomID,
+            version: MeshVersion(counter: 502, nodeID: offlineAuthorID), kind: .queueAdd, queueItem: offlineTrack))))
+        let existing = try AutomergeRoomStateSync(roomID: roomID,
+            eventValidator: { fixture.receiver.allowsDurableStorage($0) },
+            eventProjector: { fixture.receiver.accepts($0) })
+        let initialCommit = try existing.ingest(history)
+        #expect(fixture.receiver.rememberAccepted(initialCommit, retainingHistory: try existing.snapshot().retainedEvents))
+        let established = try existing.snapshot()
+        #expect(established.chatEvents.count == 500)
+        #expect(Set(established.queue.map(\.id)) == Set([ownerTrack.id, offlineTrack.id]))
+
+        // Only stored, portable proofs are relayed. The original author never
+        // connects to the third installation, and now has a stale policy copy.
+        try fixture.revokeRemote()
+        #expect(try existing.snapshot() == established)
+        let lateInstallation = try InstallationIdentity.ephemeral()
+        let lateBinding = try DeviceIdentityBinding(user: fixture.owner, deviceName: "Late joining owner device", generation: 1,
+            installationPublicKeyHash: lateInstallation.publicIdentity.publicKeyHash)
+        let lateAuthorization = try NetworkChannelAuthorization(policy: fixture.center, channelID: fixture.authorization.channelID,
+            localDevice: lateBinding)
+        let latePolicy = SecureRoomEventPolicy(roomID: roomID, identity: lateInstallation, capabilities: .desktop,
+            networkAuthorization: lateAuthorization)
+        let late = try AutomergeRoomStateSync(roomID: roomID,
+            eventValidator: { latePolicy.allowsDurableStorage($0) }, eventProjector: { latePolicy.accepts($0) })
+        #expect(!latePolicy.permits(author: ownerID, capability: .chat))
+        #expect(!latePolicy.permits(author: offlineAuthorID, capability: .chat))
+        try converge(existing, late, policy: latePolicy, sourcePolicy: fixture.receiver)
+        let initialLate = try late.snapshot()
+        #expect(initialLate.retainedEvents.count == 502)
+        #expect(initialLate.chatEvents.count == 250)
+        #expect(initialLate.chatEvents.allSatisfy { $0.version.nodeID == ownerID })
+        #expect(initialLate.queue == [ownerTrack])
+        #expect(try existing.snapshot() == established)
+
+        let revokedChat = try fixture.remoteEvent(counter: 1_000_000, text: "Revoked author cannot advance live state")
+        let revokedRemove = try #require(fixture.remoteSigner.sign(MeshRoomEvent(roomID: roomID,
+            version: MeshVersion(counter: 1_000_001, nodeID: offlineAuthorID), kind: .queueRemove, queueItemID: ownerTrack.id)))
+        let inertCommit = try existing.ingest([revokedChat, revokedRemove])
+        #expect(fixture.receiver.rememberAccepted(inertCommit.filter { fixture.receiver.accepts($0) },
+                                                retainingHistory: try existing.snapshot().retainedEvents))
+        try converge(existing, late, policy: latePolicy, sourcePolicy: fixture.receiver)
+        let afterInert = try late.snapshot()
+        #expect(afterInert.events == initialLate.events)
+        #expect(afterInert.queue == [ownerTrack])
+        #expect(MeshRoomReplica(events: afterInert.events).logicalClock == 501)
+        #expect(!latePolicy.accepts(revokedChat))
+        #expect(!latePolicy.accepts(revokedRemove))
+
+        let lateID = lateInstallation.publicIdentity.nodeID.uuidString
+        let lateChat = try #require(latePolicy.sign(MeshRoomEvent(roomID: roomID,
+            version: MeshVersion(counter: 503, nodeID: lateID), kind: .chat, senderID: lateID, text: "Third device still edits")))
+        let lateCommit = try late.ingest([lateChat])
+        #expect(latePolicy.rememberAccepted(lateCommit, retainingHistory: try late.snapshot().retainedEvents))
+        do { try converge(late, existing, policy: fixture.receiver, sourcePolicy: latePolicy) }
+        catch {
+            Issue.record("First continued edit failed after the mixed-author retention boundary: \(error)")
+            return
+        }
+        let ownerChat = try fixture.localEvent(counter: 504, text: "Established actor continues after retention boundary")
+        let ownerCommit = try existing.ingest([ownerChat])
+        #expect(fixture.receiver.rememberAccepted(ownerCommit, retainingHistory: try existing.snapshot().retainedEvents))
+        do { try converge(existing, late, policy: latePolicy, sourcePolicy: fixture.receiver) }
+        catch {
+            Issue.record("Second continued edit failed after the mixed-author retention boundary: \(error)")
+            return
+        }
+
+        let finalExisting = try existing.snapshot()
+        let finalLate = try late.snapshot()
+        #expect(finalExisting.chatEvents.count == 500)
+        #expect(finalLate.chatEvents.count == 252)
+        #expect(finalExisting.events.contains(lateChat) && finalExisting.events.contains(ownerChat))
+        #expect(finalLate.events.contains(lateChat) && finalLate.events.contains(ownerChat))
+        #expect(Set(initialLate.chatEvents.map(\.id)).isSubset(of: Set(finalLate.chatEvents.map(\.id))))
+        #expect(Set(finalExisting.queue.map(\.id)) == Set([ownerTrack.id, offlineTrack.id]))
+        #expect(finalLate.queue == [ownerTrack])
+        #expect(finalLate.chatEvents.allSatisfy { $0.version.nodeID != offlineAuthorID })
+        #expect(MeshRoomReplica(events: finalLate.events).logicalClock == 504)
+        #expect(existing.save().count < AutomergeRoomStateSync.maximumDocumentBytes)
+        #expect(late.save().count < AutomergeRoomStateSync.maximumDocumentBytes)
+    }
+
     @Test func freshDeviceVerifiesOfflineCurrentAuthorWithoutPriorTLSGrant() throws {
         let fixture = try NetworkEventFixture()
         defer { fixture.cleanup() }
@@ -317,7 +444,7 @@ struct NetworkEventAuthorizationTests {
     }
 
     private func converge(_ source: AutomergeRoomStateSync, _ receiver: AutomergeRoomStateSync,
-                          policy: SecureRoomEventPolicy) throws {
+                          policy: SecureRoomEventPolicy, sourcePolicy: SecureRoomEventPolicy? = nil) throws {
         let sourceSession = source.makeSession()
         let receiverSession = receiver.makeSession()
         for _ in 0..<100 {
@@ -329,7 +456,11 @@ struct NetworkEventAuthorizationTests {
                 progressed = true
             }
             if let message = receiver.generateSyncMessage(for: receiverSession) {
-                try source.receiveSyncMessage(message, from: sourceSession)
+                let committed = try source.receiveSyncMessage(message, from: sourceSession)
+                if let sourcePolicy {
+                    #expect(sourcePolicy.rememberAccepted(committed.filter { sourcePolicy.accepts($0) },
+                                                          retainingHistory: try source.snapshot().retainedEvents))
+                }
                 progressed = true
             }
             if !progressed { return }

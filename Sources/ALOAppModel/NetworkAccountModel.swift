@@ -25,6 +25,8 @@ public final class NetworkAccountModel: ObservableObject {
     @Published public private(set) var identity: UserIdentity?
     @Published public private(set) var identityReady = false
     @Published public private(set) var networks = [NetworkManifest]()
+    @Published public private(set) var networkRecordDiagnostics = [NetworkRepository.RecordDiagnostic]()
+    @Published public private(set) var additionalNetworkRecordDiagnosticCount = 0
     @Published public private(set) var errorMessage: String?
     @Published public var displayName = ""
     @Published public var selectedNetworkID: String?
@@ -106,23 +108,39 @@ public final class NetworkAccountModel: ObservableObject {
     }
 
     public func refresh() {
-        guard identityReady, let identity else { networks = []; selectedNetworkID = nil; return }
+        guard identityReady, let identity else {
+            networks = []; selectedNetworkID = nil
+            networkRecordDiagnostics = []; additionalNetworkRecordDiagnosticCount = 0
+            return
+        }
         do {
-            let visible = try repository.networks(for: identity.publicIdentity)
+            let listing = try repository.listing(for: identity.publicIdentity)
+            let visible = listing.networks
+            networkRecordDiagnostics = listing.diagnostics
+            additionalNetworkRecordDiagnosticCount = listing.omittedDiagnosticCount
             var selectionError: Error?
             if let selectedID = selectedNetworkID.flatMap(UUID.init(uuidString:)),
                !visible.contains(where: { $0.id == selectedID }) {
-                do {
-                    let previous = try repository.trustedManifest(id: selectedID)
-                    if !previous.isMember(identity.publicIdentity) { selectionError = NetworkAuthorityError.notMember }
-                } catch { selectionError = error }
+                if let diagnostic = listing.diagnostics.first(where: { $0.networkID == selectedID }) {
+                    selectionError = diagnostic.reason == .quarantined
+                        ? NetworkAuthorityError.quarantined : NetworkAuthorityError.invalidStorage
+                } else {
+                    do {
+                        let previous = try repository.trustedManifest(id: selectedID)
+                        if !previous.isMember(identity.publicIdentity) { selectionError = NetworkAuthorityError.notMember }
+                    } catch { selectionError = error }
+                }
             }
             networks = visible
             if !networks.contains(where: { $0.id.uuidString == selectedNetworkID }) {
                 selectedNetworkID = networks.first?.id.uuidString
             }
-            errorMessage = selectionError.map(Self.describe)
-        } catch { networks = []; selectedNetworkID = nil; errorMessage = Self.describe(error) }
+            errorMessage = Self.describeListingDiagnostics(listing) ?? selectionError.map(Self.describe)
+        } catch {
+            networks = []; selectedNetworkID = nil
+            networkRecordDiagnostics = []; additionalNetworkRecordDiagnosticCount = 0
+            errorMessage = Self.describe(error)
+        }
     }
 
     @discardableResult
@@ -218,6 +236,18 @@ public final class NetworkAccountModel: ObservableObject {
         identity = nil
         networks = []
         selectedNetworkID = nil
+        networkRecordDiagnostics = []
+        additionalNetworkRecordDiagnosticCount = 0
+    }
+
+    private static func describeListingDiagnostics(_ listing: NetworkRepository.Listing) -> String? {
+        guard listing.unavailableRecordCount > 0 else { return nil }
+        let affected = listing.diagnostics.prefix(3).map {
+            "\($0.networkID.uuidString.lowercased()) (\($0.reason == .quarantined ? "conflicting policy" : "unreadable or invalid"))"
+        }.joined(separator: ", ")
+        let summary = listing.unavailableRecordCount == 1 ? "One saved network is unavailable."
+            : "\(listing.unavailableRecordCount) saved networks are unavailable."
+        return "\(summary) Verified networks remain available. Check unreadable policy files and their permissions. Conflicting signed policies require a new network and invitation from the owner. Affected records: \(affected)."
     }
 
     /// Device labels are informational. Bound an OS-provided name before signing rather than

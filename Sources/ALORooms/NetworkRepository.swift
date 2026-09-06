@@ -7,6 +7,21 @@ import ALOIdentity
 /// processes; each network, including its conflict evidence, is replaced atomically.
 public final class NetworkRepository: @unchecked Sendable {
     public static let storageNamespace = "networks-v1"
+    public static let maximumListingDiagnostics = 16
+
+    public struct RecordDiagnostic: Equatable, Sendable {
+        public enum Reason: Equatable, Sendable { case unreadableOrInvalid, quarantined }
+        public let networkID: UUID
+        public let reason: Reason
+    }
+
+    /// Diagnostics contain validated record IDs and fixed reasons, never untrusted file contents.
+    public struct Listing: Sendable {
+        public let networks: [NetworkManifest]
+        public let diagnostics: [RecordDiagnostic]
+        public let omittedDiagnosticCount: Int
+        public var unavailableRecordCount: Int { diagnostics.count + omittedDiagnosticCount }
+    }
     public let directoryURL: URL
     private let lock = NSLock()
     // Also fail closed in this instance if persisting conflict evidence fails.
@@ -91,20 +106,37 @@ public final class NetworkRepository: @unchecked Sendable {
 
     /// Revoked and quarantined networks never appear as usable networks.
     public func networks(for authenticatedIdentity: PublicUserIdentity) throws -> [NetworkManifest] {
+        try listing(for: authenticatedIdentity).networks
+    }
+
+    /// A failed individual record cannot hide independent verified networks. Directory-level
+    /// failures still throw, and direct trusted/active reads retain their strict failure behavior.
+    public func listing(for authenticatedIdentity: PublicUserIdentity) throws -> Listing {
         try withLock {
             let files = try FileManager.default.contentsOfDirectory(at: directoryURL,
                 includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
             var manifests = [NetworkManifest]()
-            for file in files where file.pathExtension == "json" {
+            var diagnostics = [RecordDiagnostic]()
+            var omittedDiagnosticCount = 0
+            func recordFailure(_ id: UUID, _ reason: RecordDiagnostic.Reason) {
+                if diagnostics.count < Self.maximumListingDiagnostics {
+                    diagnostics.append(RecordDiagnostic(networkID: id, reason: reason))
+                } else { omittedDiagnosticCount += 1 }
+            }
+            for file in files.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) where file.pathExtension == "json" {
                 let stem = file.deletingPathExtension().lastPathComponent
                 guard let id = UUID(uuidString: stem), filename(id: id) == file.lastPathComponent else { continue }
-                guard !observedConflicts.contains(id), let record = try readRecord(id: id), record.conflictingManifest == nil,
-                      record.manifest.isMember(authenticatedIdentity) else { continue }
-                manifests.append(record.manifest)
+                if observedConflicts.contains(id) { recordFailure(id, .quarantined); continue }
+                do {
+                    guard let record = try readRecord(id: id) else { continue }
+                    guard record.conflictingManifest == nil else { recordFailure(id, .quarantined); continue }
+                    if record.manifest.isMember(authenticatedIdentity) { manifests.append(record.manifest) }
+                } catch { recordFailure(id, .unreadableOrInvalid) }
             }
-            return manifests.sorted {
+            let networks = manifests.sorted {
                 $0.name == $1.name ? $0.id.uuidString < $1.id.uuidString : $0.name < $1.name
             }
+            return Listing(networks: networks, diagnostics: diagnostics, omittedDiagnosticCount: omittedDiagnosticCount)
         }
     }
 
@@ -223,7 +255,7 @@ public final class NetworkRepository: @unchecked Sendable {
     private static let maximumRecordBytes = NetworkManifest.maximumEncodedBytes * 2 + 4096
 
     private func readRecord(id: UUID) throws -> Record? {
-        let descriptor = open(recordURL(id: id).path, O_RDONLY | O_NOFOLLOW)
+        let descriptor = open(recordURL(id: id).path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard descriptor >= 0 else {
             if errno == ENOENT { return nil }
             throw NetworkAuthorityError.invalidStorage

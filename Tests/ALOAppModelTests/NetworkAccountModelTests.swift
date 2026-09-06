@@ -401,6 +401,39 @@ struct NetworkAccountModelTests {
         #expect(throws: NetworkAccountError.self) { try resumed.createNetwork(name: "Cannot bypass setup") }
     }
 
+    @Test func damagedNetworkRecordDoesNotHideHealthyNetworkAndShowsBoundedDiagnostics() throws {
+        let fixture = try AccountModelFixture()
+        defer { fixture.cleanup() }
+        try fixture.finishNewIdentity(name: "Owner")
+        let healthy = try fixture.model.createNetwork(name: "Healthy")
+        let damaged = try fixture.model.createNetwork(name: "Damaged")
+        let record = fixture.repository.directoryURL.appendingPathComponent(damaged.id.uuidString.lowercased() + ".json")
+        let original = try Data(contentsOf: record)
+        try Data("invalid fixture policy".utf8).write(to: record)
+        fixture.model.refresh()
+        #expect(fixture.model.networks == [healthy])
+        #expect(fixture.model.selectedNetwork?.id == healthy.id)
+        #expect(fixture.model.channels == [healthy.mainChannel])
+        #expect(fixture.model.room(channelID: healthy.mainChannel.id.uuidString) != nil)
+        #expect(fixture.model.room(channelID: damaged.mainChannel.id.uuidString) == nil)
+        #expect(fixture.model.networkRecordDiagnostics.map(\.networkID) == [damaged.id])
+        #expect(fixture.model.additionalNetworkRecordDiagnosticCount == 0)
+        let warning = try #require(fixture.model.errorMessage)
+        #expect(warning.contains(damaged.id.uuidString.lowercased()))
+        #expect(warning.contains("Verified networks remain available"))
+        #expect(warning.utf8.count < 1_024)
+        let resumed = fixture.anotherModel()
+        resumed.resume()
+        #expect(resumed.networks == [healthy] && resumed.errorMessage != nil)
+
+        // Repair only the disposable test record, retaining its originally verified signed bytes.
+        try original.write(to: record, options: .atomic)
+        fixture.model.refresh()
+        #expect(fixture.model.networks.count == 2)
+        #expect(fixture.model.networkRecordDiagnostics.isEmpty)
+        #expect(fixture.model.errorMessage == nil)
+    }
+
     @Test func conflictingSignedPolicyQuarantinesAccountChannelsUntilFreshStart() throws {
         let fixture = try AccountModelFixture()
         defer { fixture.cleanup() }

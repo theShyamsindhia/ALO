@@ -13,8 +13,12 @@ These reproductions do not prove every physical drift report has the same cause.
 `ALOTiming.ClockSynchronizer` uses **t1 client send, t2 host receive, t3 host send,
 t4 client receive**. Offset is the host midpoint minus the client midpoint; RTT is
 `(t4-t1) - (t3-t2)`. See [RFC 5905](https://www.rfc-editor.org/rfc/rfc5905).
-t2 is sampled before host work, t3 at output dequeue. New probes wait for pending
-outbound control; same-executor sends do not add another asynchronous hop.
+t2 is sampled before host work; t1 and t3 are stamped at their respective output
+dequeues. A receiver reserves one coalesced FIFO probe item even under sustained
+annotation traffic. It does not wait for the whole output queue to become idle,
+and later traffic cannot overtake it. Same-executor sends do not add another
+asynchronous hop. The 35-second busy-output regression must keep clock evidence
+fresh, renew its lease, and deliver every injected audio packet.
 
 Required boundaries:
 

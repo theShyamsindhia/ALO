@@ -127,6 +127,7 @@ public final class SecurePeerChannel: @unchecked Sendable {
     private let configuration: SecurePeerConfiguration
     private let pins: PeerPinStore
     private let queue: DispatchQueue
+    private let verificationQueue = DispatchQueue(label: "alo.secure-peer.verify", qos: .userInitiated)
     private let executorKey = DispatchSpecificKey<UInt8>()
     private var state: SecurePeerChannelState = .idle
     private var generation: UInt64 = 0
@@ -147,6 +148,12 @@ public final class SecurePeerChannel: @unchecked Sendable {
     private var deferredPayloadBytes = 0
     private var policyObserver: UUID?
     private var lastSentPolicyRevision: UInt64 = 0
+    private var frameWorkInFlight = false
+    private var policyValidationInFlight = false
+    private var policyDeadline: DispatchWorkItem?
+    private var policyWindowStarted: UInt64 = 0
+    private var policyFramesInWindow = 0
+    static let maximumPolicyFramesPerWindow = 8
 
     public init(connection: NWConnection, identity: InstallationIdentity, configuration: SecurePeerConfiguration,
                 pins: PeerPinStore, queue: DispatchQueue) {
@@ -261,6 +268,8 @@ public final class SecurePeerChannel: @unchecked Sendable {
     private func close(_ reason: SecurePeerChannelError) {
         guard !isTerminal else { return }
         generation += 1; deadline?.cancel(); deadline = nil
+        policyDeadline?.cancel(); policyDeadline = nil
+        frameWorkInFlight = false; policyValidationInFlight = false
         if let policyObserver { configuration.networkAuthorization?.policy.removeObserver(policyObserver) }
         policyObserver = nil
         connection.stateUpdateHandler = nil; connection.cancel()
@@ -300,11 +309,12 @@ public final class SecurePeerChannel: @unchecked Sendable {
     }
 
     private func receive(generation: UInt64) {
-        guard !isTerminal else { return }
+        guard !isTerminal, !frameWorkInFlight else { return }
         connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [weak self] bytes, _, complete, error in
             guard let self, self.generation == generation, !self.isTerminal else { return }
             if let bytes, !bytes.isEmpty {
                 self.receiveBuffer.append(bytes)
+                guard self.receiveBuffer.count <= Self.maximumQueuedBytes else { self.close(.queueFull); return }
                 do { try self.consumeFrames() }
                 catch SecureTransportError.unsupportedProtocol { self.close(.incompatibleVersion); return }
                 catch { self.close(.protocolViolation); return }
@@ -315,7 +325,7 @@ public final class SecurePeerChannel: @unchecked Sendable {
         }
     }
     private func consumeFrames() throws {
-        while receiveBuffer.count >= 4, !isTerminal {
+        while receiveBuffer.count >= 4, !isTerminal, !frameWorkInFlight {
             var reader = WireReader(data: receiveBuffer)
             let length = Int(try reader.integer(UInt32.self))
             let maximum = state == .authenticated || (remoteProofAccepted && remoteAck) ? Self.maximumFrameBytes
@@ -324,8 +334,63 @@ public final class SecurePeerChannel: @unchecked Sendable {
             guard receiveBuffer.count >= 4 + length else { return }
             let body = Data(receiveBuffer.dropFirst(4).prefix(length))
             receiveBuffer.removeFirst(4 + length)
-            let frame = try JSONDecoder().decode(Frame.self, from: body)
-            try handle(frame)
+            if configuration.networkAuthorization != nil {
+                // Manifest decoding includes ECDSA verification. Do not put
+                // peer-controlled cryptographic work on the shared media queue.
+                frameWorkInFlight = true
+                let token = generation
+                let callbackQueue = queue
+                verificationQueue.async { [weak self] in
+                    let result = Result { try JSONDecoder().decode(Frame.self, from: body) }
+                    callbackQueue.async { [weak self] in
+                        guard let self, self.generation == token, !self.isTerminal else { return }
+                        do {
+                            try self.handle(result.get())
+                            if !self.policyValidationInFlight { self.finishFrameWork(generation: token) }
+                        } catch { self.failFrame(error) }
+                    }
+                }
+            } else { try handle(JSONDecoder().decode(Frame.self, from: body)) }
+        }
+    }
+
+    private func failFrame(_ error: Error) {
+        if (error as? SecureTransportError) == .unsupportedProtocol { close(.incompatibleVersion) }
+        else { close(.protocolViolation) }
+    }
+
+    private func finishFrameWork(generation: UInt64) {
+        guard self.generation == generation, !isTerminal else { return }
+        frameWorkInFlight = false
+        do { try consumeFrames() }
+        catch { failFrame(error); return }
+        receive(generation: generation)
+    }
+
+    private func verifyPolicy(_ manifest: NetworkManifest, authorization: NetworkChannelAuthorization,
+                              preflight: @escaping () throws -> Void = {},
+                              completion: @escaping (SecurePeerChannel) throws -> Void) {
+        policyValidationInFlight = true
+        let token = generation
+        let callbackQueue = queue
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self, self.generation == token, self.policyValidationInFlight, !self.isTerminal else { return }
+            self.close(.timedOut)
+        }
+        policyDeadline = timeout
+        queue.asyncAfter(deadline: .now() + configuration.timing.authenticationTimeout, execute: timeout)
+        verificationQueue.async { [weak self] in
+            let finish: (Result<Void, Error>) -> Void = { [weak self] result in
+                callbackQueue.async { [weak self] in
+                    guard let self, self.generation == token, !self.isTerminal else { return }
+                    self.policyDeadline?.cancel(); self.policyDeadline = nil
+                    self.policyValidationInFlight = false
+                    do { try result.get(); try completion(self); self.finishFrameWork(generation: token) }
+                    catch { self.close(.admissionFailed) }
+                }
+            }
+            do { try preflight(); authorization.policy.receiveAsynchronously(manifest, completion: finish) }
+            catch { finish(.failure(error)) }
         }
     }
 
@@ -336,8 +401,13 @@ public final class SecurePeerChannel: @unchecked Sendable {
                   let policy = frame.policy, let authorization = configuration.networkAuthorization else {
                 throw SecureTransportError.invalidState
             }
-            try authorization.policy.receive(policy)
-            networkPolicyChanged()
+            let now = DispatchTime.now().uptimeNanoseconds
+            if policyWindowStarted == 0 || now &- policyWindowStarted >= 10_000_000_000 {
+                policyWindowStarted = now; policyFramesInWindow = 0
+            }
+            guard policyFramesInWindow < Self.maximumPolicyFramesPerWindow else { throw SecureTransportError.capacity }
+            policyFramesInWindow += 1
+            verifyPolicy(policy, authorization: authorization) { $0.networkPolicyChanged() }
         case .hello:
             guard state == .authenticating, remoteHello == nil, let hello = frame.hello,
                   frame.proof == nil, frame.payload == nil, frame.policy == nil, let peer = tlsPeer,
@@ -347,34 +417,40 @@ public final class SecurePeerChannel: @unchecked Sendable {
                   (hello.direction == 1 || hello.direction == 2) else { throw SecureTransportError.wrongContext }
             _ = try hello.offer()
             _ = try NegotiatedProtocol.negotiate(initiator: configuration.offer, responder: hello.offer(), policy: .secureV2)
-            if let authorization = configuration.networkAuthorization {
-                guard let claim = hello.networkClaim else { throw SecureTransportError.invalidCredentials }
-                try authorization.validate(claim, installationKeyHash: peer.publicKeyHash)
-            } else if hello.networkClaim != nil { throw SecureTransportError.unsupportedProtocol }
             switch configuration.direction {
             case .initiator(let role):
                 guard hello.channelRole == role, hello.connectionID == localHello?.connectionID else { throw SecureTransportError.wrongContext }
             case .responder(let roles):
                 guard roles.contains(hello.channelRole) else { throw SecureTransportError.wrongContext }
-                let response = try makeHello(connectionID: hello.connectionID, role: hello.channelRole)
-                localHello = response; enqueue(Frame(kind: .hello, hello: response))
             }
-            remoteHello = hello
-            try beginAdmission()
+            if let authorization = configuration.networkAuthorization {
+                guard let claim = hello.networkClaim, claim.channelID == configuration.roomID else {
+                    throw SecureTransportError.invalidCredentials
+                }
+                verifyPolicy(claim.manifest, authorization: authorization, preflight: {
+                    try claim.device.verify(expectedInstallationPublicKeyHash: peer.publicKeyHash)
+                }) { channel in
+                    try authorization.validateCurrentAccess(claim.device.userIdentity)
+                    try channel.finishHello(hello)
+                }
+            } else {
+                guard hello.networkClaim == nil else { throw SecureTransportError.unsupportedProtocol }
+                try finishHello(hello)
+            }
         case .proof:
             guard state == .authenticating, !remoteProofAccepted, frame.hello == nil, frame.payload == nil, frame.policy == nil,
                   let proof = frame.proof, proof.count == 32, let admissionSession else { throw SecureTransportError.invalidState }
+            if configuration.networkAuthorization != nil {
+                verifyAdmissionProof(proof, session: admissionSession)
+                return
+            }
             do {
                 switch configuration.admission {
                 case .privateRoom(let secret): try admissionSession.admitPrivatePeer(proof: proof, roomSecret: secret)
                 case .publicRoom: try admissionSession.admitPublicPeer(proof: proof)
                 }
             } catch { close(.admissionFailed); return }
-            remoteProofAccepted = true
-            enqueue(Frame(kind: .accepted)) { [weak self] result in
-                guard let self, !self.isTerminal else { return }
-                if case .success = result { self.localAckSent = true; self.finishAdmissionIfReady() }
-            }
+            acknowledgeProof()
         case .accepted:
             guard state == .authenticating, remoteProofAccepted, !remoteAck,
                   frame.hello == nil, frame.proof == nil, frame.payload == nil, frame.policy == nil else { throw SecureTransportError.invalidState }
@@ -395,6 +471,55 @@ public final class SecurePeerChannel: @unchecked Sendable {
                 deferredPayloads.append(payload); deferredPayloadBytes += payload.count
             }
         }
+    }
+
+    /// The frame remains in flight and the session is removed from channel
+    /// state while its mutable admission/pin operation runs on one worker.
+    /// Cancellation may finish a valid pin write, but can never publish an ACK
+    /// or credentials for the closed channel.
+    private func verifyAdmissionProof(_ proof: Data, session: TLSAdmissionSession) {
+        admissionSession = nil
+        policyValidationInFlight = true
+        let token = generation
+        let admission = configuration.admission
+        let queued = SecureVerificationWorkPool.submit(completionQueue: queue, work: {
+            Result {
+                switch admission {
+                case .privateRoom(let secret): try session.admitPrivatePeer(proof: proof, roomSecret: secret)
+                case .publicRoom: try session.admitPublicPeer(proof: proof)
+                }
+            }
+        }, completion: { [weak self] result in
+            guard let self, self.generation == token, self.state == .authenticating, !self.isTerminal else { return }
+            self.policyValidationInFlight = false
+            do {
+                try result.get()
+                guard self.hasCurrentAuthorization else { throw SecureTransportError.invalidCredentials }
+                self.admissionSession = session
+                self.acknowledgeProof()
+                self.finishFrameWork(generation: token)
+            } catch { self.close(.admissionFailed) }
+        })
+        if !queued { close(.queueFull) }
+    }
+
+    private func acknowledgeProof() {
+        remoteProofAccepted = true
+        let token = generation
+        enqueue(Frame(kind: .accepted)) { [weak self] result in
+            guard let self, self.generation == token, !self.isTerminal else { return }
+            if case .success = result { self.localAckSent = true; self.finishAdmissionIfReady() }
+        }
+    }
+
+    private func finishHello(_ hello: Hello) throws {
+        guard state == .authenticating, remoteHello == nil else { throw SecureTransportError.invalidState }
+        if case .responder = configuration.direction {
+            let response = try makeHello(connectionID: hello.connectionID, role: hello.channelRole)
+            localHello = response; enqueue(Frame(kind: .hello, hello: response))
+        }
+        remoteHello = hello
+        try beginAdmission()
     }
 
     private func beginAdmission() throws {

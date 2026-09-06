@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import Network
 import Testing
 import ALOIdentity
@@ -8,6 +9,94 @@ import ALORooms
 /// Actual loopback TLS and generation-4 claim exchange. This does not establish physical audio accuracy.
 @Suite("Network-authorized live TLS channels", .serialized)
 struct NetworkSecureChannelTests {
+    @Test(arguments: BlockingPeerPinStore.Phase.allCases)
+    fileprivate func blockedPinStoreDoesNotBlockSharedExecutorAndAdmissionResumes(phase: BlockingPeerPinStore.Phase) async throws {
+        let fixture = try NetworkTLSFixture()
+        let pins = BlockingPeerPinStore(phase: phase)
+        let pair = try fixture.pair(serverPins: pins)
+        defer { pins.release(); pair.cancel() }
+        let admission = Task { try await pair.run() }
+        try await networkTLSEventually { pins.didEnter }
+        #expect(pair.sharedExecutorIsResponsive(), "Pin lookup/record must not park the shared media/control executor")
+        pins.release()
+        guard case .delivered = try await admission.value else { Issue.record("Admission failed after pin storage recovered"); return }
+        #expect(await pair.snapshot().payloadsDelivered == 1)
+    }
+
+    @Test(arguments: BlockingPeerPinStore.Phase.allCases)
+    fileprivate func cancelledPinStoreWorkCannotIssueLateAdmissionOrCredentials(phase: BlockingPeerPinStore.Phase) async throws {
+        let fixture = try NetworkTLSFixture()
+        let pins = BlockingPeerPinStore(phase: phase)
+        let pair = try fixture.pair(serverPins: pins)
+        defer { pins.release(); pair.cancel() }
+        let admission = Task { try await pair.run() }
+        try await networkTLSEventually { pins.didEnter }
+        #expect(pair.sharedExecutorIsResponsive())
+        pair.cancel()
+        guard case .failed(.cancelled) = try await admission.value else { Issue.record("Pin work prevented cancellation"); return }
+        pins.release()
+        try await networkTLSEventually { pins.didFinish }
+        let state = await pair.snapshot()
+        #expect(state.clientPeer == nil && state.serverPeer == nil)
+        #expect(state.clientCredentials == nil && state.serverCredentials == nil)
+        #expect(state.payloadsDelivered == 0)
+    }
+
+    @Test func blockedChangedPolicyPersistenceDoesNotBlockSharedChannelExecutor() async throws {
+        let fixture = try NetworkTLSFixture()
+        let pair = try fixture.pair(role: .mediaControl)
+        defer { pair.cancel() }
+        guard case .delivered = try await pair.run() else { Issue.record("Initial TLS admission failed"); return }
+        let descriptor = open(pair.clientRepository.directoryURL.appendingPathComponent(".repository.lock").path, O_RDWR)
+        try #require(descriptor >= 0)
+        defer { flock(descriptor, LOCK_UN); close(descriptor) }
+        #expect(flock(descriptor, LOCK_EX) == 0)
+        let updated = try fixture.manifest.renamed(to: "Updated while client disk is blocked", signedBy: fixture.owner)
+        try pair.serverAuthorization.policy.receive(updated)
+        try await networkTLSEventually { pair.clientAuthorization.policy.pendingPolicyWorkCount == 1 }
+        #expect(pair.sharedExecutorIsResponsive(), "A peer policy's flock must not stop media/control executor work")
+        #expect(try pair.clientAuthorization.policy.snapshot().revision == fixture.manifest.revision)
+        #expect(flock(descriptor, LOCK_UN) == 0)
+        try await networkTLSEventually { (try? pair.clientAuthorization.policy.snapshot().revision) == updated.revision }
+        #expect(await pair.sendAfterRevocation())
+        try await networkTLSEventually { await pair.snapshot().payloadsDelivered >= 2 }
+        let state = await pair.snapshot()
+        #expect(state.clientFailure == nil && state.serverFailure == nil)
+    }
+
+    @Test func blockedFirstHelloRemainsCancellableAndCannotAdmitAfterShutdown() async throws {
+        let fixture = try NetworkTLSFixture()
+        let updated = try fixture.manifest.renamed(to: "Newer hello policy", signedBy: fixture.owner)
+        let pair = try fixture.pair(clientManifest: updated)
+        defer { pair.cancel() }
+        let descriptor = open(pair.serverRepository.directoryURL.appendingPathComponent(".repository.lock").path, O_RDWR)
+        try #require(descriptor >= 0)
+        defer { flock(descriptor, LOCK_UN); close(descriptor) }
+        #expect(flock(descriptor, LOCK_EX) == 0)
+        let admission = Task { try await pair.run() }
+        try await networkTLSEventually { pair.serverAuthorization.policy.pendingPolicyWorkCount == 1 }
+        #expect(pair.sharedExecutorIsResponsive(), "An unadmitted hello must not park the media/control executor")
+        pair.cancel()
+        guard case .failed(.cancelled) = try await admission.value else { Issue.record("Blocked admission ignored cancellation"); return }
+        #expect(flock(descriptor, LOCK_UN) == 0)
+        try await networkTLSEventually { pair.serverAuthorization.policy.pendingPolicyWorkCount == 0 }
+        let state = await pair.snapshot()
+        #expect(state.clientPeer == nil && state.serverPeer == nil)
+        #expect(state.clientCredentials == nil && state.serverCredentials == nil)
+        #expect(state.payloadsDelivered == 0)
+    }
+
+    @Test func repeatedPolicyFramesAreRateLimitedBeforeUnboundedWorkAccumulates() async throws {
+        let fixture = try NetworkTLSFixture()
+        let pair = try fixture.pair()
+        defer { pair.cancel() }
+        guard case .delivered = try await pair.run() else { Issue.record("Initial TLS admission failed"); return }
+        try await pair.sendPolicyFrames(fixture.manifest, count: SecurePeerChannel.maximumPolicyFramesPerWindow + 1)
+        try await networkTLSEventually { await pair.snapshot().clientFailure != nil }
+        #expect(await pair.snapshot().clientFailure == .protocolViolation)
+        #expect(pair.clientAuthorization.policy.pendingPolicyWorkCount <= 1)
+    }
+
     @Test(arguments: ReliableChannelRole.allCases)
     func membersExchangePayloadsAcrossEveryCurrentReliableRole(role: ReliableChannelRole) async throws {
         let fixture = try NetworkTLSFixture()
@@ -146,11 +235,11 @@ private final class NetworkTLSFixture {
 
     func pair(clientRoot: UserIdentity? = nil, clientManifest: NetworkManifest? = nil,
               serverManifest: NetworkManifest? = nil, channelID: UUID? = nil,
-              role: ReliableChannelRole = .roomControl) throws -> NetworkTLSLoopbackPair {
+              role: ReliableChannelRole = .roomControl, serverPins: PeerPinStore? = nil) throws -> NetworkTLSLoopbackPair {
         try NetworkTLSLoopbackPair(clientRoot: clientRoot ?? member, serverRoot: owner,
             clientManifest: clientManifest ?? manifest, serverManifest: serverManifest ?? manifest,
             channelID: channelID ?? manifest.mainChannel.id, role: role,
-            directory: directory.appendingPathComponent(UUID().uuidString))
+            directory: directory.appendingPathComponent(UUID().uuidString), serverPins: serverPins)
     }
 }
 
@@ -170,6 +259,7 @@ private final class NetworkTLSLoopbackPair: @unchecked Sendable {
     let clientAuthorization: NetworkChannelAuthorization
     let serverAuthorization: NetworkChannelAuthorization
     let clientRepository: NetworkRepository
+    let serverRepository: NetworkRepository
     let payload = Data("Network member payload".utf8)
     private let queue = DispatchQueue(label: "alo.tests.network-tls")
     private let listener: NWListener
@@ -177,18 +267,21 @@ private final class NetworkTLSLoopbackPair: @unchecked Sendable {
     private let clientConfiguration: SecurePeerConfiguration
     private let serverConfiguration: SecurePeerConfiguration
     private let clientPins = MemoryPeerPinStore()
-    private let serverPins = MemoryPeerPinStore()
+    private let serverPins: PeerPinStore
     private var client: SecurePeerChannel?
     private var server: SecurePeerChannel?
+    private var serverConnection: NWConnection?
     private var state = Snapshot()
     private var continuation: CheckedContinuation<Outcome, Error>?
 
     init(clientRoot: UserIdentity, serverRoot: UserIdentity, clientManifest: NetworkManifest,
-         serverManifest: NetworkManifest, channelID: UUID, role: ReliableChannelRole, directory: URL) throws {
+         serverManifest: NetworkManifest, channelID: UUID, role: ReliableChannelRole, directory: URL,
+         serverPins: PeerPinStore? = nil) throws {
+        self.serverPins = serverPins ?? MemoryPeerPinStore()
         clientIdentity = try .ephemeral()
         serverIdentity = try .ephemeral()
         clientRepository = NetworkRepository(directoryURL: directory.appendingPathComponent("client"))
-        let serverRepository = NetworkRepository(directoryURL: directory.appendingPathComponent("server"))
+        serverRepository = NetworkRepository(directoryURL: directory.appendingPathComponent("server"))
         try clientRepository.accept(clientManifest, for: clientRoot.publicIdentity)
         try serverRepository.accept(serverManifest, for: serverRoot.publicIdentity)
         clientAuthorization = try NetworkChannelAuthorization(
@@ -208,7 +301,7 @@ private final class NetworkTLSLoopbackPair: @unchecked Sendable {
         clientParameters = try SecureNetworkParameters.tcp(identity: clientIdentity, expectedPeerID: serverIdentity.publicIdentity.nodeID,
             pins: clientPins, firstContact: .explicitRoomJoin, verificationQueue: queue)
         let serverParameters = try SecureNetworkParameters.tcp(identity: serverIdentity, expectedPeerID: clientIdentity.publicIdentity.nodeID,
-            pins: serverPins, firstContact: .explicitRoomJoin, verificationQueue: queue)
+            pins: self.serverPins, firstContact: .explicitRoomJoin, verificationQueue: queue)
         listener = try NWListener(using: serverParameters, on: .any)
     }
 
@@ -218,6 +311,7 @@ private final class NetworkTLSLoopbackPair: @unchecked Sendable {
                 self.continuation = continuation
                 self.listener.newConnectionHandler = { [weak self] connection in
                     guard let self, self.server == nil else { connection.cancel(); return }
+                    self.serverConnection = connection
                     let channel = SecurePeerChannel(connection: connection, identity: self.serverIdentity,
                         configuration: self.serverConfiguration, pins: self.serverPins, queue: self.queue)
                     self.server = channel
@@ -271,6 +365,30 @@ private final class NetworkTLSLoopbackPair: @unchecked Sendable {
         await withCheckedContinuation { continuation in queue.async { continuation.resume(returning: self.state) } }
     }
 
+    func sharedExecutorIsResponsive() -> Bool {
+        let finished = DispatchSemaphore(value: 0)
+        queue.async { finished.signal() }
+        return finished.wait(timeout: .now() + 0.5) == .success
+    }
+
+    func sendPolicyFrames(_ policy: NetworkManifest, count: Int) async throws {
+        struct PolicyFrame: Encodable { let kind = "networkPolicy"; let policy: NetworkManifest }
+        let body = try JSONEncoder().encode(PolicyFrame(policy: policy))
+        var frame = WireBytes(); frame.append(UInt32(body.count)); frame.append(body)
+        let bytes = (0..<count).reduce(into: Data()) { bytes, _ in bytes.append(frame.data) }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            queue.async {
+                guard let connection = self.serverConnection else {
+                    continuation.resume(throwing: SecurePeerChannelError.notAuthenticated); return
+                }
+                connection.send(content: bytes, completion: .contentProcessed { error in
+                    if let error { continuation.resume(throwing: error) }
+                    else { continuation.resume() }
+                })
+            }
+        }
+    }
+
     func sendAfterRevocation() async -> Bool {
         await withCheckedContinuation { continuation in
             queue.async {
@@ -296,7 +414,40 @@ private final class NetworkTLSLoopbackPair: @unchecked Sendable {
         continuation.resume(returning: result)
     }
 
-    func cancel() { queue.async { self.listener.cancel(); self.client?.cancel(); self.server?.cancel() } }
+    func cancel() {
+        queue.async {
+            self.listener.cancel(); self.client?.cancel(); self.server?.cancel()
+            self.finish(.failed(.cancelled))
+        }
+    }
+}
+
+/// No Keychain operations: gates one memory-backed pin-store call to reproduce
+/// slow storage deterministically while the real loopback TLS channel runs.
+private final class BlockingPeerPinStore: PeerPinStore, @unchecked Sendable {
+    enum Phase: CaseIterable, Sendable { case lookup, record }
+    private let phase: Phase
+    private let memory = MemoryPeerPinStore()
+    private let gate = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var entered = false
+    private var finished = false
+    init(phase: Phase) { self.phase = phase }
+    var didEnter: Bool { lock.lock(); defer { lock.unlock() }; return entered }
+    var didFinish: Bool { lock.lock(); defer { lock.unlock() }; return finished }
+    func release() { gate.signal() }
+    private func pause(_ operation: Phase) throws {
+        lock.lock()
+        let shouldPause = operation == phase && !entered
+        if shouldPause { entered = true }
+        lock.unlock()
+        guard shouldPause else { return }
+        let result = gate.wait(timeout: .now() + 5)
+        lock.lock(); finished = true; lock.unlock()
+        guard result == .success else { throw SecurePeerChannelError.timedOut }
+    }
+    func pin(for nodeID: UUID) throws -> Data? { try pause(.lookup); return memory.pin(for: nodeID) }
+    func recordAfterAdmission(_ peer: PeerPublicIdentity) throws { try pause(.record); try memory.recordAfterAdmission(peer) }
 }
 
 private func networkTLSEventually(_ condition: () async -> Bool) async throws {

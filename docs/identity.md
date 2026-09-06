@@ -12,11 +12,13 @@ canonicalize their payload and include every field affecting authorization. For 
 use `alo.network.manifest.v1`.
 
 A `DeviceIdentityBinding` signs its schema version, complete public user identity, binding UUID,
-device name, positive authorization generation, and **all 32 bytes** of the installation TLS SPKI
+device name, a positive reserved generation value, and **all 32 bytes** of the installation TLS SPKI
 hash. `verify(expectedInstallationPublicKeyHash:)` must receive the hash from the authenticated TLS
-connection. Possession of a signed binding alone does not authenticate a connection. Network policy
-must separately enforce membership, accepted generations, and revocation; cryptographic validity
-does not establish that a binding or manifest is current.
+connection. Possession of a signed binding alone does not authenticate a connection. Current app
+callers emit binding generation `1`; no generation floor or per-device revocation is enforced.
+Network membership and revocation apply to the whole user root and therefore all its devices.
+Adding per-device revocation would require corresponding owner-signed policy fields and a wire
+change. Cryptographic validity alone does not establish that a manifest is current.
 
 Onboarding explicitly calls `UserIdentityStore.loadOrCreateForOnboarding()` or
 `restoreForOnboarding(from:)`. Constructing a store performs no I/O. Keychain storage uses a distinct,
