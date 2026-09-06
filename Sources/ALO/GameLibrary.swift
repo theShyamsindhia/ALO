@@ -224,7 +224,7 @@ struct GameLibraryView: View {
                 }
                 .padding(3)
                 .background(.white.opacity(0.035), in: Capsule())
-                .overlay(Capsule().strokeBorder(.white.opacity(0.07), lineWidth: 0.7))
+                .overlay(Capsule().strokeBorder(.white.opacity(0.07), lineWidth: 0.7).allowsHitTesting(false))
                 Spacer()
                 Button { store.refresh() } label: {
                     Image(systemName: "arrow.clockwise")
@@ -272,6 +272,8 @@ struct GameLibraryView: View {
         .task { store.refresh() }
     }
 
+    // Decorative layers must not intercept buttons, including in adjacent grid cells.
+    // Clipping the artwork alone does not constrain its pointer hit area.
     private var stickFightCard: some View {
         VStack(alignment: .leading, spacing: 0) {
             ZStack(alignment: .bottomLeading) {
@@ -283,7 +285,7 @@ struct GameLibraryView: View {
                         .foregroundStyle(.white.opacity(0.7))
                     Text("STICK FIGHT").font(.system(size: 30, weight: .black, design: .rounded)).italic()
                 }.padding(16)
-            }.frame(height: 176).clipped()
+            }.frame(height: 176).clipped().allowsHitTesting(false)
             VStack(alignment: .leading, spacing: 10) {
                 Text("Tiny fighters. Big trouble.")
                     .font(.system(size: 12, weight: .semibold))
@@ -306,7 +308,7 @@ struct GameLibraryView: View {
         }
         .background(Color.white.opacity(0.035))
         .clipShape(RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.white.opacity(0.09), lineWidth: 0.7))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.white.opacity(0.09), lineWidth: 0.7).allowsHitTesting(false))
     }
 
     private var breachCard: some View {
@@ -320,7 +322,7 @@ struct GameLibraryView: View {
                     Text("BREACH").font(.system(size: 28, weight: .black)).tracking(3)
                     Text("Foundry · 2v2 demolition").font(.caption).foregroundStyle(.secondary)
                 }.padding(16)
-            }.frame(height: 138)
+            }.frame(height: 138).clipped().allowsHitTesting(false)
             HStack {
                 Button { BreachWindowController.shared.show(session: breach) } label: { Label("Play", systemImage: "play.fill") }
                     .buttonStyle(.borderedProminent)
@@ -341,7 +343,7 @@ struct GameLibraryView: View {
             Spacer().frame(height: 4)
         }.background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 16))
             .clipShape(RoundedRectangle(cornerRadius: 16))
-            .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.white.opacity(0.1)))
+            .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.white.opacity(0.1)).allowsHitTesting(false))
     }
 
     private var liveArenas: some View {
@@ -381,7 +383,7 @@ struct GameLibraryView: View {
             }
         }.padding(12)
             .background(accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
-            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(accent.opacity(0.22), lineWidth: 0.8))
+            .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(accent.opacity(0.22), lineWidth: 0.8).allowsHitTesting(false))
     }
 
     private func tab(_ title: String, systemImage: String, selected: Bool, action: @escaping () -> Void) -> some View {
@@ -406,9 +408,9 @@ struct GameLibraryView: View {
                 } else {
                     coverPlaceholder(game.id).frame(width: geometry.size.width, height: geometry.size.height)
                 }
-            }
+            }.allowsHitTesting(false)
             LinearGradient(colors: [.black.opacity(0.04), .black.opacity(0.2), .black.opacity(0.94)],
-                           startPoint: .top, endPoint: .bottom)
+                           startPoint: .top, endPoint: .bottom).allowsHitTesting(false)
             VStack(alignment: .leading, spacing: 0) {
                 HStack(alignment: .top) {
                     gameStatusPill(game: game, installed: installed, update: update, state: state)
@@ -460,7 +462,7 @@ struct GameLibraryView: View {
         .frame(height: 205)
         .background(Color.white.opacity(0.035))
         .clipShape(RoundedRectangle(cornerRadius: 15))
-        .overlay(RoundedRectangle(cornerRadius: 15).strokeBorder(Color.white.opacity(0.11), lineWidth: 0.8))
+        .overlay(RoundedRectangle(cornerRadius: 15).strokeBorder(Color.white.opacity(0.11), lineWidth: 0.8).allowsHitTesting(false))
         .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
     }
 

@@ -5,6 +5,23 @@ import Testing
 @testable import ALOCore
 
 struct GamePackTests {
+    @Test("Live catalog games download, verify, install and reload", .enabled(if: ProcessInfo.processInfo.environment["ALO_LIVE_GAME_DOWNLOAD_TEST"] == "1"))
+    @MainActor func liveDownloads() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = GameLibraryStore(directory: directory)
+        store.refresh()
+        while store.refreshing { try await Task.sleep(for: .milliseconds(50)) }
+        #expect(store.catalogNotice.isEmpty, "\(store.catalogNotice)")
+        for game in store.games {
+            store.download(game)
+            while store.states[game.id]?.busy == true { try await Task.sleep(for: .milliseconds(50)) }
+            #expect(store.installed[game.id] != nil, "\(game.id): \(String(describing: store.states[game.id]))")
+        }
+        let reloaded = GameLibraryStore(directory: directory)
+        #expect(reloaded.installed.count == store.games.count)
+    }
+
     private func fixture(version: Int = 1, engine: String = "rift-arena-v1", platform: String? = nil) throws -> (GamePackDescriptor, Data) {
         let pack = GamePackContent(id: "rift-arena", engine: engine, version: version, arenaName: "The Hollow", subtitle: "Play together", accentHex: "A2ADBE", platformImageBase64: platform)
         let data = try JSONEncoder().encode(pack)
