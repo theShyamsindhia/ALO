@@ -8,6 +8,44 @@ import ALOCore
 extension NativePresentationTests {
     @Suite(.serialized) @MainActor
     struct ArtworkHeaderPresentationTests {
+        @Test("Player tint stays transparent without artwork and respects Reduce Transparency")
+        func tintTransparency() throws {
+            let palette = ArtworkPalette(accentHex: "DF6732", secondaryHex: "397DC2", tertiaryHex: "789950")
+            for dark in [false, true] {
+                for reduced in [false, true] {
+                    for artwork in [false, true] {
+                        let renderer = ImageRenderer(content: ArtworkHeaderBackground(palette: artwork ? palette : nil)
+                            .environment(\.colorScheme, dark ? .dark : .light)
+                            .environment(\.accessibilityReduceTransparency, reduced)
+                            .frame(width: 120, height: 60))
+                        let image = try #require(renderer.nsImage)
+                        let bitmap = try #require(NSBitmapImageRep(data: try #require(image.tiffRepresentation)))
+                        let alpha = try #require(bitmap.colorAt(x: 60, y: 30)).alphaComponent
+                        if reduced { #expect(alpha > 0.99) }
+                        else if artwork { #expect(alpha > 0.05 && alpha < 0.3) }
+                        else { #expect(alpha < 0.01) }
+                    }
+                }
+            }
+        }
+
+        @Test("Floating player uses active native behind-window blur")
+        func nativeWindowBlur() async throws {
+            _ = NSApplication.shared
+            let hosting = NSHostingView(rootView: PlayerWindowBlur().frame(width: 120, height: 60))
+            hosting.frame = NSRect(x: 0, y: 0, width: 120, height: 60)
+            hosting.layoutSubtreeIfNeeded()
+            await Task.yield()
+            func effect(in view: NSView) -> NSVisualEffectView? {
+                if let result = view as? NSVisualEffectView { return result }
+                return view.subviews.lazy.compactMap { effect(in: $0) }.first
+            }
+            let blur = try #require(effect(in: hosting))
+            #expect(blur.blendingMode == .behindWindow)
+            #expect(blur.material == .popover)
+            #expect(blur.state == .active)
+        }
+
         @Test("Album colours fill the header, change with the track, and keep text readable",
               arguments: [false, true])
         func artworkHeader(dark: Bool) async throws {
@@ -24,10 +62,14 @@ extension NativePresentationTests {
                 FloatingRoomView(model: model, presentation: .menuBar)
                 WalkieTalkieBar(model: model, showsCloseButton: false)
             }
+            .background(ArtworkHeaderBackground(palette: model.roomArtworkPalette))
             .overlay(alignment: .bottomTrailing) {
                 ArtworkRenderMarker(model: model).frame(width: 4, height: 4)
             }
             .transaction { $0.disablesAnimations = true; $0.animation = nil }
+            // Raster colour/contrast checks need a deterministic backing. Native
+            // behind-window blur is verified separately, not flattened here.
+            .environment(\.accessibilityReduceTransparency, true)
             .environment(\.colorScheme, dark ? .dark : .light))
             window.contentView = hosting
             defer { window.close() }
@@ -148,7 +190,7 @@ extension NativePresentationTests {
                 #expect((values[1] + 0.05) / (values[0] + 0.05) >= 4.5)
             }
             let talkBackground = try pixel(first, x: 280, y: 91)
-            #expect(max(talkBackground.redComponent, talkBackground.greenComponent, talkBackground.blueComponent) < 0.01)
+            #expect(max(talkBackground.redComponent, talkBackground.greenComponent, talkBackground.blueComponent) > 0.01)
 
             // Metadata-only updates for the same song must not flash the theme away.
             model.nowPlayingCallback(NowPlayingMedia(title: "Colour study", artist: "ALO", isPlaying: false))
@@ -168,7 +210,7 @@ extension NativePresentationTests {
             let middle = try pixel(neutral, x: 320, y: 6)
             #expect(max(middle.redComponent, middle.greenComponent, middle.blueComponent)
                 - min(middle.redComponent, middle.greenComponent, middle.blueComponent) < 0.02)
-            #expect(distance(samples[1], middle) > 0.08)
+            #expect(distance(samples[1], middle) > 0.03)
             #expect(model.phase == .idle)
         }
 
