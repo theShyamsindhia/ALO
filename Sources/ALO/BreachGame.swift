@@ -2,24 +2,26 @@ import AppKit
 import SwiftUI
 import SceneKit
 import ALOCore
+import Combine
 
 enum BreachControl: String, CaseIterable {
-    case forward = "Forward", backward = "Backward", left = "Left", right = "Right", reload = "Reload"
-    var defaultKey: UInt16 { switch self { case .forward: 13; case .backward: 1; case .left: 0; case .right: 2; case .reload: 15 } }
-    var defaultLabel: String { switch self { case .forward: "W"; case .backward: "S"; case .left: "A"; case .right: "D"; case .reload: "R" } }
+    case forward = "Forward", backward = "Backward", left = "Left", right = "Right", reload = "Reload", interact = "Interact"
+    var defaultKey: UInt16 { switch self { case .forward: 13; case .backward: 1; case .left: 0; case .right: 2; case .reload: 15; case .interact: 14 } }
+    var defaultLabel: String { switch self { case .forward: "W"; case .backward: "S"; case .left: "A"; case .right: "D"; case .reload: "R"; case .interact: "E" } }
 }
 
 @MainActor
 final class BreachController: ObservableObject {
-    @Published var game = BreachSimulation()
+    @Published var game = BreachMatch()
+    let room: BreachRoomSession
+    private var observation: AnyCancellable?
+    @Published var buying = false
     @Published var started = false
     @Published var captured = false
     @Published var scoreboard = false
     @Published var sensitivity = UserDefaults.standard.object(forKey: "breach.sensitivity") as? Double ?? 0.002
     @Published var fov = UserDefaults.standard.object(forKey: "breach.fov") as? Double ?? 80
     @Published var shadows = UserDefaults.standard.object(forKey: "breach.shadows") as? Bool ?? true
-    @Published var difficulty = 0.7
-    @Published var loadout: BreachWeapon = .rifle
     @Published var hit = false
     @Published var volume = UserDefaults.standard.object(forKey: "breach.volume") as? Double ?? 0.5
     @Published var controlKeys: [BreachControl: UInt16] = [:]
@@ -34,7 +36,16 @@ final class BreachController: ObservableObject {
     private var timer: Timer?
     private var lastTime = ProcessInfo.processInfo.systemUptime
     private var hitUntil = 0.0
-    init() {
+    init(room: BreachRoomSession) {
+        self.room = room
+        world.setGraphics(shadows: shadows, fov: fov)
+        observation = room.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }
+        room.panelAppeared()
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0/60, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.step() }
+        }
+        if let timer { RunLoop.main.add(timer, forMode: .common) }
+
         var used = Set<UInt16>()
         for control in BreachControl.allCases {
             let saved = UserDefaults.standard.object(forKey: "breach.key.\(control.rawValue)") as? Int
@@ -46,7 +57,7 @@ final class BreachController: ObservableObject {
             controlLabels[control] = UserDefaults.standard.string(forKey: "breach.label.\(control.rawValue)") ?? control.defaultLabel
         }
     }
-    private static let reservedKeys: Set<UInt16> = [36, 48, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63]
+    private static let reservedKeys: Set<UInt16> = [11, 36, 48, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63]
     func key(_ control: BreachControl) -> UInt16 { controlKeys[control] ?? control.defaultKey }
     func label(_ control: BreachControl) -> String { controlLabels[control] ?? control.defaultLabel }
     func bind(_ control: BreachControl, event: NSEvent) -> Bool {
@@ -77,37 +88,50 @@ final class BreachController: ObservableObject {
         }
         keys.removeAll(); controlFeedback = "Default controls restored."
     }
-    func start() {
-        release(); game = BreachSimulation(); game.equip(loadout); started = true
-        yaw = 0; pitch = 0; lastTime = ProcessInfo.processInfo.systemUptime
-        world.setGraphics(shadows: shadows, fov: fov)
-        timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0/60, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.step() }
-        }
-        if let timer { RunLoop.main.add(timer, forMode: .common) }
-    }
+    var localIndex: Int { min(3,max(0,room.localIndex)) }
+    var player: BreachPlayer { game.players[localIndex] }
+    var online: Bool { room.mode != .practice && room.mode != .picker }
+    func start() { release(); room.practice(); room.showsMenu = true }
+    func host() { release(); room.host() }
     func capture() {
-        guard started, !game.roundOver, !captured else { return }
+        guard room.started, game.phase != .matchOver, !captured else { return }
         inputView?.window?.makeFirstResponder(inputView)
+        room.showsMenu = false; buying = false
         captured = true; keys.removeAll(); trigger = false
         CGAssociateMouseAndMouseCursorPosition(0); NSCursor.hide()
-        lastTime = ProcessInfo.processInfo.systemUptime
     }
     func release() {
         if captured { CGAssociateMouseAndMouseCursorPosition(1); NSCursor.unhide() }
-        captured = false; keys.removeAll(); trigger = false; scoreboard = false
+        captured = false; buying = false; keys.removeAll(); trigger = false; scoreboard = false
+        room.clearInput(); room.showsMenu = true
     }
-    func stop() { release(); timer?.invalidate(); timer = nil; started = false }
+    func stop() { release(); buying = false; room.leave() }
+    func close() { stop(); room.panelDisappeared(); timer?.invalidate(); timer = nil; observation = nil }
     func look(dx: Double, dy: Double) {
         guard captured else { return }
-        yaw -= dx*sensitivity; pitch = min(1.35,max(-1.35,pitch-dy*sensitivity))
+        yaw -= dx*sensitivity; yaw = yaw.truncatingRemainder(dividingBy: 2 * .pi)
+        pitch = min(1.35,max(-1.35,pitch-dy*sensitivity))
     }
-    func nextRound() { game.nextRound(); yaw = 0; pitch = 0; world.update(game: game, yaw: yaw, pitch: pitch, firing: false) }
-    func reload() {
-        let before = game.reloadRemaining
-        game.reload()
-        if before == 0 && game.reloadRemaining > 0 { audio.play("reload", volume: Float(volume)) }
+    private func input() -> BreachInput {
+        var value = BreachInput()
+        value.yaw = yaw; value.pitch = pitch
+        if captured && player.alive && room.mode != .spectator && !room.waitingForRound {
+            value.forward = (keys.contains(key(.forward)) ? 1 : 0) - (keys.contains(key(.backward)) ? 1 : 0)
+            value.strafe = (keys.contains(key(.right)) ? 1 : 0) - (keys.contains(key(.left)) ? 1 : 0)
+            value.walk = keys.contains(56); value.fire = trigger
+            value.interact = keys.contains(key(.interact))
+        }
+        return value
+    }
+    func reload() { var value = input(); value.reload = true; room.setInput(value) }
+    func shoot() { guard captured else { return }; var value = input(); value.fire = true; room.setInput(value) }
+    func toggleBuy() {
+        guard game.phase == .buy && room.started && room.mode != .spectator else { return }
+        if buying { buying = false; capture() } else { release(); buying = true; room.showsMenu = false }
+    }
+    func purchase(_ weapon: BreachWeapon? = nil, armor: Bool = false) {
+        var value = BreachInput(); value.buy = weapon; value.buyArmor = armor
+        room.setInput(value)
     }
     func applySettings() {
         UserDefaults.standard.set(volume, forKey: "breach.volume")
@@ -116,38 +140,32 @@ final class BreachController: ObservableObject {
         UserDefaults.standard.set(shadows, forKey: "breach.shadows")
         world.setGraphics(shadows: shadows, fov: fov)
     }
-    @discardableResult func shoot() -> Bool {
-        guard captured else { return false }
-        let fired = game.fire(yaw: yaw, pitch: pitch)
-        if fired {
-            audio.play("shot", volume: Float(volume))
-            if game.lastHit { hitUntil = ProcessInfo.processInfo.systemUptime + 0.12; audio.play("hit", volume: Float(volume)) }
-            world.update(game: game, yaw: yaw, pitch: pitch, firing: true)
-        }
-        return fired
-    }
+    private var previousRound = 0
     private func step() {
         let now = ProcessInfo.processInfo.systemUptime
-        let dt = min(0.05, now-lastTime); lastTime = now
-        var fired = false
-        if captured {
-            var forward = (keys.contains(key(.forward)) ? 1.0 : 0) - (keys.contains(key(.backward)) ? 1.0 : 0)
-            var strafe = (keys.contains(key(.right)) ? 1.0 : 0) - (keys.contains(key(.left)) ? 1.0 : 0)
-            let length = max(1,hypot(forward,strafe)); forward /= length; strafe /= length
-            let speed = keys.contains(56) ? 2.0 : 4.2
-            game.move(dx: (-sin(yaw)*forward+cos(yaw)*strafe)*speed*dt,
-                      dz: (-cos(yaw)*forward-sin(yaw)*strafe)*speed*dt)
-            let healthBefore = game.health
-            game.tick(dt, difficulty: difficulty)
-            if game.health < healthBefore { audio.play("hurt", volume: Float(volume)) }
-            if trigger {
-                fired = shoot()
-            }
-            if game.roundOver { release() }
+        let previous = game.players[localIndex]
+        game = room.simulation; started = room.started
+        if previousRound != game.round {
+            previousRound = game.round; yaw = game.players[localIndex].yaw; pitch = 0
+            keys.removeAll(); trigger = false
         }
+        let current = player
+        let fired = current.weapon == previous.weapon && current.ammo < previous.ammo
+        if fired { audio.play("shot", volume: Float(volume)) }
+        if current.health < previous.health { audio.play("hurt", volume: Float(volume)) }
+        if current.reloadRemaining > previous.reloadRemaining + 0.2 { audio.play("reload", volume: Float(volume)) }
+        if current.kills > previous.kills { hitUntil = now + 0.2; audio.play("hit", volume: Float(volume)) }
         hit = now < hitUntil
-        world.update(game: game, yaw: yaw, pitch: pitch, firing: fired)
+        if game.phase != .buy && buying { buying = false; room.showsMenu = true }
+        if (game.phase == .matchOver || !started) && captured { release() }
+        if captured { room.setInput(input()) }
+        let positions = game.players.indices.map { index -> BreachPoint in
+            let motion = room.presentationPosition(for: index, at: now)
+            return BreachPoint(motion.x, motion.y)
+        }
+        world.update(match: game, localIndex: localIndex, yaw: yaw, pitch: pitch, firing: fired, positions: positions)
     }
+
 }
 
 @MainActor
@@ -173,6 +191,7 @@ final class BreachInputView: SCNView {
         if event.keyCode == 53 { controller?.release(); return }
         guard controller?.captured == true else { return }
         if event.keyCode == 48 { controller?.scoreboard = true }
+        else if event.keyCode == 11 { controller?.toggleBuy() }
         else if event.keyCode == controller?.key(.reload) { controller?.reload() }
         else { controller?.keys.insert(event.keyCode) }
     }
@@ -206,162 +225,204 @@ struct BreachSurface: NSViewRepresentable {
 
 struct BreachGameView: View {
     @ObservedObject var controller: BreachController
+    private var room: BreachRoomSession { controller.room }
+    private var game: BreachMatch { controller.game }
+    private var player: BreachPlayer { controller.player }
     private let gold = Color(red: 0.96, green: 0.72, blue: 0.34)
     var body: some View {
         ZStack {
             BreachSurface(controller: controller)
-            if controller.started {
+            if room.started {
                 hud.allowsHitTesting(false)
                 if controller.scoreboard { stats.allowsHitTesting(false) }
-                if controller.game.roundOver { result }
+                if game.phase == .matchOver { result }
+                else if controller.buying { buyPanel }
                 else if !controller.captured { pause }
-            } else { startScreen }
+            } else { briefing }
         }
         .foregroundStyle(.white).tint(gold).preferredColorScheme(.dark)
         .frame(minWidth: 900, minHeight: 600)
-        .onDisappear { controller.stop() }
     }
     private var hud: some View {
         VStack {
             HStack {
-                Text("BREACH  /  FOUNDRY").tracking(3).font(.system(size: 12,weight: .bold))
+                Text("BREACH / FOUNDRY").tracking(3).font(.system(size: 12,weight: .bold))
                 Spacer()
-                Text("ROUND \(controller.game.round)  •  FIRST TO 5")
-                Spacer()
-                Text("\(controller.game.wins)  :  \(controller.game.losses)").font(.title2.bold())
-            }.padding(22).background(.black.opacity(0.35))
-            Text(String(format: "%01d:%02d", Int(controller.game.seconds)/60, Int(controller.game.seconds)%60))
-                .font(.title3.monospacedDigit()).padding(8).background(.black.opacity(0.4), in: Capsule())
+                Text("ATTACK \(game.attackersScore)  :  \(game.defendersScore) DEFEND").font(.headline)
+                Spacer(); Text("ROUND \(game.round) · FIRST TO 5").font(.caption)
+            }.padding(20).background(.black.opacity(0.55))
+            VStack(spacing: 5) {
+                Text("\(game.phase.rawValue.uppercased())  ·  \(Int(max(0,game.seconds)))s").font(.headline.monospacedDigit())
+                Text(objective).font(.caption)
+                if game.plantProgress > 0 { ProgressView(value: game.plantProgress, total: 3).frame(width: 200) }
+                if game.defuseProgress > 0 { ProgressView(value: game.defuseProgress, total: 5).frame(width: 200) }
+            }.padding(10).background(.black.opacity(0.5),in: RoundedRectangle(cornerRadius: 10))
             Spacer()
-            Image(systemName: controller.hit ? "xmark" : "plus")
-                .font(.system(size: 18,weight: .light)).foregroundStyle(controller.hit ? gold : .white.opacity(0.85))
+            Image(systemName: controller.hit ? "xmark" : "plus").font(.system(size: 18,weight: .light)).foregroundStyle(controller.hit ? gold : .white)
             Spacer()
+            if !player.alive { Text("ELIMINATED · Next round respawn").font(.headline).padding(10).background(.black.opacity(0.6)) }
+            if !room.notice.isEmpty { Text(room.notice).font(.caption).padding(6).background(.black.opacity(0.65)) }
             HStack(alignment: .bottom) {
                 VStack(alignment: .leading) {
-                    Text("HEALTH").font(.caption)
-                    Text("\(controller.game.health)").font(.system(size: 38,weight: .bold,design: .rounded))
+                    Text("\(player.team.rawValue.uppercased()) · $\(player.money)").font(.caption).foregroundStyle(gold)
+                    Text("\(player.health) HP  /  \(player.armor) ARMOR").font(.title3.bold())
                 }
                 Spacer()
-                Text("\(controller.label(.forward))/\(controller.label(.left))/\(controller.label(.backward))/\(controller.label(.right)) Move   ⇧ Walk   \(controller.label(.reload)) Reload   Tab Stats   Esc Menu").font(.caption)
+                Text("\(controller.label(.reload)) Reload · \(controller.label(.interact)) Hold to interact · B Buy · Tab Stats · Esc Menu").font(.caption2)
                 Spacer()
                 VStack(alignment: .trailing) {
-                    Text(controller.game.reloadRemaining > 0 ? "RELOADING…" : controller.game.weapon.rawValue)
-                    Text("\(controller.game.ammo) / \(controller.game.reserve)").font(.system(size: 30,weight: .bold,design: .monospaced))
+                    Text(player.reloadRemaining > 0 ? "RELOADING…" : player.weapon.rawValue).font(.caption)
+                    Text("\(player.ammo) / \(player.reserve)").font(.system(size: 28,weight: .bold,design: .monospaced))
                 }
-            }.padding(24).background(LinearGradient(colors: [.clear,.black.opacity(0.8)],startPoint: .top,endPoint: .bottom))
+            }.padding(22).background(.black.opacity(0.65))
         }
     }
-    private var startScreen: some View {
-        GeometryReader { geometry in
+    private var objective: String {
+        if room.waitingForRound { return "Seat reserved · Bot plays until the next round" }
+        if room.mode == .spectator { return "Spectating · Join an open seat from the lobby for the next match" }
+        if game.phase == .roundOver { return game.notice }
+        if game.phase == .buy { return "Prepare at spawn · B opens the buy menu" }
+        if game.phase == .planted { return player.team == .defenders ? "Bomb planted · Hold \(controller.label(.interact)) near the bomb to defuse" : "Bomb planted · Protect it until detonation" }
+        if player.team == .defenders { return "Defend sites A and B. Stop the attackers." }
+        return game.bombCarrier == controller.localIndex ? "You carry the bomb · Hold \(controller.label(.interact)) at A or B to plant" : "Escort the carrier · Recover the dropped bomb by walking over it"
+    }
+    private var briefing: some View {
         HStack {
             ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                Text("ALO ORIGINAL  /  TACTICAL FPS").font(.caption.bold()).tracking(3).foregroundStyle(gold)
-                Text("BREACH").font(.system(size: 68,weight: .black,design: .rounded)).tracking(5)
-                Text("FOUNDRY").font(.title2.bold()).tracking(6)
-                Text("Clear the courtyard. Control the angles.\nDefeat three guards to win the round. First to five wins.")
-                    .foregroundStyle(.white.opacity(0.65)).lineSpacing(5)
-                Label("Local bot match · Dedicated game window",systemImage: "desktopcomputer").font(.caption)
-                settings
-                Button { controller.start() } label: {
-                    Label("Deploy to Foundry",systemImage: "play.fill").font(.headline).padding(10).frame(maxWidth: .infinity)
-                }.buttonStyle(.borderedProminent)
-                Text("Click the arena to capture your mouse. Escape releases it.\nCmd W closes the window; switching apps pauses the match.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }.padding(28)
-            }.frame(width: 460, height: geometry.size.height).background(.black.opacity(0.85))
+                VStack(alignment: .leading,spacing: 18) {
+                    Text("ALO / 2v2 TACTICAL FPS").font(.caption.bold()).tracking(3).foregroundStyle(gold)
+                    Text("BREACH").font(.system(size: 58,weight: .black,design: .rounded)).tracking(4)
+                    Text("FOUNDRY / DEMOLITION").font(.headline).tracking(2)
+                    Text("Attackers plant at A or B. Defenders defuse or hold the sites. Buy your equipment between rounds. First team to five wins.").foregroundStyle(.secondary)
+                    if room.mode == .picker {
+                        Button("Practice with bots") { controller.start() }.buttonStyle(.borderedProminent)
+                        Button("Host room match") { controller.host() }.buttonStyle(.bordered).disabled(!room.roomConnected)
+                        Text(room.roomConnected ? "Room members can join. Bots fill open seats." : "Open Breach from an ALO room to host or join friends.").font(.caption).foregroundStyle(.secondary)
+                        ForEach(room.lobbies) { lobby in
+                            HStack {
+                                VStack(alignment: .leading) {
+                                    Text(room.names[lobby.peerID] ?? "Room match").font(.headline)
+                                    Text(lobby.started ? "In progress · \(lobby.availableSlots) open seats" : "Lobby · \(lobby.availableSlots) open seats").font(.caption)
+                                }
+                                Spacer()
+                                Button("Join") { room.join(lobby) }.disabled(lobby.availableSlots == 0)
+                                Button("Watch") { room.join(lobby,spectate: true) }
+                            }
+                        }
+                    } else {
+                        Text(room.mode == .joining ? "CONNECTING…" : "ROOM LOBBY").font(.headline)
+                        ForEach(room.slots, id: \.index) { slot in
+                            HStack {
+                                Circle().fill(slot.index < 2 ? gold : .cyan).frame(width: 8,height: 8)
+                                Text(slot.name); Spacer()
+                                Text(slot.isBot ? "Bot" : slot.ready ? "Ready" : "Not ready").foregroundStyle(.secondary)
+                            }
+                        }
+                        if room.mode != .joining && room.mode != .spectator {
+                            Button(room.localReady ? "Unready" : "Ready to start") { room.readyUp() }.buttonStyle(.borderedProminent)
+                        }
+                        Button("Leave match") { controller.stop() }.buttonStyle(.bordered)
+                    }
+                    if !room.notice.isEmpty { Text(room.notice).font(.caption).foregroundStyle(gold) }
+                    Divider()
+                    DisclosureGroup("Game settings") { settings.padding(.top,8) }
+                    Text("WASD move · Mouse aim/fire · R reload · E interact\nB buy · Hold Tab for stats · Escape releases the mouse\nCmd W closes the window. Online matches continue when unfocused.").font(.caption).foregroundStyle(.secondary)
+                }.padding(28)
+            }.frame(width: 490).background(.black.opacity(0.88))
             Spacer()
-        }
         }
     }
     private var settings: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Picker("Loadout",selection: $controller.loadout) {
-                ForEach(BreachWeapon.allCases,id: \.self) { Text($0.rawValue).tag($0) }
-            }.pickerStyle(.segmented).disabled(controller.started)
-            Picker("Bots",selection: $controller.difficulty) {
-                Text("Recruit").tag(0.7); Text("Regular").tag(1.0); Text("Veteran").tag(1.4)
-            }
+        VStack(alignment: .leading,spacing: 12) {
             HStack { Text("Sensitivity"); Slider(value: $controller.sensitivity,in: 0.0005...0.006) }
-            HStack { Text("Field of view"); Slider(value: $controller.fov,in: 60...105); Text("\(Int(controller.fov))°").monospacedDigit() }
-            HStack { Text("Effects volume"); Slider(value: $controller.volume, in: 0...1) }
+            HStack { Text("Field of view"); Slider(value: $controller.fov,in: 60...105); Text("\(Int(controller.fov))°") }
+            HStack { Text("Effects volume"); Slider(value: $controller.volume,in: 0...1) }
             Toggle("Dynamic shadows",isOn: $controller.shadows)
             DisclosureGroup("Controls") {
-                VStack(spacing: 7) {
-                    ForEach(BreachControl.allCases, id: \.self) { control in
-                        HStack {
-                            Text(control.rawValue)
-                            Spacer()
-                            BreachKeyRecorder(label: controller.label(control)) { event in
-                                controller.bind(control, event: event)
-                            }.frame(width: 110, height: 25)
-                                .accessibilityLabel("Assign \(control.rawValue.lowercased()) key")
-                        }
+                ForEach(BreachControl.allCases,id: \.self) { control in
+                    HStack {
+                        Text(control.rawValue); Spacer()
+                        BreachKeyRecorder(label: controller.label(control)) { controller.bind(control,event: $0) }
+                            .frame(width: 110,height: 25).accessibilityLabel("Assign \(control.rawValue.lowercased()) key")
                     }
-                    Text(controller.controlFeedback).font(.caption2).foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading).fixedSize(horizontal: false, vertical: true)
-                    Text("Mouse: aim · Left click: fire · Shift: walk · Tab: stats · Esc: pause")
-                        .font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    Button("Reset controls") { controller.resetControls() }.buttonStyle(.bordered)
-                }.padding(.top, 8)
+                }
+                Text(controller.controlFeedback).font(.caption2).foregroundStyle(.secondary)
+                Button("Reset controls") { controller.resetControls() }
             }
         }.font(.system(size: 12))
-            .onChange(of: controller.sensitivity) { _,_ in controller.applySettings() }
-            .onChange(of: controller.fov) { _,_ in controller.applySettings() }
-            .onChange(of: controller.volume) { _,_ in controller.applySettings() }
-            .onChange(of: controller.shadows) { _,_ in controller.applySettings() }
+        .onChange(of: controller.sensitivity) { _,_ in controller.applySettings() }
+        .onChange(of: controller.fov) { _,_ in controller.applySettings() }
+        .onChange(of: controller.volume) { _,_ in controller.applySettings() }
+        .onChange(of: controller.shadows) { _,_ in controller.applySettings() }
     }
     private var pause: some View {
-        GeometryReader { geometry in
         ScrollView {
-        VStack(spacing: 18) {
-            Text("READY WHEN YOU ARE").font(.title2.bold())
-            Text("Match paused · Mouse released").foregroundStyle(.secondary)
-            settings
-            Button("Resume & capture mouse") { controller.capture() }.buttonStyle(.borderedProminent)
-            Button("Return to briefing") { controller.stop() }.buttonStyle(.bordered)
-        }.padding(28)
-        }.frame(width: 420, height: min(geometry.size.height - 40, 560))
-            .background(.black.opacity(0.9),in: RoundedRectangle(cornerRadius: 16))
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
+            VStack(spacing: 18) {
+                Text(controller.online ? "MOUSE RELEASED" : "MATCH PAUSED").font(.title2.bold())
+                Text(controller.online ? "The room match continues while this menu is open." : "Resume when you are ready.").font(.caption).foregroundStyle(.secondary)
+                Button("Resume & capture mouse") { controller.capture() }.buttonStyle(.borderedProminent)
+                if game.phase == .buy && room.mode != .spectator { Button("Buy equipment") { controller.toggleBuy() }.buttonStyle(.bordered) }
+                settings
+                Button("Leave match") { controller.stop() }.buttonStyle(.bordered)
+            }.padding(24)
+        }.frame(width: 440,height: 490).background(.black.opacity(0.92),in: RoundedRectangle(cornerRadius: 16))
+    }
+    private var buyPanel: some View {
+        VStack(alignment: .leading,spacing: 18) {
+            HStack { Text("BUY EQUIPMENT").font(.title2.bold()); Spacer(); Text("$\(player.money)").foregroundStyle(gold) }
+            Text("\(Int(max(0,game.seconds))) seconds · Purchases are checked by the match host.").font(.caption).foregroundStyle(.secondary)
+            ForEach(BreachWeapon.allCases,id: \.self) { weapon in
+                HStack {
+                    VStack(alignment: .leading) { Text(weapon.rawValue).font(.headline); Text("\(weapon.magazine)-round magazine").font(.caption).foregroundStyle(.secondary) }
+                    Spacer()
+                    Button("Buy · $\(BreachMatch.price(weapon))") { controller.purchase(weapon) }.disabled(player.money < BreachMatch.price(weapon))
+                }
+            }
+            HStack { Text("Armor"); Spacer(); Button("Buy · $650") { controller.purchase(armor: true) }.disabled(player.money < 650 || player.armor >= 100) }
+            Text("Purchases work at your spawn during the buy phase. A new weapon includes ammunition.").font(.caption).foregroundStyle(.secondary)
+            Button("Return to game") { controller.toggleBuy() }.buttonStyle(.borderedProminent).keyboardShortcut("b", modifiers: [])
+        }.padding(28).frame(width: 460).background(.black.opacity(0.94),in: RoundedRectangle(cornerRadius: 16))
     }
     private var stats: some View {
-        VStack(spacing: 18) {
-            Text("FOUNDRY  /  ELIMINATION").font(.title2.bold())
-            HStack { Text("Operator"); Spacer(); Text("Kills"); Text("Health").frame(width: 65) }.foregroundStyle(.secondary)
-            HStack { Text("You"); Spacer(); Text("\(controller.game.kills)"); Text("\(controller.game.health)").frame(width: 65) }
-            Divider()
-            ForEach(controller.game.bots) { bot in
-                HStack { Text("Guard \(bot.id+1)"); Spacer(); Text(bot.health > 0 ? "Active" : "Eliminated"); Text("\(max(0,bot.health))").frame(width: 65) }
+        VStack(spacing: 16) {
+            Text("FOUNDRY / DEMOLITION").font(.title2.bold())
+            HStack { Text("Operator").frame(maxWidth: .infinity,alignment: .leading); Text("K / D").frame(width: 60); Text("Cash").frame(width: 70); Text("HP").frame(width: 35) }.foregroundStyle(.secondary)
+            ForEach(game.players) { p in
+                HStack {
+                    Circle().fill(p.team == .attackers ? gold : .cyan).frame(width: 8,height: 8)
+                    Text(room.slots.first(where: { $0.index == p.id })?.name ?? "Player \(p.id + 1)").frame(maxWidth: .infinity,alignment: .leading)
+                    Text("\(p.kills) / \(p.deaths)").frame(width: 60)
+                    Text("$\(p.money)").frame(width: 70)
+                    Text(p.alive ? "\(p.health)" : "—").frame(width: 35)
+                }
             }
-            Text("Rounds  \(controller.game.wins) – \(controller.game.losses)").font(.headline)
-        }.padding(28).frame(width: 500).background(.black.opacity(0.88),in: RoundedRectangle(cornerRadius: 16))
+            Text("Attackers \(game.attackersScore) – \(game.defendersScore) Defenders").font(.headline)
+        }.padding(28).frame(width: 560).background(.black.opacity(0.9),in: RoundedRectangle(cornerRadius: 16))
     }
     private var result: some View {
         VStack(spacing: 18) {
-            Text(controller.game.matchOver ? "MATCH COMPLETE" : controller.game.health > 0 && controller.game.seconds > 0 ? "AREA SECURED" : "ROUND LOST")
-                .font(.largeTitle.bold())
-            Text("\(controller.game.wins) : \(controller.game.losses)").font(.system(size: 48,weight: .bold))
-            Text("\(controller.game.kills) eliminations").foregroundStyle(.secondary)
-            if controller.game.matchOver {
-                Button("Play again") { controller.start() }.buttonStyle(.borderedProminent)
-            } else {
-                Button("Next round") { controller.nextRound() }.buttonStyle(.borderedProminent)
-            }
-            Button("Return to briefing") { controller.stop() }.buttonStyle(.bordered)
-        }.padding(36).background(.black.opacity(0.9),in: RoundedRectangle(cornerRadius: 18))
+            Text("\(game.winner?.rawValue.uppercased() ?? "MATCH") WIN").font(.largeTitle.bold())
+            Text("\(game.attackersScore) : \(game.defendersScore)").font(.system(size: 48,weight: .bold))
+            Text("\(player.kills) kills · \(player.deaths) deaths").foregroundStyle(.secondary)
+            if room.mode != .spectator { Button("Rematch") { room.rematch() }.buttonStyle(.borderedProminent) }
+            Button("Leave match") { controller.stop() }.buttonStyle(.bordered)
+        }.padding(36).background(.black.opacity(0.94),in: RoundedRectangle(cornerRadius: 18))
     }
 }
+
+
 
 @MainActor
 final class BreachWindowController: NSObject, NSWindowDelegate {
     static let shared = BreachWindowController()
     private var window: NSWindow?
     private var controller: BreachController?
-    func show() {
-        if let window { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return }
-        let game = BreachController()
+    func show(session: BreachRoomSession? = nil) {
+        if let window {
+            if let session, controller?.room !== session { window.performClose(nil) }
+            else { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true); return }
+        }
+        let game = BreachController(room: session ?? BreachRoomSession())
         let window = BreachWindow(contentRect: NSRect(x: 0,y: 0,width: 1100,height: 720),
                               styleMask: [.titled,.closable,.miniaturizable,.resizable],backing: .buffered,defer: false)
         window.title = "Breach · ALO"; window.delegate = self; window.isReleasedWhenClosed = false
@@ -372,7 +433,7 @@ final class BreachWindowController: NSObject, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
     func windowDidResignKey(_ notification: Notification) { controller?.release() }
-    func windowWillClose(_ notification: Notification) { controller?.stop(); controller = nil; window = nil }
+    func windowWillClose(_ notification: Notification) { controller?.close(); controller = nil; window = nil }
 }
 
 @MainActor

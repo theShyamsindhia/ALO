@@ -1,6 +1,6 @@
 import Foundation
 
-public struct BreachPoint: Equatable, Sendable {
+public struct BreachPoint: Equatable, Codable, Sendable {
     public var x: Double
     public var z: Double
     public init(_ x: Double, _ z: Double) { self.x = x; self.z = z }
@@ -15,7 +15,7 @@ public struct BreachWall: Sendable {
         abs(p.x - x) < width / 2 + margin && abs(p.z - z) < depth / 2 + margin
     }
 }
-public enum BreachWeapon: String, CaseIterable, Sendable {
+public enum BreachWeapon: String, CaseIterable, Codable, Sendable {
     case rifle = "AR-24", smg = "VX-9", pistol = "P-12"
     public var magazine: Int { switch self { case .rifle: 24; case .smg: 32; case .pistol: 12 } }
     public var damage: Int { switch self { case .rifle: 34; case .smg: 22; case .pistol: 40 } }
@@ -87,7 +87,7 @@ public struct BreachSimulation: Sendable {
         clearSegment(from: a, to: b, startHeight: 1.65, endHeight: 1.65)
     }
     // Slab intersection avoids sampled rays missing thin walls, and respects low cover.
-    private static func clearSegment(from a: BreachPoint, to b: BreachPoint,
+    static func clearSegment(from a: BreachPoint, to b: BreachPoint,
                                      startHeight: Double, endHeight: Double, margin: Double = 0) -> Bool {
         guard a.x.isFinite, a.z.isFinite, b.x.isFinite, b.z.isFinite else { return false }
         return !walls.contains { wall in
@@ -209,7 +209,7 @@ public struct BreachSimulation: Sendable {
         }
         return (points, edges)
     }()
-    private static func route(from: BreachPoint, to: BreachPoint) -> [BreachPoint] {
+    static func route(from: BreachPoint, to: BreachPoint) -> [BreachPoint] {
         if clearSegment(from: from, to: to, startHeight: 0.5, endHeight: 0.5, margin: 0.34) { return [to] }
         let graph = navigation
         func nearest(_ p: BreachPoint) -> Int? {

@@ -445,7 +445,12 @@ final class StickFightScene: SKScene {
         for i in 0..<count {
             let n = SKShapeNode(circleOfRadius: CGFloat(i % 3 + 1)); n.fillColor = color; n.strokeColor = .clear; n.position = point; effects.addChild(n)
             let angle = Double(i) * 2.39996
-            n.run(.sequence([.group([.moveBy(x: cos(angle) * Double(25 + i * 3) + min(40, max(-40, velocity.dx * 0.06)), y: sin(angle) * Double(25 + i * 3) + min(35, max(-35, velocity.dy * 0.06)), duration: 0.28), .fadeOut(withDuration: 0.28)]), .removeFromParent()]))
+            let distance = Double(25 + i * 3)
+            let dx: CGFloat = CGFloat(cos(angle) * distance) + min(CGFloat(40), max(CGFloat(-40), velocity.dx * 0.06))
+            let dy: CGFloat = CGFloat(sin(angle) * distance) + min(CGFloat(35), max(CGFloat(-35), velocity.dy * 0.06))
+            let move = SKAction.moveBy(x: dx, y: dy, duration: 0.28)
+            let fade = SKAction.fadeOut(withDuration: 0.28)
+            n.run(SKAction.sequence([SKAction.group([move, fade]), SKAction.removeFromParent()]))
         }
     }
 }

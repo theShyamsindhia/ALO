@@ -215,11 +215,17 @@ private struct StickFightPreview: View {
         Canvas { c, s in
             c.fill(Path(CGRect(origin: .zero, size: s)), with: .color(Color(red: 0.24, green: 0.25, blue: 0.23)))
             for i in 0..<5 {
-                var p = Path(); p.move(to: CGPoint(x: Double(i) * s.width / 4 - 70, y: s.height)); p.addLine(to: CGPoint(x: Double(i) * s.width / 4, y: 5 + Double(i % 2) * 40)); p.addLine(to: CGPoint(x: Double(i) * s.width / 4 + 150, y: s.height)); p.closeSubpath()
+                let x: CGFloat = CGFloat(i) * s.width / 4
+                let y: CGFloat = 5 + CGFloat(i % 2) * 40
+                var p = Path()
+                p.move(to: CGPoint(x: x - 70, y: s.height))
+                p.addLine(to: CGPoint(x: x, y: y))
+                p.addLine(to: CGPoint(x: x + 150, y: s.height))
+                p.closeSubpath()
                 c.fill(p, with: .color(.black.opacity(0.09)))
             }
             for i in 0..<4 {
-                let x = s.width * (0.2 + Double(i) * 0.20), y = s.height * (i % 2 == 0 ? 0.48 : 0.35)
+                let x = s.width * (0.2 + CGFloat(i) * 0.20), y = s.height * (i % 2 == 0 ? 0.48 : 0.35)
                 var p = Path(); p.move(to: CGPoint(x: x, y: y)); p.addLine(to: CGPoint(x: x - 2, y: y + 19)); p.addLine(to: CGPoint(x: x - 15, y: y + 34)); p.move(to: CGPoint(x: x - 2, y: y + 19)); p.addLine(to: CGPoint(x: x + 16, y: y + 26)); p.move(to: CGPoint(x: x, y: y + 6)); p.addLine(to: CGPoint(x: x - 16, y: y - 2)); p.move(to: CGPoint(x: x, y: y + 6)); p.addLine(to: CGPoint(x: x + 13, y: y + 4))
                 c.stroke(p, with: .color(StickFightPalette.color(i)), style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
                 c.fill(Path(ellipseIn: CGRect(x: x - 5, y: y - 10, width: 10, height: 10)), with: .color(StickFightPalette.color(i)))

@@ -20,7 +20,7 @@ struct ArenaPanel: View {
                     Button("Return to room") { session.closeExpanded() }.buttonStyle(.bordered)
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if session.selectedGameID == nil {
-                GameLibraryView(store: session.library, stickFight: session.stickFight, onPlayStickFight: session.openStickFight, lobbies: session.lobbies, names: session.names,
+                GameLibraryView(store: session.library, stickFight: session.stickFight, breach: session.breach, onPlayStickFight: session.openStickFight, lobbies: session.lobbies, names: session.names,
                     onPlay: session.openGame,
                     onJoin: { lobby, spectate in
                         guard let pack = session.library.installed["rift-arena"] else { return }

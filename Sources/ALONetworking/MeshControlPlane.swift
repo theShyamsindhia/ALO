@@ -680,6 +680,8 @@ public final class MeshControlPlane: @unchecked Sendable {
             kind = packet.kind.rawValue; stream = "rift/" + packet.session
         } else if let packet = try? JSONDecoder().decode(StickFightPacket.self, from: data), packet.isValid {
             kind = packet.kind.rawValue; stream = "stick/" + packet.session
+        } else if let packet = try? JSONDecoder().decode(BreachPacket.self, from: data), packet.isValid {
+            kind = packet.kind.rawValue; stream = "breach/" + packet.session
         } else { return }
         queue.async { [weak self] in
             guard let self, !self.isStopped,

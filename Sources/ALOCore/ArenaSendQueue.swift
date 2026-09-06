@@ -16,7 +16,7 @@ public struct GameSendQueue: Sendable {
             return
         }
         if kind == "leave" { lifecycle.removeAll { $0.stream == stream }; frames.removeAll { $0.stream == stream } }
-        lifecycle.removeAll { $0.stream == stream && $0.kind == kind }
+        if kind != "action" { lifecycle.removeAll { $0.stream == stream && $0.kind == kind } }
         if lifecycle.count == 32 { lifecycle.removeFirst() }
         lifecycle.append(Entry(stream: stream, kind: kind, data: data))
     }

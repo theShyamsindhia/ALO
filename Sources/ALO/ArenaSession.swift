@@ -35,6 +35,7 @@ final class ArenaSession: ObservableObject {
     let library = GameLibraryStore()
     let fourfold = FourfoldSession()
     let stickFight = StickFightSession()
+    let breach = BreachRoomSession()
     @Published var selectedGameID: String?
     @Published var loadingGame = false
     @Published var gameLoadError: String?
@@ -73,10 +74,10 @@ final class ArenaSession: ObservableObject {
     private var priorSoundStocks = [3, 3]
     private var controllerPausePressed = false
     var simulation = ArenaSimulation()
-    var send: ((Data, String?) -> Void)? { didSet { stickFight.send = send } }
-    var names: [String: String] = [:] { didSet { stickFight.names = names } }
-    var localName = "You" { didSet { stickFight.localName = localName } }
-    var localParticipantID = "local" { didSet { stickFight.localParticipantID = localParticipantID } }
+    var send: ((Data, String?) -> Void)? { didSet { stickFight.send = send; breach.send = send } }
+    var names: [String: String] = [:] { didSet { stickFight.names = names; breach.names = names } }
+    var localName = "You" { didSet { stickFight.localName = localName; breach.localName = localName } }
+    var localParticipantID = "local" { didSet { stickFight.localParticipantID = localParticipantID; breach.localParticipantID = localParticipantID } }
     var onMatchFinished: ((ArenaMatchResult) -> Void)?
     var onLobbyDiscovered: ((Lobby) -> Void)?
     var onLobbyRemoved: ((String) -> Void)?
@@ -310,7 +311,7 @@ final class ArenaSession: ObservableObject {
         remoteSequence = -1; sequence = 0; realtime.reset(); predictionSupported = false; notice = message; paused = false
     }
     func disconnect() {
-        stickFight.disconnect()
+        stickFight.disconnect(); breach.disconnect()
         returnToLibrary(); send = nil; lobbies = []; announcedSessions = []; reportedResultKeys = []; loop.stop()
         closeExpanded(); scene = nil; sound.stop()
     }
@@ -417,6 +418,7 @@ final class ArenaSession: ObservableObject {
     }
     func receive(from sender: String, data: Data) {
         stickFight.receive(from: sender, data: data)
+        breach.receive(from: sender, data: data)
         guard data.count <= GameRealtimePolicy.maximumPacketBytes, let packet = try? JSONDecoder().decode(ArenaPacket.self, from: data), packet.isValid else { return }
         let now = ProcessInfo.processInfo.systemUptime
         if packet.kind == .lobby {

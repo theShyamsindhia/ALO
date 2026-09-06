@@ -199,6 +199,7 @@ final class GamePackRedirectPolicy: NSObject, URLSessionTaskDelegate {
 struct GameLibraryView: View {
     @ObservedObject var store: GameLibraryStore
     @ObservedObject var stickFight: StickFightSession
+    @ObservedObject var breach: BreachRoomSession
     var onPlayStickFight: () -> Void
     @ObservedObject var records = ArenaRecordStore.shared
     var lobbies: [ArenaSession.Lobby]
@@ -317,16 +318,27 @@ struct GameLibraryView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("TACTICAL FPS").font(.system(size: 9, weight: .bold)).tracking(2).foregroundStyle(.orange)
                     Text("BREACH").font(.system(size: 28, weight: .black)).tracking(3)
-                    Text("Foundry · Local bot match").font(.caption).foregroundStyle(.secondary)
+                    Text("Foundry · 2v2 demolition").font(.caption).foregroundStyle(.secondary)
                 }.padding(16)
             }.frame(height: 138)
             HStack {
-                Button { BreachWindowController.shared.show() } label: { Label("Play", systemImage: "play.fill") }
+                Button { BreachWindowController.shared.show(session: breach) } label: { Label("Play", systemImage: "play.fill") }
                     .buttonStyle(.borderedProminent)
-                Text("Built in").font(.caption).foregroundStyle(.secondary)
+                Text("Room play + bots").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Image(systemName: "arrow.up.left.and.arrow.down.right").help("Opens in a dedicated window")
-            }.padding(.horizontal, 12).padding(.bottom, 12)
+            }.padding(.horizontal, 12)
+            ForEach(breach.lobbies) { lobby in
+                HStack {
+                    Text(breach.names[lobby.peerID] ?? "Room match").font(.caption).lineLimit(1)
+                    Spacer()
+                    Button(lobby.availableSlots > 0 ? "Join" : "Watch") {
+                        breach.join(lobby, spectate: lobby.availableSlots == 0)
+                        BreachWindowController.shared.show(session: breach)
+                    }.buttonStyle(.bordered)
+                }.padding(.horizontal,12)
+            }
+            Spacer().frame(height: 4)
         }.background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 16))
             .clipShape(RoundedRectangle(cornerRadius: 16))
             .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.white.opacity(0.1)))
