@@ -103,11 +103,17 @@ final class FeatureActivation {
         transition("recording", capture.isScreenRecordingLiveActivityEnabled,
                    start: { c.screenRecordingViewModel.startMonitoring() }, stop: { c.screenRecordingViewModel.stopMonitoring() })
         transition("capture", capture.isScreenshotActivityEnabled || capture.isScreenRecordingLiveActivityEnabled,
-                   start: { c.screenshotViewModel.startMonitoring(disableSystemThumbnail: capture.isScreenshotActivityEnabled && capture.isScreenshotDisableSystemThumbnailEnabled) },
+                   start: { c.screenshotViewModel.startMonitoring(
+                       disableSystemThumbnail: capture.isScreenshotActivityEnabled && capture.isScreenshotDisableSystemThumbnailEnabled,
+                       monitorPasteboard: capture.isScreenshotActivityEnabled
+                   ) },
                    stop: { c.screenshotViewModel.stopMonitoring() })
         // Keep thumbnail configuration synchronized without adding duplicate watchers.
         if running.contains("capture") {
-            c.screenshotViewModel.startMonitoring(disableSystemThumbnail: capture.isScreenshotActivityEnabled && capture.isScreenshotDisableSystemThumbnailEnabled)
+            c.screenshotViewModel.startMonitoring(
+                disableSystemThumbnail: capture.isScreenshotActivityEnabled && capture.isScreenshotDisableSystemThumbnailEnabled,
+                monitorPasteboard: capture.isScreenshotActivityEnabled
+            )
         }
         let hud = s.hud
         c.hardwareHUDMonitor.updateConfiguration(interceptVolume: isEnabled && hud.isVolumeHUDEnabled,

@@ -39,8 +39,11 @@ final class ScreenshotViewModel: ObservableObject {
         setupMonitoring()
     }
     
-    func startMonitoring(disableSystemThumbnail: Bool = true) {
-        monitorService.startMonitoring(disableSystemThumbnail: disableSystemThumbnail)
+    func startMonitoring(disableSystemThumbnail: Bool = true, monitorPasteboard: Bool = true) {
+        monitorService.startMonitoring(
+            disableSystemThumbnail: disableSystemThumbnail,
+            monitorPasteboard: monitorPasteboard
+        )
     }
     
     func stopMonitoring() {
@@ -102,18 +105,15 @@ final class ScreenshotViewModel: ObservableObject {
         isDropped = true
     }
     
-    func copyImageToClipboard() {
-        guard let image = activeScreenshot?.image else { return }
+    @discardableResult
+    func copyImageToClipboard(_ pasteboard: NSPasteboard = .general) -> Bool {
+        guard let image = activeScreenshot?.image,
+              image.tiffRepresentation != nil,
+              pasteboard.writeObjects([image]) else { return false }
         isCopied = true
-        monitorService.suppressMonitoring(for: 3.0)
-        
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        if let tiffData = image.tiffRepresentation {
-            pasteboard.setData(tiffData, forType: .tiff)
-        }
         monitorService.updateLastPasteboardChangeCount()
         dismiss()
+        return true
     }
     
     func showInFinder() {
@@ -218,16 +218,21 @@ final class ScreenshotViewModel: ObservableObject {
     }
     
     func dismiss() {
-        monitorService.suppressMonitoring(for: 3.0)
         onScreenshotDismissed?()
         
         saveToDiskIfNeeded()
         
-        if isDropped || isDeleted || isCopied {
+        if isDeleted || isCopied {
             if let tempURL = activeScreenshot?.tempFileURL {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                     try? self?.fileManager.removeItem(at: tempURL)
                 }
+            }
+        } else if isDropped, let tempURL = activeScreenshot?.tempFileURL {
+            // Drag receivers can request the promised file after the drag UI has
+            // closed. Keep it available, then reclaim the staging copy later.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 300) { [weak self] in
+                try? self?.fileManager.removeItem(at: tempURL)
             }
         }
         
@@ -245,7 +250,6 @@ final class ScreenshotViewModel: ObservableObject {
         
         let finalTargetURL = uniqueURL(for: targetURL)
         monitorService.markPathAsKnown(finalTargetURL.path)
-        monitorService.suppressMonitoring(for: 3.0)
         
         isSavedToDisk = true
         if var current = activeScreenshot {

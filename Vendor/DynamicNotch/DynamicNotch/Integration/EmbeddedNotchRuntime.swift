@@ -62,6 +62,16 @@ public final class EmbeddedNotchRuntime: ObservableObject {
     public var canvasSize: CGSize { OverlayWindowLayout.appCanvasSize }
     public var windowYOffset: CGFloat { 1 }
 
+    /// Uses the active Notch motion preset so ALO's embedded settings enter
+    /// with the same spring and top-anchored transform as expanded activities.
+    public var embeddedSettingsExpansionAnimation: Animation {
+        delegate.notchViewModel.animations.expandLiveActivityContentTransition
+    }
+
+    public var embeddedSettingsExpansionTransition: AnyTransition {
+        .notchExpanded(notchHeight: 430, baseHeight: 0)
+    }
+
     enum ActivityOpeningTarget: Equatable {
         case currentActivity
         case homePage

@@ -17,20 +17,22 @@ final class ScreenshotMonitorService {
     private var lastPasteboardChangeCount: Int = 0
     private var knownFilePaths = Set<String>()
     private var isMonitoring = false
-    private var suppressMonitoringUntil: Date?
     private let fileManager = FileManager.default
+    private let pasteboard: NSPasteboard
     
-    init() {
-        lastPasteboardChangeCount = NSPasteboard.general.changeCount
+    init(pasteboard: NSPasteboard = .general) {
+        self.pasteboard = pasteboard
+        lastPasteboardChangeCount = pasteboard.changeCount
     }
     
     deinit {
         stopMonitoring()
     }
     
-    func startMonitoring(disableSystemThumbnail: Bool = true) {
+    func startMonitoring(disableSystemThumbnail: Bool = true, monitorPasteboard: Bool = true) {
         if isMonitoring {
             updateThumbnail(disabled: disableSystemThumbnail)
+            updatePasteboardMonitoring(enabled: monitorPasteboard)
             return
         }
         originalThumbnailPreference = CFPreferencesCopyAppValue("show-thumbnail" as CFString, "com.apple.screencapture" as CFString) as? Bool
@@ -53,9 +55,7 @@ final class ScreenshotMonitorService {
             self?.scanTargetDirectoryForRecordings()
         }
         
-        pasteboardTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
-            self?.checkPasteboard()
-        }
+        updatePasteboardMonitoring(enabled: monitorPasteboard)
     }
     
     func stopMonitoring() {
@@ -89,12 +89,20 @@ final class ScreenshotMonitorService {
     }
 
     func updateLastPasteboardChangeCount() {
-        lastPasteboardChangeCount = NSPasteboard.general.changeCount
+        lastPasteboardChangeCount = pasteboard.changeCount
     }
     
-    func suppressMonitoring(for duration: TimeInterval = 3.0) {
-        suppressMonitoringUntil = Date().addingTimeInterval(duration)
-        updateLastPasteboardChangeCount()
+    private func updatePasteboardMonitoring(enabled: Bool) {
+        if enabled {
+            guard pasteboardTimer == nil else { return }
+            updateLastPasteboardChangeCount()
+            pasteboardTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+                self?.checkPasteboard()
+            }
+        } else {
+            pasteboardTimer?.invalidate()
+            pasteboardTimer = nil
+        }
     }
     
     func rawStagingDirectoryURL() -> URL {
@@ -214,8 +222,6 @@ final class ScreenshotMonitorService {
             if lower.contains("screenshot") || lower.contains("скриншот") || lower.hasSuffix(".png") || lower.hasSuffix(".jpg") {
                 if let image = NSImage(contentsOf: url) {
                     knownFilePaths.insert(path)
-                    updateLastPasteboardChangeCount()
-                    suppressMonitoring(for: 1.5)
                     DispatchQueue.main.async { [weak self] in
                         self?.onScreenshotCaptured?(image, url, filename)
                     }
@@ -292,24 +298,22 @@ final class ScreenshotMonitorService {
     }
     
     private func checkPasteboard() {
-        if let suppressUntil = suppressMonitoringUntil, Date() < suppressUntil {
-            updateLastPasteboardChangeCount()
-            return
-        }
-        
-        let currentCount = NSPasteboard.general.changeCount
+        let currentCount = pasteboard.changeCount
         guard currentCount != lastPasteboardChangeCount else { return }
         lastPasteboardChangeCount = currentCount
         
-        let pb = NSPasteboard.general
-        if let types = pb.types, types.contains(.tiff) || types.contains(.png) {
-            if let data = pb.data(forType: .tiff) ?? pb.data(forType: .png),
+        if let types = pasteboard.types, types.contains(.tiff) || types.contains(.png) {
+            if let data = pasteboard.data(forType: .tiff) ?? pasteboard.data(forType: .png),
                let image = NSImage(data: data) {
                 DispatchQueue.main.async { [weak self] in
                     self?.onScreenshotCaptured?(image, nil, "Clipboard Screenshot")
                 }
             }
         }
+    }
+
+    func scanPasteboardNow() {
+        checkPasteboard()
     }
     
     func markPathAsKnown(_ path: String) {

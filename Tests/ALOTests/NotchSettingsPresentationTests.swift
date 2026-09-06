@@ -11,7 +11,6 @@ struct NotchSettingsPresentationTests {
         model.phase = .live
         model.roomName = "Offline layout preview"
         model.nowPlaying = .init(title: "Your music", artist: "Room playback", isPlaying: false)
-        model.notchSettingsVisible = true
         let preferences = ALONotchPreferences.shared
         let wasEnabled = preferences.enabled
         preferences.enabled = true
@@ -28,16 +27,26 @@ struct NotchSettingsPresentationTests {
         window.isReleasedWhenClosed = false
         window.contentView = view
         defer { window.close() }
-        try await Task.sleep(nanoseconds: 250_000_000)
-        view.layoutSubtreeIfNeeded()
-        let bitmap = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
-        view.cacheDisplay(in: view.bounds, to: bitmap)
-        #expect(bitmap.pixelsWide >= 568)
-        if let path = ProcessInfo.processInfo.environment["ALO_NOTCH_RUNTIME_SNAPSHOT_DIR"] {
-            let directory = URL(fileURLWithPath: path)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            try #require(bitmap.representation(using: .png, properties: [:]))
-                .write(to: directory.appendingPathComponent("notch-settings-menu-bar.png"))
+        try await Task.sleep(for: .milliseconds(50))
+        model.prepareNotchSettingsForMenuBar()
+        let frames: [(String, Duration)] = [
+            ("01-first-frame", .milliseconds(16)),
+            ("02-opening", .milliseconds(90)),
+            ("03-settling", .milliseconds(160)),
+            ("04-settled", .milliseconds(340))
+        ]
+        for (name, delay) in frames {
+            try await Task.sleep(for: delay)
+            view.layoutSubtreeIfNeeded()
+            let bitmap = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+            view.cacheDisplay(in: view.bounds, to: bitmap)
+            #expect(bitmap.pixelsWide >= 568)
+            if let path = ProcessInfo.processInfo.environment["ALO_NOTCH_RUNTIME_SNAPSHOT_DIR"] {
+                let directory = URL(fileURLWithPath: path)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                try #require(bitmap.representation(using: .png, properties: [:]))
+                    .write(to: directory.appendingPathComponent("notch-settings-\(name).png"))
+            }
         }
     }
 
@@ -53,6 +62,20 @@ struct NotchSettingsPresentationTests {
         #expect(model.floatingBarHidden, "Opening inline must not move a menu-bar player into another window")
         model.notchSettingsVisible = false
         #expect(model.notchSettingsHeight == 0)
+    }
+
+    @Test func popoverReservesFullSettingsHeightSynchronously() {
+        let model = ALOViewModel(discoverRooms: false)
+        model.phase = .live
+        let controller = ALOStatusMenuController(
+            model: model,
+            toggleMainWindow: {}
+        )
+        let collapsedHeight = controller.contentSize.height
+
+        model.prepareNotchSettingsForMenuBar()
+
+        #expect(controller.contentSize.height == collapsedHeight + model.notchSettingsHeightWhenVisible)
     }
 
     @Test func openingNotchSettingsDoesNotRevealTheFloatingMediaBar() {

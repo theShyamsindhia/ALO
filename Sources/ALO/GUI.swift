@@ -875,16 +875,86 @@ struct ALOStatusPopoverContent: View {
             RoomPlaybackProgressDivider(model: model)
             WalkieTalkieBar(model: model, showsCloseButton: false)
             if model.notchSettingsVisible {
-                NotchSettingsBelowPlayer(model: model)
-                    .frame(height: model.notchSettingsHeight)
+                ALOAnimatedNotchSettingsSlot(model: model)
             }
         }
         .background(Palette.opaqueSurface)
     }
 }
 
+private struct ALOAnimatedNotchSettingsSlot: View {
+    @ObservedObject var model: ALOViewModel
+    @ObservedObject private var notchFeatures = ALONotchFeatureBridge.shared
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var revealsContent = false
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            if revealsContent {
+                NotchSettingsBelowPlayer(model: model)
+                    .transition(settingsTransition)
+            }
+        }
+        .frame(height: model.notchSettingsHeightWhenVisible, alignment: .top)
+        .clipped()
+        .onAppear {
+            guard !revealsContent else { return }
+            if reduceMotion {
+                revealsContent = true
+            } else {
+                DispatchQueue.main.async {
+                    withAnimation(settingsAnimation) { revealsContent = true }
+                }
+            }
+        }
+    }
+
+    private var settingsAnimation: Animation {
+        return notchFeatures.runtime?.embeddedSettingsExpansionAnimation
+            ?? .spring(response: 0.45, dampingFraction: 0.75, blendDuration: 0.18)
+    }
+
+    private var settingsTransition: AnyTransition {
+        guard !reduceMotion else { return .opacity }
+        return notchFeatures.runtime?.embeddedSettingsExpansionTransition
+            ?? .asymmetric(
+                insertion: .modifier(
+                    active: ALOSettingsNotchTransitionModifier(
+                        blur: 20, opacity: 0, offsetY: -53.75,
+                        scaleX: 0.6, scaleY: 0.2
+                    ),
+                    identity: ALOSettingsNotchTransitionModifier()
+                ),
+                removal: .modifier(
+                    active: ALOSettingsNotchTransitionModifier(
+                        blur: 20, opacity: 0, offsetY: -53.75,
+                        scaleX: 0.4, scaleY: 0.2
+                    ),
+                    identity: ALOSettingsNotchTransitionModifier()
+                )
+            )
+    }
+}
+
+private struct ALOSettingsNotchTransitionModifier: ViewModifier {
+    var blur: CGFloat = 0
+    var opacity: Double = 1
+    var offsetY: CGFloat = 0
+    var scaleX: CGFloat = 1
+    var scaleY: CGFloat = 1
+
+    func body(content: Content) -> some View {
+        content
+            .scaleEffect(x: scaleX, y: scaleY, anchor: .top)
+            .offset(y: offsetY)
+            .blur(radius: blur)
+            .opacity(opacity)
+            .compositingGroup()
+    }
+}
+
 @MainActor
-private final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
+final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
     private var roomTouchBar: RoomTouchBarController?
     private let model: ALOViewModel
     private let toggleMainWindow: () -> Void
@@ -926,6 +996,7 @@ private final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
         popover.delegate = self
         popover.contentSize = panelSize
         let popoverController = NSHostingController(rootView: ALOStatusPopoverContent(model: model))
+        popoverController.sizingOptions = []
         popoverController.view.wantsLayer = true
         popoverController.view.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         popover.contentViewController = popoverController
@@ -991,16 +1062,18 @@ private final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
         .sink { [weak self] _ in self?.resizePopover() }
         .store(in: &observers)
         model.$notchSettingsVisible.removeDuplicates().dropFirst()
-            .sink { [weak self] _ in
-                DispatchQueue.main.async { self?.resizePopover() }
+            .sink { [weak self] visible in
+                self?.resizePopover(
+                    to: self?.panelSize(notchSettingsVisible: visible),
+                    atomically: true
+                )
             }.store(in: &observers)
     }
 
     func showPopover(allowWhenIdle: Bool = false) {
-        guard (allowWhenIdle || model.phase == .live),
-              let button = statusItem.button,
-              !popover.isShown
-        else { return }
+        guard allowWhenIdle || model.phase == .live else { return }
+        resizePopover(atomically: model.notchSettingsVisible)
+        guard let button = statusItem.button, !popover.isShown else { return }
         popover.contentSize = panelSize
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         model.setMenuBarPopoverVisible(true)
@@ -1030,21 +1103,31 @@ private final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
         popover.isShown ? closePopover() : showPopover()
     }
 
-    private var panelSize: NSSize {
-        NSSize(
+    var contentSize: NSSize { popover.contentSize }
+
+    private var panelSize: NSSize { panelSize(notchSettingsVisible: nil) }
+
+    private func panelSize(notchSettingsVisible: Bool?) -> NSSize {
+        let settingsHeight = (notchSettingsVisible ?? model.notchSettingsVisible)
+            ? model.notchSettingsHeightWhenVisible : 0
+        return NSSize(
             width: FloatingMetrics.width,
             height: model.floatingPanelHeight
                 + FloatingMetrics.menuBarMediaHeight
                 - FloatingMetrics.barHeight
                 + FloatingMetrics.walkieBarHeight
                 + FloatingMetrics.separatorHeight
-                + model.notchSettingsHeight
+                + settingsHeight
         )
     }
 
-    private func resizePopover() {
-        guard popover.contentSize != panelSize else { return }
-        popover.contentSize = panelSize
+    private func resizePopover(to requestedSize: NSSize? = nil, atomically: Bool = false) {
+        let targetSize = requestedSize ?? panelSize
+        guard popover.contentSize != targetSize else { return }
+        let restoresAnimation = atomically && popover.animates
+        if restoresAnimation { popover.animates = false }
+        popover.contentSize = targetSize
+        if restoresAnimation { popover.animates = true }
     }
 
     private func syncMotionPreference() {
@@ -1544,7 +1627,8 @@ final class ALOViewModel: ObservableObject {
     @Published var floatingSection: FloatingSection = .collapsed
     @Published var floatingBarHidden: Bool
     @Published var notchSettingsVisible = false
-    var notchSettingsHeight: CGFloat { notchSettingsVisible ? 430 : 0 }
+    let notchSettingsHeightWhenVisible: CGFloat = 430
+    var notchSettingsHeight: CGFloat { notchSettingsVisible ? notchSettingsHeightWhenVisible : 0 }
     @Published private(set) var menuBarPopoverVisible = false
 
     private var roomBrowser: MeshRoomBrowser!
