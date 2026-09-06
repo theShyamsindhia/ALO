@@ -825,6 +825,10 @@ final class MeshSession {
     }
     func requestResync(participantID: String? = nil) -> Bool {
         guard let broadcaster = replica.broadcaster else { return false }
+        if let secureReceiver, participantID == nodeID {
+            secureReceiver.resynchronize()
+            return true
+        }
         if broadcaster.nodeID == nodeID {
             return receiveResyncRequest(
                 targetID: participantID,

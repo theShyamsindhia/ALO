@@ -33,6 +33,7 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
     private var lastTimingReportNanos: UInt64 = 0
     private var committed: MediaStreamAnchor?
     private var localRepairPending = false
+    private var requestedPlaybackResetID: UUID?
     private var clock: MediaReceiverSession.ClockSnapshot?
     private let jitter = NetworkJitterEstimator()
     private let inbox = PacketInbox()
@@ -112,6 +113,7 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
             self.annotations?.stop()
             self.videoGate.set(nil); self.videoDecoder.stop()
             self.token = nil; self.committed = nil
+            self.requestedPlaybackResetID = nil
             _ = self.inbox.take()
             self.player.stop()
         }
@@ -127,7 +129,13 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
         queue.async { self.player.setDuckingGain(ducked ? 0.3 : 1) }
     }
 
-    func resynchronize() { queue.async { self.receiver?.resynchronize() } }
+    func resynchronize() {
+        queue.async {
+            guard !self.stopped, let receiver = self.receiver else { return }
+            self.requestedPlaybackResetID = UUID()
+            receiver.resynchronize()
+        }
+    }
 
     func setVideoEnabled(_ enabled: Bool) {
         queue.async {
@@ -265,7 +273,9 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
                 // Preparation must not reset, stop, or mute the predecessor.
                 self.reportTiming(force: true)
                 do {
-                    try self.player.prepare(id: preparation.id, anchor: preparation.anchor,
+                    var anchor = preparation.anchor
+                    if let requested = self.requestedPlaybackResetID { anchor.playbackResetID = requested }
+                    try self.player.prepare(id: preparation.id, anchor: anchor,
                         clockOffsetNanos: preparation.clock.offsetNanos)
                     self.receiver?.completePreparation(id: preparation.id, ready: true)
                 } catch {
@@ -287,7 +297,13 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
                 guard let self, !self.stopped, self.token == attempt else { return }
                 let anchor = preparation.anchor
                 do { try self.player.commit(id: preparation.id) }
-                catch { self.receiver?.resynchronize(); return }
+                catch {
+                    if self.requestedPlaybackResetID == nil { self.requestedPlaybackResetID = anchor.playbackResetID }
+                    self.receiver?.resynchronize(); return
+                }
+                if anchor.state == .paused || self.player.committedAnchor?.playbackResetID == self.requestedPlaybackResetID {
+                    self.requestedPlaybackResetID = nil
+                }
                 self.clock = preparation.clock
                 self.videoDecoder.updateClockOffsetNanos(preparation.clock.offsetNanos)
                 self.videoDecoder.stagePlayoutAnchor(captureTimeNanos: anchor.captureTimeNanos,
