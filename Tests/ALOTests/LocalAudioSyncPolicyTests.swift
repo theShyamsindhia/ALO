@@ -132,3 +132,75 @@ struct CaptureTimelineAlignmentTests {
             anchorFrameIndex: 240, anchorCaptureNanos: 1_005_000_000) == .stale)
     }
 }
+
+@Suite("Continuous capture clock tracking")
+struct CaptureTimelineTrackerTests {
+    @Test func sustainedClockSkewIsCorrectedWithoutRepeatedRealignment() {
+        for skew in [-0.0005, 0.0005] {
+            var tracker = CaptureTimelineTracker()
+            var renderedSeconds = 0.0
+            var correction = 0.0
+            var rate = 1.0
+            var finalError = 0.0
+            // Ten minutes at +/-500 ppm exceeds the old 40 ms re-anchor threshold.
+            for step in 1...120_000 {
+                let frames = UInt64(step * 240)
+                let elapsed = Double(step) * 0.005 * (1 + skew)
+                let capture = UInt64(1_000_000_000 + elapsed * 1_000_000_000)
+                let state = tracker.observe(frameIndex: frames, captureNanos: capture,
+                    anchorFrameIndex: 0, anchorCaptureNanos: 1_000_000_000)
+                #expect(state == .aligned)
+                renderedSeconds += rate * 0.005 * (1 + skew)
+                if step.isMultiple(of: 10) {
+                    let host = capture + 250_000_000
+                    let estimate = RenderDriftEstimate(nowNanos: host, renderLocalNanos: host,
+                        renderHostNanos: host, outputLatencyNanos: 0,
+                        captureAnchorNanos: 1_000_000_000, playoutDelayNanos: 250_000_000,
+                        sampleTime: Int64(renderedSeconds * 48_000), sampleRate: 48_000,
+                        captureOffsetNanos: tracker.offsetNanos)!
+                    let error = estimate.errorSeconds
+                    correction = PlaybackRateCorrection.next(previous: correction, errorSeconds: error)
+                    let nextRate = Float(1 + correction)
+                    if abs(Float(rate) - nextRate) > 0.000_005 { rate = Double(nextRate) }
+                    finalError = renderedSeconds - Double(step) * 0.005
+                }
+            }
+            #expect(abs(finalError) < 0.003)
+            #expect(abs(tracker.offsetNanos) > 250_000_000)
+            #expect(skew > 0 ? rate < 1 : rate > 1)
+            // Without tracking, the initial-anchor controller sees zero and
+            // leaves rate at 1, accumulating 300 ms of content timing error.
+            #expect(abs(600 * skew) > 0.25)
+        }
+    }
+
+    @Test func smallJitterIsSmoothedButRealGapIsNot() {
+        var tracker = CaptureTimelineTracker()
+        for step in 1...200 {
+            let jitter: Int64 = step.isMultiple(of: 2) ? 1_000_000 : -1_000_000
+            #expect(tracker.observe(frameIndex: UInt64(step * 240),
+                captureNanos: UInt64(1_000_000_000 + Int64(step * 5_000_000) + jitter),
+                anchorFrameIndex: 0, anchorCaptureNanos: 1_000_000_000) == .aligned)
+        }
+        #expect(abs(tracker.offsetNanos) < 20_000)
+        let previous = tracker.offsetNanos
+        #expect(tracker.observe(frameIndex: 48_240, captureNanos: 2_205_000_000,
+            anchorFrameIndex: 0, anchorCaptureNanos: 1_000_000_000) == .discontinuous)
+        #expect(tracker.offsetNanos == previous)
+        tracker.reset()
+        #expect(tracker.offsetNanos == 0)
+        #expect(tracker.observe(frameIndex: 48_480, captureNanos: 2_210_000_000,
+            anchorFrameIndex: 48_240, anchorCaptureNanos: 2_205_000_000) == .aligned)
+    }
+
+    @Test func packetLossAndStaleDataDoNotBiasClock() {
+        var tracker = CaptureTimelineTracker()
+        #expect(tracker.observe(frameIndex: 240, captureNanos: 1_005_000_000,
+            anchorFrameIndex: 0, anchorCaptureNanos: 1_000_000_000) == .aligned)
+        #expect(tracker.observe(frameIndex: 48_000, captureNanos: 2_000_000_000,
+            anchorFrameIndex: 0, anchorCaptureNanos: 1_000_000_000) == .aligned)
+        #expect(tracker.observe(frameIndex: 240, captureNanos: 1_005_000_000,
+            anchorFrameIndex: 0, anchorCaptureNanos: 1_000_000_000) == .stale)
+        #expect(tracker.offsetNanos == 0)
+    }
+}

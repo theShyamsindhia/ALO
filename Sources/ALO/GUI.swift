@@ -2815,9 +2815,10 @@ final class ALOViewModel: ObservableObject {
     }
 
     func showGamesLibrary() {
-        showFloatingBar()
-        floatingSection = .chat; roomGamesVisible = true
-        if !arena.expanded { arena.returnToLibrary() }
+        roomGamesVisible = false
+        // Reuse the game window, including a running match, instead of putting
+        // the library into the room popover or resetting a player's session.
+        arena.openExpanded()
     }
 
     func setAutomaticAudioSync(_ enabled: Bool) {
@@ -4915,19 +4916,17 @@ struct FloatingRoomView: View {
             }
 
             Button {
-                showsGames.toggle()
-                if showsGames && !model.arena.expanded { model.arena.returnToLibrary() }
                 composerFocused = false
-                model.arena.clearInput()
+                model.showGamesLibrary()
             } label: {
-                Image(systemName: showsGames ? "bubble.left.fill" : "gamecontroller.fill")
+                Image(systemName: "gamecontroller.fill")
                     .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(Palette.controlIcon)
                     .frame(width: 32, height: 30)
             }
-            .buttonStyle(FlatToolButtonStyle(active: showsGames))
-            .help(showsGames ? "Return to room chat" : "Pick a game")
-            .accessibilityLabel(showsGames ? "Return to room chat" : "Pick a game")
+            .buttonStyle(FlatToolButtonStyle(active: model.arena.expanded))
+            .help("Open Games window")
+            .accessibilityLabel("Open Games window")
 
             HStack(spacing: -5) {
                 ForEach(Array(model.participants.prefix(3))) { participant in

@@ -89,6 +89,7 @@ final class SynchronizedPlayer {
     private var expectedSequence: UInt32?
     private var anchorFrameIndex: UInt64?
     private var anchorCaptureNanos: UInt64?
+    private var captureTimeline = CaptureTimelineTracker()
     private var hasStarted = false
     private var outputLatencyNanos: UInt64 = 0
     private var renderSchedulingHeadroomNanos = RoomTiming.renderSchedulingHeadroomNanos
@@ -259,24 +260,19 @@ final class SynchronizedPlayer {
                 nowNanos: now, renderLocalNanos: renderLocalNanos,
                 renderHostNanos: renderHostNanos, outputLatencyNanos: outputLatencyNanos,
                 captureAnchorNanos: anchorCaptureNanos, playoutDelayNanos: targetLatencyNanos,
-                sampleTime: playerTime.sampleTime, sampleRate: playerTime.sampleRate
+                sampleTime: playerTime.sampleTime, sampleRate: playerTime.sampleRate,
+                captureOffsetNanos: captureTimeline.offsetNanos
               ) else { return }
         let absoluteErrorNanos = estimate.magnitudeNanos
         // Age belongs to the audio render sample, not the polling timer.
         latestDriftMeasurement = (absoluteErrorNanos, renderLocalNanos)
-        let errorFrames = estimate.errorSeconds * Double(AudioPacket.sampleRate)
         if automaticSyncPolicy.shouldRealign(driftNanos: absoluteErrorNanos, now: now) {
             latestLatenessNanos = absoluteErrorNanos
             hardResynchronize()
             return
         }
-        let desiredCorrection = abs(errorFrames) < 24
-            ? 0
-            : max(-0.01, min(0.01, errorFrames / Double(AudioPacket.sampleRate) * 0.25))
-        smoothedCorrection += (desiredCorrection - smoothedCorrection) * 0.12
-        if abs(smoothedCorrection) < 0.000_005 {
-            smoothedCorrection = 0
-        }
+        smoothedCorrection = PlaybackRateCorrection.next(previous: smoothedCorrection,
+                                                          errorSeconds: estimate.errorSeconds)
         let rate = Float(1 + smoothedCorrection)
         if abs(varispeed.rate - rate) > 0.000_005 {
             varispeed.rate = rate
@@ -297,7 +293,7 @@ final class SynchronizedPlayer {
             }
 
             if hasStarted, let anchorFrameIndex, let anchorCaptureNanos {
-                switch CaptureTimelineAlignment.check(
+                switch captureTimeline.observe(
                     frameIndex: packet.frameIndex, captureNanos: packet.captureTimeNanos,
                     anchorFrameIndex: anchorFrameIndex, anchorCaptureNanos: anchorCaptureNanos
                 ) {
@@ -433,6 +429,7 @@ final class SynchronizedPlayer {
         expectedSequence = nil
         anchorFrameIndex = nil
         anchorCaptureNanos = nil
+        captureTimeline.reset()
         hasStarted = false
         smoothedCorrection = 0
         varispeed.rate = 1
@@ -495,6 +492,7 @@ final class SynchronizedPlayer {
         expectedSequence = nil
         anchorFrameIndex = nil
         anchorCaptureNanos = nil
+        captureTimeline.reset()
         hasStarted = false
         smoothedCorrection = 0
         varispeed.rate = 1
@@ -520,6 +518,7 @@ final class SynchronizedPlayer {
         expectedSequence = nil
         anchorFrameIndex = nil
         anchorCaptureNanos = nil
+        captureTimeline.reset()
         hasStarted = false
         smoothedCorrection = 0
         varispeed.rate = 1
@@ -887,6 +886,7 @@ final class SynchronizedPlayer {
         varispeed.rate = 1
         anchorFrameIndex = nil
         anchorCaptureNanos = nil
+        captureTimeline.reset()
         hasStarted = false
         playbackWatchdog.reset()
         driftRecovery.reset()

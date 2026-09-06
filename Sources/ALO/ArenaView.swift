@@ -70,7 +70,6 @@ struct ArenaPanel: View {
             Button { detached ? session.fullscreen() : session.openExpanded() } label: {
                 Image(systemName: "arrow.up.left.and.arrow.down.right")
             }.help(detached ? "Toggle fullscreen" : "Expand game")
-            if detached { Button { session.closeExpanded() } label: { Image(systemName: "rectangle.inset.filled") }.help("Return game to room") }
         }.buttonStyle(.plain).font(.system(size: 11, weight: .medium))
             .padding(.horizontal, 14).frame(height: 38)
             .background(.white.opacity(0.025))

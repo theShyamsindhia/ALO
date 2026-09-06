@@ -38,14 +38,15 @@ public struct RenderDriftEstimate: Sendable {
 
     public init?(nowNanos: UInt64, renderLocalNanos: UInt64, renderHostNanos: UInt64,
                  outputLatencyNanos: UInt64, captureAnchorNanos: UInt64,
-                 playoutDelayNanos: UInt64, sampleTime: Int64, sampleRate: Double) {
+                 playoutDelayNanos: UInt64, sampleTime: Int64, sampleRate: Double,
+                 captureOffsetNanos: Double = 0) {
         guard nowNanos >= renderLocalNanos,
               nowNanos - renderLocalNanos <= Self.maximumAgeNanos,
-              sampleTime >= 0, sampleRate.isFinite, sampleRate > 0 else { return nil }
+              sampleTime >= 0, sampleRate.isFinite, sampleRate > 0, captureOffsetNanos.isFinite else { return nil }
         let audible = renderHostNanos.addingReportingOverflow(outputLatencyNanos)
         let start = captureAnchorNanos.addingReportingOverflow(playoutDelayNanos)
         guard !audible.overflow, !start.overflow, audible.partialValue >= start.partialValue else { return nil }
-        errorSeconds = Double(audible.partialValue - start.partialValue) / 1_000_000_000
+        errorSeconds = (Double(audible.partialValue - start.partialValue) - captureOffsetNanos) / 1_000_000_000
             - Double(sampleTime) / sampleRate
         let magnitude = abs(errorSeconds) * 1_000_000_000
         guard magnitude.isFinite, magnitude < Double(UInt64.max) else { return nil }
@@ -66,5 +67,42 @@ public enum CaptureTimelineAlignment: Sendable, Equatable {
             * 1_000_000_000 / Double(AudioPacket.sampleRate)
         return abs(elapsedNanos - frameNanos) > Double(LocalAudioSyncPolicy.thresholdNanos)
             ? .discontinuous : .aligned
+    }
+}
+
+/// Follows gradual capture-clock skew using content timestamps, never arrival times.
+/// Abrupt gaps are rejected before smoothing so they still require a new anchor.
+public struct CaptureTimelineTracker: Sendable {
+    public private(set) var offsetNanos: Double = 0
+    private var lastFrame: UInt64?
+    public init() {}
+    public mutating func reset() { offsetNanos = 0; lastFrame = nil }
+
+    public mutating func observe(frameIndex: UInt64, captureNanos: UInt64,
+                                 anchorFrameIndex: UInt64, anchorCaptureNanos: UInt64) -> CaptureTimelineAlignment {
+        guard frameIndex >= anchorFrameIndex, captureNanos >= anchorCaptureNanos,
+              lastFrame.map({ frameIndex > $0 }) ?? true else { return .stale }
+        let frames = frameIndex - anchorFrameIndex
+        let observed = Double(captureNanos - anchorCaptureNanos)
+            - Double(frames) * 1_000_000_000 / Double(AudioPacket.sampleRate)
+        guard abs(observed - offsetNanos) <= Double(LocalAudioSyncPolicy.thresholdNanos) else {
+            return .discontinuous
+        }
+        let delta = frameIndex - (lastFrame ?? anchorFrameIndex)
+        // Half-second low-pass, bounded even after many lost packets.
+        let seconds = Double(delta) / Double(AudioPacket.sampleRate)
+        let weight = min(0.25, seconds / (0.5 + seconds))
+        offsetNanos += (observed - offsetNanos) * weight
+        lastFrame = frameIndex
+        return .aligned
+    }
+}
+
+/// Shared bounded rate controller used by live playback and clock-skew tests.
+public enum PlaybackRateCorrection {
+    public static func next(previous: Double, errorSeconds: Double) -> Double {
+        let desired = abs(errorSeconds) < 0.0005 ? 0 : max(-0.01, min(0.01, errorSeconds * 0.25))
+        let smoothed = previous + (desired - previous) * 0.12
+        return abs(smoothed) < 0.000_005 ? 0 : smoothed
     }
 }
