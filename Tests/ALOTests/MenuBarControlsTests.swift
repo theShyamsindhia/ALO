@@ -1,5 +1,6 @@
 import AppKit
 import Testing
+import ALOCore
 @testable import ALO
 
 extension NativePresentationTests {
@@ -52,6 +53,10 @@ extension NativePresentationTests {
 
         @Test func navigationNeverMirrorsOrEnablesAnotherSurface() {
             let model = ALOViewModel(discoverRooms: false)
+            model.currentParticipantID = "local"
+            model.participants = [RoomParticipant(id: "local", name: "You"),
+                                  RoomParticipant(id: "peer-a", name: "Peer A"),
+                                  RoomParticipant(id: "peer-b", name: "Peer B")]
             model.floatingBarHidden = true
             model.floatingSection = .queue
             let floatingHeight = model.floatingPanelHeight
@@ -73,6 +78,7 @@ extension NativePresentationTests {
             #expect(model.menuBarSection == .video)
             #expect(model.panelHeight(for: .menuBar) == menuHeight)
             #expect(model.floatingSection == .people)
+            #expect(model.participants.map(\.id) == ["local", "peer-a", "peer-b"], "People navigation must not prune the roster")
             model.setMenuBarPopoverVisible(false)
             #expect(model.menuBarSection == .collapsed)
             #expect(model.floatingSection == .people)
@@ -103,7 +109,7 @@ extension NativePresentationTests {
             _ = NSApplication.shared
             let appearance = try #require(NSAppearance(named: dark ? .darkAqua : .aqua))
             let palette = ArtworkPalette(accentHex: "EE7733", secondaryHex: "8855DD", tertiaryHex: "44BBAA")
-            for control in ALOMenuBarControl.allCases {
+            for control in ALOMenuBarControl.allCases where control != .record {
                 for artwork in [nil, palette] {
                     let image = ALOMenuBarControlImage.make(symbol: control.symbol, palette: artwork, appearance: appearance)
                     #expect(!image.isTemplate)
@@ -121,8 +127,28 @@ extension NativePresentationTests {
                     }
                     #expect(glyphPixels > 5, "Must contain the SF Symbol")
                     #expect(clearPixels > 5, "Must not render a solid black block")
+                    let scale = bitmap.pixelsWide / 24
+                    let belowGlyph = try #require(bitmap.colorAt(x: 12 * scale, y: 21 * scale))
+                    #expect(belowGlyph.alphaComponent < 0.01, "No coloured underline beneath the icon")
                 }
             }
+        }
+
+        @Test("Artwork tints remain legible", arguments: [false, true])
+        func artworkTintContrast(dark: Bool) throws {
+            let appearance = try #require(NSAppearance(named: dark ? .darkAqua : .aqua))
+            var background = NSColor.white
+            appearance.performAsCurrentDrawingAppearance {
+                background = NSColor.windowBackgroundColor.usingColorSpace(.deviceRGB) ?? .white
+            }
+            for hex in ["000000", "FFFFFF", "EE7733", "225544", "00FF00", "0000FF"] {
+                let palette = ArtworkPalette(accentHex: hex, secondaryHex: hex, tertiaryHex: hex)
+                let color = ALOMenuBarControlImage.tint(palette: palette, appearance: appearance)
+                #expect(ALOMenuBarControlImage.contrast(color, background) >= 4.5)
+            }
+            let warm = ALOMenuBarControlImage.tint(palette: .init(accentHex: "EE7733", secondaryHex: "EE7733", tertiaryHex: "EE7733"), appearance: appearance)
+            let cool = ALOMenuBarControlImage.tint(palette: .init(accentHex: "3366DD", secondaryHex: "3366DD", tertiaryHex: "3366DD"), appearance: appearance)
+            #expect(warm != cool, "The glyph tint must follow album changes")
         }
     }
 }

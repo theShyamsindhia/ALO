@@ -100,9 +100,42 @@ struct ALOMenuBarControlState: Equatable {
     }
 }
 
-/// Keep symbols native and legible; album colour belongs in the accent, not the glyph.
+/// The existing record stays separate. Optional SF Symbols take their tint from the artwork.
 enum ALOMenuBarControlImage {
+    static func tint(palette: ArtworkPalette?, appearance: NSAppearance) -> NSColor {
+        var result = NSColor.labelColor
+        appearance.performAsCurrentDrawingAppearance {
+            guard let palette else { result = NSColor.labelColor.usingColorSpace(.deviceRGB) ?? .labelColor; return }
+            let accent = NSColor.deviceIdentity(palette.accentHex)
+            let background = NSColor.windowBackgroundColor
+            let dark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            let endpoint: NSColor = dark ? .white : .black
+            result = accent
+            // Preserve the artwork hue, adjusting only as far as legibility requires.
+            for step in 0...20 {
+                let candidate = accent.blended(withFraction: CGFloat(step) / 20, of: endpoint) ?? endpoint
+                result = candidate
+                if contrast(candidate, background) >= 4.5 { break }
+            }
+        }
+        return result
+    }
+
+    static func contrast(_ first: NSColor, _ second: NSColor) -> Double {
+        func luminance(_ color: NSColor) -> Double {
+            guard let rgb = color.usingColorSpace(.deviceRGB) else { return 0 }
+            func linear(_ value: CGFloat) -> Double {
+                let value = Double(value)
+                return value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+            }
+            return 0.2126 * linear(rgb.redComponent) + 0.7152 * linear(rgb.greenComponent) + 0.0722 * linear(rgb.blueComponent)
+        }
+        let a = luminance(first), b = luminance(second)
+        return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+    }
+
     static func make(symbol name: String, palette: ArtworkPalette?, appearance: NSAppearance, unread: Bool = false) -> NSImage {
+        let foreground = tint(palette: palette, appearance: appearance)
         let image = NSImage(size: NSSize(width: 24, height: 24), flipped: false) { bounds in
             appearance.performAsCurrentDrawingAppearance {
                 guard let source = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
@@ -111,22 +144,15 @@ enum ALOMenuBarControlImage {
                     source.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1)
                     guard let context = NSGraphicsContext.current?.cgContext else { return false }
                     context.setBlendMode(.sourceIn)
-                    context.setFillColor(NSColor.labelColor.cgColor)
+                    context.setFillColor(foreground.cgColor)
                     context.fill(rect)
                     return true
                 }
                 let scale = min(16 / glyph.size.width, 16 / glyph.size.height)
                 let size = NSSize(width: glyph.size.width * scale, height: glyph.size.height * scale)
-                glyph.draw(in: NSRect(x: bounds.midX - size.width / 2, y: 5 + (16 - size.height) / 2,
+                glyph.draw(in: NSRect(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2,
                                       width: size.width, height: size.height),
                            from: .zero, operation: .sourceOver, fraction: 1)
-                let accent = NSBezierPath(roundedRect: NSRect(x: 7, y: 2, width: 10, height: 2), xRadius: 1, yRadius: 1)
-                if let palette, let gradient = NSGradient(colors: palette.hexes.map(NSColor.deviceIdentity)) {
-                    gradient.draw(in: accent, angle: 0)
-                } else {
-                    NSColor.secondaryLabelColor.setFill()
-                    accent.fill()
-                }
                 if unread {
                     NSColor.systemRed.setFill()
                     NSBezierPath(ovalIn: NSRect(x: 18, y: 18, width: 5, height: 5)).fill()
@@ -187,6 +213,8 @@ final class ALOPinnedMenuBarController {
             let target = MenuBarActionTarget { [weak self] in self?.perform(control) }
             item.button?.target = target
             item.button?.action = #selector(MenuBarActionTarget.invoke)
+            target.appearanceObserver = item.button?.publisher(for: \.effectiveAppearance).dropFirst()
+                .sink { [weak self] _ in self?.refresh(force: true) }
             items[control] = item
             targets[control] = target
         }
@@ -218,7 +246,7 @@ final class ALOPinnedMenuBarController {
         case .chat: navigate(.chat)
         case .people: navigate(.people)
         case .screen:
-            if model.roomHasVideo { navigate(.video) }
+            if model.roomHasVideo && !model.mediaSwitchBusy { navigate(.video) }
             else { model.toggleVideoFromFloatingBar(presentation: .menuBar) }
         case .sync: model.syncAllDevices()
         case .mute: model.toggleIncomingMediaMute()
@@ -230,6 +258,7 @@ final class ALOPinnedMenuBarController {
 @MainActor
 private final class MenuBarActionTarget: NSObject {
     let action: () -> Void
+    var appearanceObserver: AnyCancellable?
     init(_ action: @escaping () -> Void) { self.action = action }
     @objc func invoke() { action() }
 }

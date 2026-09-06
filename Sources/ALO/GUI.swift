@@ -1003,7 +1003,8 @@ final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
         pinnedControls = ALOPinnedMenuBarController(model: model, preferences: preferences) { [weak self] section in
             guard let self else { return }
             self.showPopover()
-            self.model.toggleSection(section, in: .menuBar)
+            if section == .video { self.model.toggleVideoFromFloatingBar(presentation: .menuBar) }
+            else { self.model.toggleSection(section, in: .menuBar) }
         }
         preferences.$controls.dropFirst().receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.refreshStatusRecord() }.store(in: &observers)
