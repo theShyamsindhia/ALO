@@ -58,5 +58,6 @@ struct SharedMediaWindowTests {
         }
         viewer.close()
         #expect(closed)
+        #expect(panel.contentView == nil)
     }
 }

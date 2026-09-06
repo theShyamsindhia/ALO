@@ -73,6 +73,8 @@ final class SharedMediaWindow: NSObject, NSWindowDelegate, ObservableObject {
     func close() { panel.close() }
     func windowWillClose(_ notification: Notification) {
         player?.pause()
+        // The hosting view owns this model; release it when the popup closes.
+        panel.contentView = nil
         closed()
     }
     func togglePin() { pinned.toggle(); panel.level = pinned ? .floating : .normal }
