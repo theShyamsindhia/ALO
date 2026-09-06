@@ -21,7 +21,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 30
     env:
-      ALO_UI_RENDER_DIR: ${{ runner.temp }}/alo-ui-renders
+      ALO_UI_RENDER_DIR: /tmp/alo-ui-renders
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Verify pinned toolchain
@@ -59,7 +59,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: alo-ui-renders
-          path: ${{ runner.temp }}/alo-ui-renders
+          path: /tmp/alo-ui-renders
           if-no-files-found: warn
       - name: Show XCTest crash reports on failure
         if: failure()
