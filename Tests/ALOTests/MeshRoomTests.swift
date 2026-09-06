@@ -776,15 +776,19 @@ struct MeshRoomTests {
         let room = RoomConfiguration(name: "Version test", creatorPeerID: "a")
         let ready = PortProbe()
         let versions = VersionProbe()
+        let participantsA = MeshProbe()
+        let participantsB = MeshProbe()
         let nodeA = MeshControlPlane(
             room: room, nodeID: "a", displayName: "A", appVersion: "0.12.0",
-            replicaHandler: { _ in }, participantsHandler: { _ in },
+            replicaHandler: { participantsA.update(replica: $0) },
+            participantsHandler: { participantsA.update(participants: $0) },
             peerVersionHandler: { versions.add($0) }
         )
         let nodeB = MeshControlPlane(
             room: room, nodeID: "b", displayName: "B", appVersion: "0.12.1",
             listenerReadyHandler: { ready.set($0) },
-            replicaHandler: { _ in }, participantsHandler: { _ in }
+            replicaHandler: { participantsB.update(replica: $0) },
+            participantsHandler: { participantsB.update(participants: $0) }
         )
         try nodeA.start(advertise: false)
         try nodeB.start(advertise: false)
@@ -795,6 +799,10 @@ struct MeshRoomTests {
         }
         nodeA.connectForTesting(to: .hostPort(host: "127.0.0.1", port: port))
         #expect(waitUntil { versions.contains("0.12.1") })
+        #expect(waitUntil {
+            participantsA.participant(id: "b")?.appVersion == "0.12.1"
+                && participantsB.participant(id: "a")?.appVersion == "0.12.0"
+        })
     }
 
     @Test("Any mesh participant can send playback control to the current broadcaster")

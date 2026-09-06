@@ -1407,6 +1407,13 @@ private struct DeviceIdentityEditorView: View {
     }
 }
 
+struct ParticipantRoomActivity: Equatable {
+    let messagesSent: Int
+    let filesShared: Int
+    let mentionsMade: Int
+    let reactionsAdded: Int
+}
+
 @MainActor
 final class ALOViewModel: ObservableObject {
     var peerVersionHandler: (String) -> Void = { _ in }
@@ -2891,6 +2898,26 @@ final class ALOViewModel: ObservableObject {
         return ChatAttachmentStore.existingURL(for: attachment, roomID: roomID, senderID: message.senderID)
     }
 
+    func roomActivity(for participantID: String) -> ParticipantRoomActivity {
+        Self.roomActivity(for: participantID, messages: messages)
+    }
+
+    nonisolated static func roomActivity(
+        for participantID: String,
+        messages: [RoomChatMessage]
+    ) -> ParticipantRoomActivity {
+        let visible = messages.filter { !$0.deleted }
+        let sent = visible.filter { $0.senderID == participantID }
+        return ParticipantRoomActivity(
+            messagesSent: sent.count,
+            filesShared: sent.filter { $0.attachment != nil }.count,
+            mentionsMade: sent.reduce(0) { $0 + ($1.mentionedParticipantIDs?.count ?? 0) },
+            reactionsAdded: visible.reduce(0) { count, message in
+                count + message.reactions.values.reduce(0) { $0 + ($1.contains(participantID) ? 1 : 0) }
+            }
+        )
+    }
+
     private func receiveChatAttachment(_ payload: RoomChatAttachmentPayload, senderID: String) {
         guard let roomID = activeRoomConfiguration?.id,
               Self.shouldAcceptChatAttachment(payload, senderID: senderID, messages: messages),
@@ -3644,15 +3671,18 @@ final class ALOViewModel: ObservableObject {
         let previousByID = Dictionary(uniqueKeysWithValues: prior.map { ($0.id, $0) })
         return participants.map { participant in
             guard let existing = previousByID[participant.id] else { return participant }
-            return RoomParticipant(
+            var merged = RoomParticipant(
                 id: participant.id,
                 name: participant.name,
                 volume: existing.volume,
                 isMuted: existing.isMuted,
                 icon: participant.icon,
                 colorHex: participant.colorHex,
-                profileImageData: participant.profileImageData
+                profileImageData: participant.profileImageData,
+                appVersion: participant.appVersion ?? existing.appVersion
             )
+            merged.playbackTiming = participant.playbackTiming
+            return merged
         }
     }
 }
@@ -4192,6 +4222,8 @@ struct FloatingRoomView: View {
     @State private var showsRoomInfo = false
     @State private var showsMediaMore = false
     @State private var showsLyrics = false
+    @State private var expandedParticipantIDs = Set<String>()
+    @State private var inspectedParticipantID: String?
 
     private var panelTransition: AnyTransition {
         reduceMotion
@@ -5200,101 +5232,253 @@ struct FloatingRoomView: View {
     private func floatingParticipant(_ participant: RoomParticipant) -> some View {
         let controllable = model.canControl(participant)
         let appearance = DeviceAppearance.generated(from: participant.id)
+        let expanded = expandedParticipantIDs.contains(participant.id)
         return VStack(spacing: 0) {
-          HStack(spacing: 11) {
-            DeviceAvatar(
-                emoji: participant.icon ?? appearance.icon,
-                colorHex: participant.colorHex ?? appearance.colorHex,
-                profileImageData: participant.profileImageData,
-                size: 32
-            )
+            HStack(spacing: 11) {
+                DeviceAvatar(
+                    emoji: participant.icon ?? appearance.icon,
+                    colorHex: participant.colorHex ?? appearance.colorHex,
+                    profileImageData: participant.profileImageData,
+                    size: 32
+                )
 
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(participantPresenceColor(participant))
-                    .frame(width: 6, height: 6)
-                    .help(participantPresence(participant))
-                    .accessibilityLabel(participantPresence(participant))
-                Text(participant.id == model.currentParticipantID ? "You" : participant.name)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Palette.ink)
-                    .lineLimit(1)
-            }
-            .frame(width: 122, alignment: .leading)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(participant.id == model.currentParticipantID ? "You" : participant.name)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Palette.ink)
+                        .lineLimit(1)
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(participantPresenceColor(participant))
+                            .frame(width: 6, height: 6)
+                        Text(participantPresence(participant))
+                    }
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(Palette.secondary)
+                }
 
-            Image(systemName: "speaker.fill")
-                .font(.system(size: 8))
-                .foregroundStyle(Palette.controlIcon)
-            Slider(
-                value: Binding(
-                    get: { participant.volume },
-                    set: { model.setParticipantVolume(participant, volume: $0) }
-                ),
-                in: 0...1
-            )
-            .controlSize(.mini)
-            .tint(Palette.controlAccent)
-            .disabled(!controllable)
-            .help(model.participantMediaControlHelp(participant))
-            Text("\(Int(participant.volume * 100))")
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                .foregroundStyle(Palette.secondary)
-                .frame(width: 25, alignment: .trailing)
-            Button { model.toggleParticipantMute(participant) } label: {
-                Image(systemName: participant.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(participant.isMuted ? Palette.red : Palette.controlIcon)
-                    .frame(width: 32, height: 30)
-            }
-            .buttonStyle(FlatToolButtonStyle(active: participant.isMuted))
-            .disabled(!controllable)
-            .help(controllable ? (participant.isMuted ? "Unmute \(participant.name)" : "Mute \(participant.name)")
-                  : model.participantMediaControlHelp(participant))
-            .accessibilityLabel(participant.isMuted ? "Unmute \(participant.name)" : "Mute \(participant.name)")
-            Button { model.syncParticipant(participant) } label: {
-                Image(systemName: "arrow.triangle.2.circlepath")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(Palette.controlIcon)
-                    .frame(width: 32, height: 30)
-            }
-            .buttonStyle(FlatToolButtonStyle(active: false))
-            .help("Sync \(participant.id == model.currentParticipantID ? "this Mac" : participant.name) now")
-            .accessibilityLabel("Sync \(participant.id == model.currentParticipantID ? "this Mac" : participant.name) now")
-        }
-        .padding(.horizontal, 8)
-        .frame(height: 64)
-        .opacity(controllable ? 1 : 0.68)
-          HStack(spacing: 12) {
-            Text("RTT to broadcaster: " + timingValue(participant.playbackTiming?.roundTripMilliseconds))
-            Text("Estimated drift: " + timingValue(participant.playbackTiming?.driftMilliseconds))
-            Spacer(minLength: 0)
-          }
-          .font(.system(size: 10, design: .monospaced))
-          .foregroundStyle(Palette.secondary)
-          .padding(.leading, 51)
-          .padding(.bottom, 10)
-          .help("Reported by this device. RTT is network round-trip time to the broadcaster; estimated drift compares its audio render timeline with the room schedule, not sound measured from speakers. Unavailable means no fresh report, including older app versions.")
-          if participant.id != model.currentParticipantID {
-            HStack(spacing: 10) {
-                Label("Voice on this Mac", systemImage: "mic.fill")
-                    .font(.system(size: 10))
-                    .foregroundStyle(Palette.secondary)
-                    .frame(width: 150, alignment: .leading)
-                Slider(value: Binding(
-                    get: { model.voiceVolume(for: participant.id) },
-                    set: { model.setVoiceVolume($0, for: participant.id) }
-                ), in: 0...1)
-                .controlSize(.mini)
-                .accessibilityLabel("\(participant.name) voice volume on this Mac")
-                Text("\(Int(model.voiceVolume(for: participant.id) * 100))%")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(Palette.secondary)
-                    .frame(width: 34)
+                Spacer(minLength: 8)
+
+                participantDriftBadge(participant)
+
+                Button {
+                    inspectedParticipantID = participant.id
+                } label: {
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Palette.controlIcon)
+                        .frame(width: 30, height: 30)
+                }
+                .buttonStyle(FlatToolButtonStyle(active: inspectedParticipantID == participant.id))
+                .popover(isPresented: participantInfoPresented(participant.id), arrowEdge: .trailing) {
+                    participantInfoPopover(participant)
+                }
+                .help("View details for \(participant.id == model.currentParticipantID ? "this Mac" : participant.name)")
+                .accessibilityLabel("View participant details")
+
+                Button {
+                    withAnimation(panelAnimation) {
+                        if expanded { expandedParticipantIDs.remove(participant.id) }
+                        else { expandedParticipantIDs.insert(participant.id) }
+                    }
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(Palette.controlIcon)
+                        .rotationEffect(.degrees(expanded ? 180 : 0))
+                        .frame(width: 30, height: 30)
+                }
+                .buttonStyle(FlatToolButtonStyle(active: expanded))
+                .help(expanded ? "Hide voice and timing controls" : "Show voice and timing controls")
+                .accessibilityLabel(expanded ? "Hide participant controls" : "Show participant controls")
             }
             .padding(.horizontal, 8)
-            .padding(.bottom, 12)
-          }
+            .frame(height: 60)
+
+            if expanded {
+                VStack(spacing: 10) {
+                    if participant.id != model.currentParticipantID {
+                        participantSliderRow(
+                            title: "Voice on this Mac",
+                            systemImage: "mic.fill",
+                            value: Binding(
+                                get: { model.voiceVolume(for: participant.id) },
+                                set: { model.setVoiceVolume($0, for: participant.id) }
+                            ),
+                            enabled: true,
+                            valueText: "\(Int(model.voiceVolume(for: participant.id) * 100))%"
+                        )
+                    }
+
+                    participantSliderRow(
+                        title: "Room media",
+                        systemImage: participant.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill",
+                        value: Binding(
+                            get: { participant.volume },
+                            set: { model.setParticipantVolume(participant, volume: $0) }
+                        ),
+                        enabled: controllable,
+                        valueText: participant.isMuted ? "Muted" : "\(Int(participant.volume * 100))%"
+                    )
+
+                    HStack(spacing: 10) {
+                        Label("Drift from host", systemImage: "waveform.path.ecg")
+                            .frame(width: 126, alignment: .leading)
+                        Text(timingValue(participant.playbackTiming?.driftMilliseconds))
+                            .foregroundStyle(participantDriftColor(participant))
+                        Text("RTT " + timingValue(participant.playbackTiming?.roundTripMilliseconds))
+                            .foregroundStyle(Palette.secondary)
+                        Spacer(minLength: 6)
+                        Button("Sync now", systemImage: "arrow.triangle.2.circlepath") {
+                            model.syncParticipant(participant)
+                        }
+                        .buttonStyle(PillButtonStyle(filled: false))
+                        Button {
+                            model.toggleParticipantMute(participant)
+                        } label: {
+                            Image(systemName: participant.isMuted ? "speaker.wave.2.fill" : "speaker.slash.fill")
+                                .frame(width: 24, height: 22)
+                        }
+                        .buttonStyle(FlatToolButtonStyle(active: participant.isMuted))
+                        .disabled(!controllable)
+                        .help(participant.isMuted ? "Unmute room media" : "Mute room media")
+                    }
+                    .font(.system(size: 10, weight: .medium))
+                    .help("Measured render-clock drift from the broadcaster. Missing or stale reports show as unavailable.")
+                }
+                .padding(.leading, 51)
+                .padding(.trailing, 8)
+                .padding(.bottom, 12)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
         }
+    }
+
+    private func participantSliderRow(
+        title: String,
+        systemImage: String,
+        value: Binding<Double>,
+        enabled: Bool,
+        valueText: String
+    ) -> some View {
+        HStack(spacing: 10) {
+            Label(title, systemImage: systemImage)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(Palette.secondary)
+                .frame(width: 126, alignment: .leading)
+            Slider(value: value, in: 0...1)
+                .controlSize(.mini)
+                .tint(Palette.controlAccent)
+                .disabled(!enabled)
+                .accessibilityLabel(title)
+            Text(valueText)
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundStyle(Palette.secondary)
+                .frame(width: 42, alignment: .trailing)
+        }
+    }
+
+    private func participantDriftBadge(_ participant: RoomParticipant) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: "waveform.path.ecg")
+            Text(timingValue(participant.playbackTiming?.driftMilliseconds))
+        }
+        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+        .foregroundStyle(participantDriftColor(participant))
+        .padding(.horizontal, 8)
+        .frame(height: 26)
+        .background(participantDriftColor(participant).opacity(0.10), in: Capsule())
+        .help("Current measured drift from the room broadcaster")
+        .accessibilityLabel("Drift from host")
+        .accessibilityValue(timingValue(participant.playbackTiming?.driftMilliseconds))
+    }
+
+    private func participantDriftColor(_ participant: RoomParticipant) -> Color {
+        guard let drift = participant.playbackTiming?.driftMilliseconds else { return Palette.secondary }
+        return drift >= RoomSyncMonitor.correctionThresholdMilliseconds ? .orange : .green
+    }
+
+    private func participantInfoPresented(_ participantID: String) -> Binding<Bool> {
+        Binding(
+            get: { inspectedParticipantID == participantID },
+            set: { presented in if !presented, inspectedParticipantID == participantID { inspectedParticipantID = nil } }
+        )
+    }
+
+    private func participantInfoPopover(_ participant: RoomParticipant) -> some View {
+        let isLocal = participant.id == model.currentParticipantID
+        let appearance = DeviceAppearance.generated(from: participant.id)
+        let activity = model.roomActivity(for: participant.id)
+        let version = participant.appVersion
+            ?? (isLocal ? Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String : nil)
+        return VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                DeviceAvatar(
+                    emoji: participant.icon ?? appearance.icon,
+                    colorHex: participant.colorHex ?? appearance.colorHex,
+                    profileImageData: participant.profileImageData,
+                    size: 42
+                )
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(isLocal ? "You" : participant.name)
+                        .font(.headline)
+                    Label(participantPresence(participant), systemImage: "circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(participantPresenceColor(participant))
+                }
+            }
+
+            Divider()
+            VStack(spacing: 9) {
+                participantDetailRow("Device", value: isLocal ? "This Mac" : "Mac in this room")
+                participantDetailRow("ALO version", value: version.map { "v\($0)" } ?? "Not reported")
+                participantDetailRow("Drift from host", value: timingValue(participant.playbackTiming?.driftMilliseconds))
+                participantDetailRow("RTT to host", value: timingValue(participant.playbackTiming?.roundTripMilliseconds))
+                participantDetailRow("Room media", value: participant.isMuted ? "Muted" : "\(Int(participant.volume * 100))%")
+                if !isLocal {
+                    participantDetailRow("Voice on this Mac", value: "\(Int(model.voiceVolume(for: participant.id) * 100))%")
+                }
+            }
+
+            Divider()
+            Text("ROOM ACTIVITY")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(Palette.secondary)
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                participantActivityTile("Messages", value: activity.messagesSent, symbol: "bubble.left.and.bubble.right")
+                participantActivityTile("Files", value: activity.filesShared, symbol: "paperclip")
+                participantActivityTile("Mentions", value: activity.mentionsMade, symbol: "at")
+                participantActivityTile("Reactions", value: activity.reactionsAdded, symbol: "face.smiling")
+            }
+            Text("Activity totals come from the chat history available on this Mac.")
+                .font(.caption2)
+                .foregroundStyle(Palette.secondary)
+        }
+        .padding(18)
+        .frame(width: 330)
+    }
+
+    private func participantDetailRow(_ title: String, value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title).foregroundStyle(Palette.secondary)
+            Spacer()
+            Text(value).foregroundStyle(Palette.ink).multilineTextAlignment(.trailing)
+        }
+        .font(.system(size: 11, weight: .medium))
+    }
+
+    private func participantActivityTile(_ title: String, value: Int, symbol: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: symbol)
+                .foregroundStyle(Palette.accentText)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("\(value)").font(.system(size: 13, weight: .bold, design: .rounded))
+                Text(title).font(.caption2).foregroundStyle(Palette.secondary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(9)
+        .background(Palette.messageSurface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     private var videoPlayer: some View {

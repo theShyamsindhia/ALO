@@ -22,6 +22,8 @@ public struct RoomParticipant: Codable, Sendable, Equatable, Identifiable {
     public let profileImageData: Data?
     /// Ephemeral display data, never persisted or encoded in participant identity.
     public var playbackTiming: PeerPlaybackTiming? = nil
+    /// Learned from the authenticated room handshake and kept out of durable room state.
+    public var appVersion: String? = nil
 
     public init(
         id: String,
@@ -30,7 +32,8 @@ public struct RoomParticipant: Codable, Sendable, Equatable, Identifiable {
         isMuted: Bool = false,
         icon: String? = nil,
         colorHex: String? = nil,
-        profileImageData: Data? = nil
+        profileImageData: Data? = nil,
+        appVersion: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -39,6 +42,7 @@ public struct RoomParticipant: Codable, Sendable, Equatable, Identifiable {
         self.icon = icon
         self.colorHex = colorHex
         self.profileImageData = DeviceAppearance.sanitizedProfileImageData(profileImageData)
+        self.appVersion = appVersion
     }
 
     public init(from decoder: Decoder) throws {

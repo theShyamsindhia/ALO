@@ -472,14 +472,20 @@ struct ClientPlaybackReliabilityTests {
             icon: "laptopcomputer",
             colorHex: "E45B69"
         )]
-        let refreshed = [RoomParticipant(
+        var refreshedParticipant = RoomParticipant(
             id: "peer",
             name: "New name",
             volume: 1,
             isMuted: false,
             icon: "sparkles",
-            colorHex: "7C6FF2"
-        )]
+            colorHex: "7C6FF2",
+            appVersion: "0.14.11"
+        )
+        refreshedParticipant.playbackTiming = PeerPlaybackTiming(
+            roundTripMilliseconds: 8,
+            driftMilliseconds: 3
+        )
+        let refreshed = [refreshedParticipant]
 
         let merged = ALOViewModel.mergingParticipants(refreshed, preserving: prior)
 
@@ -488,5 +494,7 @@ struct ClientPlaybackReliabilityTests {
         #expect(merged.first?.colorHex == "7C6FF2")
         #expect(merged.first?.volume == 0.35)
         #expect(merged.first?.isMuted == true)
+        #expect(merged.first?.appVersion == "0.14.11")
+        #expect(merged.first?.playbackTiming == refreshedParticipant.playbackTiming)
     }
 }

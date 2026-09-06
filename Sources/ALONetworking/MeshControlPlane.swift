@@ -2022,7 +2022,8 @@ public final class MeshControlPlane: @unchecked Sendable {
             name: displayName,
             icon: deviceIcon,
             colorHex: deviceColorHex,
-            profileImageData: profileImageData
+            profileImageData: profileImageData,
+            appVersion: appVersion
         )
         let remote: [RoomParticipant] = remoteParticipants.compactMap { id, participant in
             guard peers[id] != nil || lastSeenNanos[id].map({ seen in
@@ -2785,7 +2786,8 @@ public final class MeshControlPlane: @unchecked Sendable {
             name: name,
             icon: link.deviceIcon ?? appearance.icon,
             colorHex: link.deviceColorHex ?? appearance.colorHex,
-            profileImageData: link.profileImageData
+            profileImageData: link.profileImageData,
+            appVersion: link.appVersion
         )
     }
 
