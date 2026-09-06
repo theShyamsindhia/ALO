@@ -210,27 +210,56 @@ struct GameLibraryView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 18) {
-                tab("Library", selected: !showsLeaderboard) { showsLeaderboard = false }
-                tab("Leaderboard", selected: showsLeaderboard) { showsLeaderboard = true }
+            HStack(spacing: 10) {
+                HStack(spacing: 3) {
+                    tab("Library", systemImage: "square.grid.2x2", selected: !showsLeaderboard) {
+                        showsLeaderboard = false
+                    }
+                    tab("Leaderboard", systemImage: "trophy", selected: showsLeaderboard) {
+                        showsLeaderboard = true
+                    }
+                }
+                .padding(3)
+                .background(.white.opacity(0.035), in: Capsule())
+                .overlay(Capsule().strokeBorder(.white.opacity(0.07), lineWidth: 0.7))
                 Spacer()
+                Button { store.refresh() } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .frame(width: 28, height: 28)
+                        .rotationEffect(.degrees(store.refreshing ? 360 : 0))
+                        .animation(store.refreshing ? .linear(duration: 0.9).repeatForever(autoreverses: false) : .default,
+                                   value: store.refreshing)
+                }
+                .buttonStyle(.plain)
+                .disabled(store.refreshing)
+                .help("Refresh game library")
                 Menu {
-                    Button("Refresh library", systemImage: "arrow.clockwise") { store.refresh() }.disabled(store.refreshing)
                     Text("Game packs install once and work offline. New game engines require an ALO update.")
                 } label: { Image(systemName: "ellipsis").frame(width: 24, height: 24) }
                     .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().help("Library options")
-            }.padding(.horizontal, 14).frame(height: 36)
+            }.padding(.horizontal, 14).frame(height: 46)
             ScrollView {
-                LazyVStack(spacing: 14) {
+                LazyVStack(alignment: .leading, spacing: 14) {
                     if showsLeaderboard { leaderboard }
                     else {
                         if !lobbies.isEmpty { liveArenas }
-                        ForEach(store.games) { game in card(game) }
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Choose a game")
+                                .font(.system(size: 14, weight: .semibold))
+                            Text("Installed locally. Room members can join when they have the same game.")
+                                .font(.system(size: 10)).foregroundStyle(secondary)
+                        }
+                        LazyVGrid(columns: [
+                            GridItem(.flexible(minimum: 240), spacing: 12, alignment: .top),
+                            GridItem(.flexible(minimum: 240), spacing: 12, alignment: .top)
+                        ], alignment: .leading, spacing: 12) {
+                            ForEach(store.games) { game in card(game) }
+                        }
                         if !store.catalogNotice.isEmpty {
                             Text(store.catalogNotice).font(.system(size: 10)).foregroundStyle(secondary).frame(maxWidth: .infinity, alignment: .leading)
                         }
                     }
-                }.padding(.horizontal, 14).padding(.bottom, 14)
+                }.padding(.horizontal, 14).padding(.bottom, 18)
             }
         }
         .foregroundStyle(ink)
@@ -278,12 +307,13 @@ struct GameLibraryView: View {
             .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(accent.opacity(0.22), lineWidth: 0.8))
     }
 
-    private func tab(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
+    private func tab(_ title: String, systemImage: String, selected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Text(title).font(.system(size: 11, weight: selected ? .semibold : .medium))
+            Label(title, systemImage: systemImage)
+                .font(.system(size: 10, weight: selected ? .semibold : .medium))
                 .foregroundStyle(selected ? ink : secondary)
-                .padding(.vertical, 8)
-                .overlay(alignment: .bottom) { if selected { Capsule().fill(accent).frame(height: 2) } }
+                .padding(.horizontal, 10).frame(height: 28)
+                .background(selected ? accent.opacity(0.24) : .clear, in: Capsule())
         }.buttonStyle(.plain)
     }
 
@@ -291,63 +321,127 @@ struct GameLibraryView: View {
         let installed = store.installed[game.id]
         let state = store.states[game.id] ?? .idle
         let update = installed.map { $0.descriptor.version < game.version } ?? false
-        return VStack(alignment: .leading, spacing: 0) {
-            ZStack(alignment: .bottomLeading) {
-                GeometryReader { geometry in
-                    if let image = store.coverImage(for: game.id) {
-                        Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
-                            .frame(width: geometry.size.width, height: geometry.size.height).clipped()
-                    } else { coverPlaceholder(game.id).frame(width: geometry.size.width, height: geometry.size.height) }
-                }
-                LinearGradient(colors: [.clear, .black.opacity(0.8)], startPoint: .top, endPoint: .bottom)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(game.id == "rift-arena" ? "Platform fighter" : "Strategy · Board game")
-                        .font(.system(size: 10, weight: .medium)).foregroundStyle(.white.opacity(0.65))
-                    Text(game.title).font(.system(size: 24, weight: .semibold))
-                }.padding(16)
-            }.frame(height: 150).clipped()
-            HStack(spacing: 10) {
-                if !game.supported {
-                    Text("ALO update needed").font(.system(size: 11)).foregroundStyle(secondary)
-                } else if let installed {
-                    Button { onPlay(installed) } label: { Label("Play", systemImage: "play.fill").padding(.horizontal, 10) }
-                        .buttonStyle(.borderedProminent).tint(accent.opacity(0.85))
-                        .help("Open game options. A match starts only when you choose to play.")
-                    if update { Button("Update") { store.download(game) }.buttonStyle(.plain).disabled(state.busy) }
-                    Text("Installed").font(.system(size: 10)).foregroundStyle(secondary)
+        return ZStack(alignment: .bottomLeading) {
+            GeometryReader { geometry in
+                if let image = store.coverImage(for: game.id) {
+                    Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
+                        .frame(width: geometry.size.width, height: geometry.size.height).clipped()
                 } else {
-                    Button { store.download(game) } label: {
-                        Label(state.busy ? "Downloading" : state.isFailure ? "Retry download" : "Download", systemImage: "arrow.down")
-                    }.buttonStyle(.borderedProminent).tint(accent.opacity(0.85)).disabled(state.busy)
-                    Text(ByteCountFormatter.string(fromByteCount: Int64(game.bytes), countStyle: .file))
-                        .font(.system(size: 10)).foregroundStyle(secondary)
+                    coverPlaceholder(game.id).frame(width: geometry.size.width, height: geometry.size.height)
                 }
-                Spacer(minLength: 0)
-                Menu {
-                    Text(game.summary)
-                    if installed != nil {
-                        Button("Remove download", systemImage: "trash") { store.remove(game.id) }.disabled(state.busy)
-                    }
-                } label: { Image(systemName: "ellipsis").frame(width: 24, height: 24) }
-                    .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-                    .help("More options for \(game.title)").accessibilityLabel("More options for \(game.title)")
-            }.font(.system(size: 11, weight: .medium)).controlSize(.small).padding(12)
-            switch state {
-            case .downloading(let value):
-                HStack {
-                    ProgressView(value: value).tint(accent)
-                    Text("\(Int(value * 100))%").monospacedDigit()
-                    Button("Cancel") { store.cancel(game.id) }.buttonStyle(.plain)
-                }.font(.system(size: 10)).padding(.horizontal, 12).padding(.bottom, 12)
-            case .verifying: stateLabel("Verifying download…")
-            case .installing: stateLabel("Installing…")
-            case .failed(let error): stateLabel(error)
-            case .idle: EmptyView()
             }
+            LinearGradient(colors: [.black.opacity(0.04), .black.opacity(0.2), .black.opacity(0.94)],
+                           startPoint: .top, endPoint: .bottom)
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(alignment: .top) {
+                    gameStatusPill(game: game, installed: installed, update: update, state: state)
+                    Spacer(minLength: 8)
+                    gameOptions(game: game, installed: installed, state: state)
+                }
+                Spacer(minLength: 12)
+                Text(game.id == "rift-arena" ? "PLATFORM FIGHTER" : "STRATEGY · BOARD GAME")
+                    .font(.system(size: 8, weight: .bold)).tracking(0.7)
+                    .foregroundStyle(.white.opacity(0.62))
+                Text(game.title)
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                    .lineLimit(1)
+                Text(game.summary)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.62)).lineLimit(2)
+                    .frame(minHeight: 24, alignment: .top)
+                HStack(spacing: 8) {
+                    gamePrimaryAction(game: game, installed: installed, state: state)
+                    if installed != nil, update {
+                        Button("Update") { store.download(game) }
+                            .buttonStyle(.bordered).disabled(state.busy)
+                    }
+                    Spacer(minLength: 0)
+                    if installed != nil {
+                        Label(game.id == "rift-arena" ? "Up to 4" : "1–2 players", systemImage: "person.2.fill")
+                            .foregroundStyle(.white.opacity(0.58))
+                    } else if !state.busy {
+                        Text(ByteCountFormatter.string(fromByteCount: Int64(game.bytes), countStyle: .file))
+                            .foregroundStyle(.white.opacity(0.5))
+                    }
+                }
+                .font(.system(size: 10, weight: .semibold)).controlSize(.small)
+                switch state {
+                case .downloading(let value):
+                    HStack(spacing: 8) {
+                        ProgressView(value: value).tint(accent)
+                        Text("\(Int(value * 100))%").monospacedDigit()
+                        Button("Cancel") { store.cancel(game.id) }.buttonStyle(.plain)
+                    }.font(.system(size: 9)).padding(.top, 8)
+                case .verifying: stateLabel("Verifying download…")
+                case .installing: stateLabel("Installing…")
+                case .failed(let error): stateLabel(error)
+                case .idle: EmptyView()
+                }
+            }
+            .padding(14)
         }
+        .frame(height: 205)
         .background(Color.white.opacity(0.035))
-        .clipShape(RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.white.opacity(0.09), lineWidth: 0.7))
+        .clipShape(RoundedRectangle(cornerRadius: 15))
+        .overlay(RoundedRectangle(cornerRadius: 15).strokeBorder(Color.white.opacity(0.11), lineWidth: 0.8))
+        .shadow(color: .black.opacity(0.12), radius: 8, y: 4)
+    }
+
+    private func gameOptions(game: GamePackDescriptor, installed: InstalledGamePack?,
+                             state: GameLibraryStore.DownloadState) -> some View {
+        Menu {
+            Text(game.summary)
+            if installed != nil {
+                Button("Remove download", systemImage: "trash") { store.remove(game.id) }.disabled(state.busy)
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 12, weight: .semibold))
+                .frame(width: 30, height: 28)
+                .background(.black.opacity(0.36), in: Capsule())
+        }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        .help("More options for \(game.title)").accessibilityLabel("More options for \(game.title)")
+    }
+
+    @ViewBuilder
+    private func gamePrimaryAction(game: GamePackDescriptor, installed: InstalledGamePack?,
+                                   state: GameLibraryStore.DownloadState) -> some View {
+        if !game.supported {
+            Label("ALO update needed", systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.white.opacity(0.58))
+        } else if let installed {
+            Button { onPlay(installed) } label: {
+                Label("Play", systemImage: "play.fill").frame(minWidth: 74)
+            }
+            .buttonStyle(.borderedProminent).tint(accent)
+            .help("Open game options. A match starts only when you choose to play.")
+        } else {
+            Button { store.download(game) } label: {
+                Label(state.busy ? "Downloading" : state.isFailure ? "Retry" : "Get",
+                      systemImage: state.isFailure ? "arrow.clockwise" : "arrow.down")
+                    .frame(minWidth: 74)
+            }
+            .buttonStyle(.borderedProminent).tint(accent).disabled(state.busy)
+        }
+    }
+
+    private func gameStatusPill(game: GamePackDescriptor, installed: InstalledGamePack?, update: Bool,
+                                state: GameLibraryStore.DownloadState) -> some View {
+        let label: String
+        if !game.supported { label = "Requires update" }
+        else if state.busy { label = "Installing" }
+        else if state.isFailure { label = "Download failed" }
+        else if update { label = "Update available" }
+        else if installed != nil { label = "Installed" }
+        else { label = "Available" }
+        return HStack(spacing: 5) {
+            Circle().fill(installed != nil && !update ? Color.green : accent).frame(width: 5, height: 5)
+            Text(label)
+        }
+        .font(.system(size: 9, weight: .semibold))
+        .padding(.horizontal, 8).frame(height: 24)
+        .background(.black.opacity(0.38), in: Capsule())
     }
 
     private func coverPlaceholder(_ id: String) -> some View {
@@ -374,7 +468,7 @@ struct GameLibraryView: View {
     }
 
     private func stateLabel(_ text: String) -> some View {
-        Text(text).font(.system(size: 10)).foregroundStyle(secondary).padding(.horizontal, 12).padding(.bottom, 12)
+        Text(text).font(.system(size: 9)).foregroundStyle(.white.opacity(0.62)).lineLimit(2).padding(.top, 7)
     }
 
     private var leaderboard: some View {
