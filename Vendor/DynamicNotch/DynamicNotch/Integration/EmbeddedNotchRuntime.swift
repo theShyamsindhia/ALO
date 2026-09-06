@@ -31,6 +31,13 @@ public final class EmbeddedNotchRuntime: ObservableObject {
         pendingSettingsDestination
     }
 
+    /// Clears inline navigation when ALO dismisses its settings panel so the
+    /// next presentation always begins at the feature overview.
+    public func resetEmbeddedSettingsNavigation() {
+        pendingSettingsDestination = nil
+        NotificationCenter.default.post(name: Self.settingsRequestNotification, object: self)
+    }
+
     @Published public private(set) var isEnabled = false
     @Published public private(set) var activityActive = false
     @Published public private(set) var presentationSize: CGSize = .zero

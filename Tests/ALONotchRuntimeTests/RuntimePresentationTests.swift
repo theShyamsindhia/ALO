@@ -8,6 +8,26 @@ import XCTest
 
 @MainActor
 final class RuntimePresentationTests: XCTestCase {
+    func testEmbeddedGeneralNotchPageRendersAsAnOpaqueDetail() async throws {
+        _ = NSApplication.shared
+        let runtime = EmbeddedNotchRuntime()
+        runtime.onSettingsRequested = {}
+        runtime.setEnabled(true)
+        defer {
+            runtime.onSettingsRequested = nil
+            runtime.setEnabled(false)
+        }
+        XCTAssertTrue(runtime.requestEmbeddedSettings(.subPage(.notch)))
+
+        try await render(
+            runtime.compactSettingsView
+                .environment(\.locale, Locale(identifier: "en"))
+                .environment(\.colorScheme, .dark),
+            name: "settings-embedded-general-notch",
+            size: CGSize(width: 560, height: 430)
+        )
+    }
+
     func testOriginalSettingsAndToolsRenderWithoutActivatingFeatures() async throws {
         _ = NSApplication.shared
         let name = "ALONotchPresentationTests.\(UUID().uuidString)"

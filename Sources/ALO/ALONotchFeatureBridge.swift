@@ -150,6 +150,11 @@ final class ALONotchFeatureBridge: ObservableObject {
         }
     }
 
+    func dismissSettings() {
+        model?.notchSettingsVisible = false
+        runtime?.resetEmbeddedSettingsNavigation()
+    }
+
     func showRoomMention(sender: String, message: String, roomTitle: String) {
         guard let runtime, let model else { return }
         runtime.showRoomMention(
@@ -204,7 +209,7 @@ struct NotchSettingsBelowPlayer: View {
                           ? "Open the current Notch activity."
                           : "Turn on a Home Page item or start an activity first.")
                 }
-                Button { model.notchSettingsVisible = false } label: {
+                Button { features.dismissSettings() } label: {
                     Image(systemName: "xmark")
                 }.buttonStyle(.plain).accessibilityLabel("Close notch settings")
             }.padding(12)

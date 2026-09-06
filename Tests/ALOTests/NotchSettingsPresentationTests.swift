@@ -63,4 +63,23 @@ struct NotchSettingsPresentationTests {
         #expect(model.floatingBarHidden)
         #expect(model.nowPlaying.isEmpty)
     }
+
+    @Test func dismissingNotchSettingsClearsItsPresentationState() {
+        let model = ALOViewModel(discoverRooms: false)
+        let preferences = ALONotchPreferences.shared
+        let wasEnabled = preferences.enabled
+        preferences.enabled = true
+        let bridge = ALONotchFeatureBridge.shared
+        bridge.configure(model: model)
+        bridge.setEnabled(true)
+        defer { preferences.enabled = wasEnabled; bridge.setEnabled(false) }
+
+        model.prepareNotchSettingsForMenuBar()
+        #expect(model.notchSettingsVisible)
+
+        bridge.dismissSettings()
+
+        #expect(!model.notchSettingsVisible)
+        #expect(model.notchSettingsHeight == 0)
+    }
 }

@@ -138,12 +138,15 @@ struct SettingsRootView: View {
                             else { embeddedDetailVisible = false; searchText = "" }
                         }
                     } label: {
-                        Label("Features", systemImage: "chevron.backward")
+                        Label(
+                            navigationPath.isEmpty ? "Features" : embeddedTitle(for: selectedSection),
+                            systemImage: "chevron.backward"
+                        )
                     }
                     .buttonStyle(.borderless)
                     .accessibilityIdentifier("settings.embedded.back")
                     Text("/").foregroundStyle(.tertiary)
-                    Text(embeddedTitle(for: selectedSection))
+                    Text(embeddedDetailTitle)
                         .font(.subheadline.weight(.semibold)).lineLimit(1)
                     Spacer(minLength: 4)
                     if let page = navigationPath.last, page.canReset {
@@ -183,10 +186,15 @@ struct SettingsRootView: View {
                         detailView(for: selectedSection)
                             .navigationBarBackButtonHidden(true)
                             .navigationDestination(for: SettingsSubPage.self) { page in
-                                subPageView(for: page).navigationBarBackButtonHidden(true)
+                                subPageView(for: page)
+                                    .navigationBarBackButtonHidden(true)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                                    .background(Color(nsColor: nsBackgroundColor).ignoresSafeArea())
                             }
                     }
                     .padding(.horizontal, 8)
+                    .background(Color(nsColor: nsBackgroundColor))
+                    .clipped()
                     .transition(.opacity)
                 } else {
                     ScrollView {
@@ -270,9 +278,18 @@ struct SettingsRootView: View {
         section == .nowPlaying ? "Playback" : localized(section.titleKey, fallback: section.fallbackTitle)
     }
 
+    private var embeddedDetailTitle: String {
+        guard let page = navigationPath.last else { return embeddedTitle(for: selectedSection) }
+        return localized(page.titleKey, fallback: page.fallbackTitle)
+    }
+
     private func applyPendingEmbeddedDestination() {
-        guard let destination = EmbeddedNotchRuntime.activeInstance?.requestedSettingsDestination() else { return }
         searchText = ""
+        guard let destination = EmbeddedNotchRuntime.activeInstance?.requestedSettingsDestination() else {
+            navigationPath.removeAll()
+            embeddedDetailVisible = false
+            return
+        }
         embeddedDetailVisible = true
         switch destination {
         case .section(let section):
