@@ -315,11 +315,22 @@ private struct AppSettingsView: View {
                 case .appearance:
                     AppAppearanceSettingsView()
                 case .notch:
-                    ALONotchFeatureSettings(features: .shared)
-                        .accessibilityIdentifier("ALO.Settings.Notch")
+                    VStack(spacing: 12) {
+                        Text("Notch settings open below the media player.")
+                        Button("Open notch settings") {
+                            ALONotchFeatureBridge.shared.showSettings()
+                        }
+                    }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .onChange(of: selection) { _, section in
+            if section == .notch {
+                NSApp.keyWindow?.close()
+                ALONotchFeatureBridge.shared.showSettings()
+                selection = .appearance
+            }
         }
     }
 }

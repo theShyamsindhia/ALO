@@ -34,10 +34,12 @@ struct AboutAppSettingsView: View {
         .accessibilityIdentifier("settings.about.root")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Text(appVersionText)
+                if AppDelegate.embeddedInstance == nil {
+                    Text(appVersionText)
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 10)
+                }
             }
         }
     }

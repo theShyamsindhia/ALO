@@ -6,6 +6,22 @@ import Testing
 
 @Suite(.serialized) @MainActor
 struct ALONotchTests {
+    @Test func firstMountReplacesAppKitDefaultContentInsteadOfLeavingBlankPanel() throws {
+        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 300, height: 100),
+            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.isReleasedWhenClosed = false
+        let placeholder = try #require(panel.contentView)
+        let originalHost = NSView()
+        ALONotchWindowController.mountOriginalContent(in: panel) { originalHost }
+        #expect(panel.contentView === originalHost)
+        #expect(panel.contentView !== placeholder)
+        panel.contentView = nil
+        let replacement = NSView()
+        ALONotchWindowController.mountOriginalContent(in: panel) { replacement }
+        #expect(panel.contentView === replacement)
+        panel.close()
+    }
+
     @Test func masterSwitchPersistsWithoutChangingRoomPresentationOrFeatureChoices() throws {
         let name = "alo-notch-master-\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: name))

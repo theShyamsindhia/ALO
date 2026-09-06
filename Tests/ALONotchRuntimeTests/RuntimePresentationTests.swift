@@ -26,6 +26,7 @@ final class RuntimePresentationTests: XCTestCase {
 
         let pages: [(String, AnyView, CGSize)] = [
             ("settings-root", AnyView(SettingsRootView(container: container)), CGSize(width: 760, height: 590)),
+            ("settings-embedded-root", AnyView(SettingsRootView(container: container, embedded: true)), CGSize(width: 560, height: 430)),
             ("settings-battery", AnyView(BatterySettingsView(batterySettings: settings.battery, appearanceSettings: settings.application)), CGSize(width: 550, height: 650)),
             ("settings-home-pages", AnyView(HomePageSettingsView(homePageSettings: settings.homePage, applicationSettings: settings.application)), CGSize(width: 550, height: 650)),
             ("settings-converter", AnyView(FileConverterSettingsView(mediaSettings: settings.mediaAndFiles)), CGSize(width: 550, height: 650)),

@@ -31,5 +31,6 @@ func NotchText(verbatim string: String) -> Text { Text(verbatim: string) }
 extension UserDefaults {
     // Foundation guarantees thread-safe defaults access; workers share only
     // this immutable reference, while observable settings writes stay on main.
-    nonisolated(unsafe) static let aloNotch = UserDefaults(suiteName: (Bundle.main.bundleIdentifier ?? "in.werai.audio") + ".notch.features")!
+    nonisolated static let aloNotchDomainName = (Bundle.main.bundleIdentifier ?? "in.werai.audio") + ".notch.features"
+    nonisolated(unsafe) static let aloNotch = UserDefaults(suiteName: aloNotchDomainName)!
 }

@@ -61,6 +61,7 @@ class SettingsWindowController: NSWindowController {
     }
     
     func showWindow() {
+        if EmbeddedNotchRuntime.activeInstance?.requestEmbeddedSettings() == true { return }
         if appDelegate == nil, let embedded = AppDelegate.embeddedInstance {
             setupDependencies(appDelegate: embedded)
         }
@@ -89,11 +90,13 @@ class SettingsWindowController: NSWindowController {
     }
     
     func showWindow(selecting section: SettingsRootViewModel.Section) {
+        if EmbeddedNotchRuntime.activeInstance?.requestEmbeddedSettings(.section(section)) == true { return }
         showWindow()
         NotificationCenter.default.post(name: NSNotification.Name("SelectSettingsSection"), object: section)
     }
     
     func showWindow(selecting subPage: SettingsSubPage) {
+        if EmbeddedNotchRuntime.activeInstance?.requestEmbeddedSettings(.subPage(subPage)) == true { return }
         showWindow()
         NotificationCenter.default.post(name: NSNotification.Name("SelectSettingsSubPage"), object: subPage)
     }

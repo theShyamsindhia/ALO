@@ -28,6 +28,7 @@ struct SettingsRootView: View {
     let timerViewModel: TimerViewModel
     let lockScreenManager: LockScreenManager
 
+    private let embedded: Bool
     private let viewModel: SettingsRootViewModel
     
     @AppStorage("settings.general.isBlueNightMode") private var isBlueNightMode = false
@@ -53,7 +54,7 @@ struct SettingsRootView: View {
     @State private var availableDisplays = NSScreen.availableNotchDisplays()
     @ObservedObject private var updater = SparkleUpdater.shared
 
-    init(container: AppContainer) {
+    init(container: AppContainer, embedded: Bool = false) {
         self.init(
             powerService: container.powerService,
             settingsViewModel: container.settingsViewModel,
@@ -65,7 +66,8 @@ struct SettingsRootView: View {
             downloadViewModel: container.downloadViewModel,
             nowPlayingViewModel: container.nowPlayingViewModel,
             timerViewModel: container.timerViewModel,
-            lockScreenManager: container.lockScreenManager
+            lockScreenManager: container.lockScreenManager,
+            embedded: embedded
         )
     }
 
@@ -80,8 +82,10 @@ struct SettingsRootView: View {
         downloadViewModel: DownloadViewModel,
         nowPlayingViewModel: NowPlayingViewModel,
         timerViewModel: TimerViewModel,
-        lockScreenManager: LockScreenManager
+        lockScreenManager: LockScreenManager,
+        embedded: Bool = false
     ) {
+        self.embedded = embedded
         self.powerService = powerService
         self.settingsViewModel = settingsViewModel
         self.notchViewModel = notchViewModel
@@ -116,7 +120,107 @@ struct SettingsRootView: View {
         settingsViewModel.application.appLanguage.locale.dn(key, fallback: fallback)
     }
 
+    @ViewBuilder
     var body: some View {
+        if embedded { compactBody } else { windowBody }
+    }
+
+    /// This header lives inside the player, never in its NSWindow toolbar.
+    private var compactBody: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Button(action: navigateBack) {
+                    Image(systemName: "chevron.backward")
+                }
+                .buttonStyle(.borderless)
+                .disabled(!canNavigateBack)
+                .accessibilityLabel("Back")
+                .accessibilityIdentifier("settings.embedded.back")
+
+                Picker("Notch settings category", selection: selectionBinding) {
+                    ForEach(viewModel.sections) { section in
+                        Text(localized(section.titleKey, fallback: section.fallbackTitle)).tag(section)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(maxWidth: 220)
+                .accessibilityIdentifier("settings.embedded.category")
+
+                Spacer(minLength: 4)
+                TextField(localized("settings.search.prompt", fallback: "Search settings"), text: $searchText)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 170)
+                    .accessibilityIdentifier("settings.embedded.search")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+
+            if let page = navigationPath.last {
+                HStack {
+                    Text(localized(page.titleKey, fallback: page.fallbackTitle))
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    if page.canReset {
+                        Button(localized("settings.reset.action", fallback: "Reset")) { pendingResetSubPage = page }
+                            .buttonStyle(.borderless)
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.bottom, 8)
+            }
+            Divider()
+            NavigationStack(path: $navigationPath) {
+                Group {
+                    if filteredSections.isEmpty {
+                        SettingsSearchEmptyState(query: searchText)
+                    } else {
+                        detailView(for: resolvedSelection)
+                    }
+                }
+                .navigationBarBackButtonHidden(true)
+                .navigationDestination(for: SettingsSubPage.self) { page in
+                    subPageView(for: page)
+                        .navigationBarBackButtonHidden(true)
+                }
+            }
+            .padding(.horizontal, 8)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .background(Color(nsColor: nsBackgroundColor))
+        .environment(\.locale, settingsViewModel.application.appLanguage.locale)
+        .preferredColorScheme(settingsViewModel.application.appearanceMode.preferredColorScheme)
+        .accessibilityIdentifier("settings.embedded.root")
+        .onAppear { applyPendingEmbeddedDestination() }
+        .onReceive(NotificationCenter.default.publisher(for: EmbeddedNotchRuntime.settingsRequestNotification)) { _ in
+            applyPendingEmbeddedDestination()
+        }
+        .onChange(of: searchText) { _, value in syncSelectionWithSearch(query: value) }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("SelectSettingsSection"))) { notification in
+            if let section = notification.object as? SettingsRootViewModel.Section { applySelection(section, origin: .sidebar) }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("SelectSettingsSubPage"))) { notification in
+            if let page = notification.object as? SettingsSubPage { navigationPath.append(page) }
+        }
+        .alert(item: $pendingResetSubPage) { page in
+            Alert(title: Text(localized("settings.reset.title")), message: Text(localized("settings.reset.message")),
+                  primaryButton: .destructive(Text(localized("settings.reset.action"))) { reset(page) },
+                  secondaryButton: .cancel(Text(localized("common.cancel"))))
+        }
+    }
+
+    private func applyPendingEmbeddedDestination() {
+        guard let destination = EmbeddedNotchRuntime.activeInstance?.requestedSettingsDestination() else { return }
+        searchText = ""
+        switch destination {
+        case .section(let section):
+            applySelection(section, origin: .sidebar)
+        case .subPage(let page):
+            navigationPath = [page]
+        }
+    }
+
+    private var windowBody: some View {
         NavigationSplitView {
             List(selection: selectionBinding) {
                 ForEach(groupedSections, id: \.group.id) { group in
@@ -548,10 +652,15 @@ struct SettingsRootView: View {
         }
     }
 
+    @ViewBuilder
     private func detailContainer<Content: View>(for section: SettingsRootViewModel.Section, @ViewBuilder content: () -> Content) -> some View {
-        content()
-            .accessibilityIdentifier(section.accessibilityIdentifier)
-            .toolbar { toolbarContent(for: section) }
+        if embedded {
+            content().accessibilityIdentifier(section.accessibilityIdentifier)
+        } else {
+            content()
+                .accessibilityIdentifier(section.accessibilityIdentifier)
+                .toolbar { toolbarContent(for: section) }
+        }
     }
 
     @ToolbarContentBuilder

@@ -563,7 +563,8 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
 
         floatingBarObserver = model.$floatingBarHidden
             .removeDuplicates()
-            .sink { [weak self] hidden in
+            .combineLatest(model.$notchSettingsVisible.removeDuplicates())
+            .sink { [weak self] hidden, _ in
                 DispatchQueue.main.async { self?.updateFloatingBar(hidden: hidden) }
             }
 
@@ -730,8 +731,7 @@ private final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func updateFloatingBar(hidden: Bool) {
-        guard model.phase == .live else { return }
-        if hidden {
+        if hidden || (model.phase != .live && !model.notchSettingsVisible) {
             roomBarController?.close()
             roomBarController = nil
         } else if !model.videoFullscreen {
@@ -908,6 +908,10 @@ private final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
                 FloatingRoomView(model: model, presentation: .menuBar)
                 RoomPlaybackProgressDivider(model: model)
                 WalkieTalkieBar(model: model, showsCloseButton: false)
+                if model.notchSettingsVisible {
+                    NotchSettingsBelowPlayer(model: model)
+                        .frame(height: model.notchSettingsHeight)
+                }
             }
             .background(Palette.opaqueSurface)
         )
@@ -975,6 +979,10 @@ private final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
         .dropFirst()
         .sink { [weak self] _ in self?.resizePopover() }
         .store(in: &observers)
+        model.$notchSettingsVisible.removeDuplicates().dropFirst()
+            .sink { [weak self] _ in
+                DispatchQueue.main.async { self?.resizePopover() }
+            }.store(in: &observers)
     }
 
     func showPopover() {
@@ -1018,6 +1026,7 @@ private final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
                 - FloatingMetrics.barHeight
                 + FloatingMetrics.walkieBarHeight
                 + FloatingMetrics.separatorHeight
+                + model.notchSettingsHeight
         )
     }
 
@@ -1509,6 +1518,8 @@ final class ALOViewModel: ObservableObject {
     var floatingNavigationHeight: CGFloat { floatingNavigationVisible ? FloatingMetrics.walkieBarHeight : 0 }
     @Published var floatingSection: FloatingSection = .collapsed
     @Published var floatingBarHidden: Bool
+    @Published var notchSettingsVisible = false
+    var notchSettingsHeight: CGFloat { notchSettingsVisible ? 430 : 0 }
     @Published private(set) var menuBarPopoverVisible = false
 
     private var roomBrowser: MeshRoomBrowser!
@@ -2763,6 +2774,13 @@ final class ALOViewModel: ObservableObject {
         videoFullscreen = false
         floatingBarHidden = false
         UserDefaults.standard.set(false, forKey: Self.floatingBarPreferenceKey)
+    }
+
+    func showNotchSettingsBelowPlayer() {
+        dismissIncomingMessagePreview()
+        floatingSection = .collapsed
+        notchSettingsVisible = true
+        if !menuBarPopoverVisible { showFloatingBar() }
     }
 
     func showChatInFloatingBar() {
@@ -4269,7 +4287,7 @@ struct FloatingRoomView: View {
                 VStack(spacing: 0) {
                     expandedContent
                 }
-                    .frame(width: width, height: max(0, height - roomBarHeight - navigationHeight - FloatingMetrics.separatorHeight))
+                    .frame(width: width, height: max(0, height - roomBarHeight - navigationHeight - FloatingMetrics.separatorHeight - (presentation == .floating ? model.notchSettingsHeight : 0)))
                     .id(expansionIdentity)
                     .transition(panelTransition)
 
@@ -4291,6 +4309,10 @@ struct FloatingRoomView: View {
                 if presentation == .floating {
                     ArtworkHeaderBackground(palette: model.roomArtworkPalette)
                 }
+            }
+            if presentation == .floating, model.notchSettingsVisible {
+                NotchSettingsBelowPlayer(model: model)
+                    .frame(height: model.notchSettingsHeight)
             }
         }
         .frame(width: width, height: height, alignment: .bottom)
@@ -6180,7 +6202,7 @@ private final class FloatingRoomWindowController: NSObject, NSWindowDelegate {
                 x: 0,
                 y: 0,
                 width: FloatingMetrics.windowWidth,
-                height: FloatingMetrics.windowHeight(for: model.floatingPanelHeight + model.floatingNavigationHeight)
+                height: FloatingMetrics.windowHeight(for: model.floatingPanelHeight + model.floatingNavigationHeight + model.notchSettingsHeight)
             ),
             styleMask: [.borderless, .resizable],
             backing: .buffered,
@@ -6225,6 +6247,7 @@ private final class FloatingRoomWindowController: NSObject, NSWindowDelegate {
             model.$incomingMessagePreview.map { $0?.id }.removeDuplicates()
         )
         .combineLatest(model.$floatingNavigationVisible.removeDuplicates())
+        .combineLatest(model.$notchSettingsVisible.removeDuplicates())
         .dropFirst()
         .sink { [weak self] _ in
             DispatchQueue.main.async { self?.resize(animated: true) }
@@ -6257,9 +6280,9 @@ private final class FloatingRoomWindowController: NSObject, NSWindowDelegate {
         pendingShrink = nil
 
         let expanded = model.floatingSection != .collapsed && !model.permissionNotice
-        let height = expanded ? preferredExpandedSize.height : FloatingMetrics.windowHeight(for: model.floatingPanelHeight + model.floatingNavigationHeight)
+        let height = expanded ? preferredExpandedSize.height + model.notchSettingsHeight : FloatingMetrics.windowHeight(for: model.floatingPanelHeight + model.floatingNavigationHeight + model.notchSettingsHeight)
         let width = expanded ? preferredExpandedSize.width : FloatingMetrics.windowWidth
-        panel.minSize = NSSize(width: FloatingMetrics.windowWidth, height: expanded ? 440 : height)
+        panel.minSize = NSSize(width: FloatingMetrics.windowWidth, height: expanded ? 440 + model.notchSettingsHeight : height)
         panel.maxSize = expanded ? NSSize(width: 1800, height: 1400) : NSSize(width: width, height: height)
         guard abs(panel.frame.height - height) > 0.5
                 || abs(panel.frame.width - width) > 0.5 else { return }
@@ -6303,7 +6326,7 @@ private final class FloatingRoomWindowController: NSObject, NSWindowDelegate {
 
     func windowDidEndLiveResize(_ notification: Notification) {
         guard !adjustingFrame, model.floatingSection != .collapsed, !model.permissionNotice else { return }
-        preferredExpandedSize = panel.frame.size
+        preferredExpandedSize = NSSize(width: panel.frame.width, height: max(440, panel.frame.height - model.notchSettingsHeight))
         UserDefaults.standard.set(preferredExpandedSize.width, forKey: "room.expanded.width")
         UserDefaults.standard.set(preferredExpandedSize.height, forKey: "room.expanded.height")
     }
@@ -7252,10 +7275,28 @@ enum RoomPresentationPreview {
             RoomMessage(senderID: "preview-peer", sender: "Luna", text: "Music, conversation, or a quick round?", sentNanos: 1),
             RoomMessage(senderID: "preview-local", sender: "You", text: "Let’s try Rift Arena.", sentNanos: 2)
         ]
+        let showsNotch = Bundle.main.object(forInfoDictionaryKey: "ALONotchPreview") as? Bool == true
+        var notch: ALONotchWindowController?
+        if showsNotch {
+            model.roomName = "Notch preview · offline"
+            model.floatingSection = .collapsed
+            model.notchSettingsVisible = true
+            ALONotchPreferences.shared.enabled = true
+            notch = ALONotchWindowController(model: model)
+            if Bundle.main.object(forInfoDictionaryKey: "ALONotchPreviewMedia") as? Bool == true {
+                model.nowPlaying = NowPlayingMedia(title: "Notch playback preview", artist: "Local test media",
+                    isPlaying: true, elapsedTime: 32, duration: 180)
+            }
+        }
         let controller = FloatingRoomWindowController(model: model)
         controller.show()
         app.activate(ignoringOtherApps: true)
-        withExtendedLifetime(controller) { app.run() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            // The real notch is a nonactivating overlay. Focus the demo player
+            // so its settings are immediately available to keyboard/UI tests.
+            app.windows.first { $0 is FloatingRoomPanel }?.makeKeyAndOrderFront(nil)
+        }
+        withExtendedLifetime((controller, notch)) { app.run() }
         model.arena.disconnect()
     }
 }

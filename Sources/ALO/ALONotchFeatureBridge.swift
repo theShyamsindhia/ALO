@@ -13,7 +13,6 @@ final class ALONotchFeatureBridge: ObservableObject {
     private weak var model: ALOViewModel?
     private var observations = Set<AnyCancellable>()
     private var roomObservations = Set<AnyCancellable>()
-    private var settingsWindow: NSWindow?
 
     func configure(model: ALOViewModel) {
         guard self.model !== model else { return }
@@ -36,6 +35,7 @@ final class ALONotchFeatureBridge: ObservableObject {
     func setEnabled(_ enabled: Bool) {
         if enabled && runtime == nil {
             let runtime = EmbeddedNotchRuntime()
+            runtime.onSettingsRequested = { [weak self] in self?.showSettings() }
             runtime.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &observations)
             self.runtime = runtime
         }
@@ -83,17 +83,7 @@ final class ALONotchFeatureBridge: ObservableObject {
     }
 
     func showSettings() {
-        if settingsWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 638),
-                                  styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
-            window.title = "ALO Notch Settings"
-            window.isReleasedWhenClosed = false
-            window.contentView = NSHostingView(rootView: ALONotchFeatureSettings(features: self))
-            window.center()
-            settingsWindow = window
-        }
-        settingsWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        model?.showNotchSettingsBelowPlayer()
     }
 }
 
@@ -107,14 +97,39 @@ struct ALONotchFeatureSettings: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             Divider()
             if preferences.enabled, let runtime = features.runtime {
-                runtime.settingsView
+                runtime.compactSettingsView
             } else {
                 ContentUnavailableView("Notch is disabled", systemImage: "rectangle.topthird.inset.filled",
-                    description: Text("Enable the notch to choose features. Every additional feature starts disabled."))
+                    description: Text("Enable Notch to use the player, battery activity, and home page. Choose more features here."))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
             .onAppear { features.setEnabled(preferences.enabled) }
             .onChange(of: preferences.enabled) { _, enabled in features.setEnabled(enabled) }
+    }
+}
+
+struct NotchSettingsBelowPlayer: View {
+    @ObservedObject var model: ALOViewModel
+    @ObservedObject private var preferences = ALONotchPreferences.shared
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Divider()
+            HStack {
+                Label("Notch settings", systemImage: "rectangle.topthird.inset.filled")
+                    .font(.headline)
+                Spacer()
+                Button { ALONotchFeatureBridge.shared.openActivities() } label: {
+                    Text("Show notch")
+                }.disabled(!preferences.enabled)
+                Button { model.notchSettingsVisible = false } label: {
+                    Image(systemName: "xmark")
+                }.buttonStyle(.plain).accessibilityLabel("Close notch settings")
+            }.padding(12)
+            ALONotchFeatureSettings(features: .shared)
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+        .accessibilityIdentifier("ALO.Notch.SettingsBelowPlayer")
     }
 }

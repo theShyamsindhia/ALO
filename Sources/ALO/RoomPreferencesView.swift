@@ -2,6 +2,7 @@ import SwiftUI
 
 /// Local preferences and diagnostics stay out of the compact playback surface.
 struct RoomPreferencesView: View {
+    @Environment(\.dismiss) private var dismiss
     @ObservedObject var model: ALOViewModel
     @ObservedObject private var lyrics: LyricsController
     @State private var showsAbout = false
@@ -71,6 +72,17 @@ struct RoomPreferencesView: View {
             .frame(height: 340)
 
             Divider()
+
+            Button {
+                dismiss()
+                ALONotchFeatureBridge.shared.showSettings()
+            } label: {
+                Label("Notch settings…", systemImage: "rectangle.topthird.inset.filled")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
 
             connectionFooter
                 .padding(.horizontal, 16)

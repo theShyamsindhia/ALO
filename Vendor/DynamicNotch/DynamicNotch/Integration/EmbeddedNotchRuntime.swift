@@ -7,6 +7,30 @@ import SwiftUI
 @MainActor
 public final class EmbeddedNotchRuntime: ObservableObject {
     static weak var activeInstance: EmbeddedNotchRuntime?
+    public var onSettingsRequested: (@MainActor () -> Void)?
+    enum SettingsDestination {
+        case section(SettingsRootViewModel.Section)
+        case subPage(SettingsSubPage)
+    }
+    static let settingsRequestNotification = Notification.Name("ALOEmbeddedNotchSettingsRequested")
+    private var pendingSettingsDestination: SettingsDestination?
+
+    /// Keep the destination until the inline settings view has actually mounted.
+    @discardableResult
+    func requestEmbeddedSettings(_ destination: SettingsDestination? = nil) -> Bool {
+        guard let onSettingsRequested else { return false }
+        pendingSettingsDestination = destination
+        onSettingsRequested()
+        NotificationCenter.default.post(name: Self.settingsRequestNotification, object: self)
+        return true
+    }
+
+    func requestedSettingsDestination() -> SettingsDestination? {
+        // Menu-bar and floating hosts may coexist; a hidden host must not
+        // consume the route before the visible host has mounted.
+        pendingSettingsDestination
+    }
+
     @Published public var roomMediaEnabled = false {
         didSet {
             UserDefaults.aloNotch.set(roomMediaEnabled, forKey: "alo.roomMedia.enabled")
@@ -110,11 +134,19 @@ public final class EmbeddedNotchRuntime: ObservableObject {
         isEnabled = enabled
         delegate.notchViewModel.setActivityEventsEnabled(enabled)
         if enabled {
+            if NotchInitialFeatureProfile.apply(defaults: .aloNotch, domainName: UserDefaults.aloNotchDomainName, settings: delegate.settingsViewModel) {
+                roomMediaEnabled = UserDefaults.aloNotch.bool(forKey: NotchInitialFeatureProfile.roomMediaKey)
+            }
             // Construct the original event subscriptions before monitors emit events.
             _ = delegate.notchEventCoordinator
             delegate.observeOutsideClickDismissal()
             delegate.notchViewModel.updateDimensions()
             activation.setEnabled(true)
+            // The coordinator persists across disable/re-enable, while the engine
+            // clears activities. Restore the selected idle page on every enable.
+            if delegate.settingsViewModel.homePage.isHomePageLiveActivityEnabled {
+                delegate.notchEventCoordinator.handleHomePageEvent(.homePageOn)
+            }
             reconcileRoomPlayback()
             activityActive = delegate.notchViewModel.displayedContent != nil
         } else {
@@ -201,7 +233,12 @@ public final class EmbeddedNotchRuntime: ObservableObject {
         if hitTestSize != interactive { hitTestSize = interactive }
     }
 
-    public var settingsView: AnyView {
+    public var settingsView: AnyView { settingsContent(embedded: false) }
+
+    /// Reuses original feature pages inside ALO's main Settings pane.
+    public var compactSettingsView: AnyView { settingsContent(embedded: true) }
+
+    private func settingsContent(embedded: Bool) -> AnyView {
         guard isEnabled else { return AnyView(EmptyView()) }
         return AnyView(VStack(spacing: 0) {
             Toggle("Room media", isOn: Binding(get: { self.roomMediaEnabled }, set: { self.roomMediaEnabled = $0 }))
@@ -210,11 +247,12 @@ public final class EmbeddedNotchRuntime: ObservableObject {
                 .padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
             Divider()
-            SettingsRootView(container: delegate.container)
+            SettingsRootView(container: delegate.container, embedded: embedded)
         }.defaultAppStorage(.aloNotch))
     }
 
     public func showSettings() {
+        if requestEmbeddedSettings() { return }
         guard isEnabled else { return }
         SettingsWindowController.shared.setupDependencies(appDelegate: delegate)
         SettingsWindowController.shared.showWindow()

@@ -67,12 +67,14 @@ final class ALONotchWindowController {
             return
         }
         if panel == nil {
-            panel = runtime.makeHostPanel()
+            let originalPanel = runtime.makeHostPanel()
+            Self.mountOriginalContent(in: originalPanel, makeContent: runtime.makeHostView)
+            panel = originalPanel
         }
         guard let panel else { return }
         runtime.attachHostWindow(panel)
         if panel.contentView == nil {
-            panel.contentView = runtime.makeHostView()
+            Self.mountOriginalContent(in: panel, makeContent: runtime.makeHostView)
         }
         guard !runtime.isLocked, !runtime.shouldHideInFullscreen,
               let screen = runtime.preferredScreen else {
@@ -83,7 +85,7 @@ final class ALONotchWindowController {
         }
         let frame = runtime.hostFrame(on: screen)
         if panel.frame != frame { panel.setFrame(frame, display: true) }
-        panel.orderFrontRegardless()
+        if !panel.isVisible { panel.orderFrontRegardless() }
         if timer == nil {
             let tracking = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated { self?.updatePointerPassThrough() }
@@ -92,6 +94,12 @@ final class ALONotchWindowController {
             timer = tracking
         }
         updatePointerPassThrough()
+    }
+
+    /// NSPanel starts with a non-nil plain NSView. Initial mounting cannot rely
+    /// on contentView == nil, which otherwise leaves a completely blank panel.
+    static func mountOriginalContent(in panel: NSPanel, makeContent: () -> NSView) {
+        panel.contentView = makeContent()
     }
 
     private func updatePointerPassThrough() {
