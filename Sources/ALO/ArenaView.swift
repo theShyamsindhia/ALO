@@ -20,7 +20,7 @@ struct ArenaPanel: View {
                     Button("Return to room") { session.closeExpanded() }.buttonStyle(.bordered)
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if session.selectedGameID == nil {
-                GameLibraryView(store: session.library, lobbies: session.lobbies, names: session.names,
+                GameLibraryView(store: session.library, stickFight: session.stickFight, onPlayStickFight: session.openStickFight, lobbies: session.lobbies, names: session.names,
                     onPlay: session.openGame,
                     onJoin: { lobby, spectate in
                         guard let pack = session.library.installed["rift-arena"] else { return }
@@ -38,6 +38,8 @@ struct ArenaPanel: View {
                     Text(error).font(.system(size: 12)).multilineTextAlignment(.center)
                     Button("Back to library") { session.returnToLibrary() }
                 }.padding(20).frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if session.selectedGameID == "stick-fight" {
+                StickFightPanel(session: session.stickFight, onBack: session.returnToLibrary, showsHeader: false)
             } else if session.selectedGameID == "fourfold" {
                 FourfoldPanel(session: session.fourfold, onBack: session.returnToLibrary, showsHeader: false)
             } else if session.playing {
@@ -58,7 +60,7 @@ struct ArenaPanel: View {
                     .help("Leave this activity and return to Games")
             }
             Spacer(minLength: 0)
-            Text(session.selectedGameID == "fourfold" ? "Fourfold" : session.selectedGameID == nil ? "Games" : "Rift Arena")
+            Text(session.selectedGameID == "stick-fight" ? "Stick Fight" : session.selectedGameID == "fourfold" ? "Fourfold" : session.selectedGameID == nil ? "Games" : "Rift Arena")
                 .font(.system(size: 12, weight: .semibold))
             Spacer(minLength: 0)
             if session.playing {
@@ -395,7 +397,6 @@ final class ArenaScene: SKScene {
     private var priorHits = [0, 0]
     private var priorStocks = [3, 3]
     private var lastFrame = -1
-    private var lastSnapshotTime: TimeInterval?
     private let mint = NSColor(calibratedRed: 0.55, green: 0.59, blue: 0.75, alpha: 1)
     private let coral = NSColor(calibratedRed: 0.75, green: 0.59, blue: 0.51, alpha: 1)
     init(session: ArenaSession) {
@@ -430,7 +431,6 @@ final class ArenaScene: SKScene {
         priorHits = session?.simulation.fighters.map(\.hitSerial) ?? []
         priorStocks = session?.simulation.fighters.map(\.stocks) ?? []
         lastFrame = -1
-        lastSnapshotTime = nil
         // Artwork layers are decoded once; rig nodes and platform geometry are reused per frame.
         if let image = session?.arenaBackground {
             let backdrop = SKSpriteNode(texture: SKTexture(image: image))
@@ -559,21 +559,11 @@ final class ArenaScene: SKScene {
         introNames.text = session.playerNames.map { String($0.prefix(16)) }.joined(separator: "   ·   ")
         introTitle.alpha = introAlpha; introNames.alpha = introAlpha
         let changed = sim.frame != lastFrame
-        if changed { lastSnapshotTime = currentTime }
         lastFrame = sim.frame
-        let smoothRemote = session.mode == .guest || session.mode == .spectator
-        let snapshotAge = smoothRemote ? min(0.05, max(0, currentTime - (lastSnapshotTime ?? currentTime))) : 0
         for i in sim.fighters.indices {
             let f = sim.fighters[i], body = bodies[i]
-            // Present velocity for at most one snapshot interval. This keeps
-            // remote fighters moving between authoritative frames while the
-            // simulation itself remains host-owned and unchanged.
-            let target = CGPoint(x: f.x + f.vx * snapshotAge, y: f.y + f.vy * snapshotAge)
-            if smoothRemote && hypot(body.position.x - target.x, body.position.y - target.y) < 180 {
-                let correction = changed ? 0.62 : 0.42
-                body.position.x += (target.x - body.position.x) * correction
-                body.position.y += (target.y - body.position.y) * correction
-            } else { body.position = target }
+            let displayed = session.presentationPosition(for: i, at: currentTime)
+            body.position = CGPoint(x: displayed.x, y: displayed.y)
             let ground = sim.arenaPlatforms.filter { f.x >= $0.left && f.x <= $0.right && $0.top <= f.y + 1 }.map(\.top).max()
             shadows[i].isHidden = ground == nil || f.respawn > 0 || f.stocks == 0
             if let ground {

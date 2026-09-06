@@ -190,7 +190,7 @@ public enum ArenaBotDifficulty: String, Codable, CaseIterable, Sendable {
 
 public struct ArenaSimulation: Codable, Equatable, Sendable {
     public static let maximumFighters = 4
-    public static let step = 1.0 / 60.0
+    public static let step = GameRealtimePolicy.step
     public static var platforms: [ArenaPlatform] { ArenaMap.observatory.platforms }
     public var map: ArenaMap
     public var arenaPlatforms: [ArenaPlatform] { map.platforms }
@@ -261,7 +261,23 @@ public struct ArenaSimulation: Codable, Equatable, Sendable {
         previousInputs = inputs
     }
 
-    private mutating func advance(_ i: Int, input: ArenaInput, old: ArenaInput) {
+    /// Predict locomotion only. Combat, stocks, clocks and opponents are host-owned.
+    public mutating func predictMovement(slot: Int, input: ArenaInput) {
+        guard fighters.indices.contains(slot), input.isValid, countdown == 0, winner == nil,
+              fighters[slot].stocks > 0, fighters[slot].respawn == 0 else { return }
+        let authoritative = fighters[slot]
+        var movement = input; movement.light = false; movement.heavy = false; movement.dodge = false
+        advance(slot, input: movement, old: previousInputs[slot], movementOnly: true)
+        let predicted = fighters[slot]
+        fighters[slot] = authoritative
+        fighters[slot].x = predicted.x; fighters[slot].y = predicted.y
+        fighters[slot].vx = predicted.vx; fighters[slot].vy = predicted.vy
+        fighters[slot].grounded = predicted.grounded; fighters[slot].airJumps = predicted.airJumps
+        fighters[slot].facing = predicted.facing
+        previousInputs[slot] = movement
+    }
+
+    private mutating func advance(_ i: Int, input: ArenaInput, old: ArenaInput, movementOnly: Bool = false) {
         var f = fighters[i]
         guard f.stocks > 0 else { return }
         if f.respawn > 0 {
@@ -306,7 +322,7 @@ public struct ArenaSimulation: Codable, Equatable, Sendable {
                 }
             }
         }
-        if f.attackFrames > 0 {
+        if !movementOnly && f.attackFrames > 0 {
             let move = ArenaAttackProfile.resolve(kind: f.kind, heavy: f.attackHeavy, direction: f.attackDirection, aerial: f.attackAerial ?? !f.grounded)
             if f.attackAge == move.startup {
                 if move.selfVelocityX != 0 { f.vx = f.facing * move.selfVelocityX }

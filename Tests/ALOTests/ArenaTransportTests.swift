@@ -63,4 +63,31 @@ struct ArenaTransportTests {
         try #require(wait { bProbe.events.contains { $0.text == "Barrier" } })
         #expect(bProbe.packets.count == count)
     }
+    @Test("Stick Fight uses authenticated activity transport and rejects invalid frames")
+    func stickFightActivityTransport() throws {
+        let room = RoomConfiguration(id: UUID().uuidString, name: "Stick Fight QA", isPrivate: true, accessKey: UUID().uuidString)
+        let aProbe = Probe(), bProbe = Probe()
+        let a = MeshControlPlane(room: room, nodeID: "stick-a", displayName: "A", listenerReadyHandler: aProbe.setPort,
+                                 replicaHandler: aProbe.replica, participantsHandler: aProbe.people, arenaHandler: aProbe.receive)
+        let b = MeshControlPlane(room: room, nodeID: "stick-b", displayName: "B", listenerReadyHandler: bProbe.setPort,
+                                 replicaHandler: bProbe.replica, participantsHandler: bProbe.people, arenaHandler: bProbe.receive)
+        try a.start(advertise: false); try b.start(advertise: false)
+        defer { a.stop(); b.stop() }
+        try #require(wait { bProbe.port != nil })
+        a.connectForTesting(to: .hostPort(host: "127.0.0.1", port: try #require(bProbe.port)))
+        try #require(wait { aProbe.participants == 2 && bProbe.participants == 2 })
+        var packet = StickFightPacket(kind: .lobby, session: UUID().uuidString, sequence: 1)
+        packet.availableSlots = 3; packet.started = false
+        packet.slots = [StickFightSlot(index: 0, name: "A", isBot: false, ready: false)]
+        let data = try JSONEncoder().encode(packet)
+        a.publishArena(data, targetID: "stick-b")
+        try #require(wait { bProbe.packets.contains { $0.0 == "stick-a" && $0.1 == data } })
+        packet.game = "unsupported-game"
+        a.publishArena(try JSONEncoder().encode(packet), targetID: "stick-b")
+        a.publishChat("Stick Fight transport barrier")
+        try #require(wait { bProbe.events.contains { $0.text == "Stick Fight transport barrier" } })
+        #expect(bProbe.packets.count == 1)
+        #expect(bProbe.events.filter { $0.kind == .chat }.count == 1)
+    }
+
 }

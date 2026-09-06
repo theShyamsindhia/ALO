@@ -161,7 +161,7 @@ public final class MeshControlPlane: @unchecked Sendable {
         var realtimeVoiceQueue = RealtimeVoiceSendQueue()
         var realtimeVoiceSendInFlight = false
         var arenaSendInFlight = false
-        var arenaSendQueue = ArenaSendQueue()
+        var arenaSendQueue = GameSendQueue()
         var chatAttachmentSendInFlight = false
         var chatAttachmentSendQueue = [Data]()
         var chatAttachmentQueuedBytes = 0
@@ -673,14 +673,21 @@ public final class MeshControlPlane: @unchecked Sendable {
 
     /// Direct authenticated links only. One in-flight packet, bounded priority lifecycle queue, and one latest frame per peer.
     public func publishArena(_ data: Data, targetID: String?) {
-        guard data.count <= 8192, let packet = try? JSONDecoder().decode(ArenaPacket.self, from: data), packet.isValid else { return }
+        guard data.count <= GameRealtimePolicy.maximumPacketBytes else { return }
+        let stream: String
+        let kind: String
+        if let packet = try? JSONDecoder().decode(ArenaPacket.self, from: data), packet.isValid {
+            kind = packet.kind.rawValue; stream = "rift/" + packet.session
+        } else if let packet = try? JSONDecoder().decode(StickFightPacket.self, from: data), packet.isValid {
+            kind = packet.kind.rawValue; stream = "stick/" + packet.session
+        } else { return }
         queue.async { [weak self] in
             guard let self, !self.isStopped,
                   let wire = try? MeshEnvelope(type: "arena", nodeID: self.nodeID, arenaData: data).encodedLine()
             else { return }
             let destinations = targetID.map { id in self.peers[id].map { [$0] } ?? [] } ?? Array(self.peers.values)
             for link in destinations where link.authenticated {
-                link.arenaSendQueue.enqueue(kind: packet.kind.rawValue, data: wire)
+                link.arenaSendQueue.enqueue(kind: kind, data: wire, stream: stream)
                 self.drainArena(to: link)
             }
         }
@@ -693,7 +700,7 @@ public final class MeshControlPlane: @unchecked Sendable {
             guard let self, let link else { return }
             self.queue.async {
                 link.arenaSendInFlight = false
-                if error != nil { link.arenaSendQueue = ArenaSendQueue(); self.cancel(link) }
+                if error != nil { link.arenaSendQueue = GameSendQueue(); self.cancel(link) }
                 else if !self.isStopped { self.drainArena(to: link) }
             }
         }
@@ -1508,7 +1515,7 @@ public final class MeshControlPlane: @unchecked Sendable {
             guard room.transportPolicy == .secureV2 else { return }
             receiveSecureDirectory(envelope.meshPeerDirectory ?? [], from: link)
         case "arena":
-            guard envelope.nodeID == remoteID, let data = envelope.arenaData, data.count <= 8192 else { return }
+            guard envelope.nodeID == remoteID, let data = envelope.arenaData, data.count <= GameRealtimePolicy.maximumPacketBytes else { return }
             let now = MonotonicClock.nowNanos()
             if now - min(now, link.arenaReceiveWindow) >= 1_000_000_000 {
                 link.arenaReceiveWindow = now; link.arenaReceiveCount = 0

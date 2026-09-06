@@ -34,6 +34,7 @@ final class ArenaSession: ObservableObject {
     @Published var spectatorCount = 0
     let library = GameLibraryStore()
     let fourfold = FourfoldSession()
+    let stickFight = StickFightSession()
     @Published var selectedGameID: String?
     @Published var loadingGame = false
     @Published var gameLoadError: String?
@@ -72,10 +73,10 @@ final class ArenaSession: ObservableObject {
     private var priorSoundStocks = [3, 3]
     private var controllerPausePressed = false
     var simulation = ArenaSimulation()
-    var send: ((Data, String?) -> Void)?
-    var names: [String: String] = [:]
-    var localName = "You"
-    var localParticipantID = "local"
+    var send: ((Data, String?) -> Void)? { didSet { stickFight.send = send } }
+    var names: [String: String] = [:] { didSet { stickFight.names = names } }
+    var localName = "You" { didSet { stickFight.localName = localName } }
+    var localParticipantID = "local" { didSet { stickFight.localParticipantID = localParticipantID } }
     var onMatchFinished: ((ArenaMatchResult) -> Void)?
     var onLobbyDiscovered: ((Lobby) -> Void)?
     var onLobbyRemoved: ((String) -> Void)?
@@ -85,6 +86,9 @@ final class ArenaSession: ObservableObject {
         var slot: Int
         var ready = false
         var input = ArenaInput()
+        var buffered = ArenaInput()
+        var lastInputSequence = -1
+        var acknowledgedInput = -1
         var lastInput = 0.0
         var lastSeen: Double
         var sequence = -1
@@ -119,9 +123,9 @@ final class ArenaSession: ObservableObject {
     private(set) var peerID: String?
     private var round = 0
     private var sessionID = UUID().uuidString
-    private var timer: Timer?
-    private var previousTime: TimeInterval = 0
-    private var accumulator = 0.0
+    private let loop = GameRealtimeLoop()
+    private var realtime = GameRealtimeEngine<ArenaInput>()
+    private var predictionSupported = false
     private var tickCount = 0
     private var sequence = 0
     private var remoteSequence = -1
@@ -159,7 +163,13 @@ final class ArenaSession: ObservableObject {
         revision += 1
     }
 
+    func openStickFight() {
+        returnToLibrary()
+        selectedGameID = "stick-fight"
+    }
+
     func openGame(_ pack: InstalledGamePack) {
+        stickFight.leave()
         leave(); selectedGameID = pack.descriptor.id; loadingGame = true; gameLoadError = nil
         loadTask?.cancel()
         loadTask = Task { [weak self] in
@@ -181,6 +191,7 @@ final class ArenaSession: ObservableObject {
         }
     }
     func returnToLibrary() {
+        stickFight.leave()
         leave(); loadTask?.cancel(); selectedGameID = nil; loadingGame = false
         gameBackground = nil; gardenBackground = nil; midgroundArtwork = nil; platformArtwork = nil; expandedFighterArtwork = nil; fighterArtwork = nil; gameLoadError = nil; controlsFocused = false; configureTimer()
     }
@@ -193,16 +204,25 @@ final class ArenaSession: ObservableObject {
         clearInput(); sound.stop(); configureTimer()
     }
     private func configureTimer() {
-        timer?.invalidate(); timer = nil
-        guard networked || (visiblePanels > 0 && (playing || selectedGameID == "rift-arena")) else { return }
-        previousTime = ProcessInfo.processInfo.systemUptime
-        let interval = playing && !paused ? ArenaSimulation.step : 0.25
-        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.update(at: ProcessInfo.processInfo.systemUptime) }
+        let active = networked || (visiblePanels > 0 && (playing || selectedGameID == "rift-arena"))
+        let running = playing && mode != .spectator && !GameRealtimePolicy.pausesWorld(multiplayer: mode != .practice, menuOpen: paused || showsMenu)
+        if loop.configure(active: active, realtime: running, update: { [weak self] in self?.update(at: $0) }) {
+            realtime.rebaseClock(at: ProcessInfo.processInfo.systemUptime)
         }
-        timer.tolerance = playing ? 0.002 : 0.05
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
+    }
+    func presentationPosition(for index: Int, at time: Double) -> GameMotion {
+        let f = simulation.fighters[index]
+        return realtime.position(for: index, at: time, fallback: Self.motion(f), remote: mode == .spectator || (mode == .guest && (index != localIndex || !predictionSupported)))
+    }
+    private static func motion(_ f: ArenaFighter) -> GameMotion {
+        let moving = f.stocks > 0 && f.respawn == 0
+        return GameMotion(x: f.x, y: f.y, vx: moving ? f.vx : 0, vy: moving ? f.vy : 0, continuity: f.stocks * 2 + (f.respawn > 0 ? 1 : 0))
+    }
+    private func mergingActions(_ held: ArenaInput, _ actions: ArenaInput) -> ArenaInput {
+        var input = held
+        input.jump = input.jump || actions.jump; input.light = input.light || actions.light
+        input.heavy = input.heavy || actions.heavy; input.dodge = input.dodge || actions.dodge
+        return input
     }
     private func botKind(slot: Int) -> ArenaFighterKind {
         let roster = ArenaFighterKind.allCases
@@ -256,6 +276,7 @@ final class ArenaSession: ObservableObject {
         round += 1; localReady = false; remoteReady = false; reportedRound = nil
         for id in members.keys { members[id]!.ready = false; members[id]!.input = ArenaInput() }
         simulation = ArenaSimulation(kinds: simulation.fighters.map(\.kind), map: simulation.map)
+        realtime.reset(); clearInput()
         mode = .readyHost; refreshSlots(); sendRoster(); advertise()
     }
     func readyUp() {
@@ -286,10 +307,11 @@ final class ArenaSession: ObservableObject {
         spectators = [:]; spectatorProbes = [:]; spectatorCount = 0; members = [:]; botSlots = []; playerSlots = []
         remotePlayerNames = nil; remoteParticipantIDs = nil; assignedSlot = 0; reportedRound = nil
         mode = .picker; peerID = nil; clearInput(); remoteInput = ArenaInput()
-        remoteSequence = -1; sequence = 0; accumulator = 0; notice = message; paused = false
+        remoteSequence = -1; sequence = 0; realtime.reset(); predictionSupported = false; notice = message; paused = false
     }
     func disconnect() {
-        returnToLibrary(); send = nil; lobbies = []; announcedSessions = []; reportedResultKeys = []; timer?.invalidate(); timer = nil
+        stickFight.disconnect()
+        returnToLibrary(); send = nil; lobbies = []; announcedSessions = []; reportedResultKeys = []; loop.stop()
         closeExpanded(); scene = nil; sound.stop()
     }
     func surfaceVisibility(_ id: UUID, visible: Bool) {
@@ -308,7 +330,12 @@ final class ArenaSession: ObservableObject {
         bufferedActions.dodge = bufferedActions.dodge || (input.dodge && !localInput.dodge)
         localInput = input
     }
-    func clearInput() { localInput = ArenaInput(); bufferedActions = ArenaInput() }
+    func clearInput() {
+        stickFight.clearInput()
+        let changed = localInput != ArenaInput() || bufferedActions != ArenaInput()
+        localInput = ArenaInput(); bufferedActions = ArenaInput()
+        if changed && mode == .guest { transmit(.input, input: localInput) }
+    }
     func assignKey(_ keyCode: UInt16, to action: ArenaKeyAction) {
         keyBindings.assign(keyCode, to: action)
         clearInput()
@@ -365,8 +392,8 @@ final class ArenaSession: ObservableObject {
     private func advertise() {
         transmit(.lobby, fighter: selected, target: "", started: mode == .host)
     }
-    private func transmit(_ kind: ArenaPacket.Kind, fighter: ArenaFighterKind? = nil,
-                          input: ArenaInput? = nil, state: ArenaSimulation? = nil, target: String? = nil, ready: Bool? = nil, started: Bool? = nil) {
+    @discardableResult private func transmit(_ kind: ArenaPacket.Kind, fighter: ArenaFighterKind? = nil,
+                          input: ArenaInput? = nil, state: ArenaSimulation? = nil, target: String? = nil, ready: Bool? = nil, started: Bool? = nil) -> Int {
         sequence += 1
         let now = ProcessInfo.processInfo.systemUptime
         if networked && (sentProbe == nil || now - sentProbe! >= 1) { sentProbe = now }
@@ -383,11 +410,14 @@ final class ArenaSession: ObservableObject {
             availableSlots: kind == .lobby ? availableSlots : nil,
             humanCount: kind == .lobby ? 1 + members.count : nil,
             botCount: kind == .lobby ? botSlots.count : nil,
-            participantIDs: rosterPacket ? simulation.fighters.indices.map { slot in slot == 0 ? localParticipantID : members.first(where: { $0.value.slot == slot })?.key } : nil)
-        if let data = try? JSONEncoder().encode(packet), data.count <= 8192 { send?(data, destination) }
+            participantIDs: rosterPacket ? simulation.fighters.indices.map { slot in slot == 0 ? localParticipantID : members.first(where: { $0.value.slot == slot })?.key } : nil,
+            acknowledgedInput: rosterPacket ? destination.flatMap { members[$0]?.acknowledgedInput } : nil)
+        if let data = try? JSONEncoder().encode(packet), data.count <= GameRealtimePolicy.maximumPacketBytes { send?(data, destination) }
+        return sequence
     }
     func receive(from sender: String, data: Data) {
-        guard data.count <= 8192, let packet = try? JSONDecoder().decode(ArenaPacket.self, from: data), packet.isValid else { return }
+        stickFight.receive(from: sender, data: data)
+        guard data.count <= GameRealtimePolicy.maximumPacketBytes, let packet = try? JSONDecoder().decode(ArenaPacket.self, from: data), packet.isValid else { return }
         let now = ProcessInfo.processInfo.systemUptime
         if packet.kind == .lobby {
             let announcementKey = sender + "/" + packet.session
@@ -426,7 +456,7 @@ final class ArenaSession: ObservableObject {
             guard [.joining, .readyGuest, .guest, .spectator].contains(mode), let state = packet.state,
                   let slots = packet.slots, let rosterNames = packet.playerNames,
                   slots.count == state.fighters.count, rosterNames.count == slots.count else { return }
-            if packet.kind == .state, state.frame < simulation.frame, mode == .guest, !advancedRound { return }
+            if packet.kind == .state, state.frame < (realtime.latestAuthoritativeFrame ?? -1), mode == .guest, !advancedRound { return }
             if packet.spectating == true { mode = .spectator }
             else {
                 guard let slot = packet.assignedSlot, state.fighters.indices.contains(slot), !slots[slot].isBot else { return }
@@ -434,6 +464,11 @@ final class ArenaSession: ObservableObject {
             }
             remotePlayerNames = rosterNames; remoteParticipantIDs = packet.participantIDs; playerSlots = slots; botSlots = Set(slots.filter(\.isBot).map(\.index))
             selectedMap = state.map; simulation = state; remoteReady = packet.ready ?? false
+            realtime.receiveSnapshot(frame: state.frame, epoch: sessionID + "/" + String(round), at: now, motion: state.fighters.map(Self.motion))
+            predictionSupported = packet.acknowledgedInput != nil
+            let replay = realtime.acknowledge(packet.acknowledgedInput)
+            if mode == .guest { for input in replay { simulation.predictMovement(slot: localIndex, input: input) } }
+            else { realtime.clearPrediction() }
             lastRemote = now; notice = mode == .spectator ? "Spectating · four fighter slots; join a live bot slot when available." : ""
             revision += 1; playImpacts(); reportResultIfNeeded()
         case .leave: leave(message: "The activity host left. Your room and chat are still open.")
@@ -480,7 +515,13 @@ final class ArenaSession: ObservableObject {
             let changed = member.ready != packet.ready!
             member.ready = packet.ready!; members[sender] = member
             if changed { refreshSlots(); sendRoster(); startIfReady() }
-        case .input where mode == .host: member.input = packet.input!; member.lastInput = now; members[sender] = member
+        case .input where mode == .host:
+            let input = packet.input!
+            member.buffered.jump = member.buffered.jump || (input.jump && !member.input.jump)
+            member.buffered.light = member.buffered.light || (input.light && !member.input.light)
+            member.buffered.heavy = member.buffered.heavy || (input.heavy && !member.input.heavy)
+            member.buffered.dodge = member.buffered.dodge || (input.dodge && !member.input.dodge)
+            member.input = input; member.lastInput = now; member.lastInputSequence = packet.sequence; members[sender] = member
         case .leave: replaceWithBot(sender)
         case .rematch where mode == .host && simulation.winner != nil: members[sender] = member; beginRematch()
         default: members[sender] = member
@@ -503,15 +544,16 @@ final class ArenaSession: ObservableObject {
     /// The timer supplies monotonic time; tests can exercise a coalesced callback
     /// without depending on wall-clock sleeps or the main run loop's cadence.
     func update(at now: TimeInterval) {
-        let elapsed = min(0.1, max(0, now - previousTime)); previousTime = now; tickCount += 1
+        tickCount += 1
+        let frame = realtime.advance(at: now, running: mode == .host || mode == .guest || (mode == .practice && !GameRealtimePolicy.pausesWorld(multiplayer: false, menuOpen: paused || showsMenu)))
         if now - lastAdvertise >= 1 {
             lastAdvertise = now
             let expired = lobbies.filter { now - $0.seen > 3.5 }.map(\.sessionID)
             lobbies.removeAll { now - $0.seen > 3.5 }
             for id in expired { onLobbyRemoved?(id) }
             if isActivityHost {
-                for id in members.keys.filter({ now - members[$0]!.lastSeen > 5 }) { replaceWithBot(id) }
-                spectators = spectators.filter { now - $0.value < 5 }; spectatorCount = spectators.count
+                for id in members.keys.filter({ now - members[$0]!.lastSeen > GameRealtimePolicy.memberTimeout }) { replaceWithBot(id) }
+                spectators = spectators.filter { now - $0.value < GameRealtimePolicy.memberTimeout }; spectatorCount = spectators.count
                 spectatorProbes = spectatorProbes.filter { spectators[$0.key] != nil }
                 advertise(); if mode != .host { sendRoster() }
             }
@@ -519,31 +561,47 @@ final class ArenaSession: ObservableObject {
             if mode == .spectator { transmit(.spectate) }
             if mode == .joining { transmit(.join, fighter: selected) }
         }
-        if [.joining, .guest, .readyGuest, .spectator].contains(mode) && now - lastRemote > 5 {
+        if [.joining, .guest, .readyGuest, .spectator].contains(mode) && now - lastRemote > GameRealtimePolicy.connectionTimeout {
             leave(message: "Activity connection lost. Your room and chat are still open."); return
+        }
+        if [.guest, .readyGuest, .spectator].contains(mode), now - lastRemote > GameRealtimePolicy.reconnectAfter {
+            notice = "Reconnecting to activity host…"
+            if now - lastInput >= 1 { lastInput = now; transmit(mode == .spectator ? .spectate : .join, fighter: selected) }
+            return
         }
         let frameInput = sampledInput()
         if mode == .guest {
-            if tickCount % 2 == 0 { transmit(.input, input: frameInput); bufferedActions = ArenaInput() }
+            if frame.steps > 0 {
+                let sequence = transmit(.input, input: frameInput)
+                if predictionSupported {
+                    realtime.recordInput(sequence: sequence, input: frameInput, steps: frame.steps)
+                    for _ in 0..<frame.steps { simulation.predictMovement(slot: localIndex, input: frameInput) }
+                }
+                bufferedActions = ArenaInput(); revision += 1
+            }
             return
         }
-        guard mode == .host || (mode == .practice && !paused) else { accumulator = 0; return }
-        accumulator += elapsed; var steps = 0
-        while accumulator >= ArenaSimulation.step && steps < 6 {
+        guard mode == .host || (mode == .practice && !GameRealtimePolicy.pausesWorld(multiplayer: false, menuOpen: paused || showsMenu)) else { return }
+        for _ in 0..<frame.steps {
             let inputs = simulation.fighters.indices.map { slot -> ArenaInput in
                 if slot == 0 { return frameInput }
                 if botSlots.contains(slot) || mode == .practice { return simulation.botInput(for: slot, difficulty: botDifficulty) }
-                guard let member = members.values.first(where: { $0.slot == slot }), now - member.lastInput <= 0.25 else { return ArenaInput() }
-                return member.input
+                guard let member = members.values.first(where: { $0.slot == slot }), now - member.lastInput <= GameRealtimePolicy.staleInputAfter else { return ArenaInput() }
+                return mergingActions(member.input, member.buffered)
             }
-            simulation.tick(inputs); accumulator -= ArenaSimulation.step; steps += 1
+            simulation.tick(inputs)
         }
-        if steps > 0 { bufferedActions = ArenaInput() }
+        if frame.steps > 0 {
+            bufferedActions = ArenaInput()
+            for id in members.keys {
+                members[id]?.buffered = ArenaInput()
+                let acknowledged = members[id]?.lastInputSequence ?? -1
+                members[id]?.acknowledgedInput = acknowledged
+            }
+            revision += 1; playImpacts()
+        }
         let finished = reportResultIfNeeded()
-        if finished && mode == .host { sendRoster() }
-        // Match the 30 Hz input cadence. Twenty-Hz snapshots made remote
-        // movement visibly step when three guests were playing at once.
-        if tickCount % 2 == 0 { revision += 1; playImpacts(); if mode == .host { sendRoster() } }
+        if mode == .host && (finished || frame.publishSnapshot) { sendRoster() }
     }
     @discardableResult
     private func reportResultIfNeeded() -> Bool {
@@ -571,7 +629,7 @@ final class ArenaSession: ObservableObject {
         clearInput(); expanded = true
         let w = ArenaWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
                          styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
-        w.title = "Rift Arena · ALO"
+        w.title = "Games · ALO"
         w.collectionBehavior = [.fullScreenPrimary]
         w.minSize = NSSize(width: 760, height: 520)
         w.isReleasedWhenClosed = false
@@ -612,10 +670,11 @@ private final class ArenaWindowDelegate: NSObject, NSWindowDelegate {
 
 @MainActor
 enum ArenaStandalone {
-    static func run() {
+    static func run(stickFight: Bool = false) {
         let app = NSApplication.shared
         app.setActivationPolicy(.regular)
         let session = ArenaSession()
+        if stickFight { session.openStickFight() }
         session.openExpanded()
         app.run()
         session.disconnect()

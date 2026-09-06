@@ -153,7 +153,7 @@ struct ArenaMenuOverlay: View {
                 Text(session.mode == .practice && session.paused ? "Practice paused" : "Arena menu")
                     .font(.system(size: compact ? 14 : 18, weight: .semibold))
                 Text(session.networked && session.simulation.winner == nil
-                     ? "The room match continues while this menu is open."
+                     ? "Match continues. Your controls are released and your fighter can still be hit."
                      : "Your controls, players and game settings.")
                     .font(.system(size: compact ? 9 : 11)).foregroundStyle(ArenaAppearance.secondary)
                     .fixedSize(horizontal: false, vertical: true)

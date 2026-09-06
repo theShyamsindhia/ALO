@@ -198,6 +198,8 @@ final class GamePackRedirectPolicy: NSObject, URLSessionTaskDelegate {
 @MainActor
 struct GameLibraryView: View {
     @ObservedObject var store: GameLibraryStore
+    @ObservedObject var stickFight: StickFightSession
+    var onPlayStickFight: () -> Void
     @ObservedObject var records = ArenaRecordStore.shared
     var lobbies: [ArenaSession.Lobby]
     var names: [String: String]
@@ -253,6 +255,7 @@ struct GameLibraryView: View {
                             GridItem(.flexible(minimum: 240), spacing: 12, alignment: .top),
                             GridItem(.flexible(minimum: 240), spacing: 12, alignment: .top)
                         ], alignment: .leading, spacing: 12) {
+                            stickFightCard
                             ForEach(store.games) { game in card(game) }
                         }
                         if !store.catalogNotice.isEmpty {
@@ -265,6 +268,43 @@ struct GameLibraryView: View {
         .foregroundStyle(ink)
         .background(Color(red: 0.15, green: 0.155, blue: 0.17))
         .task { store.refresh() }
+    }
+
+    private var stickFightCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ZStack(alignment: .bottomLeading) {
+                StickFightLibraryArtwork()
+                LinearGradient(colors: [.clear, .black.opacity(0.75)], startPoint: .center, endPoint: .bottom)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("2–4 FIGHTERS · PHYSICS BRAWLER")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced)).tracking(1.5)
+                        .foregroundStyle(.white.opacity(0.7))
+                    Text("STICK FIGHT").font(.system(size: 30, weight: .black, design: .rounded)).italic()
+                }.padding(16)
+            }.frame(height: 176).clipped()
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Tiny fighters. Big trouble.")
+                    .font(.system(size: 12, weight: .semibold))
+                Text("Scramble for weapons, knock friends into the spikes, and survive the next arena. First to five rounds wins.")
+                    .font(.system(size: 11)).foregroundStyle(secondary).fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 10) {
+                    Button(action: onPlayStickFight) {
+                        Label("Play", systemImage: "play.fill").padding(.horizontal, 10)
+                    }.buttonStyle(.borderedProminent).tint(Color(red: 0.72, green: 0.18, blue: 0.28))
+                    Text("Built in · Offline practice").font(.system(size: 10)).foregroundStyle(secondary)
+                    Spacer(minLength: 0)
+                }.controlSize(.small)
+                if !stickFight.lobbies.isEmpty {
+                    Button(action: onPlayStickFight) {
+                        Label("Live in this room · \(stickFight.lobbies.count) match\(stickFight.lobbies.count == 1 ? "" : "es")", systemImage: "dot.radiowaves.left.and.right")
+                            .font(.system(size: 11, weight: .medium)).foregroundStyle(.green)
+                    }.buttonStyle(.plain)
+                }
+            }.padding(12)
+        }
+        .background(Color.white.opacity(0.035))
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.white.opacity(0.09), lineWidth: 0.7))
     }
 
     private var liveArenas: some View {
@@ -520,4 +560,43 @@ struct GameLibraryView: View {
 
 private extension GameLibraryStore.DownloadState {
     var isFailure: Bool { if case .failed = self { return true }; return false }
+}
+
+/// Original vector cover stays crisp and ships without a content download.
+private struct StickFightLibraryArtwork: View {
+    var body: some View {
+        Canvas { context, size in
+            let sx = size.width / 480, sy = size.height / 176
+            context.scaleBy(x: sx, y: sy)
+            context.fill(Path(CGRect(x: 0, y: 0, width: 480, height: 176)), with: .color(Color(red: 0.27, green: 0.29, blue: 0.25)))
+            for index in 0..<5 {
+                let x = CGFloat(index) * 120 - 65
+                var mountain = Path()
+                mountain.move(to: CGPoint(x: x, y: 176))
+                mountain.addLines([CGPoint(x: x + 90, y: CGFloat(12 + index * 9)), CGPoint(x: x + 220, y: 176)])
+                context.fill(mountain, with: .color(.black.opacity(0.09)))
+            }
+            let platforms = [CGRect(x: 0, y: 119, width: 122, height: 70), CGRect(x: 192, y: 99, width: 106, height: 20), CGRect(x: 365, y: 120, width: 115, height: 66)]
+            for rect in platforms {
+                context.fill(Path(rect), with: .color(Color(red: 0.025, green: 0.04, blue: 0.12)))
+                context.fill(Path(roundedRect: CGRect(x: rect.minX - 3, y: rect.minY - 3, width: rect.width + 6, height: 8), cornerRadius: 5), with: .color(Color(red: 0.68, green: 0.05, blue: 0.22)))
+                for i in 0..<Int(rect.width / 19) {
+                    let x = rect.minX + CGFloat(i) * 19
+                    var spike = Path(); spike.move(to: CGPoint(x: x, y: rect.maxY))
+                    spike.addLines([CGPoint(x: x + 8, y: rect.maxY + 14), CGPoint(x: x + 16, y: rect.maxY)])
+                    context.fill(spike, with: .color(Color(red: 0.025, green: 0.04, blue: 0.12)))
+                }
+            }
+            let colors: [Color] = [.red, .yellow, .green, .cyan]
+            let positions: [CGPoint] = [CGPoint(x: 95,y: 83), CGPoint(x: 208,y: 40), CGPoint(x: 290,y: 62), CGPoint(x: 395,y: 86)]
+            for (i, p) in positions.enumerated() {
+                context.fill(Path(ellipseIn: CGRect(x: p.x - 4, y: p.y - 5, width: 9, height: 9)), with: .color(colors[i]))
+                var body = Path(); body.move(to: CGPoint(x: p.x, y: p.y + 4))
+                body.addLines([CGPoint(x: p.x + 2,y: p.y + 21), CGPoint(x: p.x - 10,y: p.y + 33)])
+                body.move(to: CGPoint(x: p.x + 2,y: p.y + 21)); body.addLine(to: CGPoint(x: p.x + 17,y: p.y + 30))
+                body.move(to: CGPoint(x: p.x - 12,y: p.y + 7)); body.addLines([CGPoint(x: p.x,y: p.y + 12), CGPoint(x: p.x + 19,y: p.y + 5)])
+                context.stroke(body, with: .color(colors[i]), style: StrokeStyle(lineWidth: 3.4, lineCap: .round, lineJoin: .round))
+            }
+        }.accessibilityHidden(true)
+    }
 }

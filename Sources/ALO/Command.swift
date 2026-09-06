@@ -33,6 +33,9 @@ enum ALOCommand {
             case "arena":
                 ArenaStandalone.run()
 
+            case "stick-fight":
+                ArenaStandalone.run(stickFight: true)
+
             case "host":
                 let roomName = arguments.dropFirst().first ?? Host.current().localizedName ?? "ALO Room"
                 try await runHost(roomName: roomName)
@@ -237,7 +240,8 @@ enum ALOCommand {
         ALO — free, synchronized Mac-to-Mac screen and audio over local Wi-Fi
 
         Usage:
-          alo arena               Open standalone Rift Arena practice
+          alo arena               Open the standalone games library
+          alo stick-fight          Open standalone Stick Fight
           alo host [room-name]     Stream this Mac's screen and system audio
           alo join [room-name]     Find and play a room on the local network
           alo room [id-or-name] [--broadcast|--take-over]

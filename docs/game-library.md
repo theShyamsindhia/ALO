@@ -1,6 +1,24 @@
 # Games library and downloadable content
 
-The room's Games library lists real games supported by the installed app: Rift Arena (four-player room matches, bots, spectating) and Fourfold (bot or pass-and-play on the same Mac). Artwork-led cards keep download/install/update actions visible and put removal in More. Progress, verification, retry/cancel and version details remain available. Installed packs can be loaded offline, updated or removed. Rift matches require a room; Fourfold also supports local play. An unsuccessful update keeps the previous installation intact.
+The room's Games library lists real games supported by the installed app: Stick Fight (built-in, four-player room brawls and offline bots), Rift Arena (four-player room matches, bots, spectating), and Fourfold (bot or pass-and-play on the same Mac). Artwork-led cards keep download/install/update actions visible and put removal in More. Progress, verification, retry/cancel and version details remain available. Installed packs can be loaded offline, updated or removed. Rift matches require a room; Fourfold also supports local play. An unsuccessful update keeps the previous installation intact.
+
+Both real-time games use the [shared timing and networking engine](game-realtime.md). Multiplayer menus release only your controls; the room match keeps running and your fighter remains vulnerable. Offline practice pauses fully.
+
+## Stick Fight
+
+Stick Fight ships as native code and original procedural SpriteKit artwork, so its library card opens immediately without a pack download. Run `swift run alo stick-fight` to open it directly, or select **Games → Stick Fight → Play** in a room. Practice supports one to three bots. Room hosting starts with one seat; people can join and the host can add bots, up to four fighters. Every human readies up before the match starts.
+
+Controls: A/D or Left/Right move; W, Up, or Space jumps (once more in the air). Aim with the mouse, left-click to punch/fire, right-click to block, and F to throw a weapon. J/K/L remain keyboard attack/fire/block alternatives. Esc opens the match menu. Click the arena to focus controls. Switching focus clears held inputs, and offline practice pauses. Room games continue while the menu is open. A separate expanded game window supports fullscreen.
+
+Last alive wins a round; first to five rounds wins the match. Crimson Keep, Ember Foundry, and Frostfall rotate between rounds. Pistols, scatterguns, and blasters have limited ammunition; a thrown gun keeps its remaining ammo. A swinging saw adds a moving threat in Ember Foundry; touching a pickup equips it. Shields reduce frontal damage and knockback while draining energy. Falling, spikes, and depleted health eliminate a fighter. Simultaneous knockouts draw the round; a round deadline prevents endless standoffs.
+
+The fight host runs a fixed 60 Hz simulation over the room's existing authenticated, ephemeral activity transport. Guests predict local movement and reconcile to authoritative snapshots; hits and match results remain authoritative. Bounded queues replace obsolete frames instead of building a playback backlog. Network latency still depends on the devices and connection.
+
+Joining an active/full match enters spectating rather than respawning a fighter mid-round. Spectators can join a later lobby when seats open. Duplicate joins reuse a seat. Missing inputs become neutral after 200 ms; disconnected guests become bots after six seconds. A stalled guest displays reconnecting and retries; twelve seconds without a host response returns to the picker. The fight ends when its host leaves, while the ALO room remains open. A new fight can then be hosted by any room member. Older ALO builds ignore the separately versioned Stick Fight protocol. Stick Fight results are not currently added to Rift Arena's leaderboard.
+
+See [physics and verification](stick-fight-physics.md) for the movement equations, collision model, and network limits.
+
+## Downloadable packs
 
 Native engines and multiplayer protocols ship with ALO. Downloaded packs change artwork, arena naming, descriptions and theme colors. Version 4 of Rift includes five fighter portraits, Moon Garden, transparent parallax and stone-platform artwork and requires the five-fighter native engine; the library prompts older app versions to update ALO. Version-1 pack files remain immutable.
 

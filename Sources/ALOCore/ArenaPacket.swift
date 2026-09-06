@@ -13,6 +13,7 @@ public struct ArenaPlayerSlot: Codable, Equatable, Sendable {
 
 public struct ArenaPacket: Codable, Sendable {
     public enum Kind: String, Codable, Sendable { case lobby, join, ready, rematch, spectate, state, input, leave, busy }
+    public var acknowledgedInput: Int?
     public var version = 4
     public var participantIDs: [String?]?
     public var slots: [ArenaPlayerSlot]?
@@ -35,7 +36,8 @@ public struct ArenaPacket: Codable, Sendable {
     public var input: ArenaInput?
     public var state: ArenaSimulation?
     public init(kind: Kind, session: String, sequence: Int = 0, fighter: ArenaFighterKind? = nil,
-                input: ArenaInput? = nil, state: ArenaSimulation? = nil, ready: Bool? = nil, started: Bool? = nil, playerNames: [String]? = nil, round: Int = 0, map: ArenaMap? = nil, probe: Double? = nil, echo: Double? = nil, slots: [ArenaPlayerSlot]? = nil, assignedSlot: Int? = nil, spectating: Bool? = nil, availableSlots: Int? = nil, humanCount: Int? = nil, botCount: Int? = nil, participantIDs: [String?]? = nil) {
+                input: ArenaInput? = nil, state: ArenaSimulation? = nil, ready: Bool? = nil, started: Bool? = nil, playerNames: [String]? = nil, round: Int = 0, map: ArenaMap? = nil, probe: Double? = nil, echo: Double? = nil, slots: [ArenaPlayerSlot]? = nil, assignedSlot: Int? = nil, spectating: Bool? = nil, availableSlots: Int? = nil, humanCount: Int? = nil, botCount: Int? = nil, participantIDs: [String?]? = nil, acknowledgedInput: Int? = nil) {
+        self.acknowledgedInput = acknowledgedInput
         self.participantIDs = participantIDs
         self.slots = slots; self.assignedSlot = assignedSlot; self.spectating = spectating
         self.availableSlots = availableSlots; self.humanCount = humanCount; self.botCount = botCount
@@ -48,6 +50,7 @@ public struct ArenaPacket: Codable, Sendable {
     }
     public var isValid: Bool {
         guard version == 4, (0...1000).contains(round), UUID(uuidString: session) != nil, (0...1_000_000).contains(sequence) else { return false }
+        if let acknowledgedInput, acknowledgedInput < -1 { return false }
         for stamp in [probe, echo].compactMap({ $0 }) {
             guard stamp.isFinite, stamp >= 0 else { return false }
         }
