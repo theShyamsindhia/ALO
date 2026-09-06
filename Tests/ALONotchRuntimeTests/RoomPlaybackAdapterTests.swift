@@ -91,31 +91,35 @@ final class RoomPlaybackAdapterTests: XCTestCase {
             notch.send(.showLiveActivity(RoomNowPlayingNotchContent(original: original)))
             let deadline = Date().addingTimeInterval(2)
             while notch.notchModel.content == nil && Date() < deadline { try await Task.sleep(for: .milliseconds(20)) }
+            func render(_ filename: String) async throws {
+                let size = notch.presentedNotchSize
+                XCTAssertLessThan(size.width, 500, "Must retain original compact player sizing")
+                XCTAssertLessThan(size.height, 250)
+                let bounds = NSRect(x: 0, y: 0, width: size.width + 30, height: size.height + 15)
+                let host = NSHostingView(rootView: NotchInteractiveBodyView(notchViewModel: notch, settingsViewModel: settings)
+                    .defaultAppStorage(defaults).frame(width: bounds.width, height: bounds.height, alignment: .top)
+                    .background(Color(red: 0.17, green: 0.18, blue: 0.20)))
+                let window = NSWindow(contentRect: bounds.offsetBy(dx: -3000, dy: -3000), styleMask: .borderless, backing: .buffered, defer: false)
+                window.isReleasedWhenClosed = false
+                window.contentView = host
+                window.orderBack(nil)
+                try await Task.sleep(for: .milliseconds(150))
+                host.layoutSubtreeIfNeeded()
+                let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+                let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                XCTAssertGreaterThan(png.count, 1500)
+                if let directory = ProcessInfo.processInfo.environment["ALO_NOTCH_RUNTIME_SNAPSHOT_DIR"] {
+                    let folder = URL(fileURLWithPath: directory, isDirectory: true)
+                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                    try png.write(to: folder.appendingPathComponent(filename))
+                }
+                window.close()
+            }
+            try await render(island ? "original-room-player-island-compact.png" : "original-room-player-notch-compact.png")
             notch.expandActiveLiveActivity()
             try await Task.sleep(for: .milliseconds(500))
-            let size = notch.presentedNotchSize
-            XCTAssertLessThan(size.width, 500, "Must retain original compact player sizing")
-            XCTAssertLessThan(size.height, 250)
-            let bounds = NSRect(x: 0, y: 0, width: size.width + 30, height: size.height + 15)
-            let host = NSHostingView(rootView: NotchInteractiveBodyView(notchViewModel: notch, settingsViewModel: settings)
-                .defaultAppStorage(defaults).frame(width: bounds.width, height: bounds.height, alignment: .top)
-                .background(Color(red: 0.17, green: 0.18, blue: 0.20)))
-            let window = NSWindow(contentRect: bounds.offsetBy(dx: -3000, dy: -3000), styleMask: .borderless, backing: .buffered, defer: false)
-            window.isReleasedWhenClosed = false
-            window.contentView = host
-            window.orderBack(nil)
-            try await Task.sleep(for: .milliseconds(150))
-            host.layoutSubtreeIfNeeded()
-            let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
-            host.cacheDisplay(in: host.bounds, to: bitmap)
-            let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
-            XCTAssertGreaterThan(png.count, 1500)
-            if let directory = ProcessInfo.processInfo.environment["ALO_NOTCH_RUNTIME_SNAPSHOT_DIR"] {
-                let folder = URL(fileURLWithPath: directory, isDirectory: true)
-                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-                try png.write(to: folder.appendingPathComponent(island ? "original-room-player-island.png" : "original-room-player-notch.png"))
-            }
-            window.close()
+            try await render(island ? "original-room-player-island.png" : "original-room-player-notch.png")
             notch.setActivityEventsEnabled(false)
         }
     }

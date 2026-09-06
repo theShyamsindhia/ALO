@@ -3375,6 +3375,12 @@ final class ALOViewModel: ObservableObject {
                     && (!self.floatingBarHidden || self.menuBarPopoverVisible)
                 let chatIsAtLatest = chatIsVisible && !self.chatViewportsAtLatest.isEmpty
                 if senderID != self.currentParticipantID {
+                    let shouldPreview = self.chatNotificationMode.shouldPreview(
+                        text: receivedMessage.text,
+                        displayName: self.currentUserName,
+                        participantID: self.currentParticipantID,
+                        mentionedParticipantIDs: receivedMessage.mentionedParticipantIDs
+                    )
                     let mentionsThisMac = ChatNotificationMode.mentions.shouldPreview(
                         text: receivedMessage.text,
                         displayName: self.currentUserName,
@@ -3389,8 +3395,15 @@ final class ALOViewModel: ObservableObject {
                             self.firstUnreadMessageID = receivedMessage.id
                         }
                         self.unreadMessageCount += 1
-                        if self.floatingSection == .collapsed, self.chatNotificationMode.shouldPreview(text: receivedMessage.text, displayName: self.currentUserName, participantID: self.currentParticipantID, mentionedParticipantIDs: receivedMessage.mentionedParticipantIDs) {
-                            self.presentIncomingMessagePreview(receivedMessage)
+                        if shouldPreview {
+                            ALONotchFeatureBridge.shared.showRoomMention(
+                                sender: receivedMessage.sender,
+                                message: receivedMessage.previewText,
+                                roomTitle: self.roomTitle
+                            )
+                            if self.floatingSection == .collapsed {
+                                self.presentIncomingMessagePreview(receivedMessage)
+                            }
                         }
                     }
                 }

@@ -12,7 +12,6 @@ final class NotchInitialFeatureProfileTests: XCTestCase {
         XCTAssertFalse(settings.homePage.isHomePageLiveActivityEnabled)
         XCTAssertNil(defaults.object(forKey: NotchInitialFeatureProfile.appliedKey))
         XCTAssertTrue(NotchInitialFeatureProfile.apply(defaults: defaults, domainName: suite, settings: settings))
-        XCTAssertTrue(defaults.bool(forKey: NotchInitialFeatureProfile.roomMediaKey))
         XCTAssertTrue(settings.mediaAndFiles.isNowPlayingLiveActivityEnabled)
         XCTAssertTrue(settings.battery.isChargerTemporaryActivityEnabled)
         XCTAssertTrue(settings.connectivity.isBluetoothTemporaryActivityEnabled)
@@ -34,7 +33,6 @@ final class NotchInitialFeatureProfileTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let settings = SettingsViewModel(defaults: defaults)
-        defaults.set(false, forKey: NotchInitialFeatureProfile.roomMediaKey)
         settings.mediaAndFiles.isNowPlayingLiveActivityEnabled = false
         settings.battery.isChargerTemporaryActivityEnabled = false
         settings.connectivity.isBluetoothTemporaryActivityEnabled = false
@@ -42,7 +40,6 @@ final class NotchInitialFeatureProfileTests: XCTestCase {
         settings.lockScreen.widgetAppearanceStyle = .ultraThickMaterial
         settings.homePage.homePageDisabled = Set(HomePages.allCases)
         XCTAssertTrue(NotchInitialFeatureProfile.apply(defaults: defaults, domainName: suite, settings: settings))
-        XCTAssertFalse(defaults.bool(forKey: NotchInitialFeatureProfile.roomMediaKey))
         XCTAssertFalse(settings.mediaAndFiles.isNowPlayingLiveActivityEnabled)
         XCTAssertFalse(settings.battery.isChargerTemporaryActivityEnabled)
         XCTAssertFalse(settings.connectivity.isBluetoothTemporaryActivityEnabled)

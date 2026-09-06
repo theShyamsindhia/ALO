@@ -7,7 +7,6 @@ enum NotchInitialFeatureProfile {
     static let appliedKey = "alo.notch.initialFeatureProfile.v1"
     static let lockScreenAppliedKey = "alo.notch.lockScreenFeatureProfile.v1"
     static let connectivityGlassAppliedKey = "alo.notch.connectivityGlassProfile.v1"
-    static let roomMediaKey = "alo.roomMedia.enabled"
 
     static func apply(defaults: UserDefaults, domainName: String, settings: SettingsViewModel) -> Bool {
         let updatedLockDefaults = applyLockScreenDefaults(defaults: defaults, domainName: domainName, settings: settings)
@@ -19,9 +18,6 @@ enum NotchInitialFeatureProfile {
         // Registered upstream defaults are not user choices. Inspect only the
         // persistent suite so inherited false defaults can acquire this profile.
         let saved = defaults.persistentDomain(forName: domainName) ?? [:]
-        if saved[roomMediaKey] == nil {
-            defaults.set(true, forKey: roomMediaKey)
-        }
         if saved[GeneralSettingsStorage.Keys.nowPlayingLiveActivityEnabled] == nil {
             settings.mediaAndFiles.isNowPlayingLiveActivityEnabled = true
         }

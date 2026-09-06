@@ -31,12 +31,6 @@ public final class EmbeddedNotchRuntime: ObservableObject {
         pendingSettingsDestination
     }
 
-    @Published public var roomMediaEnabled = false {
-        didSet {
-            UserDefaults.aloNotch.set(roomMediaEnabled, forKey: "alo.roomMedia.enabled")
-            reconcileRoomPlayback()
-        }
-    }
     @Published public private(set) var isEnabled = false
     @Published public private(set) var activityActive = false
     @Published public private(set) var presentationSize: CGSize = .zero
@@ -80,7 +74,6 @@ public final class EmbeddedNotchRuntime: ObservableObject {
         self.delegate = delegate
         self.activation = FeatureActivation(container: delegate.container)
         AppDelegate.embeddedInstance = delegate
-        self.roomMediaEnabled = UserDefaults.aloNotch.bool(forKey: "alo.roomMedia.enabled")
         Self.activeInstance = self
         delegate.notchViewModel.$notchModel
             .receive(on: RunLoop.main)
@@ -142,9 +135,11 @@ public final class EmbeddedNotchRuntime: ObservableObject {
         isEnabled = enabled
         delegate.notchViewModel.setActivityEventsEnabled(enabled)
         if enabled {
-            if NotchInitialFeatureProfile.apply(defaults: .aloNotch, domainName: UserDefaults.aloNotchDomainName, settings: delegate.settingsViewModel) {
-                roomMediaEnabled = UserDefaults.aloNotch.bool(forKey: NotchInitialFeatureProfile.roomMediaKey)
-            }
+            _ = NotchInitialFeatureProfile.apply(
+                defaults: .aloNotch,
+                domainName: UserDefaults.aloNotchDomainName,
+                settings: delegate.settingsViewModel
+            )
             // Construct the original event subscriptions before monitors emit events.
             _ = delegate.notchEventCoordinator
             delegate.observeOutsideClickDismissal()
@@ -248,17 +243,10 @@ public final class EmbeddedNotchRuntime: ObservableObject {
 
     private func settingsContent(embedded: Bool) -> AnyView {
         guard isEnabled else { return AnyView(EmptyView()) }
-        return AnyView(VStack(spacing: 0) {
-            if !embedded {
-                Toggle("Room media", isOn: Binding(get: { self.roomMediaEnabled }, set: { self.roomMediaEnabled = $0 }))
-                    .toggleStyle(.switch)
-                    .help("Show this room’s player in the notch.")
-                    .padding(12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Divider()
-            }
+        return AnyView(
             SettingsRootView(container: delegate.container, embedded: embedded)
-        }.defaultAppStorage(.aloNotch))
+                .defaultAppStorage(.aloNotch)
+        )
     }
 
     public func showSettings() {
@@ -279,8 +267,21 @@ public final class EmbeddedNotchRuntime: ObservableObject {
         roomViewModel?.applyRoomLyrics(payload)
     }
 
+    public func showRoomMention(
+        _ snapshot: RoomMentionSnapshot,
+        onOpen: @escaping @MainActor () -> Void
+    ) {
+        guard isEnabled else { return }
+        delegate.notchViewModel.send(
+            .showTemporaryNotification(
+                RoomMentionNotchContent(snapshot: snapshot, onOpen: onOpen),
+                duration: 4.5
+            )
+        )
+    }
+
     private func reconcileRoomPlayback() {
-        guard isEnabled, roomMediaEnabled, let snapshot = roomPlaybackSnapshot else {
+        guard isEnabled, let snapshot = roomPlaybackSnapshot else {
             activation.setLockScreenMediaSource(nil)
             roomViewModel?.stopMonitoring()
             roomService?.update(nil)
