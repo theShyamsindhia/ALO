@@ -816,7 +816,12 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
 
     func presentNotchSettings() {
         model.prepareNotchSettingsForMenuBar()
-        statusMenuController?.showPopover(allowWhenIdle: true)
+        // The settings state must reach SwiftUI before a hidden AppKit popover is
+        // shown, otherwise its first frame contains the previous compact layout.
+        DispatchQueue.main.async { [weak self] in
+            guard self?.model.notchSettingsVisible == true else { return }
+            self?.statusMenuController?.showPopover(allowWhenIdle: true)
+        }
     }
 
     @objc func checkForUpdates(_ sender: Any?) {
@@ -877,7 +882,7 @@ struct ALOStatusPopoverContent: View {
             FloatingRoomView(model: model, presentation: .menuBar)
             RoomPlaybackProgressDivider(model: model)
             WalkieTalkieBar(model: model, showsCloseButton: false)
-            if model.notchSettingsVisible {
+            if model.notchSettingsContentVisible {
                 ALOAnimatedNotchSettingsSlot(model: model)
             }
         }
@@ -973,6 +978,7 @@ final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
     private var artworkData: Data?
     private var artwork: NSImage?
     private var artworkPalette: ArtworkPalette?
+    private var notchSettingsResizeGeneration = 0
 
     init(model: ALOViewModel, toggleMainWindow: @escaping () -> Void) {
         self.model = model
@@ -1067,17 +1073,14 @@ final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
         .store(in: &observers)
         model.$notchSettingsVisible.removeDuplicates().dropFirst()
             .sink { [weak self] visible in
-                self?.resizePopover(
-                    to: self?.panelSize(notchSettingsVisible: visible),
-                    atomically: true
-                )
+                self?.scheduleNotchSettingsResize(visible: visible)
             }.store(in: &observers)
     }
 
     func showPopover(allowWhenIdle: Bool = false) {
         guard allowWhenIdle || model.phase == .live else { return }
-        resizePopover(atomically: model.notchSettingsVisible)
         guard let button = statusItem.button, !popover.isShown else { return }
+        resizePopover(atomically: model.notchSettingsVisible)
         popover.contentSize = panelSize
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         model.setMenuBarPopoverVisible(true)
@@ -1132,6 +1135,34 @@ final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
         if restoresAnimation { popover.animates = false }
         popover.contentSize = targetSize
         if restoresAnimation { popover.animates = true }
+    }
+
+    private func scheduleNotchSettingsResize(visible: Bool) {
+        notchSettingsResizeGeneration &+= 1
+        let generation = notchSettingsResizeGeneration
+        let targetSize = panelSize(notchSettingsVisible: visible)
+
+        if !visible {
+            // Remove the tall SwiftUI hierarchy while the window still has room
+            // for it. The next layout pass can then safely collapse the window.
+            model.setNotchSettingsContentVisible(false)
+        }
+
+        // @Published emits before its stored value changes. Resizing in this
+        // callback pairs the new AppKit window size with SwiftUI's previous view
+        // tree, exposing a cropped feature grid on close and a compact jump on
+        // open. Reconcile and lay out the new tree before resizing either way.
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  generation == self.notchSettingsResizeGeneration,
+                  self.model.notchSettingsVisible == visible else { return }
+            self.popover.contentViewController?.view.layoutSubtreeIfNeeded()
+            self.resizePopover(to: targetSize, atomically: true)
+            if visible {
+                // Grow first, then insert the settings using the Notch transition.
+                self.model.setNotchSettingsContentVisible(true)
+            }
+        }
     }
 
     private func syncMotionPreference() {
@@ -1631,6 +1662,7 @@ final class ALOViewModel: ObservableObject {
     @Published var floatingSection: FloatingSection = .collapsed
     @Published var floatingBarHidden: Bool
     @Published var notchSettingsVisible = false
+    @Published private(set) var notchSettingsContentVisible = false
     let notchSettingsHeightWhenVisible: CGFloat = 430
     var notchSettingsHeight: CGFloat { notchSettingsVisible ? notchSettingsHeightWhenVisible : 0 }
     @Published private(set) var menuBarPopoverVisible = false
@@ -2910,6 +2942,11 @@ final class ALOViewModel: ObservableObject {
         dismissIncomingMessagePreview()
         floatingSection = .collapsed
         notchSettingsVisible = true
+    }
+
+    func setNotchSettingsContentVisible(_ visible: Bool) {
+        guard notchSettingsContentVisible != visible else { return }
+        notchSettingsContentVisible = visible
     }
 
     func showChatInFloatingBar() {
