@@ -30,6 +30,7 @@ struct SettingsRootView: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var embeddedDetailVisible = false
+    @State private var showingActivityInfo = false
     private let embedded: Bool
     private let viewModel: SettingsRootViewModel
     
@@ -150,7 +151,23 @@ struct SettingsRootView: View {
                             .buttonStyle(.borderless)
                     }
                 } else {
-                    Text("Features").font(.subheadline.weight(.semibold))
+                    HStack(spacing: 5) {
+                        Text("Features").font(.subheadline.weight(.semibold))
+                        Button { showingActivityInfo.toggle() } label: {
+                            Image(systemName: "info.circle")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Activities appear briefly when something changes. Open a feature to choose its behavior.")
+                        .accessibilityLabel("About Notch activities")
+                        .accessibilityIdentifier("settings.embedded.activityExplanation")
+                        .popover(isPresented: $showingActivityInfo, arrowEdge: .top) {
+                            Text("Activities appear briefly when something changes. Open a feature to choose its behavior.")
+                                .font(.callout)
+                                .frame(width: 250, alignment: .leading)
+                                .padding(12)
+                        }
+                    }
                     Spacer(minLength: 8)
                     TextField(localized("settings.search.prompt", fallback: "Search features"), text: $searchText)
                         .textFieldStyle(.roundedBorder)
@@ -159,15 +176,6 @@ struct SettingsRootView: View {
                 }
             }
             .padding(.horizontal, 14).padding(.vertical, 10)
-            if !embeddedDetailVisible {
-                Text("Activities appear briefly when something changes. Open a feature to choose its behavior.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 14)
-                    .padding(.bottom, 9)
-                    .accessibilityIdentifier("settings.embedded.activityExplanation")
-            }
             Divider()
             Group {
                 if embeddedDetailVisible {
