@@ -50,7 +50,7 @@ struct SecureMediaRoomIntegrationTests {
         let returningIdentity = try InstallationIdentity.ephemeral()
         for _ in 0..<2 {
             let before = healthySink.count
-            let newcomer = LiveMediaNode(room: room, identity: returningIdentity)
+            let newcomer = try LiveMediaNode(room: room, identity: returningIdentity)
             let sink = LiveMediaSink()
             defer { sink.stop(); newcomer.stop() }
             try newcomer.start()
@@ -87,19 +87,22 @@ final class LiveMediaNode {
     struct State { var port: NWEndpoint.Port?; var peers: Set<String> = []; var epoch: UInt64? }
     let id: UUID
     let mesh: MeshControlPlane
+    private let networkFixture: NetworkTestRoomFixture
     private let state = LiveMediaBox(State())
     convenience init(room: RoomConfiguration, incoming: ((SecurePeerChannel, AuthenticatedPeer) -> Void)? = nil) throws {
-        self.init(room: room, identity: try .ephemeral(), incoming: incoming)
+        try self.init(room: room, identity: .ephemeral(), incoming: incoming)
     }
     init(room: RoomConfiguration, identity: InstallationIdentity,
-         incoming: ((SecurePeerChannel, AuthenticatedPeer) -> Void)? = nil) {
+         incoming: ((SecurePeerChannel, AuthenticatedPeer) -> Void)? = nil) throws {
         id = identity.publicIdentity.nodeID
+        networkFixture = try NetworkTestRoomFixture.shared(for: room)
         let state = self.state
         mesh = MeshControlPlane(room: room, nodeID: id.uuidString, displayName: "Test peer",
             listenerReadyHandler: { port in state.update { $0.port = port } },
             replicaHandler: { replica in state.update { $0.epoch = replica.broadcaster?.epoch } },
             participantsHandler: { peers in state.update { $0.peers = Set(peers.map(\.id)) } },
-            installationIdentity: identity, peerPins: MemoryPeerPinStore(), incomingMediaChannelHandler: incoming)
+            installationIdentity: identity, peerPins: MemoryPeerPinStore(),
+            networkAuthorization: try networkFixture.authorization(for: identity), incomingMediaChannelHandler: incoming)
     }
     func start() throws { try mesh.start(advertise: false) }
     func stop() { mesh.stop() }
@@ -131,7 +134,7 @@ final class LiveMediaSink: @unchecked Sendable {
     var errors: [String] { state.read { $0.errors } }
     func stop() { state.read { $0.receiver }?.stop() }
     func open(node: LiveMediaNode, room: RoomConfiguration, source: UUID, epoch: UInt64) {
-        node.mesh.openMediaChannel(to: source, role: .mediaControl) { [self] result in
+        node.mesh.openPeerChannel(to: source, role: .mediaControl) { [self] result in
             do {
                 let channel = try result.get().0
                 let selection = MediaReceiverSession.Selection(roomID: UUID(uuidString: room.id)!,

@@ -74,7 +74,7 @@ struct RoomTrayStore {
             let bundleFolder = Bundle.main.bundleIdentifier == "in.werai.audio.dev" ? "ALO-Dev" : "ALO"
             self.rootURL = (cache ?? fileManager.temporaryDirectory)
                 .appendingPathComponent(bundleFolder, isDirectory: true)
-                .appendingPathComponent("Shared Room Tray", isDirectory: true)
+                .appendingPathComponent("Shared Channel Tray", isDirectory: true)
                 .standardizedFileURL
         }
     }

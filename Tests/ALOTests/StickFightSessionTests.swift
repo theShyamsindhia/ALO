@@ -13,7 +13,7 @@ import Testing
     }
     @Test func offlineHostHasActionableStateAndPracticeWorks() {
         let session = StickFightSession(); session.host()
-        #expect(session.mode == .picker); #expect(session.notice.contains("Join a room"))
+        #expect(session.mode == .picker); #expect(session.notice.contains("Join a channel"))
         session.practice(); #expect(session.mode == .practice); #expect(session.slots.count == 4)
         session.disconnect()
     }

@@ -9,7 +9,9 @@ struct SecureMeshTests {
     @Test func largeSignedSnapshotIsPacedWithoutDisconnecting() async throws {
         let room = RoomConfiguration.secure(name: "Large signed snapshot")
         let identity = try InstallationIdentity.ephemeral()
-        let signer = SecureRoomEventPolicy(roomID: room.id, identity: identity, capabilities: .desktop)
+        let network = try NetworkTestRoomFixture.shared(for: room)
+        let signer = SecureRoomEventPolicy(roomID: room.id, identity: identity, capabilities: .desktop,
+            networkAuthorization: try network.authorization(for: identity))
         var events = [MeshRoomEvent]()
         for index in 1...500 {
             let event = MeshRoomEvent(roomID: room.id, version: .init(counter: UInt64(index), nodeID: identity.publicIdentity.nodeID.uuidString),
@@ -17,8 +19,8 @@ struct SecureMeshTests {
             events.append(try #require(signer.sign(event)))
         }
         #expect(try JSONEncoder().encode(events).count > 1_024 * 1_024)
-        let a = SecureMeshNode(room: room, identity: identity, initialEvents: events, disableStateSync: true)
-        let b = SecureMeshNode(room: room, identity: try .ephemeral(), disableStateSync: true)
+        let a = try SecureMeshNode(room: room, identity: identity, initialEvents: events, disableStateSync: true)
+        let b = try SecureMeshNode(room: room, identity: .ephemeral(), disableStateSync: true)
         defer { a.stop(); b.stop() }
         try a.start(); try b.start()
         let port = try await a.readyPort()
@@ -31,7 +33,7 @@ struct SecureMeshTests {
 
     @Test func restrictedPeerCanChatButCannotBroadcastOrEditQueue() async throws {
         let room = RoomConfiguration.secure(name: "Restricted peer")
-        let restricted = SecureMeshNode(room: room, identity: try .ephemeral(), capabilities: .chat)
+        let restricted = try SecureMeshNode(room: room, identity: .ephemeral(), capabilities: .chat)
         let desktop = try SecureMeshNode(room: room)
         defer { restricted.stop(); desktop.stop() }
         try restricted.start(); try desktop.start()
@@ -51,8 +53,8 @@ struct SecureMeshTests {
         let room = RoomConfiguration.secure(name: "Private mesh")
         let identities = try [InstallationIdentity.ephemeral(), InstallationIdentity.ephemeral()]
             .sorted { $0.publicIdentity.nodeID.uuidString < $1.publicIdentity.nodeID.uuidString }
-        let lower = SecureMeshNode(room: room, identity: identities[0])
-        let higher = SecureMeshNode(room: room, identity: identities[1])
+        let lower = try SecureMeshNode(room: room, identity: identities[0])
+        let higher = try SecureMeshNode(room: room, identity: identities[1])
         defer { lower.stop(); higher.stop() }
         try lower.start(); try higher.start()
         for index in 0..<40 { lower.control.publishChat("Before join \(index)") }
@@ -140,7 +142,7 @@ struct SecureMeshTests {
         try await meshEventually { b.state.read { $0.participants.count == 2 } }
         let committed = await a.control.secureConnectionsForTesting()
         let wrongRoom = RoomConfiguration.secure(id: room.id, name: room.name)
-        let wrong = SecureMeshNode(room: wrongRoom, identity: b.identity)
+        let wrong = try SecureMeshNode(room: wrongRoom, identity: b.identity)
         defer { wrong.stop() }
         try wrong.start()
         wrong.control.connectForTesting(to: .hostPort(host: "127.0.0.1", port: port), expectedNodeID: a.id)
@@ -165,7 +167,7 @@ struct SecureMeshTests {
         try await Task.sleep(for: .seconds(3))
         #expect(a.state.read { $0.replica.broadcaster?.nodeID == b.id })
         a.control.publishChat("While disconnected")
-        let returning = SecureMeshNode(room: room, identity: b.identity)
+        let returning = try SecureMeshNode(room: room, identity: b.identity)
         defer { returning.stop() }
         try returning.start()
         returning.control.connectForTesting(to: .hostPort(host: "127.0.0.1", port: port), expectedNodeID: a.id)
@@ -199,7 +201,8 @@ struct SecureMeshTests {
             firstContact: .explicitRoomJoin, verificationQueue: queue))
         let config = try SecurePeerConfiguration(roomID: try #require(UUID(uuidString: room.id)), incarnationID: UUID(),
             admission: .publicRoom, offer: currentGeneration ? ProtocolOffer.current(capabilities: .mobile) : ProtocolOffer(wireVersions: [2], stateSyncVersions: [1], capabilities: .mobile),
-            direction: .initiator(.video))
+            direction: .initiator(.video),
+            networkAuthorization: currentGeneration ? server.networkFixture.authorization(for: identity) : nil)
         let channel = SecurePeerChannel(connection: connection, identity: identity, configuration: config, pins: pins, queue: queue)
         defer { channel.cancel() }
         let payload = Data([0, 1, 2, 255])
@@ -239,7 +242,7 @@ struct SecureMeshTests {
             expectedPeerID: receiver.identity.publicIdentity.nodeID)
         try await fullMeshEventually([presenter, receiver])
         let payload = Data([42, 12, 83])
-        receiver.control.openMediaChannel(to: presenter.identity.publicIdentity.nodeID, role: role) { result in
+        receiver.control.openPeerChannel(to: presenter.identity.publicIdentity.nodeID, role: role) { result in
             do {
                 let (channel, _) = try result.get()
                 routed.update { $0.mediaChannels.append(channel) }
@@ -336,16 +339,18 @@ private final class MeshTestState: @unchecked Sendable {
 
 private final class SecureMeshNode {
     let identity: InstallationIdentity
+    let networkFixture: NetworkTestRoomFixture
     let control: MeshControlPlane
     let state = MeshTestState()
     var id: String { identity.publicIdentity.nodeID.uuidString }
     convenience init(room: RoomConfiguration, incomingMediaChannelHandler: ((SecurePeerChannel, AuthenticatedPeer) -> Void)? = nil) throws {
-        self.init(room: room, identity: try .ephemeral(), incomingMediaChannelHandler: incomingMediaChannelHandler)
+        try self.init(room: room, identity: .ephemeral(), incomingMediaChannelHandler: incomingMediaChannelHandler)
     }
     init(room: RoomConfiguration, identity: InstallationIdentity, capabilities: PeerCapabilities = .desktop,
          initialEvents: [MeshRoomEvent] = [], disableStateSync: Bool = false,
-         incomingMediaChannelHandler: ((SecurePeerChannel, AuthenticatedPeer) -> Void)? = nil) {
+         incomingMediaChannelHandler: ((SecurePeerChannel, AuthenticatedPeer) -> Void)? = nil) throws {
         self.identity = identity
+        networkFixture = try NetworkTestRoomFixture.shared(for: room)
         let observation = state
         control = MeshControlPlane(room: room, nodeID: identity.publicIdentity.nodeID.uuidString, displayName: "Peer",
             initialEvents: initialEvents,
@@ -360,7 +365,9 @@ private final class SecureMeshNode {
             },
             disableRoomStateSyncDuringAuthenticationForTesting: disableStateSync,
             connectionAttemptHandler: { observation.update { $0.connectionAttempts += 1 } },
-            installationIdentity: identity, peerPins: MemoryPeerPinStore(), secureCapabilities: capabilities, incomingMediaChannelHandler: incomingMediaChannelHandler)
+            installationIdentity: identity, peerPins: MemoryPeerPinStore(), secureCapabilities: capabilities,
+            networkAuthorization: try networkFixture.authorization(for: identity),
+            incomingMediaChannelHandler: incomingMediaChannelHandler)
     }
     func start() throws { try control.start(advertise: false) }
     func stop() { control.stop() }

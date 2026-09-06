@@ -61,7 +61,7 @@ struct ALONotchTests {
     @Test func liveAudioWithoutMetadataUsesTheRoomIdentity() throws {
         let snapshot = try #require(ALONotchFeatureBridge.roomSnapshot(media: NowPlayingMedia(), isLive: true,
             audioIsRendering: true, roomName: "Studio", isPlaying: true, position: nil, canControl: false))
-        #expect(snapshot.title == "Live room audio" && snapshot.artist == "Studio")
+        #expect(snapshot.title == "Live channel audio" && snapshot.artist == "Studio")
         #expect(snapshot.duration == 0 && snapshot.elapsed == 0)
     }
 }

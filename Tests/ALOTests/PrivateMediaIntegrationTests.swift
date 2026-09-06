@@ -7,7 +7,8 @@ import ALONetworking
 
 @Suite("Private desktop media integration", .serialized)
 struct PrivateMediaIntegrationTests {
-    @Test func realHostJoinEncryptsAudioAndRejectsUninvitedClients() async throws {
+    @Test(arguments: [false, true])
+    func realHostJoinEncryptsAudioAndRejectsUninvitedClients(wrongKeyAfterAuthorized: Bool) async throws {
         let room = RoomConfiguration(name: "Private media", isPrivate: true, accessKey: UUID().uuidString)
         let security = try #require(try RoomMediaSecurity.forRoom(room, serviceName: "source"))
         let wrongRoom = RoomConfiguration(id: room.id, name: room.name, isPrivate: true, accessKey: UUID().uuidString)
@@ -28,7 +29,11 @@ struct PrivateMediaIntegrationTests {
             outboundSend: { connection, data, isComplete, completion in
                 probe.lock.withLock {
                     if let message = try? JSONDecoder().decode(ControlMessage.self, from: data) {
-                        if message.type == "welcome", let session = message.mediaSessionID { probe.sessions.append(session) }
+                        if message.type == "welcome", let session = message.mediaSessionID {
+                            probe.sessions.append(session)
+                            probe.welcomedParticipants.append(message.participantID ?? "missing")
+                            probe.diagnostics.append("welcome to \(message.participantID ?? "missing") at \(connection.endpoint)")
+                        }
                     } else { probe.audioPackets.append(data) }
                 }
                 connection.send(content: data, isComplete: isComplete, completion: .contentProcessed { error in completion(error) })
@@ -38,7 +43,15 @@ struct PrivateMediaIntegrationTests {
             host.stop()
             audio.newConnectionHandler = nil; video.newConnectionHandler = nil
             audio.cancel(); video.cancel()
-            probe.lock.withLock { probe.connections.forEach { $0.cancel() }; probe.connections.removeAll() }
+            let connections = probe.lock.withLock {
+                let connections = probe.connections
+                probe.connections.removeAll()
+                return connections
+            }
+            for connection in connections {
+                connection.stateUpdateHandler = nil
+                connection.cancel()
+            }
         }
         for _ in 0..<200 {
             if audio.port != nil, video.port != nil, probe.lock.withLock({ probe.port != nil }) { break }
@@ -46,16 +59,42 @@ struct PrivateMediaIntegrationTests {
         }
         let port = try #require(probe.lock.withLock { probe.port })
         let audioPort = try #require(audio.port), videoPort = try #require(video.port)
-        for parameters in [security.tcp(), wrong.tcp(), LocalNetworkParameters.tcp()] {
+        for (label, parameters) in [("authorized", security.tcp()), ("wrong-key", wrong.tcp()), ("plaintext", LocalNetworkParameters.tcp())] {
             let connection = NWConnection(host: "127.0.0.1", port: port, using: parameters)
             probe.lock.withLock { probe.connections.append(connection) }
+            connection.stateUpdateHandler = { [weak connection] state in
+                probe.lock.withLock {
+                    probe.diagnostics.append("\(label): \(state); local=\(String(describing: connection?.currentPath?.localEndpoint))")
+                    if case .ready = state { probe.readyClients.insert(label) }
+                    // Network.framework can report a rejected PSK handshake as
+                    // waiting(.tls), rather than a terminal failed state.
+                    switch state {
+                    case .waiting(let error), .failed(let error):
+                        if case .tls = error { probe.tlsRejectedClients.insert(label) }
+                    default: break
+                    }
+                }
+            }
             connection.start(queue: queue)
             let join = try ControlMessage(type: "join", udpPort: audioPort.rawValue, videoPort: videoPort.rawValue,
-                                          displayName: "Receiver", participantID: UUID().uuidString).encodedLine()
-            connection.send(content: join, completion: .contentProcessed { _ in })
+                                          displayName: label, participantID: label).encodedLine()
+            connection.send(content: join, completion: .contentProcessed { error in
+                probe.lock.withLock { probe.diagnostics.append("\(label) join send: \(String(describing: error))") }
+            })
+            // Exercise both the original concurrent handshake and an uninvited
+            // client arriving after a successful handshake could warm TLS state.
+            if label == "authorized", wrongKeyAfterAuthorized {
+                for _ in 0..<200 {
+                    if probe.lock.withLock({ !probe.sessions.isEmpty }) { break }
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                try await Task.sleep(for: .milliseconds(100))
+            }
         }
         for _ in 0..<200 {
-            if probe.lock.withLock({ !probe.sessions.isEmpty }) { break }
+            if probe.lock.withLock({
+                !probe.sessions.isEmpty && (probe.tlsRejectedClients.contains("wrong-key") || probe.readyClients.contains("wrong-key"))
+            }) { break }
             try await Task.sleep(for: .milliseconds(10))
         }
         let session = try #require(probe.lock.withLock { probe.sessions.first })
@@ -67,7 +106,12 @@ struct PrivateMediaIntegrationTests {
             try await Task.sleep(for: .milliseconds(10))
         }
         let encrypted = try #require(probe.lock.withLock { probe.audioPackets.first })
-        #expect(probe.lock.withLock { probe.sessions.count == 1 && probe.audioPackets.count == 1 })
+        let diagnostics = probe.lock.withLock { probe.diagnostics.joined(separator: "\n") }
+        #expect(probe.lock.withLock { probe.tlsRejectedClients.contains("wrong-key") }, "\(diagnostics)")
+        #expect(!probe.lock.withLock { probe.readyClients.contains("wrong-key") }, "\(diagnostics)")
+        #expect(probe.lock.withLock { probe.welcomedParticipants } == ["authorized"], "\(diagnostics)")
+        #expect(probe.lock.withLock { probe.sessions.count } == 1, "\(diagnostics)")
+        #expect(probe.lock.withLock { probe.audioPackets.count } == 1, "\(diagnostics)")
         #expect(AudioPacket(data: encrypted) == nil)
         let opener = try security.audioOpener(sessionID: session)
         let packet = try #require(AudioPacket(data: try opener.open(encrypted)))
@@ -81,5 +125,9 @@ private final class PrivateHostProbe: @unchecked Sendable {
     var port: NWEndpoint.Port?
     var connections = [NWConnection]()
     var sessions = [UUID]()
+    var welcomedParticipants = [String]()
+    var readyClients = Set<String>()
+    var tlsRejectedClients = Set<String>()
+    var diagnostics = [String]()
     var audioPackets = [Data]()
 }

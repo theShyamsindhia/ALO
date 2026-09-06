@@ -80,12 +80,12 @@ final class StickFightSession: ObservableObject {
         bots = Set(1..<count); mode = .practice; started = true; refreshSlots(); configureTimer()
     }
     func host(botCount: Int = 0) {
-        guard roomConnected else { notice = "Join a room to host a fight, or play practice now."; return }
+        guard roomConnected else { notice = "Join a channel to host a fight, or play practice now."; return }
         leave(); sessionID = UUID().uuidString
         let count = min(4, max(1, botCount + 1))
         simulation = StickFightSimulation(playerCount: count, map: selectedMap)
         bots = Set(1..<count); mode = .hosting
-        notice = "Room fight open. Everyone readies up to begin."
+        notice = "Channel fight open. Everyone readies up to begin."
         refreshSlots(); configureTimer(); advertise()
     }
     func addBot() {
@@ -94,10 +94,10 @@ final class StickFightSession: ObservableObject {
         localReady = false; refreshSlots(); broadcastState(); advertise()
     }
     func join(_ lobby: Lobby, spectate: Bool = false) {
-        guard roomConnected else { notice = "Join the room before joining its fight."; return }
+        guard roomConnected else { notice = "Join the channel before joining its fight."; return }
         leave(); hostID = lobby.peerID; sessionID = lobby.sessionID
         wantsSpectate = spectate; mode = .joining; lastRemote = ProcessInfo.processInfo.systemUptime
-        notice = "Connecting to \(names[lobby.peerID] ?? "room host")…"
+        notice = "Connecting to \(names[lobby.peerID] ?? "channel host")…"
         configureTimer(); transmit(spectate ? .spectate : .join)
     }
     func readyUp() {
@@ -127,7 +127,7 @@ final class StickFightSession: ObservableObject {
         remoteSequence = -1; clearInput(); showsMenu = false; suspended = false; notice = message; realtime.reset()
         configureTimer()
     }
-    func disconnect() { leave(message: "Room disconnected. Practice is available offline."); send = nil; lobbies.removeAll(); loop.stop() }
+    func disconnect() { leave(message: "Channel disconnected. Practice is available offline."); send = nil; lobbies.removeAll(); loop.stop() }
     func panelAppeared() { panels += 1; configureTimer() }
     func panelDisappeared() { panels = max(0, panels - 1); clearInput(); if mode == .practice { showsMenu = true }; configureTimer() }
     func togglePause() { showsMenu.toggle(); clearInput() }
@@ -149,7 +149,7 @@ final class StickFightSession: ObservableObject {
     private func refreshSlots() {
         slots = simulation.fighters.indices.map { i in
             let member = members.first { $0.value.slot == i }
-            return Slot(index: i, name: String((i == 0 ? localName : member.map { names[$0.key] ?? "Room player" } ?? "Bot \(i)").prefix(40)), isBot: bots.contains(i), ready: i == 0 ? localReady : bots.contains(i) || member?.value.ready == true)
+            return Slot(index: i, name: String((i == 0 ? localName : member.map { names[$0.key] ?? "Channel player" } ?? "Bot \(i)").prefix(40)), isBot: bots.contains(i), ready: i == 0 ? localReady : bots.contains(i) || member?.value.ready == true)
         }
     }
     private func configureTimer() {
@@ -197,7 +197,7 @@ final class StickFightSession: ObservableObject {
         guard packet.session == sessionID else { return }
         if isActivityHost { receiveHost(sender, packet, now); return }
         guard sender == hostID, packet.sequence > remoteSequence else { return }
-        if packet.kind == .leave { leave(message: "The fight host left. Your room is still open; host a new fight or join another."); return }
+        if packet.kind == .leave { leave(message: "The fight host left. Your channel is still open; host a new fight or join another."); return }
         if packet.kind == .busy { leave(message: "This fight and its spectator seats are full. Try another fight or host one."); return }
         guard packet.kind == .state, let state = packet.state, let roster = packet.slots else { return }
         if packet.spectating != true { guard let slot = packet.assignedSlot, roster.indices.contains(slot), !roster[slot].isBot else { return }; localIndex = packet.assignedSlot! }
@@ -272,7 +272,7 @@ final class StickFightSession: ObservableObject {
         }
         if [.joining, .guest, .spectator].contains(mode) {
             let age = now - lastRemote
-            if age > GameRealtimePolicy.connectionTimeout { leave(message: "Fight connection lost. Your room is still open. Join again or host a new fight."); return }
+            if age > GameRealtimePolicy.connectionTimeout { leave(message: "Fight connection lost. Your channel is still open. Join again or host a new fight."); return }
             if age > GameRealtimePolicy.reconnectAfter { suspended = true; notice = "Reconnecting to fight host…"; if ticks % 30 == 0 { transmit(mode == .spectator ? .spectate : .join) } }
         }
         guard playing, started, mode != .spectator, !suspended else { return }

@@ -296,12 +296,12 @@ struct BreachGameView: View {
                     Text("Attackers plant at A or B. Defenders defuse or hold the sites. Buy your equipment between rounds. First team to five wins.").foregroundStyle(.secondary)
                     if room.mode == .picker {
                         Button("Practice with bots") { controller.start() }.buttonStyle(.borderedProminent)
-                        Button("Host room match") { controller.host() }.buttonStyle(.bordered).disabled(!room.roomConnected)
-                        Text(room.roomConnected ? "Room members can join. Bots fill open seats." : "Open Breach from an ALO room to host or join friends.").font(.caption).foregroundStyle(.secondary)
+                        Button("Host channel match") { controller.host() }.buttonStyle(.bordered).disabled(!room.roomConnected)
+                        Text(room.roomConnected ? "Channel members can join. Bots fill open seats." : "Open Breach from an ALO channel to host or join friends.").font(.caption).foregroundStyle(.secondary)
                         ForEach(room.lobbies) { lobby in
                             HStack {
                                 VStack(alignment: .leading) {
-                                    Text(room.names[lobby.peerID] ?? "Room match").font(.headline)
+                                    Text(room.names[lobby.peerID] ?? "Channel match").font(.headline)
                                     Text(lobby.started ? "In progress · \(lobby.availableSlots) open seats" : "Lobby · \(lobby.availableSlots) open seats").font(.caption)
                                 }
                                 Spacer()
@@ -359,7 +359,7 @@ struct BreachGameView: View {
         ScrollView {
             VStack(spacing: 18) {
                 Text(controller.online ? "MOUSE RELEASED" : "MATCH PAUSED").font(.title2.bold())
-                Text(controller.online ? "The room match continues while this menu is open." : "Resume when you are ready.").font(.caption).foregroundStyle(.secondary)
+                Text(controller.online ? "The channel match continues while this menu is open." : "Resume when you are ready.").font(.caption).foregroundStyle(.secondary)
                 Button("Resume & capture mouse") { controller.capture() }.buttonStyle(.borderedProminent)
                 if game.phase == .buy && room.mode != .spectator { Button("Buy equipment") { controller.toggleBuy() }.buttonStyle(.bordered) }
                 settings

@@ -36,7 +36,7 @@ final class DirectFileSharingController: ObservableObject {
     }
     func send(_ url: URL, to peer: UUID) {
         guard active, names()[peer.uuidString] != nil, let openChannel else {
-            message = "This device is no longer in the room."; showProgress(); return
+            message = "This device is no longer in the channel."; showProgress(); return
         }
         guard transfers.count + pendingConnections < 4 else { message = DirectFileError.busy.localizedDescription; showProgress(); return }
         pendingConnections += 1
@@ -49,7 +49,7 @@ final class DirectFileSharingController: ObservableObject {
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.pendingConnections -= 1; self.progress.removeAll { $0.id == pendingID }
-                    self.message = "Couldn’t establish a secure connection to this device. Make sure both Macs have updated and rejoined the room. \(error.localizedDescription)"
+                    self.message = "Couldn’t establish a secure connection to this device. Make sure both Macs have updated and rejoined the channel. \(error.localizedDescription)"
                 }
             case .success(let (channel, remote)):
                 let transfer = Self.makeTransfer(channel: channel, peer: remote.nodeID, source: url, owner: self)
@@ -91,7 +91,7 @@ final class DirectFileSharingController: ObservableObject {
         guard active, transfers[transfer.id] != nil,
               let sender = names()[transfer.peerID.uuidString] else { transfer.cancel(); return }
         guard receivedBytes + size <= 2 * DirectFileWire.maximumFileBytes else {
-            transfer.decline(); message = "The temporary file inbox is full. Leave and rejoin the room to clear it."; showProgress(); return
+            transfer.decline(); message = "The temporary file inbox is full. Leave and rejoin the channel to clear it."; showProgress(); return
         }
         receivedBytes += size
         incomingIDs.insert(transfer.id)

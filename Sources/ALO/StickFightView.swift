@@ -130,10 +130,10 @@ struct StickFightPanel: View {
                         Button("Practice") { session.practice(botCount: botCount) }.buttonStyle(.bordered)
                         Button("Host match") { session.host(botCount: 0) }.buttonStyle(.borderedProminent).disabled(!session.roomConnected)
                     }.controlSize(.small)
-                    if !session.roomConnected { Text("Practice works offline. Join a room to fight with friends.").font(.system(size: 10)).foregroundStyle(.secondary) }
+                    if !session.roomConnected { Text("Practice works offline. Join a channel to fight with friends.").font(.system(size: 10)).foregroundStyle(.secondary) }
                     if session.roomConnected {
                         Text("IN THIS ROOM").font(.system(size: 10, weight: .bold)).tracking(1.5)
-                        if session.lobbies.isEmpty { Text("No matches yet. Host one and room members can join here.").font(.system(size: 11)).foregroundStyle(.secondary) }
+                        if session.lobbies.isEmpty { Text("No matches yet. Host one and channel members can join here.").font(.system(size: 11)).foregroundStyle(.secondary) }
                         ForEach(session.lobbies, id: \.sessionID) { match in
                             HStack {
                                 VStack(alignment: .leading, spacing: 3) {

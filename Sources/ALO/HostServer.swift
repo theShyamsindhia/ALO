@@ -167,14 +167,14 @@ final class HostServer {
         listener.stateUpdateHandler = { state in
             switch state {
             case .ready:
-                print("Room \"\(self.roomName)\" is visible on the local network.")
-                self.statusHandler?("Room is visible on your local network")
+                print("Channel \"\(self.roomName)\" is visible on the local network.")
+                self.statusHandler?("Channel is visible on your local network")
                 if let port = listener.port {
                     self.listenerReadyHandler?(port)
                 }
             case .failed(let error):
                 fputs("Host listener failed: \(error)\n", stderr)
-                self.statusHandler?("Could not open the room: \(error.localizedDescription)")
+                self.statusHandler?("Could not open the channel: \(error.localizedDescription)")
             default:
                 break
             }
@@ -971,7 +971,7 @@ final class HostServer {
             // ordered timing message with one shared future capture boundary.
             _ = sendCoordinatedResync(targetID: nil, nowNanos: now)
         }
-        print("Room timing adjusted to \(groupPlayoutDelayNanos / 1_000_000) ms.")
+        print("Channel timing adjusted to \(groupPlayoutDelayNanos / 1_000_000) ms.")
     }
 
     /// A single CPU-starved listener must not add latency to every healthy Mac.
@@ -1245,7 +1245,7 @@ final class HostServer {
         if client.audioExpiredAge != priorAgeDrops,
            client.lastAudioAgeWarningNanos.map({ now >= $0 && now - $0 >= 5_000_000_000 }) ?? true {
             client.lastAudioAgeWarningNanos = now
-            fputs("Audio capture arrived after its room playout deadline; inspect capture-age drop diagnostics.\n", stderr)
+            fputs("Audio capture arrived after its channel playout deadline; inspect capture-age drop diagnostics.\n", stderr)
         }
     }
 }

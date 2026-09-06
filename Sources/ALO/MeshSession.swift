@@ -228,6 +228,7 @@ final class MeshSession {
         audioOutput: RoomAudioOutputEngine = RoomAudioOutputEngine(),
         installationIdentity: InstallationIdentity? = nil,
         peerPins: (any PeerPinStore)? = nil,
+        networkAuthorization: NetworkChannelAuthorization? = nil,
         initialEvents: [MeshRoomEvent] = [],
         initialRoomStateDocument: Data? = nil,
         statusHandler: @escaping (String) -> Void,
@@ -345,6 +346,7 @@ final class MeshSession {
             roomStatePersistenceHandler: roomStatePersistenceHandler,
             installationIdentity: installationIdentity,
             peerPins: peerPins,
+            networkAuthorization: networkAuthorization,
             incomingMediaChannelHandler: { [secureMediaAdmission, fileSharing] channel, peer in
                 if peer.channelRole == .fileTransfer { fileSharing.receive(channel, peer: peer) }
                 else if peer.channelRole == .voiceControl { secureVoice.admit(channel) }
@@ -352,7 +354,7 @@ final class MeshSession {
             },
             secureStateHandler: { _, state in
                 if case .failed(.incompatibleVersion) = state {
-                    statusHandler("Incompatible device: update all devices to the current ALO room system.")
+                    statusHandler("Incompatible device: update all devices to the current ALO channel system.")
                 }
             }
         )
@@ -362,7 +364,7 @@ final class MeshSession {
         }
         fileSharing.openChannel = { [weak control] peer, completion in
             guard let control else { completion(.failure(DirectFileError.interrupted)); return }
-            control.openMediaChannel(to: peer, role: .fileTransfer, completion: completion)
+            control.openPeerChannel(to: peer, role: .fileTransfer, completion: completion)
         }
         relay.participants = { [weak self] participants in
             participantsHandler(participants)
@@ -407,7 +409,7 @@ final class MeshSession {
         }
         identityHandler(nodeID, displayName)
         if broadcastInitially { beginBroadcasting() }
-        else { statusHandler("Room open · waiting for a broadcaster") }
+        else { statusHandler("Channel open · waiting for a broadcaster") }
     }
 
     func beginBroadcasting(
@@ -1089,12 +1091,12 @@ final class MeshSession {
             await oldSecureHost?.stop()
             guard !Task.isCancelled, generation == transitionGeneration else { return }
             guard let broadcaster else {
-                statusHandler("Room open · no one is broadcasting")
+                statusHandler("Channel open · no one is broadcasting")
                 return
             }
             do {
                 if broadcaster.nodeID == nodeID {
-                    statusHandler("Taking over room audio")
+                    statusHandler("Taking over channel audio")
                     if room.transportPolicy == .secureV2 {
                         let host = SecureMacMediaHost()
                         secureHost = host
@@ -1233,7 +1235,7 @@ final class MeshSession {
                         muted: routing.publishedParticipantMediaMuted
                     )
                 } else {
-                    statusHandler("Connecting to the room broadcaster")
+                    statusHandler("Connecting to the channel broadcaster")
                     if room.transportPolicy == .secureV2 {
                         guard let roomID = UUID(uuidString: room.id),
                               let localID = UUID(uuidString: nodeID),
@@ -1257,8 +1259,8 @@ final class MeshSession {
                                     switch state {
                                     case .active: self.statusHandler("Media transport ready")
                                     case .paused: self.statusHandler("Connected · waiting for audio")
-                                    case .recovering, .failed: self.statusHandler("Recovering room audio")
-                                    default: self.statusHandler("Synchronizing room audio")
+                                    case .recovering, .failed: self.statusHandler("Recovering channel audio")
+                                    default: self.statusHandler("Synchronizing channel audio")
                                     }
                                 }
                             }, playbackActivity: { [weak self] active in
@@ -1302,7 +1304,7 @@ final class MeshSession {
                             if status == .silent { self?.statusHandler("Connected · waiting for audio") }
                             if status == .searching {
                                 DispatchQueue.main.async { self?.mediaCommandReady = false }
-                                self?.statusHandler("Reconnecting to room audio")
+                                self?.statusHandler("Reconnecting to channel audio")
                             }
                             if case .failed(let reason) = status {
                                 DispatchQueue.main.async { self?.mediaCommandReady = false }

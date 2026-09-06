@@ -79,13 +79,13 @@ final class BreachRoomSession: ObservableObject {
         mode = .practice; started = true; refreshSlots(); configureTimer()
     }
     func host() {
-        guard roomConnected else { notice = "Join a room to host Breach, or play practice now."; return }
+        guard roomConnected else { notice = "Join a channel to host Breach, or play practice now."; return }
         leave(); sessionID = UUID().uuidString; simulation = BreachMatch(); bots = Set(1..<4)
-        mode = .hosting; notice = "Room match open. Ready up to start; bots fill empty seats."
+        mode = .hosting; notice = "Channel match open. Ready up to start; bots fill empty seats."
         refreshSlots(); configureTimer(); advertise()
     }
     func join(_ lobby: Lobby, spectate: Bool = false) {
-        guard roomConnected else { notice = "Join the room before joining its match."; return }
+        guard roomConnected else { notice = "Join the channel before joining its match."; return }
         leave(); hostID = lobby.peerID; sessionID = lobby.sessionID
         wantsSpectate = spectate; mode = .joining; lastRemote = clock()
         notice = "Connecting to \(names[lobby.peerID] ?? "room host")…"
@@ -118,7 +118,7 @@ final class BreachRoomSession: ObservableObject {
         remoteSequence = -1; waitingForRound = false; clearInput(); showsMenu = false; suspended = false; notice = message; realtime.reset()
         configureTimer()
     }
-    func disconnect() { leave(message: "Room disconnected. Practice is available offline."); send = nil; lobbies.removeAll(); loop.stop() }
+    func disconnect() { leave(message: "Channel disconnected. Practice is available offline."); send = nil; lobbies.removeAll(); loop.stop() }
     func panelAppeared() { panels += 1; configureTimer() }
     func panelDisappeared() { panels = max(0, panels - 1); clearInput(); if mode == .practice { showsMenu = true }; configureTimer() }
     func togglePause() { showsMenu.toggle(); clearInput() }
@@ -139,7 +139,7 @@ final class BreachRoomSession: ObservableObject {
     private func refreshSlots() {
         slots = simulation.players.indices.map { i in
             let member = members.first { $0.value.slot == i }
-            return Slot(index: i, name: String((i == 0 ? localName : member.map { names[$0.key] ?? "Room player" } ?? "Bot \(i)").prefix(40)), isBot: bots.contains(i), ready: i == 0 ? localReady : bots.contains(i) || member?.value.ready == true)
+            return Slot(index: i, name: String((i == 0 ? localName : member.map { names[$0.key] ?? "Channel player" } ?? "Bot \(i)").prefix(40)), isBot: bots.contains(i), ready: i == 0 ? localReady : bots.contains(i) || member?.value.ready == true)
         }
     }
     private func configureTimer() {
@@ -193,7 +193,7 @@ final class BreachRoomSession: ObservableObject {
         guard packet.session == sessionID else { return }
         if isActivityHost { receiveHost(sender, packet, now); return }
         guard sender == hostID, packet.sequence > remoteSequence else { return }
-        if packet.kind == .leave { leave(message: "The match host left. Your room is still open; host a new match or join another."); return }
+        if packet.kind == .leave { leave(message: "The match host left. Your channel is still open; host a new match or join another."); return }
         if packet.kind == .busy { leave(message: "This match and its spectator seats are full. Try another match or host one."); return }
         guard packet.kind == .state, let state = packet.state, let roster = packet.slots else { return }
         if packet.spectating != true { guard let slot = packet.assignedSlot, roster.indices.contains(slot), !roster[slot].isBot else { return }; localIndex = packet.assignedSlot! }
@@ -276,7 +276,7 @@ final class BreachRoomSession: ObservableObject {
         }
         if [.joining, .guest, .spectator].contains(mode) {
             let age = now - lastRemote
-            if age > GameRealtimePolicy.connectionTimeout { leave(message: "Match connection lost. Your room is still open. Join again or host a new match."); return }
+            if age > GameRealtimePolicy.connectionTimeout { leave(message: "Match connection lost. Your channel is still open. Join again or host a new match."); return }
             if age > GameRealtimePolicy.reconnectAfter { suspended = true; notice = "Reconnecting to match host…"; if ticks % 30 == 0 { transmit(mode == .spectator ? .spectate : .join) } }
         }
         guard playing, started, mode != .spectator, !suspended else { return }

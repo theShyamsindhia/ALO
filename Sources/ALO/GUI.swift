@@ -7,6 +7,9 @@ import QuartzCore
 import SwiftUI
 import UniformTypeIdentifiers
 import ALOCore
+import ALOAppModel
+import ALORooms
+import ALOIdentity
 import os
 
 private enum ALOAppFlavor {
@@ -440,13 +443,13 @@ func toggleALOSetupWindow(_ window: NSWindow) {
 @MainActor
 final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     private enum SetupWindow {
-        static let width: CGFloat = 306
+        static let width: CGFloat = 800
         static let collapseDuration: TimeInterval = 0.28
 
         @MainActor static func height(for model: ALOViewModel) -> CGFloat {
             switch model.phase {
             case .idle:
-                return 426
+                return 640
             case .starting:
                 return 270
             case .failed:
@@ -1365,7 +1368,7 @@ private struct DeviceIdentityEditorView: View {
                     Text(normalizedName.isEmpty ? "This Mac" : normalizedName)
                         .font(.system(size: 17, weight: .semibold, design: .rounded))
                         .lineLimit(1)
-                    Text("This profile appears to everyone in your rooms.")
+                    Text("This profile appears to everyone in your channels.")
                         .font(.system(size: 11, design: .rounded))
                         .foregroundStyle(Palette.secondary)
                 }
@@ -1546,10 +1549,12 @@ struct ParticipantRoomActivity: Equatable {
 
 @MainActor
 final class ALOViewModel: ObservableObject {
+    let account: NetworkAccountModel
+    private var accountObserver: AnyCancellable?
     var peerVersionHandler: (String) -> Void = { _ in }
     enum Mode: String, CaseIterable {
-        case share = "Create Room"
-        case listen = "Rooms"
+        case share = "Create network"
+        case listen = "Networks"
     }
 
     enum Phase: Equatable {
@@ -1691,8 +1696,8 @@ final class ALOViewModel: ObservableObject {
     @Published private(set) var musicDuckingEnabled = UserDefaults.standard.bool(forKey: "musicDuckingEnabled")
     @Published private var participantVoiceLevels = VoiceLevelStore().levels
     private let voiceLevelStore = VoiceLevelStore()
-    private let roomStore = RoomStore()
-    private let lastJoinedRoomStore = LastJoinedRoomStore()
+    private let roomStore = RoomStore(fileURL: NetworkChannelStorage.fileURL)
+    private let lastJoinedRoomStore = LastJoinedRoomStore(key: "alo.networks-v1.mac.last-channel")
     private let nodeID: String
     private let audioOutput = RoomAudioOutputEngine()
     private var localNowPlayingMonitor: NowPlayingMonitor?
@@ -1715,7 +1720,8 @@ final class ALOViewModel: ObservableObject {
     private static let audioSourceNameKey = "broadcastAudioSourceName"
     private static let deviceProfileImageKey = "meshDeviceProfileImageData"
 
-    init(discoverRooms: Bool = true) {
+    init(discoverRooms: Bool = true, account: NetworkAccountModel? = nil) {
+        self.account = account ?? NetworkAccountModel()
         discoveryEnabled = discoverRooms
         let defaults = UserDefaults.standard
         if let stored = defaults.string(forKey: "meshNodeID") {
@@ -1744,7 +1750,7 @@ final class ALOViewModel: ObservableObject {
         currentDeviceColorHex = savedAppearance.colorHex
         defaults.set(savedAppearance.icon, forKey: "meshDeviceIcon")
         currentDeviceProfileImageData = defaults.data(forKey: Self.deviceProfileImageKey)
-        savedRooms = roomStore.load()
+        savedRooms = [] // Old Spaces never grant access in this generation.
         floatingBarHidden = defaults.object(forKey: Self.floatingBarPreferenceKey) == nil
             ? true
             : defaults.bool(forKey: Self.floatingBarPreferenceKey)
@@ -1808,13 +1814,45 @@ final class ALOViewModel: ObservableObject {
             }, scanFinishedHandler: { [weak self] in
                 DispatchQueue.main.async { self?.completedRoomScans.insert(.secureV2) }
             })
-        if discoverRooms { secureRoomBrowser.start() }
+        if discoverRooms {
+            self.account.resume()
+            refreshNetworkChannels()
+            secureRoomBrowser.start()
+            if let channel = lastJoinedRoomStore.roomToRestore(from: savedRooms) {
+                Task { @MainActor [weak self] in self?.joinChannel(channel.id) }
+            }
+        }
+        accountObserver = self.account.objectWillChange.sink { [weak self] in
+            Task { @MainActor [weak self] in self?.refreshNetworkChannels() }
+        }
     }
 
     private func updateNearbyRoomChoices() {
         // Old advertisements must neither invite legacy joins nor hide upgraded rooms.
-        nearbyRooms = secureNearbyRooms
+        nearbyRooms = secureNearbyRooms.filter { account.room(channelID: $0.id) != nil }
             .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    private func refreshNetworkChannels() {
+        savedRooms = account.networks.flatMap { $0.channels }.compactMap { account.room(channelID: $0.id.uuidString) }
+        updateNearbyRoomChoices()
+        // A policy update is not just a sidebar change. Stop capture, renderers
+        // and retry loops when this identity loses the active channel.
+        if !isLeavingRoom, let active = activeRoomConfiguration,
+           account.room(channelID: active.id) == nil {
+            stop(preservingNotice: "Your identity no longer has access to this channel. Ask the network owner for a new invitation.")
+        }
+        objectWillChange.send()
+    }
+
+    func joinChannel(_ channelID: String) {
+        guard phase == .idle, let room = account.room(channelID: channelID) else {
+            errorMessage = "Set up your identity and select a channel you can access."
+            return
+        }
+        currentUserName = account.displayName
+        selectedRoomID = channelID
+        open(room, broadcastInitially: false)
     }
 
     private func requireSecureRoomIdentity() throws -> MacSecureRoomIdentity {
@@ -1832,22 +1870,17 @@ final class ALOViewModel: ObservableObject {
     var hasBroadcaster: Bool { meshSession?.hasBroadcaster == true }
     var selectedRoomConfiguration: RoomConfiguration? {
         guard let id = selectedRoomID else { return nil }
-        if let saved = savedRooms.first(where: { $0.id == id }) { return saved }
-        guard let nearby = nearbyRooms.first(where: { $0.id == id }) else { return nil }
-        return RoomConfiguration(id: nearby.id, name: nearby.name, isPrivate: nearby.isPrivate,
-                                 transportPolicy: nearby.transportPolicy, icon: nearby.icon)
+        return account.room(channelID: id)
     }
     var roomChoices: [RoomConfiguration] {
-        var result = savedRooms
-        for nearby in nearbyRooms where !result.contains(where: { $0.id == nearby.id }) {
-            result.append(RoomConfiguration(id: nearby.id, name: nearby.name, isPrivate: nearby.isPrivate,
-                                            transportPolicy: nearby.transportPolicy, icon: nearby.icon))
-        }
-        return result
+        account.networks.flatMap { $0.channels }.compactMap { account.room(channelID: $0.id.uuidString) }
     }
-    var activePrivateInviteKey: String? {
-        guard activeRoomConfiguration?.isPrivate == true else { return nil }
-        return activeRoomConfiguration?.accessKey
+    var channelAccessSummary: String {
+        guard let id = activeRoomConfiguration?.id,
+              let channel = account.networks.flatMap({ $0.channels }).first(where: { $0.id.uuidString == id }) else {
+            return "Network membership required"
+        }
+        return channel.isPrivate ? "Private channel · explicitly allowed members" : "Public channel · network members only"
     }
     var roomIsPlaying: Bool {
         Self.effectivePlaybackState(
@@ -1910,9 +1943,9 @@ final class ALOViewModel: ObservableObject {
     var videoControlHelp: String {
         if mediaSwitchBusy { return "Preparing audio and video broadcast" }
         switch videoControlIntent {
-        case .unavailable: return "Video is unavailable while the room opens"
+        case .unavailable: return "Video is unavailable while the channel opens"
         case .toggleViewer, .showViewer: return "View shared video"
-        case .enableVideo: return "Broadcast video with room audio"
+        case .enableVideo: return "Broadcast video with channel audio"
         case .beginAudioAndVideoBroadcast:
             return hasBroadcaster
                 ? "Take over and broadcast audio and video"
@@ -1942,121 +1975,19 @@ final class ALOViewModel: ObservableObject {
         }
     }
 
-    func startSharing() {
-        guard canStartSharing else { return }
-        resetRoomState()
-        let room: RoomConfiguration
-        do {
-            let identity = try requireSecureRoomIdentity()
-            room = .secure(name: normalizedRoomName,
-                creatorPeerID: identity.identity.publicIdentity.nodeID.uuidString,
-                isPrivate: createPrivateRoom)
-        } catch {
-            errorMessage = "Could not load this Mac's secure identity: \(error.localizedDescription)"
-            return
-        }
-        do { try roomStore.save(room); savedRooms = roomStore.load() }
-        catch { errorMessage = "Could not save the room: \(error.localizedDescription)"; return }
-        open(room, broadcastInitially: false)
-    }
-
-    func joinSelectedRoom() {
-        guard canJoin, let room = selectedRoomConfiguration else { return }
-        if room.isPrivate {
-            let enteredKey = privateRoomKey.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let key = room.accessKey ?? (enteredKey.isEmpty ? nil : enteredKey) else {
-                errorMessage = "Enter this private room's invite key."
-                return
-            }
-            if let advertisedProof = nearbyRooms.first(where: { $0.id == room.id })?.accessProof,
-               MeshControlPlane.makeAccessProof(roomID: room.id, accessKey: key) != advertisedProof {
-                errorMessage = "That invite key does not match this private room."
-                return
-            }
-            let unlocked = RoomConfiguration(
-                id: room.id,
-                name: room.name,
-                creatorPeerID: room.creatorPeerID,
-                isPrivate: true,
-                accessKey: key,
-                transportPolicy: room.transportPolicy,
-                icon: room.icon
-            )
-            do { try unlocked.validateForJoining(); try roomStore.save(unlocked) }
-            catch { errorMessage = "Could not join this room: \(error.localizedDescription)"; return }
-            savedRooms = roomStore.load()
-            open(unlocked, broadcastInitially: false)
-        } else { open(room, broadcastInitially: false) }
-    }
-
-    func forgetRoom(roomID: String) {
-        do {
-            lastJoinedRoomStore.clear(ifMatching: roomID)
-            try roomStore.forget(roomID: roomID)
-            savedRooms = roomStore.load()
-            if selectedRoomID == roomID {
-                selectedRoomID = nil
-            }
-        } catch {
-            errorMessage = "Could not forget the room: \(error.localizedDescription)"
-        }
-    }
-
-    @discardableResult
-    func renameRoom(roomID: String, to proposedName: String) -> Bool {
-        let name = String(proposedName.trimmingCharacters(in: .whitespacesAndNewlines).prefix(40))
-        guard phase == .idle, !name.isEmpty else { return false }
-        do {
-            guard try roomStore.rename(roomID: roomID, to: name) else { return false }
-            savedRooms = roomStore.load()
-            statusText = "Renamed space to \(name)"
-            return true
-        } catch {
-            errorMessage = "Could not rename the space: \(error.localizedDescription)"
-            return false
-        }
-    }
-
-    func copyPrivateInviteKey(roomID: String) {
-        guard let room = savedRooms.first(where: { $0.id == roomID }),
-              room.isPrivate,
-              let key = room.accessKey
-        else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(key, forType: .string)
-        statusText = "Private space invite key copied"
-    }
-
-    func setRoomIcon(roomID: String, symbol: String) {
-        guard phase == .idle, let room = savedRooms.first(where: { $0.id == roomID }),
-              RoomIcon.choices.contains(where: { $0.symbol == symbol }) else { return }
-        let nearbyIcon = nearbyRooms.first(where: { $0.id == roomID })?.icon
-        let counter = max(room.icon?.version.counter ?? 0, nearbyIcon?.version.counter ?? 0)
-        guard counter < UInt64.max - 1 else { return }
-        let icon = RoomIcon(symbol: symbol, version: MeshVersion(counter: counter + 1,
-            nodeID: meshSession?.nodeID ?? nodeID))
-        do {
-            try roomStore.mergeIcon(icon, roomID: roomID)
-            savedRooms = roomStore.load()
-        } catch {
-            errorMessage = "Could not save the space icon: \(error.localizedDescription)"
-        }
-    }
-
-    func copyPrivateInviteKey() {
-        guard let key = activePrivateInviteKey else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(key, forType: .string)
-        statusText = "Private room invite key copied"
-    }
 
     private func open(_ savedRoom: RoomConfiguration, broadcastInitially: Bool) {
         let room: RoomConfiguration
+        let authorization: NetworkChannelAuthorization
         do {
-            room = try savedRoom.upgradedToCurrentSystem()
+            guard let authorized = account.room(channelID: savedRoom.id) else { throw NetworkAccountError.channelUnavailable }
+            room = authorized
+            let secure = try requireSecureRoomIdentity()
+            authorization = try account.authorization(channelID: room.id,
+                installationHash: secure.identity.publicIdentity.publicKeyHash, deviceName: currentUserName)
             try roomStore.save(room)
         } catch {
-            errorMessage = "Could not upgrade this room securely: \(error.localizedDescription)"
+            errorMessage = NetworkAccountModel.describe(error)
             return
         }
         resetRoomState()
@@ -2065,7 +1996,7 @@ final class ALOViewModel: ObservableObject {
             try room.validateForJoining()
             secure = room.transportPolicy == .secureV2 ? try requireSecureRoomIdentity() : nil
         } catch {
-            errorMessage = "Could not open this room securely: \(error.localizedDescription)"
+            errorMessage = "Could not open this channel securely: \(error.localizedDescription)"
             return
         }
         let session = MeshSession(
@@ -2078,6 +2009,7 @@ final class ALOViewModel: ObservableObject {
             audioOutput: audioOutput,
             installationIdentity: secure?.identity,
             peerPins: secure?.pins,
+            networkAuthorization: authorization,
             initialEvents: roomStore.loadEvents(roomID: room.id),
             initialRoomStateDocument: roomStore.loadRoomStateDocument(roomID: room.id),
             statusHandler: { [weak self] status in
@@ -2113,7 +2045,7 @@ final class ALOViewModel: ObservableObject {
                     self.savedRooms = self.roomStore.load()
                     if self.activeRoomConfiguration?.id == room.id { self.activeRoomConfiguration?.icon = icon }
                 } catch {
-                    self.errorMessage = "Could not save the shared space icon: \(error.localizedDescription)"
+                    self.errorMessage = "Could not save the shared channel icon: \(error.localizedDescription)"
                 }
             },
             arenaHandler: { [weak self] sender, data in self?.arena.receive(from: sender, data: data) },
@@ -2225,14 +2157,14 @@ final class ALOViewModel: ObservableObject {
             lastJoinedRoomStore.markJoined(room)
             savedRooms = roomStore.load()
             phase = .live
-            statusText = broadcastInitially ? "Starting this Mac's broadcast" : "Room open"
+            statusText = broadcastInitially ? "Starting this Mac's broadcast" : "Channel open"
             startLiveSyncMonitoring(session)
             updateLocalNowPlayingMonitor()
         } catch {
             meshSession = nil
             phase = .failed
             errorMessage = readable(error)
-            statusText = "Could not open the room"
+            statusText = "Could not open the channel"
             secureRoomBrowser.start()
         }
     }
@@ -2256,7 +2188,7 @@ final class ALOViewModel: ObservableObject {
                 floatingSection = selection == .video ? .video : .collapsed
                 statusText = selection == .video
                     ? "The selected display or window is live"
-                    : "Audio room active"
+                    : "Audio channel active"
             } catch is CancellationError {
                 statusText = "Video sharing cancelled"
             } catch {
@@ -2289,7 +2221,7 @@ final class ALOViewModel: ObservableObject {
         audioIsRendering = false
         stopLocalNowPlayingMonitor()
         statusText = hasBroadcaster
-            ? "Taking over room audio and preparing full-screen sharing"
+            ? "Taking over channel audio and preparing full-screen sharing"
             : "Starting audio and video broadcast"
         meshSession.beginBroadcasting(
             videoEnabled: true,
@@ -2329,12 +2261,12 @@ final class ALOViewModel: ObservableObject {
 
     var connectionSummary: String {
         if permissionNotice || errorIsPermissionRelated { return "Audio permission needed" }
-        if phase == .starting { return "Connecting to room…" }
+        if phase == .starting { return "Connecting to channel…" }
         if phase != .live { return statusText }
         if statusText.localizedCaseInsensitiveContains("failed") || statusText.localizedCaseInsensitiveContains("lost") {
             return statusText
         }
-        if statusText.hasPrefix("Reconnecting") { return "Reconnecting to room audio…" }
+        if statusText.hasPrefix("Reconnecting") { return "Reconnecting to channel audio…" }
         if incomingMediaMuted { return "Connected · music muted on this Mac" }
         if !hasBroadcaster { return "Connected · nobody is broadcasting" }
         return audioIsRendering ? "Connected · listening" : "Connected · waiting for audio"
@@ -2477,17 +2409,17 @@ final class ALOViewModel: ObservableObject {
 
     func globalShortcutAvailability(_ action: GlobalShortcutAction) -> GlobalShortcutAvailability {
         guard phase == .live, meshSession != nil else {
-            return .unavailable("Available while a room is open")
+            return .unavailable("Available while a channel is open")
         }
         switch action.kind {
         case .talkToEveryone:
             return currentRemoteParticipantIDs.isEmpty
-                ? .unavailable("No other device is in the room")
+                ? .unavailable("No other device is in the channel")
                 : .ready
         case .talkToDevice:
             guard let participantID = action.participantID,
                   currentRemoteParticipantIDs.contains(participantID)
-            else { return .unavailable("This device is not currently in the room") }
+            else { return .unavailable("This device is not currently in the channel") }
             return .ready
         case .shareScreen:
             if mediaSwitchBusy { return .unavailable("Screen sharing is already changing") }
@@ -2555,7 +2487,7 @@ final class ALOViewModel: ObservableObject {
             guard let currentParticipantID,
                   let participant = participants.first(where: { $0.id == currentParticipantID })
             else {
-                statusText = "This Mac is still joining the room"
+                statusText = "This Mac is still joining the channel"
                 return
             }
             syncParticipant(participant)
@@ -2812,7 +2744,7 @@ final class ALOViewModel: ObservableObject {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Talk and Open Line need microphone access"
-        alert.informativeText = "Allow ALO in Privacy & Security → Microphone to use Talk or Open Line. Listening to rooms does not require this permission."
+        alert.informativeText = "Allow ALO in Privacy & Security → Microphone to use Talk or Open Line. Listening to channels does not require this permission."
         alert.addButton(withTitle: "Open Microphone Settings")
         alert.addButton(withTitle: "Not Now")
         if alert.runModal() == .alertFirstButtonReturn,
@@ -2985,8 +2917,8 @@ final class ALOViewModel: ObservableObject {
     }
 
     func participantMediaControlHelp(_ participant: RoomParticipant) -> String {
-        canControl(participant) ? "Adjust this device’s room media output"
-            : "Remote media volume control is unavailable in this room. Each person controls their own media; received voice volume remains local."
+        canControl(participant) ? "Adjust this device’s channel media output"
+            : "Remote media volume control is unavailable in this channel. Each person controls their own media; received voice volume remains local."
     }
 
     func joinActivityInvitation() {
@@ -3056,7 +2988,7 @@ final class ALOViewModel: ObservableObject {
             RoomTrayDocument.maximumActiveBytes - roomTrayItems.reduce(0) { $0 + $1.attachment.byteCount }
         )
         guard remainingItemSlots > 0, remainingBytes > 0 else {
-            statusText = "The room tray is full. Remove a file before adding another."
+            statusText = "The channel tray is full. Remove a file before adding another."
             return
         }
         var shared = 0
@@ -3095,8 +3027,8 @@ final class ALOViewModel: ObservableObject {
             }
         }
         if shared > 0 {
-            let summary = shared == 1 ? "Shared 1 file in the room tray" : "Shared \(shared) files in the room tray"
-            statusText = skipped == 0 ? summary : summary + "; skipped \(skipped) that would exceed the room limit"
+            let summary = shared == 1 ? "Shared 1 file in the channel tray" : "Shared \(shared) files in the channel tray"
+            statusText = skipped == 0 ? summary : summary + "; skipped \(skipped) that would exceed the channel limit"
         }
     }
 
@@ -3251,7 +3183,7 @@ final class ALOViewModel: ObservableObject {
             url: url.absoluteString
         ))
         queueURL = ""
-        queueNotice = "Added to the room queue."
+        queueNotice = "Added to the channel queue."
     }
 
     func addCurrentTrackToQueue() {
@@ -3265,7 +3197,7 @@ final class ALOViewModel: ObservableObject {
             subtitle: media.artist ?? media.album,
             url: url.absoluteString
         ))
-        queueNotice = "Added \(title) to the room queue."
+        queueNotice = "Added \(title) to the channel queue."
     }
 
     func removeQueueItem(_ item: RoomQueueItem) {
@@ -3281,7 +3213,7 @@ final class ALOViewModel: ObservableObject {
         guard let destination = order.firstIndex(of: targetID) else { return false }
         order.insert(id, at: destination)
         meshSession?.reorderQueue(order)
-        queueNotice = "Queue order updated for the room."
+        queueNotice = "Queue order updated for the channel."
         return true
     }
 
@@ -3394,18 +3326,22 @@ final class ALOViewModel: ObservableObject {
     }
 
     func stop() {
+        stop(preservingNotice: nil)
+    }
+
+    private func stop(preservingNotice notice: String?) {
         DJStudio.stopIfCreated()
         arena.disconnect()
         isLeavingRoom = true
         stopLiveSyncMonitoring()
         lastJoinedRoomStore.clear(ifMatching: activeRoomConfiguration?.id)
         phase = .starting
-        statusText = "Leaving the room"
+        statusText = "Leaving the channel"
         stopLocalNowPlayingMonitor()
         Task {
             await meshSession?.stop()
             meshSession = nil
-            finishStopping()
+            finishStopping(notice: notice)
         }
     }
 
@@ -3419,14 +3355,15 @@ final class ALOViewModel: ObservableObject {
 
     func refreshRooms() {
         guard discoveryEnabled, phase == .idle, !roomsRefreshing else { return }
-        savedRooms = roomStore.load()
+        account.refresh()
+        refreshNetworkChannels()
         nearbyRooms = []
         legacyNearbyRooms = []
         secureNearbyRooms = []
         roomsRefreshing = true
         completedRoomScans.removeAll()
         roomsRefreshError = nil
-        statusText = "Looking for rooms"
+        statusText = "Looking for channels"
         secureRoomBrowser.restart()
     }
 
@@ -3525,7 +3462,7 @@ final class ALOViewModel: ObservableObject {
         guard meshSession === session, phase == .live, !isLeavingRoom else { return }
         guard hasBroadcaster, nowPlaying.isPlaying != false else {
             invalidateLiveSyncSample(
-                reason: hasBroadcaster ? "Room playback was paused." : "The room broadcaster became unavailable.",
+                reason: hasBroadcaster ? "Channel playback was paused." : "The channel broadcaster became unavailable.",
                 kind: hasBroadcaster ? .notice : .warning)
             return
         }
@@ -3555,7 +3492,7 @@ final class ALOViewModel: ObservableObject {
     private func stopLiveSyncMonitoring() {
         liveSyncTask?.cancel()
         liveSyncTask = nil
-        invalidateLiveSyncSample(reason: "Room timing monitoring stopped.", kind: .notice)
+        invalidateLiveSyncSample(reason: "Channel timing monitoring stopped.", kind: .notice)
     }
 
     private func invalidateLiveSyncSample(reason: String, kind: RoomSyncEvent.Kind = .warning) {
@@ -3757,10 +3694,10 @@ final class ALOViewModel: ObservableObject {
 
     private func handle(_ status: ReceiverStatus) {
         switch status {
-        case .searching: statusText = "Looking for \(activeRoom ?? "the room")"
+        case .searching: statusText = "Looking for \(activeRoom ?? "the channel")"
         case .connected:
             audioIsRendering = false
-            statusText = "Aligning this Mac with the room"
+            statusText = "Aligning this Mac with the channel"
         case .playing:
             phase = .live
             audioIsRendering = true
@@ -3866,10 +3803,11 @@ final class ALOViewModel: ObservableObject {
         incomingMessagePreview = nil
     }
 
-    private func finishStopping() {
+    private func finishStopping(notice: String?) {
         activeRoom = nil
         activeRoomConfiguration = nil
         resetRoomState()
+        errorMessage = notice
         phase = .idle
         statusText = "Ready"
         secureRoomBrowser.restart()
@@ -3932,10 +3870,10 @@ final class ALOViewModel: ObservableObject {
         }
         if status.contains("waiting for audio")
             || status.hasPrefix("Connecting")
-            || status.hasPrefix("Recovering room audio")
-            || status.hasPrefix("Synchronizing room audio")
+            || status.hasPrefix("Recovering channel audio")
+            || status.hasPrefix("Synchronizing channel audio")
             || status.hasPrefix("Reconnecting")
-            || status.hasPrefix("Room open")
+            || status.hasPrefix("Channel open")
             || status.hasPrefix("Taking over") {
             return false
         }
@@ -3997,7 +3935,7 @@ struct ALOView: View {
             switch model.phase {
             case .idle: idleView
             case .starting: progressView
-            case .live: EmptyView()
+            case .live: MacNetworkSetupView(model: model, account: model.account)
             case .failed: errorView
             }
             if model.permissionNotice { permissionOverlay }
@@ -4007,396 +3945,9 @@ struct ALOView: View {
     }
 
     private var idleView: some View {
-        setupConsole
+        MacNetworkSetupView(model: model, account: model.account)
     }
 
-    private var setupConsole: some View {
-        ZStack {
-            SetupBackground()
-
-            VStack(spacing: 0) {
-                setupIdentityHeader
-                VStack(spacing: 0) {
-                    if model.mode == .share {
-                        createRoomPanel
-                    } else {
-                        roomList
-                    }
-                    setupFooter
-                }
-                .frame(width: 286, height: 236)
-                .background(.regularMaterial, in: UnevenRoundedRectangle(
-                    topLeadingRadius: 22, topTrailingRadius: 22
-                ))
-            }
-        }
-        .frame(width: 286, height: 406)
-        .clipShape(RoundedRectangle(cornerRadius: 27, style: .continuous))
-        .animation(reduceMotion ? nil : .smooth(duration: 0.32), value: model.mode)
-    }
-
-    private var setupIdentityHeader: some View {
-        VStack(spacing: 8) {
-            Spacer(minLength: 22)
-            Button(action: model.editDeviceIdentity) {
-                DeviceAvatar(
-                    emoji: model.currentDeviceIcon,
-                    colorHex: model.currentDeviceColorHex,
-                    profileImageData: model.currentDeviceProfileImageData,
-                    size: 64
-                )
-                .overlay(Circle().stroke(Color.white.opacity(0.96), lineWidth: 4))
-                .shadow(color: Color.black.opacity(0.26), radius: 10, y: 5)
-            }
-            .buttonStyle(PressScaleButtonStyle())
-            .help("Edit \(model.currentUserName)")
-            .accessibilityLabel("Edit this Mac's room identity")
-
-            Button(action: model.editDeviceIdentity) {
-                Label(model.currentUserName, systemImage: "pencil")
-                    .font(.body)
-                    .lineLimit(1)
-            }
-            .buttonStyle(.bordered)
-            .foregroundStyle(.primary)
-            .help("Edit \(model.currentUserName)")
-            .accessibilityLabel("Edit this Mac's room identity")
-
-            Spacer(minLength: 16)
-        }
-        .frame(height: 170)
-    }
-
-    private var setupFooter: some View {
-        VStack(spacing: 0) {
-            Divider()
-            HStack(spacing: 6) {
-                if let error = model.roomsRefreshError {
-                    Image(systemName: "wifi.exclamationmark")
-                        .help(error)
-                        .accessibilityLabel("Nearby discovery unavailable: \(error)")
-                }
-                Button(action: { checkForUpdates?() }) {
-                    HStack(spacing: 6) {
-                        Label("ALO \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—")",
-                              systemImage: "arrow.down.circle")
-                        if model.availableUpdateVersion != nil {
-                            Circle()
-                                .fill(.tint)
-                                .frame(width: 5, height: 5)
-                                .accessibilityHidden(true)
-                            Text("Update available")
-                                .foregroundStyle(.tint)
-                        }
-                    }
-                }
-                .buttonStyle(.borderless)
-                .disabled(checkForUpdates == nil)
-                .help(model.availableUpdateVersion.map { "ALO \($0) is available" } ?? "Check for updates")
-                .accessibilityLabel(model.availableUpdateVersion.map { "Update available: ALO \($0)" } ?? "Check for ALO updates")
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .frame(height: 37)
-    }
-
-    private var createRoomPanel: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(spacing: 8) {
-                Button {
-                    withAnimation(reduceMotion ? nil : .smooth(duration: 0.28)) {
-                        model.mode = .listen
-                    }
-                } label: {
-                    Image(systemName: "chevron.left")
-                }
-                .buttonStyle(.bordered)
-                .help("Back to spaces")
-                .accessibilityLabel("Back to spaces")
-
-                Text("New space")
-                    .font(.headline)
-                Spacer()
-            }
-
-            TextField("Space name", text: $model.roomName)
-                .textFieldStyle(.roundedBorder)
-                .focused($roomNameFocused)
-                .onSubmit(model.startSharing)
-
-            Toggle("Private space", isOn: $model.createPrivateRoom)
-                .help("Require an invite key to join this space")
-
-            Spacer(minLength: 0)
-
-            HStack {
-                Spacer()
-                Button("Create space", action: model.startSharing)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!model.canStartSharing)
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.top, 12)
-        .padding(.bottom, 10)
-        .frame(width: 286, height: 199)
-        .onAppear {
-            DispatchQueue.main.async { roomNameFocused = true }
-        }
-    }
-
-    private var roomList: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 8) {
-                Text("Spaces")
-                    .font(.headline)
-                Spacer()
-                Button(action: model.refreshRooms) {
-                    ZStack {
-                        if model.roomsRefreshing {
-                            ProgressView().controlSize(.small)
-                        } else {
-                            Image(systemName: "arrow.clockwise")
-                        }
-                    }
-                    .frame(width: 20, height: 20)
-                }
-                .buttonStyle(.bordered)
-                .buttonBorderShape(.circle)
-                .disabled(model.roomsRefreshing)
-                .help(model.roomsRefreshing ? "Looking for nearby spaces…" : model.roomScanFinished ? "Scan finished. Refresh to check nearby spaces again." : "Sync saved and nearby spaces")
-                .accessibilityLabel("Sync spaces")
-                Button {
-                    withAnimation(reduceMotion ? nil : .smooth(duration: 0.28)) {
-                        model.mode = .share
-                    }
-                } label: {
-                    Image(systemName: "plus")
-                        .frame(width: 20, height: 20)
-                }
-                .buttonStyle(.bordered)
-                .buttonBorderShape(.circle)
-                .help("Create a space")
-                .accessibilityLabel("Create a space")
-            }
-            .padding(.horizontal, 14)
-            .frame(height: 45)
-
-            ScrollViewReader { proxy in
-                List(selection: $focusedRoomID) {
-                    if model.roomChoices.isEmpty {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(model.roomScanFinished ? "No nearby spaces found" : "Looking nearby")
-                                .font(.body)
-                            Text(model.roomScanFinished ? "Open ALO on another device, then refresh." : "Open ALO on another device to see its spaces.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, minHeight: 54, alignment: .leading)
-                        .help(model.roomScanFinished ? "Scan finished. Refresh to search again." : "Looking for nearby spaces")
-                    } else {
-                        ForEach(model.roomChoices) { room in
-                            roomCard(room)
-                                .tag(room.id)
-                                .id(room.id)
-                        }
-                    }
-                }
-                .listStyle(.inset)
-                .scrollContentBackground(.hidden)
-                .onChange(of: focusedRoomID) { _, selected in
-                    if let selected { model.selectedRoomID = selected }
-                }
-                .onChange(of: model.selectedRoomID, initial: true) { previous, selected in
-                    if previous != selected { model.privateRoomKey = "" }
-                    if let selected, model.selectedRoomConfiguration?.isPrivate == true {
-                        DispatchQueue.main.async { proxy.scrollTo(selected, anchor: .center) }
-                    }
-                }
-                .onKeyPress(.return) {
-                    guard editingRoomID == nil, focusedRoomID != nil,
-                          let room = model.selectedRoomConfiguration else { return .ignored }
-                    if room.isPrivate && room.accessKey == nil {
-                        privateKeyFocused = true
-                    } else {
-                        model.joinSelectedRoom()
-                    }
-                    return .handled
-                }
-            }
-            .frame(height: setupRoomListHeight)
-
-            if model.selectedRoomConfiguration?.isPrivate == true,
-               model.selectedRoomConfiguration?.accessKey == nil {
-                TextField("Private room invite key", text: $model.privateRoomKey)
-                    .textFieldStyle(.roundedBorder)
-                    .focused($privateKeyFocused)
-                    .onSubmit(model.joinSelectedRoom)
-                    .frame(height: 36)
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 7)
-                    .onAppear {
-                        DispatchQueue.main.async { privateKeyFocused = true }
-                    }
-            }
-        }
-        .frame(width: 286, height: 199)
-        .onAppear {
-            focusedRoomID = nil
-            model.refreshRooms()
-        }
-    }
-
-    private var setupRoomListHeight: CGFloat {
-        model.selectedRoomConfiguration?.isPrivate == true
-            && model.selectedRoomConfiguration?.accessKey == nil ? 110 : 154
-    }
-
-    private func roomCard(_ room: RoomConfiguration) -> some View {
-        let nearby = model.nearbyRooms.first(where: { $0.id == room.id })
-        let saved = model.savedRooms.contains(where: { $0.id == room.id })
-        return HStack(spacing: 8) {
-            roomCardIcon(room)
-
-            if editingRoomID == room.id {
-                TextField("Space name", text: $editedRoomName)
-                    .textFieldStyle(.roundedBorder)
-                    .focused($roomRenameFocused)
-                    .onChange(of: editedRoomName) { _, newValue in
-                        if newValue.count > 40 { editedRoomName = String(newValue.prefix(40)) }
-                    }
-                    .onSubmit { commitRoomRename(room) }
-                    .onExitCommand(perform: cancelRoomRename)
-
-                Button(action: cancelRoomRename) {
-                    Image(systemName: "xmark")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .help("Cancel rename")
-                .accessibilityLabel("Cancel rename")
-
-                Button { commitRoomRename(room) } label: {
-                    Image(systemName: "checkmark")
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .disabled(normalizedEditedRoomName.isEmpty)
-                .help("Save space name")
-                .accessibilityLabel("Save space name")
-            } else {
-                Button {
-                    model.selectedRoomID = room.id
-                    model.privateRoomKey = ""
-                    if !room.isPrivate || room.accessKey != nil {
-                        model.joinSelectedRoom()
-                    }
-                } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(room.name)
-                            .font(.body)
-                            .lineLimit(1)
-                        Text(nearby.map { model.completedRoomScans.contains($0.transportPolicy) ? "Recently seen · Refresh to check" : $0.detail }
-                            ?? (room.isPrivate ? "Private · Saved on this Mac" : "Saved on this Mac"))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .help(nearby?.activityHelp ?? "Saved on this Mac. Join to open the space.")
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.borderless)
-                .foregroundStyle(.primary)
-                .help(room.isPrivate && room.accessKey == nil ? "Enter the invite key for \(room.name)" : "Open \(room.name)")
-                .accessibilityLabel("Open \(room.name)")
-
-                if saved {
-                    roomOptionsMenu(room)
-                }
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .frame(minHeight: 36)
-        .animation(reduceMotion ? nil : .snappy(duration: 0.2), value: editingRoomID)
-    }
-
-    private func roomCardIcon(_ room: RoomConfiguration) -> some View {
-        let nearbyIcon = model.nearbyRooms.first(where: { $0.id == room.id })?.icon
-        let icon = nearbyIcon?.supersedes(room.icon) == true ? nearbyIcon : room.icon
-        return Image(systemName: icon?.symbol ?? (room.isPrivate ? "lock.fill" : "person.3.fill"))
-            .font(.body)
-            .foregroundStyle(.secondary)
-            .frame(width: 24, height: 24)
-    }
-
-    private func roomOptionsMenu(_ room: RoomConfiguration) -> some View {
-        Menu {
-            Button {
-                beginRoomRename(room)
-            } label: {
-                Label("Rename Space", systemImage: "pencil")
-            }
-            Menu {
-                Text("Shared when you join the space")
-                ForEach(RoomIcon.choices, id: \.symbol) { choice in
-                    Button { model.setRoomIcon(roomID: room.id, symbol: choice.symbol) } label: {
-                        Label(choice.name, systemImage: choice.symbol)
-                    }
-                }
-            } label: {
-                Label("Shared Icon", systemImage: "square.grid.2x2")
-            }
-            if room.isPrivate, room.accessKey != nil {
-                Button {
-                    model.copyPrivateInviteKey(roomID: room.id)
-                } label: {
-                    Label("Copy Invite Key", systemImage: "key")
-                }
-            }
-            Divider()
-            Button(role: .destructive) {
-                model.forgetRoom(roomID: room.id)
-            } label: {
-                Label("Forget Space", systemImage: "trash")
-            }
-        } label: {
-            Image(systemName: "ellipsis")
-        }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .frame(width: 24, height: 24)
-        .help("Space options")
-        .accessibilityLabel("Options for \(room.name)")
-    }
-
-    private var normalizedEditedRoomName: String {
-        String(editedRoomName.trimmingCharacters(in: .whitespacesAndNewlines).prefix(40))
-    }
-
-    private func beginRoomRename(_ room: RoomConfiguration) {
-        editedRoomName = room.name
-        withAnimation(reduceMotion ? nil : .snappy(duration: 0.2)) {
-            editingRoomID = room.id
-        }
-        DispatchQueue.main.async { roomRenameFocused = true }
-    }
-
-    private func cancelRoomRename() {
-        roomRenameFocused = false
-        withAnimation(reduceMotion ? nil : .snappy(duration: 0.2)) {
-            editingRoomID = nil
-        }
-        editedRoomName = ""
-    }
-
-    private func commitRoomRename(_ room: RoomConfiguration) {
-        guard model.renameRoom(roomID: room.id, to: normalizedEditedRoomName) else { return }
-        cancelRoomRename()
-    }
 
     private var progressView: some View {
         VStack(spacing: 18) {
@@ -4404,7 +3955,7 @@ struct ALOView: View {
             Text(model.statusText)
                 .font(.system(size: 18, weight: .semibold, design: .rounded))
                 .foregroundStyle(Palette.ink)
-            Text("Building the room around one shared clock.")
+            Text("Building the channel around one shared clock.")
                 .font(.system(size: 12, design: .rounded))
                 .foregroundStyle(Palette.secondary)
         }
@@ -4463,7 +4014,7 @@ struct ALOView: View {
                 .font(.system(size: 22, weight: .light))
                 .foregroundStyle(Palette.red)
             VStack(alignment: .leading, spacing: 7) {
-                Text("The room couldn’t start")
+                Text("The channel couldn’t start")
                     .font(.system(size: 20, weight: .semibold, design: .rounded))
                     .foregroundStyle(Palette.ink)
                 Text(model.errorMessage ?? "Something interrupted ALO.")
@@ -4691,8 +4242,8 @@ struct FloatingRoomView: View {
                     Image(systemName: "gamecontroller.fill").font(.system(size: 15))
                         .frame(width: 32, height: 32)
                 }.buttonStyle(FlatToolButtonStyle(active: false))
-                    .help("A room game is open · Join or spectate")
-                    .accessibilityLabel("Room game invitation")
+                    .help("A channel game is open · Join or spectate")
+                    .accessibilityLabel("Channel game invitation")
             }
 
             roomBarButton(
@@ -4700,7 +4251,7 @@ struct FloatingRoomView: View {
                 activeIcon: "dot.radiowaves.left.and.right",
                 active: model.isHost,
                 disabled: model.mediaSwitchBusy,
-                help: model.isHost ? "Stop broadcasting" : (model.hasBroadcaster ? "Take over room audio" : "Broadcast audio")
+                help: model.isHost ? "Stop broadcasting" : (model.hasBroadcaster ? "Take over channel audio" : "Broadcast audio")
             ) { model.toggleBroadcasting() }
 
             if model.hasBroadcaster || model.isHost {
@@ -4733,8 +4284,8 @@ struct FloatingRoomView: View {
                     .frame(width: 32, height: 32)
             }
             .buttonStyle(FlatToolButtonStyle(active: showsMediaMore))
-            .help("More room controls")
-            .accessibilityLabel("More room controls")
+            .help("More channel controls")
+            .accessibilityLabel("More channel controls")
             .popover(isPresented: $showsMediaMore, arrowEdge: .top) {
                 VStack(alignment: .leading, spacing: 4) {
                     if presentation == .floating && model.floatingSection == .collapsed {
@@ -4773,7 +4324,7 @@ struct FloatingRoomView: View {
                         showsMediaMore = false
                         model.showQueue()
                     } label: {
-                        Label("Room queue", systemImage: "music.note.list")
+                        Label("Channel queue", systemImage: "music.note.list")
                             .frame(maxWidth: .infinity, alignment: .leading).padding(8)
                     }
                     if presentation == .floating {
@@ -4804,8 +4355,8 @@ struct FloatingRoomView: View {
                         .frame(width: 30, height: 32)
                 }
                 .buttonStyle(FlatToolButtonStyle(active: false))
-                .help("Leave room")
-                .accessibilityLabel("Leave room")
+                .help("Leave channel")
+                .accessibilityLabel("Leave channel")
             }
         }
         .padding(.horizontal, 8)
@@ -4958,7 +4509,7 @@ struct FloatingRoomView: View {
             RoundedRectangle(cornerRadius: radius, style: .continuous)
                 .stroke(Palette.stroke, lineWidth: 1)
         )
-        .accessibilityLabel(model.nowPlaying.title.map { "Album artwork for \($0)" } ?? "Audio room")
+        .accessibilityLabel(model.nowPlaying.title.map { "Album artwork for \($0)" } ?? "Audio channel")
     }
 
     private func roomBarButton(
@@ -5082,7 +4633,7 @@ struct FloatingRoomView: View {
                         Text("Nothing queued yet")
                             .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(Palette.ink)
-                        Text("Paste a media link from any Mac in the room.")
+                        Text("Paste a media link from any Mac in the channel.")
                             .font(.system(size: 10))
                             .foregroundStyle(Palette.secondary)
                     }
@@ -5248,7 +4799,7 @@ struct FloatingRoomView: View {
     private var chatHeader: some View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(showsGames ? "Games" : "Room chat")
+                Text(showsGames ? "Games" : "Channel chat")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Palette.ink)
                 Text("\(model.participants.count) here · live")
@@ -5446,22 +4997,6 @@ struct FloatingRoomView: View {
     private var peopleMixer: some View {
         VStack(spacing: 0) {
             Divider().opacity(0.42)
-            if model.activePrivateInviteKey != nil {
-                HStack(spacing: 8) {
-                    Image(systemName: "lock.fill")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(Palette.accent)
-                    Text("Private room")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(Palette.ink)
-                    Spacer()
-                    Button("Copy invite key", action: model.copyPrivateInviteKey)
-                        .buttonStyle(PillButtonStyle(filled: false))
-                }
-                .padding(.horizontal, 12)
-                .frame(height: 44)
-                Divider().opacity(0.42)
-            }
             ScrollView {
                 LazyVStack(spacing: 0) {
                     ForEach(model.participants) { participant in
@@ -5492,7 +5027,7 @@ struct FloatingRoomView: View {
         if participant.isMuted { return "Audio muted" }
         if isLocal && model.audioIsRendering { return "Listening" }
         // Remote output and idle state are not advertised by this protocol.
-        return "In room"
+        return "In channel"
     }
 
     private func participantPresenceColor(_ participant: RoomParticipant) -> Color {
@@ -5590,7 +5125,7 @@ struct FloatingRoomView: View {
                     }
 
                     participantSliderRow(
-                        title: "Room media",
+                        title: "Channel media",
                         systemImage: participant.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill",
                         value: Binding(
                             get: { participant.volume },
@@ -5620,7 +5155,7 @@ struct FloatingRoomView: View {
                         }
                         .buttonStyle(FlatToolButtonStyle(active: participant.isMuted))
                         .disabled(!controllable)
-                        .help(participant.isMuted ? "Unmute room media" : "Mute room media")
+                        .help(participant.isMuted ? "Unmute channel media" : "Mute channel media")
                     }
                     .font(.system(size: 10, weight: .medium))
                     .help("Measured render-clock drift from the broadcaster. Missing or stale reports show as unavailable.")
@@ -5667,7 +5202,7 @@ struct FloatingRoomView: View {
         .padding(.horizontal, 8)
         .frame(height: 26)
         .background(participantDriftColor(participant).opacity(0.10), in: Capsule())
-        .help("Current measured drift from the room broadcaster")
+        .help("Current measured drift from the channel broadcaster")
         .accessibilityLabel("Drift from host")
         .accessibilityValue(timingValue(participant.playbackTiming?.driftMilliseconds))
     }
@@ -5709,11 +5244,11 @@ struct FloatingRoomView: View {
 
             Divider()
             VStack(spacing: 9) {
-                participantDetailRow("Device", value: isLocal ? "This Mac" : "Mac in this room")
+                participantDetailRow("Device", value: isLocal ? "This Mac" : "Mac in this channel")
                 participantDetailRow("ALO version", value: version.map { "v\($0)" } ?? "Not reported")
                 participantDetailRow("Drift from host", value: timingValue(participant.playbackTiming?.driftMilliseconds))
                 participantDetailRow("RTT to host", value: timingValue(participant.playbackTiming?.roundTripMilliseconds))
-                participantDetailRow("Room media", value: participant.isMuted ? "Muted" : "\(Int(participant.volume * 100))%")
+                participantDetailRow("Channel media", value: participant.isMuted ? "Muted" : "\(Int(participant.volume * 100))%")
                 if !isLocal {
                     participantDetailRow("Voice on this Mac", value: "\(Int(model.voiceVolume(for: participant.id) * 100))%")
                 }
@@ -6465,14 +6000,14 @@ struct WalkieTalkieBar: View {
             communicationButton(
                 icon: "slider.horizontal.3",
                 active: false,
-                help: "Room and audio settings",
+                help: "Channel and audio settings",
                 action: onRoomSettings
             )
         } else {
             communicationButton(
                 icon: "slider.horizontal.3",
                 active: showsSettings,
-                help: "Room and audio settings"
+                help: "Channel and audio settings"
             ) {
                 showsSettings.toggle()
             }
