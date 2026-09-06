@@ -15,7 +15,7 @@ final class LyricsController: ObservableObject {
     }
     @Published private(set) var state: State = .disabled
     static let preferenceKey = "lyricsEnabled"
-    static let privacyNotice = "When enabled, track title, artist and album are sent to LRCLIB to find lyrics. Room details and audio are not sent."
+    static let privacyNotice = "When enabled, track title, artist, album and duration are sent to LRCLIB to find lyrics. Room details and audio are not sent."
     private let preferences: UserDefaults
     private let provider: LyricsProvider
     private(set) var track: LyricsTrack?
@@ -39,7 +39,17 @@ final class LyricsController: ObservableObject {
     func setExternalDemand(_ requested: Bool) {
         let previouslyNeeded = needsLyrics
         externalDemand = requested
-        if previouslyNeeded != needsLyrics { refresh() }
+        if previouslyNeeded != needsLyrics {
+            refresh()
+        } else if requested {
+            // Opening the Notch or lock-screen presentation is an explicit retry.
+            // This lets a transient lookup failure recover without requiring a
+            // track change or changing the user's persistent lyrics preference.
+            switch state {
+            case .unavailable, .failed: refresh()
+            default: break
+            }
+        }
     }
     func retry() { refresh() }
     func cancel() { generation = UUID(); task?.cancel(); task = nil; track = nil; state = enabled ? .missingTrack : .disabled }

@@ -15,8 +15,24 @@ struct LyricsTests {
         #expect(parts.queryItems?.first(where: { $0.name == "track_name" })?.value == "Track & title")
         #expect(!request.url!.absoluteString.contains("private"))
         #expect(LyricsTrack(media: .init(title: "Track")) == nil)
+        #expect(LyricsTrack(media: .init(title: "Real Song", artist: "Known Artist",
+                                        playbackControlsAvailable: false)) != nil)
         #expect(LyricsTrack(media: .init(title: "Safari", artist: "Shared app audio",
                                         playbackControlsAvailable: false)) == nil)
+    }
+
+    @Test func exactLookupResolvesARealTrackBeforeAmbiguousSearchResults() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [LyricsFixtureProtocol.self]
+        let provider = LyricsProvider(session: URLSession(configuration: configuration))
+        let track = LyricsTrack(media: .init(
+            title: "Famous Song",
+            artist: "Fixture",
+            album: "An album name that the service may format differently",
+            playbackControlsAvailable: false
+        ))!
+        let result = try await provider.fetch(track)
+        #expect(result.plain == "Synthetic Famous Song line")
     }
 
     @Test func matchingDoesNotGuessBetweenVersions() throws {
@@ -90,12 +106,40 @@ struct LyricsTests {
             try await Task.sleep(for: .milliseconds(20))
         }
         guard case .ready = controller.state else { Issue.record("Expected shared result"); return }
+        let payload = ALONotchFeatureBridge.roomLyricsPayload(controller: controller, hasPlaybackClock: true)
+        guard case .ready = payload.state else { Issue.record("Expected Notch and lock screen payload"); return }
+        #expect(payload.lines.map(\.text) == ["Synthetic Fast line"])
         let result = controller.state
         controller.setExternalDemand(true)
         #expect(controller.state == result)
         #expect(!preferences.bool(forKey: LyricsController.preferenceKey))
         controller.setExternalDemand(false)
         #expect(controller.state == .disabled)
+    }
+
+    @MainActor @Test func openingLockScreenRetriesATransientLyricsFailure() async throws {
+        let suite = "lyrics-retry-" + UUID().uuidString
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        preferences.set(true, forKey: LyricsController.preferenceKey)
+        RetryLyricsFixtureProtocol.state.reset()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [RetryLyricsFixtureProtocol.self]
+        let controller = LyricsController(preferences: preferences,
+            provider: LyricsProvider(session: URLSession(configuration: configuration)))
+        controller.update(media: .init(title: "Retry Song", artist: "Fixture"))
+        for _ in 0..<100 {
+            if case .failed = controller.state { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        guard case .failed = controller.state else { Issue.record("Expected initial transient failure"); return }
+        controller.setExternalDemand(true)
+        for _ in 0..<100 {
+            if case .ready = controller.state { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        guard case .ready(let result) = controller.state else { Issue.record("Expected presentation retry to resolve"); return }
+        #expect(result.plain == "Recovered lyrics")
     }
 
     @MainActor @Test func defaultOffAndLateRequestsCannotReplaceCurrentTrack() async throws {
@@ -134,7 +178,15 @@ private final class LyricsFixtureProtocol: URLProtocol, @unchecked Sendable {
         DispatchQueue.global().asyncAfter(deadline: .now() + (title == "Slow" ? 0.2 : 0.01)) { [self] in
             lock.lock(); let cancelled = stopped; lock.unlock()
             guard !cancelled else { return }
-            let body: [[String: Any]] = [["trackName": title, "artistName": "Fixture", "instrumental": false, "plainLyrics": "Synthetic \(title) line"]]
+            let record: [String: Any] = [
+                "id": 1,
+                "trackName": title,
+                "artistName": "Fixture",
+                "albumName": "Service Album",
+                "instrumental": false,
+                "plainLyrics": "Synthetic \(title) line"
+            ]
+            let body: Any = request.url?.path == "/api/get" ? record : [record, record.merging(["id": 2]) { _, new in new }]
             let data = try! JSONSerialization.data(withJSONObject: body)
             client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: data)
@@ -142,4 +194,41 @@ private final class LyricsFixtureProtocol: URLProtocol, @unchecked Sendable {
         }
     }
     override func stopLoading() { lock.lock(); stopped = true; lock.unlock() }
+}
+
+private final class RetryLyricsFixtureProtocol: URLProtocol, @unchecked Sendable {
+    static let state = RetryLyricsFixtureState()
+    override class func canInit(with request: URLRequest) -> Bool { request.url?.host == "lrclib.net" }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let shouldFail = Self.state.takeFailure()
+        let status = shouldFail ? 503 : 200
+        let body: [String: Any] = [
+            "id": 1,
+            "trackName": "Retry Song",
+            "artistName": "Fixture",
+            "instrumental": false,
+            "plainLyrics": "Recovered lyrics"
+        ]
+        let data = try! JSONSerialization.data(withJSONObject: body)
+        client?.urlProtocol(self, didReceive: HTTPURLResponse(
+            url: request.url!, statusCode: status, httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        )!, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: data)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
+private final class RetryLyricsFixtureState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var failuresRemaining = 3
+    func reset() { lock.lock(); failuresRemaining = 3; lock.unlock() }
+    func takeFailure() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard failuresRemaining > 0 else { return false }
+        failuresRemaining -= 1
+        return true
+    }
 }

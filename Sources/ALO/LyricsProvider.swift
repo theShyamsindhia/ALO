@@ -7,10 +7,14 @@ struct LyricsTrack: Hashable, Sendable {
     let album: String?
     let duration: TimeInterval?
     init?(media: NowPlayingMedia) {
-        guard media.playbackControlsAvailable != false else { return nil }
         guard let title = media.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty,
               let artist = media.artist?.trimmingCharacters(in: .whitespacesAndNewlines), !artist.isEmpty,
               title.count <= 300, artist.count <= 300 else { return nil }
+        // Playback-command availability describes whether ALO may send media keys;
+        // it does not determine whether valid track metadata can resolve lyrics.
+        // App-scoped capture publishes these placeholders instead of song metadata.
+        guard artist.caseInsensitiveCompare("Shared app audio") != .orderedSame,
+              artist.caseInsensitiveCompare("Live DJ mix") != .orderedSame else { return nil }
         self.title = title; self.artist = artist
         let album = media.album?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.album = album?.isEmpty == false ? String(album!.prefix(300)) : nil
@@ -35,6 +39,7 @@ enum LyricsError: Error, Equatable {
 }
 
 struct LyricsRecord: Decodable, Sendable {
+    let id: Int?
     let trackName: String
     let artistName: String
     let albumName: String?
@@ -43,8 +48,9 @@ struct LyricsRecord: Decodable, Sendable {
     let plainLyrics: String?
     let syncedLyrics: String?
 
-    init(trackName: String, artistName: String, albumName: String? = nil, duration: TimeInterval? = nil,
+    init(id: Int? = nil, trackName: String, artistName: String, albumName: String? = nil, duration: TimeInterval? = nil,
          instrumental: Bool, plainLyrics: String?, syncedLyrics: String?) {
+        self.id = id
         self.trackName = trackName
         self.artistName = artistName
         self.albumName = albumName
@@ -79,17 +85,60 @@ actor LyricsProvider {
     func fetch(_ track: LyricsTrack) async throws -> LyricsResult {
         if let cached = cache[track] { return cached }
         guard Date() >= blockedUntil else { throw LyricsError.rateLimited(blockedUntil) }
+
+        for request in Self.exactRequests(track) {
+            do {
+                if let data = try await responseData(for: request, allowsNotFound: true),
+                   let record = try? JSONDecoder().decode(LyricsRecord.self, from: data),
+                   let result = try? Self.select([record], for: track) {
+                    store(result, for: track)
+                    return result
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch LyricsError.rateLimited(let retryDate) {
+                throw LyricsError.rateLimited(retryDate)
+            } catch {
+                // LRCLIB can answer an exact miss with 503. Continue through the
+                // less restrictive exact requests and then its search endpoint.
+            }
+        }
+
+        var receivedSearchResponse = false
+        var lastSearchError: Error?
+        for request in Self.searchRequests(track) {
+            do {
+                guard let data = try await responseData(for: request, allowsNotFound: false) else { continue }
+                let records = try JSONDecoder().decode([LyricsRecord].self, from: data)
+                receivedSearchResponse = true
+                guard let result = try? Self.select(records, for: track) else { continue }
+                store(result, for: track)
+                return result
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch LyricsError.rateLimited(let retryDate) {
+                throw LyricsError.rateLimited(retryDate)
+            } catch {
+                lastSearchError = error
+            }
+        }
+        if !receivedSearchResponse, let lastSearchError { throw lastSearchError }
+        throw LyricsError.unavailable
+    }
+
+    private func responseData(for request: URLRequest, allowsNotFound: Bool) async throws -> Data? {
         let delay = max(0, nextRequest.timeIntervalSinceNow)
         nextRequest = max(Date(), nextRequest).addingTimeInterval(0.5)
         if delay > 0 { try await Task.sleep(for: .seconds(delay)) }
         try Task.checkCancellation()
         guard Date() >= blockedUntil else { throw LyricsError.rateLimited(blockedUntil) }
-        let (bytes, response) = try await session.bytes(for: Self.request(track))
+        let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse else { throw LyricsError.invalidResponse }
         if http.statusCode == 429 {
             blockedUntil = Self.retryDate(http.value(forHTTPHeaderField: "Retry-After"))
             throw LyricsError.rateLimited(blockedUntil)
         }
+        if http.statusCode == 404, allowsNotFound { return nil }
         guard http.statusCode == 200 else { throw http.statusCode == 404 ? LyricsError.unavailable : LyricsError.serviceUnavailable }
         guard response.expectedContentLength <= 512_000 else { throw LyricsError.invalidResponse }
         var data = Data()
@@ -98,33 +147,76 @@ actor LyricsProvider {
             guard data.count < 512_000 else { throw LyricsError.invalidResponse }
             data.append(byte)
         }
-        let records: [LyricsRecord]
-        do { records = try JSONDecoder().decode([LyricsRecord].self, from: data) }
-        catch { throw LyricsError.invalidResponse }
-        let result = try Self.select(records, for: track)
+        return data
+    }
+
+    private func store(_ result: LyricsResult, for track: LyricsTrack) {
         cache[track] = result; order.append(track)
         while order.count > 8 { cache.removeValue(forKey: order.removeFirst()) }
-        return result
     }
 
     nonisolated static func request(_ track: LyricsTrack) -> URLRequest {
-        var components = URLComponents(string: "https://lrclib.net/api/search")!
-        components.queryItems = [URLQueryItem(name: "track_name", value: track.title), URLQueryItem(name: "artist_name", value: track.artist)]
-        if let album = track.album { components.queryItems?.append(URLQueryItem(name: "album_name", value: album)) }
-        var request = URLRequest(url: components.url!)
-        request.setValue("ALO lyrics (https://github.com/theShyamsindhia/WERAI)", forHTTPHeaderField: "User-Agent")
+        structuredRequest(track, endpoint: "search", includeAlbum: true, includeDuration: false)
+    }
+
+    nonisolated static func exactRequests(_ track: LyricsTrack) -> [URLRequest] {
+        let requests = [
+            structuredRequest(track, endpoint: "get", includeAlbum: true, includeDuration: true),
+            structuredRequest(track, endpoint: "get", includeAlbum: false, includeDuration: false)
+        ]
+        var seen = Set<URL>()
+        return requests.filter { seen.insert($0.url!).inserted }
+    }
+
+    nonisolated static func searchRequests(_ track: LyricsTrack) -> [URLRequest] {
+        var requests = [
+            structuredRequest(track, endpoint: "search", includeAlbum: false, includeDuration: true)
+        ]
+        var query = URLComponents(string: "https://lrclib.net/api/search")!
+        query.queryItems = [URLQueryItem(name: "q", value: "\(track.artist) \(track.title)")]
+        requests.append(configuredRequest(url: query.url!))
+        var seen = Set<URL>()
+        return requests.filter { seen.insert($0.url!).inserted }
+    }
+
+    nonisolated private static func structuredRequest(
+        _ track: LyricsTrack,
+        endpoint: String,
+        includeAlbum: Bool,
+        includeDuration: Bool
+    ) -> URLRequest {
+        var components = URLComponents(string: "https://lrclib.net/api/\(endpoint)")!
+        components.queryItems = [
+            URLQueryItem(name: "track_name", value: track.title),
+            URLQueryItem(name: "artist_name", value: track.artist)
+        ]
+        if includeAlbum, let album = track.album {
+            components.queryItems?.append(URLQueryItem(name: "album_name", value: album))
+        }
+        if includeDuration, let duration = track.duration {
+            components.queryItems?.append(URLQueryItem(name: "duration", value: String(Int(duration.rounded()))))
+        }
+        return configuredRequest(url: components.url!)
+    }
+
+    nonisolated private static func configuredRequest(url: URL) -> URLRequest {
+        var request = URLRequest(url: url)
+        request.setValue("ALO lyrics (https://github.com/theShyamsindhia/ALO)", forHTTPHeaderField: "User-Agent")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         return request
     }
 
     nonisolated static func select(_ records: [LyricsRecord], for track: LyricsTrack) throws -> LyricsResult {
         func normalized(_ value: String) -> String { value.trimmingCharacters(in: .whitespacesAndNewlines).folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX")) }
-        let matches = records.filter {
+        var matches = records.filter {
             normalized($0.trackName) == normalized(track.title) && normalized($0.artistName) == normalized(track.artist)
-                && (track.album == nil || normalized($0.albumName ?? "") == normalized(track.album!))
         }
         guard !matches.isEmpty else { throw LyricsError.unavailable }
         guard matches.count <= 100 else { throw LyricsError.invalidResponse }
+        if let album = track.album {
+            let albumMatches = matches.filter { normalized($0.albumName ?? "") == normalized(album) }
+            if !albumMatches.isEmpty { matches = albumMatches }
+        }
         var preferred = matches
         if let duration = track.duration {
             let measured = matches.compactMap { record -> (LyricsRecord, TimeInterval)? in
@@ -138,7 +230,7 @@ actor LyricsProvider {
             }
         }
         let synchronized = preferred.filter { !($0.syncedLyrics?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) }
-        if synchronized.count == 1 { preferred = synchronized }
+        if !synchronized.isEmpty { preferred = synchronized }
 
         let results = try preferred.map { record in
             guard (record.plainLyrics?.utf8.count ?? 0) <= 128_000,

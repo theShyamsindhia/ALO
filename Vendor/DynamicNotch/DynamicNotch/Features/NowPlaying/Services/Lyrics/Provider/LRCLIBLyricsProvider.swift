@@ -37,13 +37,17 @@ final class LRCLIBLyricsProvider: LyricsProviding {
     private let decoder = JSONDecoder()
     private var cache = BoundedCache<String, CacheEntry>(capacity: 128)
 
-    init() {
-        let configuration = URLSessionConfiguration.default
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        configuration.urlCache = nil
-        configuration.timeoutIntervalForRequest = 30
-        configuration.timeoutIntervalForResource = 45
-        session = URLSession(configuration: configuration)
+    init(session: URLSession? = nil) {
+        if let session {
+            self.session = session
+        } else {
+            let configuration = URLSessionConfiguration.default
+            configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+            configuration.urlCache = nil
+            configuration.timeoutIntervalForRequest = 30
+            configuration.timeoutIntervalForResource = 45
+            self.session = URLSession(configuration: configuration)
+        }
     }
 
     func lyrics(for snapshot: NowPlayingSnapshot) async throws -> TrackLyrics? {
@@ -71,7 +75,10 @@ final class LRCLIBLyricsProvider: LyricsProviding {
             return nil
         }
 
-        let data = try await data(from: url, allowsNotFound: true)
+        // LRCLIB currently returns either 404 or 503 when an exact combination
+        // is not present. Both are misses here, so the bounded search fallback
+        // below still gets a chance to resolve the track.
+        let data = try await data(from: url, allowsExactMiss: true)
         guard let data else { return nil }
 
         let response = try decoder.decode(Response.self, from: data)
@@ -97,7 +104,7 @@ final class LRCLIBLyricsProvider: LyricsProviding {
                 continue
             }
 
-            guard let data = try await data(from: url, allowsNotFound: false) else {
+            guard let data = try await data(from: url, allowsExactMiss: false) else {
                 continue
             }
 
@@ -137,7 +144,7 @@ final class LRCLIBLyricsProvider: LyricsProviding {
         return items
     }
 
-    private func data(from url: URL, allowsNotFound: Bool) async throws -> Data? {
+    private func data(from url: URL, allowsExactMiss: Bool) async throws -> Data? {
         var request = URLRequest(url: url)
         request.setValue(
             "DynamicNotch/1.0 (https://github.com/jackson-storm/DynamicNotch)",
@@ -152,7 +159,8 @@ final class LRCLIBLyricsProvider: LyricsProviding {
         switch httpResponse.statusCode {
         case 200..<300:
             return data
-        case 404 where allowsNotFound:
+        case 404, 503:
+            guard allowsExactMiss else { throw URLError(.badServerResponse) }
             return nil
         default:
             throw URLError(.badServerResponse)
