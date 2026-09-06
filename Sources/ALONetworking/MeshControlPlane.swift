@@ -272,6 +272,8 @@ public final class MeshControlPlane: @unchecked Sendable {
     private var lastSeenNanos = [String: UInt64]()
     private var remoteParticipants = [String: RoomParticipant]()
     private var lastPublishedParticipants = [RoomParticipant]()
+    private var playbackReports: [String: (timing: PeerPlaybackTiming, received: UInt64, broadcaster: String, epoch: UInt64)] = [:]
+    private var lastPlaybackReportSend: UInt64 = 0
     private var reconnectAttempts = [String: Int]()
     private var reconnectWorkItems = [String: DispatchWorkItem]()
     private var seenRoomActionIDs = Set<String>()
@@ -662,6 +664,7 @@ public final class MeshControlPlane: @unchecked Sendable {
             secureAdmissions.removeAll()
             peerDirectory.removeAll()
             remoteParticipants.removeAll()
+            playbackReports.removeAll()
             lastPublishedParticipants.removeAll()
             reconnectWorkItems.removeAll()
             reconnectAttempts.removeAll()
@@ -954,6 +957,20 @@ public final class MeshControlPlane: @unchecked Sendable {
                     mediaServiceName: nil
                 )
             }
+        }
+    }
+
+    public func publishPlaybackTiming(_ timing: PeerPlaybackTiming) {
+        queue.async { [self] in
+            guard timing.isValid, let current = replica.broadcaster else { return }
+            let now = MonotonicClock.nowNanos()
+            // Bound diagnostic traffic independently of render/timer frequency.
+            guard now >= lastPlaybackReportSend, now - lastPlaybackReportSend >= 500_000_000 else { return }
+            lastPlaybackReportSend = now
+            playbackReports[nodeID] = (timing, now, current.nodeID, current.epoch)
+            broadcast(MeshEnvelope(type: "playback_timing", nodeID: nodeID,
+                broadcasterID: current.nodeID, broadcasterEpoch: current.epoch, playbackTiming: timing))
+            publishParticipants()
         }
     }
 
@@ -1513,6 +1530,16 @@ public final class MeshControlPlane: @unchecked Sendable {
 
         guard link.authenticated, let remoteID = link.nodeID, peers[remoteID] === link else { return }
         switch envelope.type {
+        case "playback_timing":
+            guard envelope.nodeID == remoteID, let timing = envelope.playbackTiming, timing.isValid,
+                  let current = replica.broadcaster, envelope.broadcasterID == current.nodeID,
+                  envelope.broadcasterEpoch == current.epoch else { return }
+            let now = MonotonicClock.nowNanos()
+            if let prior = playbackReports[remoteID], now >= prior.received,
+               now - prior.received < 500_000_000 { return }
+            // Only accept reports directly from the authenticated reporting device.
+            playbackReports[remoteID] = (timing, now, current.nodeID, current.epoch)
+            publishParticipants()
         case "mesh_peer_directory":
             guard room.transportPolicy == .secureV2 else { return }
             receiveSecureDirectory(envelope.meshPeerDirectory ?? [], from: link)
@@ -1978,6 +2005,16 @@ public final class MeshControlPlane: @unchecked Sendable {
         }
     }
 
+    private func freshPlaybackTiming(for id: String, now: UInt64) -> PeerPlaybackTiming? {
+        guard let report = playbackReports[id],
+              report.timing.isFresh(receivedAt: report.received, now: now),
+              let broadcaster = replica.broadcaster,
+              broadcaster.nodeID == report.broadcaster,
+              broadcaster.epoch == report.epoch,
+              replica.nowPlaying.isPlaying != false else { return nil }
+        return report.timing
+    }
+
     private func publishParticipants() {
         let now = MonotonicClock.nowNanos()
         let local = RoomParticipant(
@@ -1993,7 +2030,14 @@ public final class MeshControlPlane: @unchecked Sendable {
             }) == true else { return nil }
             return participant
         }
-        let participants = ([local] + remote).sorted { $0.name < $1.name }
+        var participants: [RoomParticipant] = []
+        for identity in [local] + remote {
+            var participant = identity
+            // Identity caches are never a source of timing truth.
+            participant.playbackTiming = freshPlaybackTiming(for: identity.id, now: now)
+            participants.append(participant)
+        }
+        participants.sort { $0.name < $1.name }
         guard participants != lastPublishedParticipants else { return }
         lastPublishedParticipants = participants
         participantsHandler(participants)
@@ -2005,6 +2049,7 @@ public final class MeshControlPlane: @unchecked Sendable {
         let wasCanonical = disconnectedID.map { peers[$0] === link } ?? false
         if let id = disconnectedID, wasCanonical {
             peers.removeValue(forKey: id)
+            playbackReports.removeValue(forKey: id)
             chatAttachmentAssembler.discard(senderID: id)
         }
         if room.transportPolicy == .secureV2 {
@@ -2127,6 +2172,7 @@ public final class MeshControlPlane: @unchecked Sendable {
             broadcast(MeshEnvelope(type: "heartbeat", nodeID: nodeID, heartbeatSequence: heartbeatSequence, heartbeatGeneration: heartbeatGeneration))
             retireExpiredBroadcasterIfNeeded(nowNanos: now)
             expireDisconnectedParticipantsIfNeeded(nowNanos: now)
+            publishParticipants() // Expire stale playback telemetry even on an otherwise quiet room.
             if room.transportPolicy == .secureV2 {
                 repairSecureDirectory(nowNanos: now)
                 if now >= lastDirectoryPublishNanos, now - lastDirectoryPublishNanos >= 5_000_000_000 {

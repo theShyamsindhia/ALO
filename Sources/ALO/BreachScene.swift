@@ -57,12 +57,24 @@ final class BreachScene {
         let ambient = SCNNode(); ambient.light = SCNLight(); ambient.light?.type = .ambient
         ambient.light?.color = NSColor(calibratedRed: 0.66, green: 0.76, blue: 0.87, alpha: 1)
         ambient.light?.intensity = 470; scene.rootNode.addChildNode(ambient)
-        if let url = Bundle.module.url(forResource: "concrete", withExtension: "png", subdirectory: "Breach"), let texture = NSImage(contentsOf: url) {
+        if let url = GameResources.concreteURL(), let texture = NSImage(contentsOf: url) {
             concrete.diffuse.contents = texture
             concrete.diffuse.wrapS = .repeat; concrete.diffuse.wrapT = .repeat
         }
         buildYard()
         buildObjectives()
+    }
+
+    /// Used on the distributed app in CI, outside the SwiftPM build machine.
+    static func verifyPackagedResources() throws {
+        guard let url = GameResources.concreteURL(), NSImage(contentsOf: url) != nil else {
+            throw ALOError("Breach texture missing or unreadable in packaged resources")
+        }
+        let preview = BreachScene()
+        guard !preview.scene.rootNode.childNodes.isEmpty else {
+            throw ALOError("Breach scene failed to initialize")
+        }
+        print("Breach packaged resources and scene initialization verified")
     }
 
     func setGraphics(shadows: Bool, fov: Double) {

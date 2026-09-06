@@ -133,6 +133,15 @@ final class MeshSession {
         )
     }
 
+    func publishPlaybackTiming(_ timing: ReceiverTimingDiagnostics?) {
+        let freshDrift = timing.flatMap { sample -> Double? in
+            guard let age = sample.driftMeasurementAgeMilliseconds, age >= 0, age <= 250 else { return nil }
+            return sample.currentDriftMilliseconds
+        }
+        control.publishPlaybackTiming(PeerPlaybackTiming(
+            roundTripMilliseconds: timing?.roundTripMilliseconds, driftMilliseconds: freshDrift))
+    }
+
     func diagnosticsSnapshot() -> SessionTimingDiagnostics? {
         if let hostSession { return hostSession.diagnosticsSnapshot() }
         if let secureReceiver { return SessionTimingDiagnostics(receiver: secureReceiver.diagnosticsSnapshot(), host: nil) }

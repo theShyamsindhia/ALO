@@ -20,6 +20,8 @@ public struct RoomParticipant: Codable, Sendable, Equatable, Identifiable {
     public let icon: String?
     public let colorHex: String?
     public let profileImageData: Data?
+    /// Ephemeral display data, never persisted or encoded in participant identity.
+    public var playbackTiming: PeerPlaybackTiming? = nil
 
     public init(
         id: String,

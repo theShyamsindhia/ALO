@@ -28,3 +28,43 @@ public struct LocalAudioSyncPolicy: Sendable {
         return true
     }
 }
+
+/// Difference between the scheduled room timeline and the player's render clock.
+/// This measures software playout timing; it cannot measure acoustic speaker delay.
+public struct RenderDriftEstimate: Sendable {
+    public static let maximumAgeNanos: UInt64 = 250_000_000
+    public let errorSeconds: Double
+    public let magnitudeNanos: UInt64
+
+    public init?(nowNanos: UInt64, renderLocalNanos: UInt64, renderHostNanos: UInt64,
+                 outputLatencyNanos: UInt64, captureAnchorNanos: UInt64,
+                 playoutDelayNanos: UInt64, sampleTime: Int64, sampleRate: Double) {
+        guard nowNanos >= renderLocalNanos,
+              nowNanos - renderLocalNanos <= Self.maximumAgeNanos,
+              sampleTime >= 0, sampleRate.isFinite, sampleRate > 0 else { return nil }
+        let audible = renderHostNanos.addingReportingOverflow(outputLatencyNanos)
+        let start = captureAnchorNanos.addingReportingOverflow(playoutDelayNanos)
+        guard !audible.overflow, !start.overflow, audible.partialValue >= start.partialValue else { return nil }
+        errorSeconds = Double(audible.partialValue - start.partialValue) / 1_000_000_000
+            - Double(sampleTime) / sampleRate
+        let magnitude = abs(errorSeconds) * 1_000_000_000
+        guard magnitude.isFinite, magnitude < Double(UInt64.max) else { return nil }
+        magnitudeNanos = UInt64(magnitude)
+    }
+}
+
+/// Checks that content timestamps still describe the PCM timeline being played.
+/// Packet loss preserves frame indices; missing source PCM does not.
+public enum CaptureTimelineAlignment: Sendable, Equatable {
+    case aligned, stale, discontinuous
+
+    public static func check(frameIndex: UInt64, captureNanos: UInt64,
+                             anchorFrameIndex: UInt64, anchorCaptureNanos: UInt64) -> Self {
+        guard frameIndex >= anchorFrameIndex, captureNanos >= anchorCaptureNanos else { return .stale }
+        let elapsedNanos = Double(captureNanos - anchorCaptureNanos)
+        let frameNanos = Double(frameIndex - anchorFrameIndex)
+            * 1_000_000_000 / Double(AudioPacket.sampleRate)
+        return abs(elapsedNanos - frameNanos) > Double(LocalAudioSyncPolicy.thresholdNanos)
+            ? .discontinuous : .aligned
+    }
+}

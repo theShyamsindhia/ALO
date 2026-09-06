@@ -3197,6 +3197,7 @@ final class ALOViewModel: ObservableObject {
             invalidateLiveSyncSample()
             return
         }
+        session.publishPlaybackTiming(freshTiming.receiver)
         if localAudioTiming != freshTiming.receiver { localAudioTiming = freshTiming.receiver }
         let result = diagnosticRoomContext(timing: freshTiming).result
         if liveSyncHealth.recentTransitions.last?.outcome != result.outcome {
@@ -3214,6 +3215,7 @@ final class ALOViewModel: ObservableObject {
     }
 
     private func invalidateLiveSyncSample() {
+        meshSession?.publishPlaybackTiming(nil)
         if localAudioTiming != nil { localAudioTiming = nil }
         // Guard before mutating the @Published value: even an unchanged inout
         // write would otherwise redraw the whole model on every idle timer tick.
@@ -5135,6 +5137,11 @@ struct FloatingRoomView: View {
         return Palette.secondary.opacity(0.7)
     }
 
+    private func timingValue(_ value: Double?) -> String {
+        guard let value, value.isFinite else { return "Unavailable" }
+        return String(format: "%.0f ms", value)
+    }
+
     private func floatingParticipant(_ participant: RoomParticipant) -> some View {
         let controllable = model.canControl(participant)
         let appearance = DeviceAppearance.generated(from: participant.id)
@@ -5202,6 +5209,16 @@ struct FloatingRoomView: View {
         .padding(.horizontal, 8)
         .frame(height: 64)
         .opacity(controllable ? 1 : 0.68)
+          HStack(spacing: 12) {
+            Text("RTT to broadcaster: " + timingValue(participant.playbackTiming?.roundTripMilliseconds))
+            Text("Estimated drift: " + timingValue(participant.playbackTiming?.driftMilliseconds))
+            Spacer(minLength: 0)
+          }
+          .font(.system(size: 10, design: .monospaced))
+          .foregroundStyle(Palette.secondary)
+          .padding(.leading, 51)
+          .padding(.bottom, 10)
+          .help("Reported by this device. RTT is network round-trip time to the broadcaster; estimated drift compares its audio render timeline with the room schedule, not sound measured from speakers. Unavailable means no fresh report, including older app versions.")
           if participant.id != model.currentParticipantID {
             HStack(spacing: 10) {
                 Label("Voice on this Mac", systemImage: "mic.fill")

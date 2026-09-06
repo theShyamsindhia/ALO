@@ -252,6 +252,7 @@ else
     run_codesign "${codesign_arguments[@]}" "$app"
 fi
 codesign --verify --deep --strict --verbose=2 "$app"
+"$app/Contents/MacOS/alo" verify-game-resources
 
 if $development_build; then
     echo "Created $app with isolated bundle id $bundle_identifier"

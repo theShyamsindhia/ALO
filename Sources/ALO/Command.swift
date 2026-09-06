@@ -30,6 +30,9 @@ enum ALOCommand {
             }
 
             switch command {
+            case "verify-game-resources":
+                try BreachScene.verifyPackagedResources()
+
             case "breach":
                 BreachStandalone.run()
 

@@ -241,7 +241,7 @@ final class SynchronizedPlayer {
         }
 
         guard let offset = clockOffsetNanos,
-              let anchorFrameIndex,
+              anchorFrameIndex != nil,
               let anchorCaptureNanos,
               let renderTime,
               renderTime.isHostTimeValid,
@@ -251,19 +251,20 @@ final class SynchronizedPlayer {
         let renderLocalNanos = MonotonicClock.ticksToNanos(renderTime.hostTime)
         guard let renderHostNanos = RoomTiming.hostTimeNanos(clientTimeNanos: renderLocalNanos,
                                                            clockOffsetNanos: offset) else { return }
-        let audibleHostNanos = renderHostNanos &+ outputLatencyNanos
-        let timelineStart = anchorCaptureNanos &+ targetLatencyNanos
-        let expectedNanos = audibleHostNanos > timelineStart
-            ? audibleHostNanos - timelineStart
-            : 0
-        let expectedFrames = Double(expectedNanos)
-            * Double(AudioPacket.sampleRate) / 1_000_000_000
-        let actualFrame = Double(anchorFrameIndex) + Double(playerTime.sampleTime)
-        let errorFrames = Double(anchorFrameIndex) + expectedFrames - actualFrame
-        let absoluteErrorNanos = UInt64(
-            abs(errorFrames) * 1_000_000_000 / Double(AudioPacket.sampleRate)
-        )
-        latestDriftMeasurement = (absoluteErrorNanos, now)
+        guard playerTime.isSampleTimeValid,
+              let lastPacketReceivedNanos,
+              now >= lastPacketReceivedNanos,
+              now - lastPacketReceivedNanos <= 500_000_000,
+              let estimate = RenderDriftEstimate(
+                nowNanos: now, renderLocalNanos: renderLocalNanos,
+                renderHostNanos: renderHostNanos, outputLatencyNanos: outputLatencyNanos,
+                captureAnchorNanos: anchorCaptureNanos, playoutDelayNanos: targetLatencyNanos,
+                sampleTime: playerTime.sampleTime, sampleRate: playerTime.sampleRate
+              ) else { return }
+        let absoluteErrorNanos = estimate.magnitudeNanos
+        // Age belongs to the audio render sample, not the polling timer.
+        latestDriftMeasurement = (absoluteErrorNanos, renderLocalNanos)
+        let errorFrames = estimate.errorSeconds * Double(AudioPacket.sampleRate)
         if automaticSyncPolicy.shouldRealign(driftNanos: absoluteErrorNanos, now: now) {
             latestLatenessNanos = absoluteErrorNanos
             hardResynchronize()
@@ -293,6 +294,25 @@ final class SynchronizedPlayer {
                 }
                 concealMissingPacketIfNeeded(sequence: sequence, offset: offset)
                 return
+            }
+
+            if hasStarted, let anchorFrameIndex, let anchorCaptureNanos {
+                switch CaptureTimelineAlignment.check(
+                    frameIndex: packet.frameIndex, captureNanos: packet.captureTimeNanos,
+                    anchorFrameIndex: anchorFrameIndex, anchorCaptureNanos: anchorCaptureNanos
+                ) {
+                case .stale:
+                    expectedSequence = sequence &+ 1
+                    continue
+                case .discontinuous:
+                    // A source tap can skip PCM while its frame counter remains
+                    // contiguous. Appending it would compress the capture gap,
+                    // even while the render clock reports zero timing error.
+                    // Re-anchor only this renderer to the packet's real timestamp.
+                    hardResynchronize()
+                case .aligned:
+                    break
+                }
             }
 
             guard let localCaptureNanos = RoomTiming.clientTimeNanos(hostTimeNanos: packet.captureTimeNanos,
@@ -379,8 +399,12 @@ final class SynchronizedPlayer {
         if !hasStarted { return "Waiting for live audio" }
         if !automaticSyncPolicy.enabled { return "Automatic drift realignment off" }
         if automaticSyncPolicy.isCoolingDown(at: MonotonicClock.nowNanos()) { return "Settling after realignment" }
-        if latestDriftMeasurement == nil { return "Waiting for a fresh timing measurement" }
-        return "Watching local audio timing"
+        guard let sample = latestDriftMeasurement,
+              MonotonicClock.nowNanos() >= sample.time,
+              MonotonicClock.nowNanos() - sample.time <= RenderDriftEstimate.maximumAgeNanos
+        else { return "Waiting for a fresh timing measurement" }
+        return sample.magnitude >= LocalAudioSyncPolicy.thresholdNanos
+            ? "Checking sustained playback drift" : "Watching estimated playback timing"
     }
 
     func setTargetLatencyNanos(_ nanos: UInt64) {

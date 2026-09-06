@@ -181,10 +181,10 @@ struct RoomPreferencesView: View {
                             metric("Network round trip", timing.roundTripMilliseconds)
                             metric("Room playback delay", timing.activePlayoutBufferMilliseconds)
                             metric("Output delay", timing.outputLatencyMilliseconds)
-                            if let age = timing.driftMeasurementAgeMilliseconds, age <= 1500 {
-                                metric("Current drift", timing.currentDriftMilliseconds)
+                            if let age = timing.driftMeasurementAgeMilliseconds, age <= 250 {
+                                metric("Estimated playback drift", timing.currentDriftMilliseconds)
                             } else {
-                                Text("Current drift · measuring…")
+                                Text("Estimated playback drift · measuring…")
                             }
                             Text("Automatic sync · \(timing.automaticSyncState ?? "waiting")")
                         } else {
@@ -196,7 +196,7 @@ struct RoomPreferencesView: View {
                     .padding(.top, 8)
                 } label: {
                     settingLabel("Timing details",
-                                 help: "Network delay and playback drift are separate. Sync corrects alignment; it cannot reduce network latency.")
+                                 help: "Playback drift compares this Mac’s render clock with the room timeline, including the output delay reported by macOS. It cannot measure sound leaving speakers or unreported Bluetooth delay. A near-zero estimate does not prove every speaker is audibly aligned.")
                 }
             }
 

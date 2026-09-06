@@ -504,6 +504,7 @@ public struct MeshEnvelope: Codable, Sendable {
     public let openLine: OpenLineMessage?
     public let meshListeningPort: UInt16?
     public let meshPeerDirectory: [MeshPeerDirectoryHint]?
+    public let playbackTiming: PeerPlaybackTiming?
     public let arenaData: Data?
     public let chatAttachmentPacket: RoomChatAttachmentPacket?
 
@@ -542,6 +543,7 @@ public struct MeshEnvelope: Codable, Sendable {
         openLine: OpenLineMessage? = nil,
         meshListeningPort: UInt16? = nil,
         meshPeerDirectory: [MeshPeerDirectoryHint]? = nil,
+        playbackTiming: PeerPlaybackTiming? = nil,
         arenaData: Data? = nil,
         chatAttachmentPacket: RoomChatAttachmentPacket? = nil
     ) {
@@ -579,6 +581,7 @@ public struct MeshEnvelope: Codable, Sendable {
         self.openLine = openLine
         self.meshListeningPort = meshListeningPort
         self.meshPeerDirectory = meshPeerDirectory
+        self.playbackTiming = playbackTiming
         self.arenaData = arenaData
         self.chatAttachmentPacket = chatAttachmentPacket
     }
