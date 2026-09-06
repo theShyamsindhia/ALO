@@ -56,6 +56,18 @@ final class EmbeddedSettingsRoutingTests: XCTestCase {
         }
     }
 
+    func testDismissalClearsThePendingDestination() async {
+        withRuntime { runtime in
+            runtime.onSettingsRequested = {}
+            XCTAssertTrue(runtime.requestEmbeddedSettings(.subPage(.notch)))
+            XCTAssertNotNil(runtime.requestedSettingsDestination())
+
+            runtime.resetEmbeddedSettingsNavigation()
+
+            XCTAssertNil(runtime.requestedSettingsDestination())
+        }
+    }
+
     func testMissingHostCallbackDeclinesRoutingWithoutChangingPendingDestination() async {
         withRuntime { runtime in
             XCTAssertFalse(runtime.requestEmbeddedSettings(.section(.vpn)))

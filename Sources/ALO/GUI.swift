@@ -1019,6 +1019,7 @@ private final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
 
     func popoverDidClose(_ notification: Notification) {
         model.setMenuBarPopoverVisible(false)
+        ALONotchFeatureBridge.shared.dismissSettings()
     }
 
     @objc private func handleStatusItemClick(_ sender: NSStatusBarButton) {
