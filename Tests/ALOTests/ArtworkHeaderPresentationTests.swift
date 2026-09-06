@@ -14,17 +14,18 @@ extension NativePresentationTests {
             let palette = ArtworkPalette(accentHex: "DF6732", secondaryHex: "397DC2", tertiaryHex: "789950")
             let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
             for dark in [false, true] {
-                    for artwork in [false, true] {
-                        let renderer = ImageRenderer(content: ArtworkHeaderBackground(palette: artwork ? palette : nil)
-                            .environment(\.colorScheme, dark ? .dark : .light)
-                            .frame(width: 120, height: 60))
-                        let image = try #require(renderer.nsImage)
-                        let bitmap = try #require(NSBitmapImageRep(data: try #require(image.tiffRepresentation)))
-                        let alpha = try #require(bitmap.colorAt(x: 60, y: 30)).alphaComponent
-                        if reduced { #expect(alpha > 0.99) }
-                        else if artwork { #expect(alpha > 0.05 && alpha < 0.3) }
-                        else { #expect(alpha < 0.01) }
-                    }
+                for artwork in [false, true] {
+                    let renderer = ImageRenderer(content: ArtworkHeaderBackground(palette: artwork ? palette : nil)
+                        .environment(\.colorScheme, dark ? .dark : .light)
+                        .frame(width: 120, height: 60))
+                    let image = try #require(renderer.nsImage)
+                    let data = try #require(image.tiffRepresentation)
+                    let bitmap = try #require(NSBitmapImageRep(data: data))
+                    let alpha = try #require(bitmap.colorAt(x: 60, y: 30)).alphaComponent
+                    if reduced { #expect(alpha > 0.99) }
+                    else if artwork { #expect(alpha > 0.05 && alpha < 0.3) }
+                    else { #expect(alpha < 0.01) }
+                }
             }
         }
 
