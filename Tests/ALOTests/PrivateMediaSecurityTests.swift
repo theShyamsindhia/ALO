@@ -13,6 +13,7 @@ struct PrivateMediaSecurityTests {
         let wrongRoom = RoomConfiguration(id: room.id, name: room.name, isPrivate: true, accessKey: UUID().uuidString)
         let wrong = try #require(try RoomMediaSecurity.forRoom(wrongRoom, serviceName: "source"))
         let otherSource = try #require(try RoomMediaSecurity.forRoom(room, serviceName: "another-source"))
+        #expect(security.tcp().allowLocalEndpointReuse)
         let session = UUID()
         let packet = try security.audioSealer(sessionID: session).seal(Data([42]))
         let opener = try security.audioOpener(sessionID: session)

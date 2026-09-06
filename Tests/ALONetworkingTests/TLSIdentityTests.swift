@@ -7,6 +7,18 @@ import Testing
 
 @Suite("Installation TLS identity", .serialized)
 struct TLSIdentityTests {
+    @Test func secureRoomTCPAllowsSimultaneousListenAndDialEndpoints() throws {
+        let identity = try InstallationIdentity.ephemeral()
+        let parameters = try SecureNetworkParameters.tcp(
+            identity: identity,
+            expectedPeerID: nil,
+            pins: MemoryPeerPinStore(),
+            firstContact: .explicitRoomJoin,
+            verificationQueue: DispatchQueue(label: "alo.tests.secure-endpoint-reuse")
+        )
+        #expect(parameters.allowLocalEndpointReuse)
+    }
+
     @Test func ephemeralCertificateParsesAndSignatureVerifiesWithoutKeychain() throws {
         let identity = try InstallationIdentity.ephemeral()
         let publicKey = try #require(SecCertificateCopyKey(identity.certificate))

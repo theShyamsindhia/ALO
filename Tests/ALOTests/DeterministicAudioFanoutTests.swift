@@ -20,6 +20,15 @@ struct DeterministicAudioFanoutTests {
             "Batched callbacks must retain the same strict per-listener floor as the live timing gate")
     }
 
+    @Test func delayedCaptureAndBatchedCompletionsPreserveEveryListenerFloor() throws {
+        let room = try simulate(peers: 8, rate: 4_000_000,
+            policy: .boundedLatest(maxInFlight: 8), oversleep: 35_000_000,
+            callbackQuantumNanos: 25_000_000)
+        #expect(room.maximumAge < SynchronizedPlayer.targetLatencyNanos)
+        #expect(room.minimumPackets >= 50,
+            "Capture catch-up and batched completions must not starve one listener")
+    }
+
     @Test func callbackBatchingDoesNotDependOnMachineUptime() throws {
         var elapsedDeliveries: [UInt64] = []
         for origin in [UInt64(1_000_000_000), 1_000_012_345, 1_024_000_000] {

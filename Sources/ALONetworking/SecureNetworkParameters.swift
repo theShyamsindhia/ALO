@@ -39,6 +39,7 @@ public enum SecureNetworkParameters {
         }, verificationQueue)
         let tcp = NWProtocolTCP.Options(); tcp.noDelay = true
         let parameters = NWParameters(tls: tls, tcp: tcp)
+        parameters.allowLocalEndpointReuse = true
         parameters.includePeerToPeer = true
         return parameters
     }

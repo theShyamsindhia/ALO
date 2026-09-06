@@ -1119,6 +1119,16 @@ final class HostServer {
             let schedulingHeadroom = RoomTiming.renderSchedulingHeadroomNanos
             let admissionBudget = groupPlayoutDelayNanos > schedulingHeadroom
                 ? groupPlayoutDelayNanos - schedulingHeadroom : 0
+            // The final completion on a recovered path can be slow even when
+            // current capture is already waiting behind it. Probe that idle
+            // path with fresh audio instead of rejecting the whole pending
+            // burst using evidence from work that has finished draining.
+            if client.audioSendsInFlight == 0,
+               captureAge < Self.maximumPendingAudioSpanNanos {
+                client.audioCompletionDurations.removeAll()
+                client.audioCompletionIntervals.removeAll()
+                client.lastAudioCompletionNanos = nil
+            }
             // Pending audio itself may wait for at most 80ms. Older completed
             // evidence cannot describe its remaining queue residence, while an
             // actually slow active path remains covered by the unfinished term.
@@ -1207,13 +1217,6 @@ final class HostServer {
         }
         if client.audioSendsInFlight <= max(1, maxInFlight) / 2, client.pendingAudio.isEmpty {
             client.audioBacklogCongested = false
-        }
-        if client.audioSendsInFlight == 0, client.pendingAudio.isEmpty {
-            // A giant stall must not permanently exclude fresh capture after
-            // recovery. The next bounded burst probes the now-idle path anew.
-            client.audioCompletionDurations.removeAll()
-            client.audioCompletionIntervals.removeAll()
-            client.lastAudioCompletionNanos = nil
         }
     }
 

@@ -76,6 +76,7 @@ struct MeshRoomTests {
     func nearbyPeerToPeerNetworking() {
         let tcp = LocalNetworkParameters.tcp()
         #expect(tcp.includePeerToPeer)
+        #expect(tcp.allowLocalEndpointReuse)
         let tcpOptions = tcp.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options
         #expect(tcpOptions?.enableKeepalive == true)
         #expect(tcpOptions?.keepaliveIdle == 5)

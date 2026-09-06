@@ -1748,19 +1748,9 @@ private final class HeadlessLoopbackPeer {
     func receivedSequencesForDrain() -> Set<UInt32> { queue.sync { Set(arrivals.keys) } }
 
     func start(hostPort: NWEndpoint.Port) throws {
-        let udp = try NWListener(using: .udp, on: .any)
-        udp.newConnectionHandler = { [weak self] connection in
-            self?.acceptAudio(connection)
-        }
-        let udpPort = try start(udp, kind: "UDP")
-        udpListener = udp
-
-        // Reserve the outbound control socket before opening the peer's TCP
-        // video listener. On a single Mac, Network.framework otherwise tends
-        // to allocate consecutive ephemeral ports to the host listener and
-        // each video listener, then tries to reuse one of those ports for the
-        // outbound loopback connection. That intermittently leaves every
-        // control connection waiting with EADDRINUSE on fresh CI runners.
+        // Reserve the outbound control endpoint before opening either media
+        // listener. Network.framework can otherwise select a just-opened local
+        // listener port for this loopback flow and leave it in EADDRINUSE.
         let controlReady = DispatchSemaphore(value: 0)
         let control = NWConnection(host: "127.0.0.1", port: hostPort, using: .tcp)
         self.control = control
@@ -1768,10 +1758,12 @@ private final class HeadlessLoopbackPeer {
         control.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             switch state {
-            case .waiting(let error), .failed(let error):
-                print("Loopback peer \(self.index) control \(state): host=127.0.0.1:\(hostPort), UDP=\(udpPort), error=\(error)")
+            case .waiting(let error):
+                print("Loopback peer \(self.index) control \(state): host=127.0.0.1:\(hostPort), error=\(error)")
+            case .failed(let error):
+                print("Loopback peer \(self.index) control \(state): host=127.0.0.1:\(hostPort), error=\(error)")
                 controlReady.signal()
-            case .ready:
+            case .ready, .cancelled:
                 controlReady.signal()
             default:
                 break
@@ -1785,12 +1777,28 @@ private final class HeadlessLoopbackPeer {
             throw LoopbackTestError.peerDidNotJoin
         }
 
-        let video = try NWListener(using: .tcp, on: .any)
-        video.newConnectionHandler = { [weak self] connection in
-            self?.acceptVideo(connection)
+        let udpPort: NWEndpoint.Port
+        let videoPort: NWEndpoint.Port
+        do {
+            let udp = try NWListener(using: .udp, on: .any)
+            udp.newConnectionHandler = { [weak self] connection in
+                self?.acceptAudio(connection)
+            }
+            udpPort = try start(udp, kind: "UDP")
+            udpListener = udp
+
+            let video = try NWListener(using: .tcp, on: .any)
+            video.newConnectionHandler = { [weak self] connection in
+                self?.acceptVideo(connection)
+            }
+            videoPort = try start(video, kind: "video")
+            videoListener = video
+        } catch {
+            udpListener?.cancel()
+            videoListener?.cancel()
+            control.cancel()
+            throw error
         }
-        let videoPort = try start(video, kind: "video")
-        videoListener = video
 
         let join = ControlMessage(
             type: "join",

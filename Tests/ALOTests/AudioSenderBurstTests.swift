@@ -163,6 +163,27 @@ struct AudioSenderBurstTests {
             "A stale service estimate must not permanently bar fresh audio after the path drains")
     }
 
+    @Test func finalSlowCompletionCannotRejectFreshAudioWaitingOnAnIdlePath() throws {
+        let fixture = try AudioBurstFixture()
+        defer { fixture.stop() }
+        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 8 * 240 * 2),
+            captureTimeNanos: fixture.audioNowNanos)
+        fixture.barrier()
+        for _ in 0..<7 { fixture.completeOne() }
+        fixture.advanceAudioClock(by: 180_000_000)
+        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 4 * 240 * 2),
+            captureTimeNanos: fixture.audioNowNanos)
+        fixture.barrier()
+        #expect(fixture.probe.sequences == Array(0..<8))
+
+        // The final old send leaves an idle path and a fresh four-packet burst.
+        // Its 180ms sample must not reject that entire burst before recovery.
+        fixture.completeOne()
+        fixture.drain()
+        #expect(fixture.probe.sequences == Array(0..<12))
+        #expect(fixture.host.audioSenderSnapshot().first?.admissionRejected == 0)
+    }
+
     @Test func expiredPendingDoesNotMakeFreshCaptureCongested() throws {
         let fixture = try AudioBurstFixture()
         defer { fixture.stop() }

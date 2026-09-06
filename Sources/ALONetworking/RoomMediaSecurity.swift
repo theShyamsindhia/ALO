@@ -50,6 +50,7 @@ public struct RoomMediaSecurity: Sendable {
         tcp.keepaliveInterval = 2
         tcp.keepaliveCount = 3
         let parameters = NWParameters(tls: tls, tcp: tcp)
+        parameters.allowLocalEndpointReuse = true
         parameters.includePeerToPeer = true
         return parameters
     }

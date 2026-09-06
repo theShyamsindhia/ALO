@@ -10,6 +10,9 @@ public enum LocalNetworkParameters {
         tcp.keepaliveInterval = 2
         tcp.keepaliveCount = 3
         let parameters = NWParameters(tls: nil, tcp: tcp)
+        // A room listens and dials on the same Mac. Permit Network.framework
+        // to reuse a local TCP endpoint that is still retiring from either role.
+        parameters.allowLocalEndpointReuse = true
         parameters.includePeerToPeer = true
         return parameters
     }
