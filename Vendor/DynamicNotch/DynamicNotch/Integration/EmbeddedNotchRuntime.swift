@@ -55,6 +55,12 @@ public final class EmbeddedNotchRuntime: ObservableObject {
     public var canvasSize: CGSize { OverlayWindowLayout.appCanvasSize }
     public var windowYOffset: CGFloat { 1 }
 
+    enum ActivityOpeningTarget: Equatable {
+        case currentActivity
+        case homePage
+        case unavailable
+    }
+
     private let delegate: AppDelegate
     private let activation: FeatureActivation
     private var observations = Set<AnyCancellable>()
@@ -309,15 +315,46 @@ public final class EmbeddedNotchRuntime: ObservableObject {
         }
     }
 
-    public func openHomePage() {
-        guard isEnabled else { return }
+    public var canOpenActivity: Bool {
         let settings = delegate.settingsViewModel.homePage
-        guard settings.isHomePageLiveActivityEnabled,
-              settings.homePageOrder.contains(where: { !settings.homePageDisabled.contains($0) }) else {
-            showSettings()
-            return
+        return Self.activityOpeningTarget(
+            isEnabled: isEnabled,
+            hasCurrentActivity: delegate.notchViewModel.displayedContent != nil,
+            isHomePageEnabled: settings.isHomePageLiveActivityEnabled,
+            hasEnabledHomePageItem: settings.homePageOrder.contains {
+                !settings.homePageDisabled.contains($0)
+            }
+        ) != .unavailable
+    }
+
+    @discardableResult
+    public func openActivity() -> Bool {
+        let settings = delegate.settingsViewModel.homePage
+        let target = Self.activityOpeningTarget(
+            isEnabled: isEnabled,
+            hasCurrentActivity: delegate.notchViewModel.displayedContent != nil,
+            isHomePageEnabled: settings.isHomePageLiveActivityEnabled,
+            hasEnabledHomePageItem: settings.homePageOrder.contains {
+                !settings.homePageDisabled.contains($0)
+            }
+        )
+        switch target {
+        case .currentActivity:
+            delegate.notchViewModel.expandActiveLiveActivity()
+        case .homePage:
+            delegate.notchEventCoordinator.handleHomePageEvent(.homePageOn)
+            delegate.notchViewModel.expandActiveLiveActivity()
+        case .unavailable:
+            return false
         }
-        delegate.notchEventCoordinator.handleHomePageEvent(.homePageOn)
-        delegate.notchViewModel.expandActiveLiveActivity()
+        return true
+    }
+
+    static func activityOpeningTarget(isEnabled: Bool, hasCurrentActivity: Bool,
+                                      isHomePageEnabled: Bool, hasEnabledHomePageItem: Bool) -> ActivityOpeningTarget {
+        guard isEnabled else { return .unavailable }
+        if hasCurrentActivity { return .currentActivity }
+        if isHomePageEnabled, hasEnabledHomePageItem { return .homePage }
+        return .unavailable
     }
 }

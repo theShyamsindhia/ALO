@@ -7,6 +7,41 @@ import ALOCore
 extension NativePresentationTests {
     @Suite(.serialized) @MainActor
     struct RoomControlsPresentationTests {
+        @Test("ALO settings uses the product title")
+        func aloSettingsTitle() async throws {
+            _ = NSApplication.shared
+            let model = ALOViewModel(discoverRooms: false)
+            model.roomName = "Offline preview"
+            let size = NSSize(width: 360, height: 430)
+            let window = NSWindow(
+                contentRect: NSRect(origin: NSPoint(x: -2000, y: 0), size: size),
+                styleMask: .borderless,
+                backing: .buffered,
+                defer: false
+            )
+            window.isReleasedWhenClosed = false
+            window.appearance = NSAppearance(named: .darkAqua)
+            let hosting = NSHostingView(rootView: RoomPreferencesView(model: model)
+                .transaction { $0.disablesAnimations = true }
+                .environment(\.colorScheme, .dark))
+            window.contentView = hosting
+            defer { window.close() }
+            window.orderBack(nil)
+            try await Task.sleep(for: .milliseconds(120))
+            hosting.layoutSubtreeIfNeeded()
+            let bitmap = try #require(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
+            hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
+            #expect(bitmap.pixelsWide > 0)
+            #expect(bitmap.pixelsHigh > 0)
+
+            if let directory = ProcessInfo.processInfo.environment["ALO_SPACES_SNAPSHOT_DIR"] {
+                let folder = URL(fileURLWithPath: directory, isDirectory: true)
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                let png = try #require(bitmap.representation(using: .png, properties: [:]))
+                try png.write(to: folder.appendingPathComponent("alo-settings.png"))
+            }
+        }
+
         @Test("Playback progress replaces the menu popover seam")
         func playbackProgressSeam() async throws {
             _ = NSApplication.shared

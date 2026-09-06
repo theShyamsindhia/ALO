@@ -109,10 +109,10 @@ final class ALONotchFeatureBridge: ObservableObject {
             canSeek: false)
     }
 
-    func openActivities() {
+    func openNotch() {
         guard ALONotchPreferences.shared.enabled else { return }
         setEnabled(true)
-        runtime?.openHomePage()
+        runtime?.openActivity()
     }
 
     func showSettings() {
@@ -158,9 +158,14 @@ struct NotchSettingsBelowPlayer: View {
                     Toggle("Room media", isOn: Binding(get: { runtime.roomMediaEnabled }, set: { runtime.roomMediaEnabled = $0 }))
                         .toggleStyle(.switch).controlSize(.mini).font(.caption)
                         .help("Show this room's artwork and playback in Notch and on the lock screen.")
-                    Button { features.openActivities() } label: {
-                        Label("Preview", systemImage: "play.rectangle")
-                    }.controlSize(.small)
+                    Button { features.openNotch() } label: {
+                        Label("Open Notch", systemImage: "rectangle.topthird.inset.filled")
+                    }
+                    .controlSize(.small)
+                    .disabled(!runtime.canOpenActivity)
+                    .help(runtime.canOpenActivity
+                          ? "Open the current Notch activity."
+                          : "Turn on a Home Page item or start an activity first.")
                 }
                 Button { model.notchSettingsVisible = false } label: {
                     Image(systemName: "xmark")

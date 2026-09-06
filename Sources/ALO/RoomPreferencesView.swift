@@ -34,7 +34,7 @@ struct RoomPreferencesView: View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 11) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Room settings")
+                    Text("ALO settings")
                         .font(.system(size: 15, weight: .semibold))
                     Text(selectedSection.summary)
                         .font(.caption)

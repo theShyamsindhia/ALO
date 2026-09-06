@@ -72,6 +72,46 @@ final class EmbeddedSettingsRoutingTests: XCTestCase {
         }
     }
 
+    func testOpenActivityNeverFallsBackToSettings() async {
+        withRuntime { runtime in
+            var settingsRequests = 0
+            runtime.onSettingsRequested = { settingsRequests += 1 }
+
+            XCTAssertFalse(runtime.openActivity())
+            XCTAssertEqual(settingsRequests, 0)
+        }
+    }
+
+    func testOpenActivityPrefersCurrentContentThenConfiguredHomePage() async {
+        XCTAssertEqual(
+            EmbeddedNotchRuntime.activityOpeningTarget(
+                isEnabled: true,
+                hasCurrentActivity: true,
+                isHomePageEnabled: false,
+                hasEnabledHomePageItem: false
+            ),
+            .currentActivity
+        )
+        XCTAssertEqual(
+            EmbeddedNotchRuntime.activityOpeningTarget(
+                isEnabled: true,
+                hasCurrentActivity: false,
+                isHomePageEnabled: true,
+                hasEnabledHomePageItem: true
+            ),
+            .homePage
+        )
+        XCTAssertEqual(
+            EmbeddedNotchRuntime.activityOpeningTarget(
+                isEnabled: true,
+                hasCurrentActivity: false,
+                isHomePageEnabled: false,
+                hasEnabledHomePageItem: true
+            ),
+            .unavailable
+        )
+    }
+
     private func withRuntime(_ body: (EmbeddedNotchRuntime) -> Void) {
         _ = NSApplication.shared
         let previousRuntime = EmbeddedNotchRuntime.activeInstance
