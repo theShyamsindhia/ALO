@@ -4,20 +4,27 @@ import Testing
 
 @MainActor
 struct AppIconTests {
-    @Test func catalogAndAssets() throws {
+    @Test func catalogAndDownloadAssets() throws {
         #expect(AppIconOption.all.count == 16)
         #expect(Set(AppIconOption.all.map(\.id)).count == 16)
-        for icon in AppIconOption.all {
-            let image = try #require(icon.image)
+        #expect(AppIconOption.all.first?.id == "original")
+
+        for option in AppIconOption.all.dropFirst() {
+            let url = try #require(option.downloadURL)
+            #expect(url.scheme == "https")
+            #expect(url.host == "raw.githubusercontent.com")
+            #expect(!url.path.contains("/main/"), "Downloads must use an immutable source revision")
+            let data = try Data(contentsOf: sourceURL(for: option.id))
+            let image = try option.validate(data)
             #expect(image.isValid)
-            #expect(image.size == NSSize(width: 1024, height: 1024))
+            #expect(image.size == NSSize(width: 1_024, height: 1_024))
             let alpha = try alphaChannel(of: image)
             #expect(alpha[0] == 0)
             #expect(alpha[1_023] == 0)
             #expect(alpha[1_023 * 1_024] == 0)
             #expect(alpha[1_024 * 1_024 - 1] == 0)
             #expect(alpha.lazy.filter { $0 > 0 && $0 < 255 }.prefix(1_001).count > 1_000,
-                    "\(icon.name) must keep a feathered edge rather than a jagged binary cutout")
+                    "\(option.name) must keep a feathered edge rather than a jagged binary cutout")
         }
     }
 
@@ -27,18 +34,80 @@ struct AppIconTests {
         #expect(AppIconOption.resolvedID("frosted-orange") == "frosted-orange")
     }
 
-    @Test func selectionPersistsAndRestoresDefault() throws {
+    @Test func downloadedSelectionPersistsAndCanBeRemoved() throws {
+        let context = try makeContext()
+        defer { context.cleanUp() }
+        let option = try #require(AppIconOption.all.first { $0.id == "midnight" })
+        let preferences = AppIconPreferences(defaults: context.defaults, directory: context.directory)
+        #expect(preferences.selectedID == "original")
+        try preferences.install(Data(contentsOf: sourceURL(for: option.id)), for: option)
+        #expect(preferences.isDownloaded(option.id))
+        preferences.select(option.id)
+        #expect(preferences.error == nil)
+        #expect(AppIconPreferences(defaults: context.defaults, directory: context.directory).selectedID == option.id)
+        preferences.removeDownloads()
+        #expect(preferences.selectedID == "original")
+        #expect(preferences.installedIDs.isEmpty)
+        #expect(context.defaults.string(forKey: AppIconPreferences.defaultsKey) == nil)
+    }
+
+    @Test func selectingMissingIconDownloadsVerifiesAndAppliesIt() async throws {
+        let context = try makeContext()
+        defer { context.cleanUp() }
+        let option = try #require(AppIconOption.all.first { $0.id == "coral" })
+        let expected = try Data(contentsOf: sourceURL(for: option.id))
+        let preferences = AppIconPreferences(defaults: context.defaults, directory: context.directory) { url, limit in
+            #expect(url == option.downloadURL)
+            #expect(limit == option.bytes)
+            return expected
+        }
+
+        preferences.select(option.id)
+        try await waitUntilIdle(preferences)
+        #expect(preferences.error == nil)
+        #expect(preferences.selectedID == option.id)
+        #expect(preferences.isDownloaded(option.id))
+        #expect(FileManager.default.fileExists(atPath: context.directory.appendingPathComponent(option.id + ".png").path))
+    }
+
+    @Test func damagedDownloadIsRejectedWithoutChangingSelection() async throws {
+        let context = try makeContext()
+        defer { context.cleanUp() }
+        let option = try #require(AppIconOption.all.first { $0.id == "cobalt" })
+        var damaged = try Data(contentsOf: sourceURL(for: option.id))
+        damaged[damaged.startIndex] ^= 0xff
+        let damagedDownload = damaged
+        let preferences = AppIconPreferences(defaults: context.defaults, directory: context.directory) { _, _ in damagedDownload }
+
+        preferences.select(option.id)
+        try await waitUntilIdle(preferences)
+        #expect(preferences.selectedID == "original")
+        #expect(preferences.error != nil)
+        #expect(!preferences.isDownloaded(option.id))
+        #expect(!FileManager.default.fileExists(atPath: context.directory.appendingPathComponent(option.id + ".png").path))
+    }
+
+    private func waitUntilIdle(_ preferences: AppIconPreferences) async throws {
+        for _ in 0..<200 where preferences.downloadingID != nil {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        #expect(preferences.downloadingID == nil)
+    }
+
+    private func sourceURL(for id: String) -> URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/ALO/Resources/AppIcons/\(id).png")
+    }
+
+    private func makeContext() throws -> TestContext {
         let suite = "ALO.AppIconTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let preferences = AppIconPreferences(defaults: defaults)
-        #expect(preferences.selectedID == "original")
-        preferences.select("midnight")
-        #expect(preferences.error == nil)
-        #expect(AppIconPreferences(defaults: defaults).selectedID == "midnight")
-        preferences.select("original")
-        #expect(AppIconPreferences(defaults: defaults).selectedID == "original")
-        #expect(defaults.string(forKey: AppIconPreferences.defaultsKey) == nil)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ALO-AppIconTests-\(UUID().uuidString)", isDirectory: true)
+        return TestContext(suite: suite, defaults: defaults, directory: directory)
     }
 
     private func alphaChannel(of image: NSImage) throws -> [UInt8] {
@@ -63,5 +132,16 @@ struct AppIconTests {
         }
         #expect(rendered)
         return stride(from: 3, to: pixels.count, by: 4).map { pixels[$0] }
+    }
+
+    private struct TestContext {
+        let suite: String
+        let defaults: UserDefaults
+        let directory: URL
+
+        func cleanUp() {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: directory)
+        }
     }
 }
