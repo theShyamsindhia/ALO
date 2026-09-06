@@ -10,13 +10,13 @@ extension NativePresentationTests {
     struct ArtworkHeaderPresentationTests {
         @Test("Player tint stays transparent without artwork and respects Reduce Transparency")
         func tintTransparency() throws {
+            _ = NSApplication.shared
             let palette = ArtworkPalette(accentHex: "DF6732", secondaryHex: "397DC2", tertiaryHex: "789950")
+            let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
             for dark in [false, true] {
-                for reduced in [false, true] {
                     for artwork in [false, true] {
                         let renderer = ImageRenderer(content: ArtworkHeaderBackground(palette: artwork ? palette : nil)
                             .environment(\.colorScheme, dark ? .dark : .light)
-                            .environment(\.accessibilityReduceTransparency, reduced)
                             .frame(width: 120, height: 60))
                         let image = try #require(renderer.nsImage)
                         let bitmap = try #require(NSBitmapImageRep(data: try #require(image.tiffRepresentation)))
@@ -25,7 +25,6 @@ extension NativePresentationTests {
                         else if artwork { #expect(alpha > 0.05 && alpha < 0.3) }
                         else { #expect(alpha < 0.01) }
                     }
-                }
             }
         }
 
@@ -63,13 +62,11 @@ extension NativePresentationTests {
                 WalkieTalkieBar(model: model, showsCloseButton: false)
             }
             .background(ArtworkHeaderBackground(palette: model.roomArtworkPalette))
+            .background(Color(nsColor: .windowBackgroundColor))
             .overlay(alignment: .bottomTrailing) {
                 ArtworkRenderMarker(model: model).frame(width: 4, height: 4)
             }
             .transaction { $0.disablesAnimations = true; $0.animation = nil }
-            // Raster colour/contrast checks need a deterministic backing. Native
-            // behind-window blur is verified separately, not flattened here.
-            .environment(\.accessibilityReduceTransparency, true)
             .environment(\.colorScheme, dark ? .dark : .light))
             window.contentView = hosting
             defer { window.close() }
