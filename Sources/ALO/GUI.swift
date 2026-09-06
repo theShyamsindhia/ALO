@@ -973,12 +973,17 @@ final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
     private var artworkData: Data?
     private var artwork: NSImage?
     private var artworkPalette: ArtworkPalette?
+    private let menuBarPreferences: ALOMenuBarPreferences
+    private var pinnedControls: ALOPinnedMenuBarController?
 
-    init(model: ALOViewModel, toggleMainWindow: @escaping () -> Void) {
+    init(model: ALOViewModel, menuBarPreferences: ALOMenuBarPreferences? = nil, toggleMainWindow: @escaping () -> Void) {
+        let preferences = menuBarPreferences ?? .shared
         self.model = model
+        self.menuBarPreferences = preferences
         self.toggleMainWindow = toggleMainWindow
         statusItem = NSStatusBar.system.statusItem(withLength: ALOMenuBarRecord.statusItemWidth)
         super.init()
+        statusItem.autosaveName = "ALO.launcher"
         statusItem.button?.toolTip = ALOAppFlavor.displayName
         if let button = statusItem.button {
             button.image = nil
@@ -995,6 +1000,16 @@ final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
         }
         refreshStatusRecord()
 
+        pinnedControls = ALOPinnedMenuBarController(model: model, preferences: preferences) { [weak self] section in
+            guard let self else { return }
+            self.showPopover()
+            self.model.toggleSection(section, in: .menuBar)
+        }
+        preferences.$controls.dropFirst().receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.refreshStatusRecord() }.store(in: &observers)
+        NSApplication.shared.publisher(for: \.effectiveAppearance)
+            .sink { [weak self] _ in self?.refreshStatusRecord() }.store(in: &observers)
+
         popover.behavior = .transient
         popover.animates = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         popover.delegate = self
@@ -1004,7 +1019,7 @@ final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
         popoverController.view.wantsLayer = true
         popoverController.view.layer?.backgroundColor = NSColor.clear.cgColor
         popover.contentViewController = popoverController
-        let touchBar = RoomTouchBarController(model: model, onGames: { [weak model] in model?.showGamesLibrary() })
+        let touchBar = RoomTouchBarController(model: model, presentation: .menuBar, onGames: { [weak model] in model?.showGamesLibrary() })
         touchBar.attach(to: popoverController)
         roomTouchBar = touchBar
 
@@ -1057,12 +1072,13 @@ final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
             .sink { [weak self] _ in self?.syncMotionPreference() }
             .store(in: &observers)
         Publishers.CombineLatest4(
-            model.$floatingSection.removeDuplicates(),
+            model.$menuBarSection.removeDuplicates(),
             model.$permissionNotice.removeDuplicates(),
             model.$participants.map(\.count).removeDuplicates(),
             model.$incomingMessagePreview.map { $0?.id }.removeDuplicates()
         )
         .dropFirst()
+        .receive(on: DispatchQueue.main)
         .sink { [weak self] _ in self?.resizePopover() }
         .store(in: &observers)
         model.$notchSettingsVisible.removeDuplicates().dropFirst()
@@ -1116,7 +1132,7 @@ final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
             ? model.notchSettingsHeightWhenVisible : 0
         return NSSize(
             width: FloatingMetrics.width,
-            height: model.floatingPanelHeight
+            height: model.panelHeight(for: .menuBar)
                 + FloatingMetrics.menuBarMediaHeight
                 - FloatingMetrics.barHeight
                 + FloatingMetrics.walkieBarHeight
@@ -1168,10 +1184,16 @@ final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
 
     private func refreshStatusRecord() {
         guard let button = statusItem.button else { return }
+        let showsDisc = menuBarPreferences.controls.contains(.record)
+        recordView?.isHidden = !showsDisc
+        statusItem.length = showsDisc ? ALOMenuBarRecord.statusItemWidth : 28
+        button.image = showsDisc ? nil : ALOMenuBarControlImage.make(
+            symbol: "person.2.fill", palette: artworkPalette,
+            appearance: button.effectiveAppearance, unread: unreadCount > 0)
         let title = model.nowPlaying.title?.trimmingCharacters(in: .whitespacesAndNewlines)
         recordView?.update(
             active: isLive,
-            playing: model.roomIsPlaying,
+            playing: showsDisc && model.roomIsPlaying,
             unreadCount: unreadCount,
             media: model.nowPlaying,
             artwork: artwork,
@@ -1629,6 +1651,8 @@ final class ALOViewModel: ObservableObject {
     }
     var floatingNavigationHeight: CGFloat { floatingNavigationVisible ? FloatingMetrics.walkieBarHeight : 0 }
     @Published var floatingSection: FloatingSection = .collapsed
+    @Published var menuBarSection: FloatingSection = .collapsed
+    private var videoPresentation: RoomControlsPresentation = .floating
     @Published var floatingBarHidden: Bool
     @Published var notchSettingsVisible = false
     let notchSettingsHeightWhenVisible: CGFloat = 430
@@ -1897,8 +1921,26 @@ final class ALOViewModel: ObservableObject {
         )
     }
     var floatingPanelHeight: CGFloat {
+        panelHeight(for: .floating)
+    }
+
+    func section(for presentation: RoomControlsPresentation) -> FloatingSection {
+        presentation == .menuBar ? menuBarSection : floatingSection
+    }
+
+    func setSection(_ section: FloatingSection, in presentation: RoomControlsPresentation) {
+        dismissIncomingMessagePreview()
+        if presentation == .menuBar { menuBarSection = section }
+        else { floatingSection = section }
+    }
+
+    func toggleSection(_ section: FloatingSection, in presentation: RoomControlsPresentation) {
+        setSection(self.section(for: presentation) == section ? .collapsed : section, in: presentation)
+    }
+
+    func panelHeight(for presentation: RoomControlsPresentation) -> CGFloat {
         if permissionNotice { return FloatingMetrics.permissionHeight }
-        switch floatingSection {
+        switch section(for: presentation) {
         case .collapsed:
             return incomingMessagePreview == nil
                 ? FloatingMetrics.barHeight
@@ -2205,12 +2247,12 @@ final class ALOViewModel: ObservableObject {
         }
     }
 
-    func selectExperience(_ selection: Experience) {
+    func selectExperience(_ selection: Experience, presentation: RoomControlsPresentation = .floating) {
         guard selection != experience, !mediaSwitchBusy else { return }
         if !isHost {
             guard selection == .audio || roomHasVideo else { return }
             experience = selection
-            floatingSection = selection == .video ? .video : .collapsed
+            setSection(selection == .video ? .video : .collapsed, in: presentation)
             return
         }
 
@@ -2221,7 +2263,7 @@ final class ALOViewModel: ObservableObject {
             do {
                 try await meshSession?.setVideoEnabled(selection == .video)
                 experience = selection
-                floatingSection = selection == .video ? .video : .collapsed
+                setSection(selection == .video ? .video : .collapsed, in: presentation)
                 statusText = selection == .video
                     ? "The selected display or window is live"
                     : "Audio room active"
@@ -2908,7 +2950,7 @@ final class ALOViewModel: ObservableObject {
 
     func prepareNotchSettingsForMenuBar() {
         dismissIncomingMessagePreview()
-        floatingSection = .collapsed
+        menuBarSection = .collapsed
         notchSettingsVisible = true
     }
 
@@ -2937,9 +2979,7 @@ final class ALOViewModel: ObservableObject {
 
     func setMenuBarPopoverVisible(_ visible: Bool) {
         menuBarPopoverVisible = visible
-        if !visible, floatingBarHidden {
-            floatingSection = .collapsed
-        }
+        if !visible { menuBarSection = .collapsed }
     }
 
     func canControl(_ participant: RoomParticipant) -> Bool {
@@ -3315,7 +3355,7 @@ final class ALOViewModel: ObservableObject {
         floatingSection = floatingSection == .video ? .collapsed : .video
     }
 
-    func toggleVideoFromFloatingBar() {
+    func toggleVideoFromFloatingBar(presentation: RoomControlsPresentation = .floating) {
         if mediaSwitchBusy {
             statusText = "Cancelling screen selection"
             Task { try? await meshSession?.setVideoEnabled(false) }
@@ -3323,10 +3363,11 @@ final class ALOViewModel: ObservableObject {
         }
         switch videoControlIntent {
         case .toggleViewer:
-            toggleFloatingVideo()
+            toggleSection(.video, in: presentation)
         case .showViewer, .enableVideo:
-            selectExperience(.video)
+            selectExperience(.video, presentation: presentation)
         case .beginAudioAndVideoBroadcast:
+            videoPresentation = presentation
             beginAudioAndVideoBroadcast()
         case .unavailable:
             break
@@ -3617,7 +3658,7 @@ final class ALOViewModel: ObservableObject {
                     self.videoBroadcastTimeoutTask?.cancel()
                     self.videoBroadcastTimeoutTask = nil
                     self.experience = .video
-                    self.floatingSection = .video
+                    self.setSection(.video, in: self.videoPresentation)
                     self.statusText = "Audio and the selected display or window are live"
                 }
                 if !enabled {
@@ -3630,6 +3671,9 @@ final class ALOViewModel: ObservableObject {
                     }
                     if self.floatingSection == .video {
                         self.floatingSection = .collapsed
+                    }
+                    if self.menuBarSection == .video {
+                        self.menuBarSection = .collapsed
                     }
                 }
             }
@@ -3644,8 +3688,8 @@ final class ALOViewModel: ObservableObject {
                 let isNewMessage = self.chatDocument.receive(senderID: senderID, sender: sender, text: text, sentNanos: sentNanos, version: version)
                 self.messages = self.chatDocument.messages
                 guard isNewMessage, let receivedMessage = self.messages.first(where: { $0.senderID == senderID && $0.sentNanos == sentNanos }) else { return }
-                let chatIsVisible = self.floatingSection == .chat
-                    && (!self.floatingBarHidden || self.menuBarPopoverVisible)
+                let chatIsVisible = (self.floatingSection == .chat && !self.floatingBarHidden && !self.videoFullscreen)
+                    || (self.menuBarSection == .chat && self.menuBarPopoverVisible)
                 let chatIsAtLatest = chatIsVisible && !self.chatViewportsAtLatest.isEmpty
                 if senderID != self.currentParticipantID {
                     let shouldPreview = self.chatNotificationMode.shouldPreview(
@@ -3810,6 +3854,7 @@ final class ALOViewModel: ObservableObject {
         experience = .audio
         draftMessage = ""
         floatingSection = .collapsed
+        menuBarSection = .collapsed
     }
 
     private func presentIncomingMessagePreview(_ message: RoomMessage) {
@@ -4498,14 +4543,19 @@ struct FloatingRoomView: View {
         model.roomAccentColor
     }
 
+    private var section: ALOViewModel.FloatingSection {
+        get { model.section(for: presentation) }
+        nonmutating set { model.setSection(newValue, in: presentation) }
+    }
+
     private var hasExpandedContent: Bool {
         model.permissionNotice
-            || model.floatingSection != .collapsed
+            || section != .collapsed
             || model.incomingMessagePreview != nil
     }
 
     private var expandedContentHeight: CGFloat {
-        max(0, model.floatingPanelHeight - FloatingMetrics.barHeight - FloatingMetrics.separatorHeight)
+        max(0, model.panelHeight(for: presentation) - FloatingMetrics.barHeight - FloatingMetrics.separatorHeight)
     }
 
     private var roomBarHeight: CGFloat {
@@ -4515,7 +4565,7 @@ struct FloatingRoomView: View {
 
     private var compactRoomBar: Bool {
         presentation == .floating && !model.permissionNotice
-            && model.floatingSection != .collapsed
+            && section != .collapsed
     }
 
     private var navigationHeight: CGFloat {
@@ -4523,16 +4573,16 @@ struct FloatingRoomView: View {
     }
 
     private var roomContentHeight: CGFloat {
-        model.floatingPanelHeight + roomBarHeight - FloatingMetrics.barHeight
+        model.panelHeight(for: presentation) + roomBarHeight - FloatingMetrics.barHeight
     }
 
     private var expansionIdentity: String {
         if model.permissionNotice { return "permission" }
         if let preview = model.incomingMessagePreview,
-           model.floatingSection == .collapsed {
+           section == .collapsed {
             return "message-\(preview.id)"
         }
-        switch model.floatingSection {
+        switch section {
         case .collapsed: return "collapsed"
         case .queue: return "queue"
         case .chat: return "chat"
@@ -4550,10 +4600,10 @@ struct FloatingRoomView: View {
         if model.permissionNotice {
             permissionPanel
         } else if let preview = model.incomingMessagePreview,
-                  model.floatingSection == .collapsed {
+                  section == .collapsed {
             incomingMessagePreview(preview)
         } else {
-            switch model.floatingSection {
+            switch section {
             case .collapsed:
                 EmptyView()
             case .queue:
@@ -4563,7 +4613,7 @@ struct FloatingRoomView: View {
             case .people:
                 VStack(spacing: 0) {
                     HStack {
-                        Button { model.floatingSection = .chat; showsGames = false } label: { Label("Chat", systemImage: "chevron.left") }
+                        Button { section = .chat; showsGames = false } label: { Label("Chat", systemImage: "chevron.left") }
                         Spacer()
                         Text("People").font(.system(size: 13, weight: .semibold))
                         Spacer()
@@ -4630,19 +4680,10 @@ struct FloatingRoomView: View {
                 ArtworkHeaderBackground(palette: model.roomArtworkPalette)
             }
         }
-        .animation(panelAnimation, value: model.floatingSection)
+        .animation(panelAnimation, value: section)
         .animation(panelAnimation, value: model.permissionNotice)
         .animation(panelAnimation, value: model.participants.count)
         .animation(panelAnimation, value: model.incomingMessagePreview?.id)
-    }
-
-    private var videoMenuTitle: String {
-        if model.mediaSwitchBusy { return "Cancel screen selection" }
-        switch model.videoControlIntent {
-        case .toggleViewer, .showViewer: return "View shared video"
-        case .enableVideo, .beginAudioAndVideoBroadcast: return "Share screen and audio…"
-        case .unavailable: return "Share screen…"
-        }
     }
 
     private var roomBar: some View {
@@ -4683,11 +4724,11 @@ struct FloatingRoomView: View {
             }
 
             roomBarButton(
-                icon: "rectangle.on.rectangle",
-                active: model.roomHasVideo || model.mediaSwitchBusy,
-                disabled: !model.canSelectVideo,
-                help: videoMenuTitle
-            ) { model.toggleVideoFromFloatingBar() }
+                icon: "arrow.triangle.2.circlepath",
+                active: false,
+                disabled: !model.hasBroadcaster || model.mediaSwitchBusy,
+                help: "Sync all · request fresh timing for everyone"
+            ) { model.syncAllDevices() }
 
             Button { showsMediaMore.toggle() } label: {
                 Image(systemName: "ellipsis")
@@ -4700,7 +4741,7 @@ struct FloatingRoomView: View {
             .accessibilityLabel("More room controls")
             .popover(isPresented: $showsMediaMore, arrowEdge: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    if presentation == .floating && model.floatingSection == .collapsed {
+                    if presentation == .floating && section == .collapsed {
                         Button {
                             showsMediaMore = false
                             model.showChatInFloatingBar()
@@ -4734,7 +4775,7 @@ struct FloatingRoomView: View {
                     .disabled(!model.hasBroadcaster || model.currentParticipantID == nil || model.mediaSwitchBusy)
                     Button {
                         showsMediaMore = false
-                        model.showQueue()
+                        model.toggleSection(.queue, in: presentation)
                     } label: {
                         Label("Room queue", systemImage: "music.note.list")
                             .frame(maxWidth: .infinity, alignment: .leading).padding(8)
@@ -4967,7 +5008,7 @@ struct FloatingRoomView: View {
     }
 
     private func incomingMessagePreview(_ message: RoomMessage) -> some View {
-        Button(action: model.showChat) {
+        Button { model.toggleSection(.chat, in: presentation) } label: {
             HStack(spacing: 10) {
                 messageAvatar(message, size: 30)
 
@@ -5202,7 +5243,7 @@ struct FloatingRoomView: View {
     }
 
     private var chatIsPresented: Bool {
-        !showsGames && model.phase == .live && model.floatingSection == .chat && !model.permissionNotice
+        !showsGames && model.phase == .live && section == .chat && !model.permissionNotice
             && (presentation == .menuBar
                 ? model.menuBarPopoverVisible
                 : !model.floatingBarHidden && !model.videoFullscreen)
@@ -5266,7 +5307,7 @@ struct FloatingRoomView: View {
             }
             .accessibilityHidden(true)
 
-            Button(action: model.collapseFloatingBar) {
+            Button { model.setSection(.collapsed, in: presentation) } label: {
                 Image(systemName: "chevron.down")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(Palette.controlIcon)
@@ -5754,7 +5795,7 @@ struct FloatingRoomView: View {
                 .buttonStyle(VideoControlButtonStyle())
                 .help("Open video window")
                 .accessibilityLabel("Open video window")
-                Button(action: model.collapseFloatingBar) {
+                Button { model.setSection(.collapsed, in: presentation) } label: {
                     Image(systemName: "chevron.down")
                 }
                 .buttonStyle(VideoControlButtonStyle())
@@ -5830,7 +5871,7 @@ struct FloatingRoomView: View {
                 .help("Re-align this Mac without interrupting other listeners")
                 .accessibilityLabel("Sync this Mac only")
             }
-            Button(action: model.collapseFloatingBar) {
+            Button { model.setSection(.collapsed, in: presentation) } label: {
                 Image(systemName: "chevron.down")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(Palette.controlIcon)
@@ -6228,7 +6269,14 @@ struct WalkieTalkieBar: View {
     var onRoomSettings: (() -> Void)? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showsSettings = false
-    @State private var roomPushToTalkPressed = false
+    private var presentation: RoomControlsPresentation {
+        showsCloseButton || embeddedFloating ? .floating : .menuBar
+    }
+    private var receivesNavigationShortcuts: Bool {
+        !showsCloseButton && (presentation == .menuBar
+            ? model.menuBarPopoverVisible
+            : !model.menuBarPopoverVisible && !model.floatingBarHidden)
+    }
 
     var body: some View {
         Group {
@@ -6260,9 +6308,6 @@ struct WalkieTalkieBar: View {
 
     private var controls: some View {
         HStack(spacing: 7) {
-            if !showsCloseButton {
-                voiceState
-            }
             targetDock
             actionDock
         }
@@ -6281,63 +6326,13 @@ struct WalkieTalkieBar: View {
         }
     }
 
-    private var voiceState: some View {
-        ZStack {
-            Circle().fill(roomPushToTalkPressed ? model.roomAccentColor.opacity(0.28) : model.roomAccentColor.opacity(0.14))
-            Image(systemName: roomPushToTalkPressed ? "waveform.badge.mic" : "waveform")
-                .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(roomPushToTalkPressed ? Palette.voiceBlue : model.roomAccentColor)
-        }
-        .frame(width: 27, height: 27)
-        .onLongPressGesture(
-            minimumDuration: .infinity,
-            maximumDistance: 18,
-            pressing: { pressed in
-                guard pressed != roomPushToTalkPressed else { return }
-                roomPushToTalkPressed = pressed
-                model.setPushToTalkPressed(pressed, targetID: nil)
-            },
-            perform: {}
-        )
-        .onDisappear {
-            if roomPushToTalkPressed {
-                roomPushToTalkPressed = false
-                model.setPushToTalkPressed(false, targetID: nil)
-            }
-        }
-        .overlay(alignment: .bottomTrailing) {
-            Circle()
-                .fill(voiceStateColor)
-                .frame(width: 7, height: 7)
-                .overlay(Circle().stroke(Palette.opaqueSurface, lineWidth: 1.5))
-        }
-        .frame(width: 32, height: 40)
-        .contentShape(Rectangle())
-        .help("Hold to talk to everyone")
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Hold to talk to everyone")
-        .accessibilityValue(voiceStateLabel)
-    }
-
     private var targetDock: some View {
         HStack(spacing: 4) {
-            if showsCloseButton {
-                walkieTarget(id: nil, name: "Everyone", icon: "", colorHex: "3F86E8")
-            }
+            // The group avatar preserves hold-to-talk-to-everyone without a second mic control.
+            walkieTarget(id: nil, name: "Everyone", icon: "", colorHex: "3F86E8")
+                .disabled(remoteParticipants.isEmpty)
 
-            if remoteParticipants.isEmpty {
-                Text("Waiting for people")
-                    .font(.system(size: 9, weight: .medium, design: .rounded))
-                    .foregroundStyle(Palette.secondary)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                if showsCloseButton {
-                    Rectangle()
-                        .fill(Palette.strokeStrong.opacity(0.58))
-                        .frame(width: 1, height: 20)
-                }
-
+            if !remoteParticipants.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 4) {
                         ForEach(remoteParticipants) { participant in
@@ -6353,22 +6348,13 @@ struct WalkieTalkieBar: View {
                     }
                 }
                 .scrollClipDisabled()
-                .frame(maxWidth: .infinity)
+            } else {
+                Spacer(minLength: 0)
             }
         }
         .padding(.horizontal, 4)
         .frame(maxWidth: .infinity)
         .frame(height: 40)
-        .background {
-            if !embeddedFloating {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Palette.messageSurface.opacity(0.76))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .stroke(Palette.glassHighlight.opacity(0.62), lineWidth: 1)
-                    }
-            }
-        }
     }
 
     private var actionDock: some View {
@@ -6377,23 +6363,32 @@ struct WalkieTalkieBar: View {
 
             communicationButton(
                 icon: model.unreadMessageCount > 0 ? "bubble.left.and.text.bubble.right.fill" : "bubble.left.and.text.bubble.right",
-                active: model.floatingSection == .chat,
+                active: model.section(for: presentation) == .chat,
                 badge: model.unreadMessageCount,
                 help: "Conversation"
             ) {
-                if showsCloseButton || embeddedFloating { model.showChatInFloatingBar() }
-                else { model.roomGamesVisible = false; model.showChat() }
+                model.roomGamesVisible = false
+                if showsCloseButton { model.showChatInFloatingBar() }
+                else { model.toggleSection(.chat, in: presentation) }
             }
-            .keyboardShortcut("1", modifiers: .command)
+            .keyboardShortcut(receivesNavigationShortcuts ? KeyboardShortcut("1", modifiers: .command) : nil)
 
             communicationButton(
-                icon: model.floatingSection == .people ? "person.2.fill" : "person.2",
-                active: model.floatingSection == .people,
+                icon: model.section(for: presentation) == .people ? "person.2.fill" : "person.2",
+                active: model.section(for: presentation) == .people,
                 help: "People and volume"
             ) {
-                (showsCloseButton || embeddedFloating) ? model.showPeopleInFloatingBar() : model.showPeople()
+                if showsCloseButton { model.showPeopleInFloatingBar() }
+                else { model.toggleSection(.people, in: presentation) }
             }
-            .keyboardShortcut("2", modifiers: .command)
+            .keyboardShortcut(receivesNavigationShortcuts ? KeyboardShortcut("2", modifiers: .command) : nil)
+
+            communicationButton(
+                icon: "rectangle.on.rectangle",
+                active: model.roomHasVideo || model.mediaSwitchBusy,
+                help: model.mediaSwitchBusy ? "Cancel screen selection" : model.videoControlHelp
+            ) { model.toggleVideoFromFloatingBar(presentation: presentation) }
+            .disabled(!model.canSelectVideo)
 
             settingsButton
 
@@ -6443,26 +6438,6 @@ struct WalkieTalkieBar: View {
                 RoomPreferencesView(model: model)
             }
         }
-    }
-
-    private var voiceStateLabel: String {
-        if model.walkieStarting { return "Starting" }
-        if model.walkieTalking { return "Speaking" }
-        if !model.incomingWalkieSpeakerIDs.isEmpty { return "Listening" }
-        switch model.openLineState {
-        case .invited: return "Incoming"
-        case .inviting: return "Calling"
-        case .connected: return "Open line"
-        case .idle: return "Ready"
-        }
-    }
-
-    private var voiceStateColor: Color {
-        if !model.incomingWalkieSpeakerIDs.isEmpty { return Palette.voiceBlue }
-        if model.walkieTalking || model.walkieStarting || model.openLineState.isSendingMicrophone {
-            return Palette.voiceBlue
-        }
-        return Palette.muted
     }
 
     private var remoteParticipants: [RoomParticipant] {
@@ -7676,7 +7651,7 @@ private extension NSImage {
     }
 }
 
-private extension NSColor {
+extension NSColor {
     static func deviceIdentity(_ hex: String) -> NSColor {
         let normalized = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
         guard normalized.count == 6, let value = UInt64(normalized, radix: 16) else {

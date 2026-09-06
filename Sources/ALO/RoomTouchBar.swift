@@ -29,6 +29,7 @@ final class RoomTouchBarController: NSObject, NSTouchBarDelegate {
         let muted: Bool
     }
     private let model: ALOViewModel
+    private let presentation: RoomControlsPresentation
     private let onGames: (() -> Void)?
     private var observer: AnyCancellable?
     private var previous: Snapshot?
@@ -40,8 +41,9 @@ final class RoomTouchBarController: NSObject, NSTouchBarDelegate {
         NSTouchBarItem.Identifier("app.alo.room.action.\(action.rawValue)")
     }
 
-    init(model: ALOViewModel, onGames: (() -> Void)? = nil) {
+    init(model: ALOViewModel, presentation: RoomControlsPresentation = .floating, onGames: (() -> Void)? = nil) {
         self.model = model; self.onGames = onGames
+        self.presentation = presentation
         super.init()
         let bar = NSTouchBar()
         bar.delegate = self
@@ -132,8 +134,8 @@ final class RoomTouchBarController: NSObject, NSTouchBarDelegate {
         case .playback: model.toggleRoomPlayback()
         case .mute: model.toggleAllIncomingAudio()
         case .syncThisMac: model.syncThisMac()
-        case .chat: model.showChatInFloatingBar(); moreItem?.dismissPopover(nil)
-        case .people: model.showPeopleInFloatingBar(); moreItem?.dismissPopover(nil)
+        case .chat: model.toggleSection(.chat, in: presentation); moreItem?.dismissPopover(nil)
+        case .people: model.toggleSection(.people, in: presentation); moreItem?.dismissPopover(nil)
         case .games: onGames?(); moreItem?.dismissPopover(nil)
         }
         refresh()

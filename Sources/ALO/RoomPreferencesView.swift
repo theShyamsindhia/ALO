@@ -5,6 +5,7 @@ struct RoomPreferencesView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var model: ALOViewModel
     @ObservedObject private var notch = ALONotchPreferences.shared
+    @ObservedObject private var menuBar = ALOMenuBarPreferences.shared
     @ObservedObject private var lyrics: LyricsController
     @State private var showsAbout = false
     @State private var selectedSection = SettingsSection.audio
@@ -219,6 +220,22 @@ struct RoomPreferencesView: View {
                 Toggle("Show media bar", isOn: mediaBarVisible)
                 Toggle("Enable Notch", isOn: $notch.enabled)
                     .toggleStyle(.switch).controlSize(.small)
+            }
+
+            Divider()
+
+            preferenceSection("Pin to menu bar", systemImage: "menubar.rectangle") {
+                Text("Choose your shortcuts. Hiding the disc keeps a small ALO launcher.")
+                    .font(.caption).foregroundStyle(.secondary)
+                ForEach(ALOMenuBarControl.allCases) { control in
+                    Toggle(isOn: Binding(
+                        get: { menuBar.controls.contains(control) },
+                        set: { menuBar.setPinned(control, $0) }
+                    )) {
+                        Label(control.title, systemImage: control.symbol)
+                    }
+                    .toggleStyle(.checkbox)
+                }
             }
 
             Divider()

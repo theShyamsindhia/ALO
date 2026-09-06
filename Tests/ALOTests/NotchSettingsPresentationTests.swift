@@ -55,10 +55,12 @@ struct NotchSettingsPresentationTests {
         model.setMenuBarPopoverVisible(true)
         model.floatingBarHidden = true
         model.floatingSection = .chat
+        model.menuBarSection = .people
         model.prepareNotchSettingsForMenuBar()
         #expect(model.notchSettingsVisible)
         #expect(model.notchSettingsHeight == 430)
-        #expect(model.floatingSection == .collapsed)
+        #expect(model.menuBarSection == .collapsed)
+        #expect(model.floatingSection == .chat, "Menu settings must not change floating navigation")
         #expect(model.floatingBarHidden, "Opening inline must not move a menu-bar player into another window")
         model.notchSettingsVisible = false
         #expect(model.notchSettingsHeight == 0)
