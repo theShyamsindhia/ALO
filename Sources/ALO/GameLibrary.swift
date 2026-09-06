@@ -256,7 +256,8 @@ struct GameLibraryView: View {
                             GridItem(.flexible(minimum: 240), spacing: 12, alignment: .top)
                         ], alignment: .leading, spacing: 12) {
                             stickFightCard
-                            ForEach(store.games) { game in card(game) }
+                            breachCard
+                            ForEach(store.games.filter { $0.id != "fourfold" }) { game in card(game) }
                         }
                         if !store.catalogNotice.isEmpty {
                             Text(store.catalogNotice).font(.system(size: 10)).foregroundStyle(secondary).frame(maxWidth: .infinity, alignment: .leading)
@@ -305,6 +306,30 @@ struct GameLibraryView: View {
         .background(Color.white.opacity(0.035))
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(Color.white.opacity(0.09), lineWidth: 0.7))
+    }
+
+    private var breachCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ZStack(alignment: .bottomLeading) {
+                LinearGradient(colors: [Color(red: 0.22, green: 0.30, blue: 0.32), .black], startPoint: .topLeading, endPoint: .bottomTrailing)
+                Image(systemName: "scope").font(.system(size: 66, weight: .ultraLight))
+                    .foregroundStyle(.orange.opacity(0.3)).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing).padding(20)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("TACTICAL FPS").font(.system(size: 9, weight: .bold)).tracking(2).foregroundStyle(.orange)
+                    Text("BREACH").font(.system(size: 28, weight: .black)).tracking(3)
+                    Text("Foundry · Local bot match").font(.caption).foregroundStyle(.secondary)
+                }.padding(16)
+            }.frame(height: 138)
+            HStack {
+                Button { BreachWindowController.shared.show() } label: { Label("Play", systemImage: "play.fill") }
+                    .buttonStyle(.borderedProminent)
+                Text("Built in").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Image(systemName: "arrow.up.left.and.arrow.down.right").help("Opens in a dedicated window")
+            }.padding(.horizontal, 12).padding(.bottom, 12)
+        }.background(.white.opacity(0.035), in: RoundedRectangle(cornerRadius: 16))
+            .clipShape(RoundedRectangle(cornerRadius: 16))
+            .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.white.opacity(0.1)))
     }
 
     private var liveArenas: some View {

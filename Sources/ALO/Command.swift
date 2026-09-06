@@ -30,6 +30,9 @@ enum ALOCommand {
             }
 
             switch command {
+            case "breach":
+                BreachStandalone.run()
+
             case "arena":
                 ArenaStandalone.run()
 
@@ -242,6 +245,7 @@ enum ALOCommand {
         Usage:
           alo arena               Open the standalone games library
           alo stick-fight          Open standalone Stick Fight
+          alo breach              Open Breach tactical FPS bot match
           alo host [room-name]     Stream this Mac's screen and system audio
           alo join [room-name]     Find and play a room on the local network
           alo room [id-or-name] [--broadcast|--take-over]
