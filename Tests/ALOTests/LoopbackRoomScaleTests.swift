@@ -1755,13 +1755,13 @@ private final class HeadlessLoopbackPeer {
         let udpPort = try start(udp, kind: "UDP")
         udpListener = udp
 
-        let video = try NWListener(using: .tcp, on: .any)
-        video.newConnectionHandler = { [weak self] connection in
-            self?.acceptVideo(connection)
-        }
-        let videoPort = try start(video, kind: "video")
-        videoListener = video
-
+        // Reserve the outbound control socket before opening the peer's TCP
+        // video listener. On a single Mac, Network.framework otherwise tends
+        // to allocate consecutive ephemeral ports to the host listener and
+        // each video listener, then tries to reuse one of those ports for the
+        // outbound loopback connection. That intermittently leaves every
+        // control connection waiting with EADDRINUSE on fresh CI runners.
+        let controlReady = DispatchSemaphore(value: 0)
         let control = NWConnection(host: "127.0.0.1", port: hostPort, using: .tcp)
         self.control = control
         receiveControl(from: control)
@@ -1769,21 +1769,37 @@ private final class HeadlessLoopbackPeer {
             guard let self else { return }
             switch state {
             case .waiting(let error), .failed(let error):
-                print("Loopback peer \(self.index) control \(state): host=127.0.0.1:\(hostPort), UDP=\(udpPort), video=\(videoPort), error=\(error)")
-                return
-            case .ready: break
-            default: return
+                print("Loopback peer \(self.index) control \(state): host=127.0.0.1:\(hostPort), UDP=\(udpPort), error=\(error)")
+                controlReady.signal()
+            case .ready:
+                controlReady.signal()
+            default:
+                break
             }
-            let join = ControlMessage(
-                type: "join",
-                udpPort: udpPort.rawValue,
-                videoPort: videoPort.rawValue,
-                displayName: "Loopback peer \(self.index)",
-                participantID: self.participantID
-            )
-            self.send(join)
         }
         control.start(queue: queue)
+        guard controlReady.wait(timeout: .now() + 3) == .success,
+              case .ready = control.state
+        else {
+            control.cancel()
+            throw LoopbackTestError.peerDidNotJoin
+        }
+
+        let video = try NWListener(using: .tcp, on: .any)
+        video.newConnectionHandler = { [weak self] connection in
+            self?.acceptVideo(connection)
+        }
+        let videoPort = try start(video, kind: "video")
+        videoListener = video
+
+        let join = ControlMessage(
+            type: "join",
+            udpPort: udpPort.rawValue,
+            videoPort: videoPort.rawValue,
+            displayName: "Loopback peer \(index)",
+            participantID: participantID
+        )
+        queue.async { [weak self] in self?.send(join) }
     }
 
     func waitUntilJoined(timeout: TimeInterval) -> Bool {
