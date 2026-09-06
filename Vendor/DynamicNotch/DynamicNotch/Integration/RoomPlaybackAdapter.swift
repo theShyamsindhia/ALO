@@ -34,6 +34,10 @@ public enum RoomPlaybackCommand: Equatable, Sendable {
 /// Only adapts ALO data and commands. Rendering remains the upstream player.
 @MainActor
 final class RoomPlaybackService: NowPlayingMonitoring, NowPlayingCommandAvailabilityProviding {
+    // No executor-bound resources are owned here. Avoid the isolated-deinit
+    // backdeployment thunk, which can abort in TaskLocal teardown on macOS 15.
+    nonisolated deinit {}
+
     var onSnapshotChange: ((NowPlayingSnapshot?) -> Void)?
     var onCommand: @MainActor (RoomPlaybackCommand) -> Void = { _ in }
     private(set) var roomSnapshot: RoomPlaybackSnapshot?
