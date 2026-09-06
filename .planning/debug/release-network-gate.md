@@ -28,6 +28,8 @@ updated: 2026-09-06
   observation: The same run logged POSIX EADDRINUSE after the loopback helper had opened UDP but before its outbound control connection reached ready; multiple public and secure mesh convergence tests then timed out.
 - timestamp: 2026-09-06T18:20:00+05:30
   observation: HostServer clears completion evidence only after drainAudio has emptied pending work. When the last in-flight send completes slowly, fresh pending packets are evaluated and rejected before that reset.
+- timestamp: 2026-09-06T18:52:00+05:30
+  observation: Release run 34035289490 reproduced the remaining idle-path fault deterministically: two listeners stopped at sequences 176 and 181, a late-join run left an established listener at 40 packets, and a delayed-capture run reached 49. All four failures stayed below the unchanged 250ms latency ceiling and were admission drops, not transport loss.
 
 ## Eliminated
 

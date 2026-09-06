@@ -1123,8 +1123,7 @@ final class HostServer {
             // current capture is already waiting behind it. Probe that idle
             // path with fresh audio instead of rejecting the whole pending
             // burst using evidence from work that has finished draining.
-            if client.audioSendsInFlight == 0,
-               captureAge < Self.maximumPendingAudioSpanNanos {
+            if client.audioSendsInFlight == 0 {
                 client.audioCompletionDurations.removeAll()
                 client.audioCompletionIntervals.removeAll()
                 client.lastAudioCompletionNanos = nil
