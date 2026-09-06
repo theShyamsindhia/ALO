@@ -327,12 +327,12 @@ struct NowPlayingExpandedNotchView: View {
                         showsLyrics.toggle()
                     }
                 } label: {
-                    Label("Lyrics", systemImage: showsLyrics ? "quote.bubble.fill" : "quote.bubble")
-                        .font(.system(size: 10, weight: .semibold))
+                    Image(systemName: showsLyrics ? "quote.bubble.fill" : "quote.bubble")
+                        .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(.white.opacity(showsLyrics ? 0.9 : 0.52))
-                        .frame(width: 52, height: 32)
+                        .frame(width: 38, height: 38)
                         .background(.white.opacity(showsLyrics ? 0.12 : 0))
-                        .clipShape(Capsule())
+                        .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
                 .help(showsLyrics ? "Hide lyrics" : "Show lyrics")
