@@ -10,25 +10,25 @@ struct AppIconOption: Identifiable, Equatable {
     let bytes: Int?
     let sha256: String?
 
-    private static let sourceRevision = "e1a93551329e1ef7f61462be33abb07f0230e7dc"
+    private static let sourceRevision = "228eafaaccd0a77c3fa5dbc682e09f52e9bb6f1a"
 
     static let all: [Self] = [
         .init(id: "original", name: "Original · Default", bytes: nil, sha256: nil),
-        .init(id: "midnight", name: "Midnight", bytes: 979_363, sha256: "fa704d7c3e75e8bfb738ec5a002e4eb15004e544cd9d3a7d2bf9efc2bf565119"),
-        .init(id: "coral", name: "Coral", bytes: 867_408, sha256: "84498aedd109a20d2695ab31e850e94c6dc056db1262e29826059d38d5386b82"),
-        .init(id: "cobalt", name: "Cobalt", bytes: 763_253, sha256: "32280377f3f968b7e025de2d79535885d7a4e134a78b6e455658faf8ac88728a"),
-        .init(id: "pearl-color", name: "Pearl Color", bytes: 776_404, sha256: "60fb96fd76834d3728a1289d5c115bd65dee7f0a4d38fbc168373f2ec229b298"),
-        .init(id: "graphite-keycap", name: "Graphite Keycap", bytes: 1_130_044, sha256: "09287e368d02723f83716ff7d6d6fdde8f1f29c557a3a8d7c17ce23f7a3710fc"),
-        .init(id: "layered-white", name: "Layered White", bytes: 791_296, sha256: "639a8b5b5c581360eae43529f9bf727bb4b7b9af8e53100e2de6f39827a41f01"),
-        .init(id: "aurora-pearl", name: "Aurora Pearl", bytes: 950_132, sha256: "b4327e25a4a9e0b64c2198ef361e5dcc9f7b1ccebaf0065103b9c43fce1d9a2d"),
-        .init(id: "spectrum-ink", name: "Spectrum Ink", bytes: 806_893, sha256: "640ea6a47ebca7d55ce47c7a945bbd040d28967d12f37d546102b3a92dee33fa"),
-        .init(id: "frosted-ice", name: "Frosted Ice", bytes: 1_338_280, sha256: "87261736c62ea7eb712c52392b52f77fd8b81bac3a57b3b90dc1cd9fc4918559"),
-        .init(id: "violet-chrome", name: "Violet Chrome", bytes: 1_289_023, sha256: "87e24e486d8835207bc71eb2a5ddf830dbae62a6ccd0e4b564e7cba504fc7f45"),
-        .init(id: "milk-glass", name: "Milk Glass", bytes: 732_988, sha256: "8144d84b26dd9cf2c23b33b45aca664590a2f8b53e0accc1d1f51a0e600ecb7f"),
-        .init(id: "ink-and-lime", name: "Ink and Lime", bytes: 830_785, sha256: "c35811542c2fc29bbd182de22107df133365e97952e507d49648fb87ef6c5519"),
-        .init(id: "sunset-gel", name: "Sunset Gel", bytes: 881_954, sha256: "2c32badd15ad14466438366d19ff600ca23fdb741489dc5436ccf686c3de7159"),
-        .init(id: "electric-mint", name: "Electric Mint", bytes: 931_499, sha256: "30d3c993df93d75320f0689282e50b0ba00fdf8bcb7b69606f9ec43c792195d6"),
-        .init(id: "frosted-orange", name: "Frosted Orange", bytes: 811_672, sha256: "bef86975bae7800348d50115b5d266ed25b9c27b32eb5eb911a4bae20b6dca0d")
+        .init(id: "midnight", name: "Midnight", bytes: 874_136, sha256: "c8d5ca62b05f3d46a056f6f02f3a85f7d669b0c32035488915035cec43a432b7"),
+        .init(id: "coral", name: "Coral", bytes: 777_388, sha256: "d49e2453122f1243215d0aa310e862430b7aa9bc53f0868147bec05dfa6760ba"),
+        .init(id: "cobalt", name: "Cobalt", bytes: 693_664, sha256: "eed74ea66e4bdc08029379c11c18fc2fa9107a9d3a20f23bf1593412c88b3ba8"),
+        .init(id: "pearl-color", name: "Pearl Color", bytes: 692_761, sha256: "f1bb66b3563c1e40f497db5ca28191a9619674c58109c1f518069cb9c25c4ef3"),
+        .init(id: "graphite-keycap", name: "Graphite Keycap", bytes: 998_223, sha256: "4dd1cf7e606dfbb8183358d3e3894d6f044a322671097a65b2a65e6ffef78cbb"),
+        .init(id: "layered-white", name: "Layered White", bytes: 700_450, sha256: "6584907748fc189998658ed381d6852a209c8191fb970f7eec5f9d2d0d577076"),
+        .init(id: "aurora-pearl", name: "Aurora Pearl", bytes: 757_405, sha256: "2b8aeb5bad9774c97ced5406f6b6e3212b88ff0c03952fa4ce02e8de68312d45"),
+        .init(id: "spectrum-ink", name: "Spectrum Ink", bytes: 755_970, sha256: "c599e587c663a860279400b18a1b16f231bb4ee5cf4dd1103f6df3bbce1f8ac8"),
+        .init(id: "frosted-ice", name: "Frosted Ice", bytes: 1_205_033, sha256: "067e87f48df4e90d61011ccd1843ed44c88a0736e126f5c9d8869b147a1825ed"),
+        .init(id: "violet-chrome", name: "Violet Chrome", bytes: 1_173_671, sha256: "01debbac240a0943f586805ba85ad2291e3bd12c7c8ecc2946e32678bdd017f1"),
+        .init(id: "milk-glass", name: "Milk Glass", bytes: 681_604, sha256: "00411a80c12aba5b17a0fedfccdc269648643f21891203f29cd7dac96a67ce29"),
+        .init(id: "ink-and-lime", name: "Ink and Lime", bytes: 698_486, sha256: "da3097c2bec70bc10ab325bbe827fd42c1f48c4e2801a4688f8d54c897e49947"),
+        .init(id: "sunset-gel", name: "Sunset Gel", bytes: 812_959, sha256: "1b660ccba7f774517200eb13508f859232a72a45414c15e5258009d1990476ec"),
+        .init(id: "electric-mint", name: "Electric Mint", bytes: 817_914, sha256: "8aed47966fc890767c8e2677da6640e4b57a12191aa9b75fb96e405c492338b1"),
+        .init(id: "frosted-orange", name: "Frosted Orange", bytes: 701_764, sha256: "bca56a4410da0a54aa8e31bbf4e631d4ac34376f49c8714ff5d5ac7f9aca7f3e")
     ]
 
     static func resolvedID(_ value: String?) -> String {
@@ -92,12 +92,12 @@ final class AppIconPreferences: ObservableObject {
     init(defaults: UserDefaults = .standard, directory: URL? = nil, fetcher: Fetch? = nil) {
         self.defaults = defaults
         self.directory = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("ALO/AppIcons/v1", isDirectory: true)
+            .appendingPathComponent("ALO/AppIcons/v2", isDirectory: true)
         self.fetcher = fetcher ?? { url, limit in try await Self.fetch(url, limit: limit) }
         selectedID = AppIconOption.resolvedID(defaults.string(forKey: Self.defaultsKey))
         installedIDs = Set(AppIconOption.all.dropFirst().compactMap { option in
             let url = (directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("ALO/AppIcons/v1", isDirectory: true))
+                .appendingPathComponent("ALO/AppIcons/v2", isDirectory: true))
                 .appendingPathComponent(option.id + ".png")
             return FileManager.default.fileExists(atPath: url.path) ? option.id : nil
         })
