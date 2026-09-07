@@ -4,6 +4,24 @@ import Testing
 @Suite("Foreground channel lifecycle")
 @MainActor
 struct ForegroundChannelLifecycleTests {
+    @Test func explicitRefreshCancelsSuspendedOldActivationWork() async throws {
+        let lifecycle = ForegroundChannelLifecycle()
+        var resume: CheckedContinuation<Void, Never>?
+        var oldCompletions = 0
+        let old = lifecycle.activate { activation in
+            await withCheckedContinuation { resume = $0 }
+            // Refresh preserves join intent, so cancellation is the required
+            // fence for the superseded activation task, just as in MobileRoomModel.
+            if !Task.isCancelled, lifecycle.accepts(activation) { oldCompletions += 1 }
+        }
+        while resume == nil { await Task.yield() }
+        var newCompletions = 0
+        await lifecycle.activate(refreshIfForeground: true) { _ in newCompletions += 1 }.value
+        try #require(resume).resume()
+        await old.value
+        #expect(oldCompletions == 0)
+        #expect(newCompletions == 1)
+    }
     @Test func repeatedForegroundActivationPreservesManualJoin() async throws {
         let lifecycle = ForegroundChannelLifecycle()
         await lifecycle.activate { _ in }.value

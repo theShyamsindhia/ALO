@@ -15,6 +15,7 @@ public struct ALONetworkSidebar: View {
     private let onApprove: (UUID) -> Void
     private let onDecline: (UUID) -> Void
     private let nearbyError: String?
+    private let nearbyNotice: String?
     private let onRetryNearby: () -> Void
     private let onCancelJoin: (UUID) -> Void
 
@@ -33,6 +34,7 @@ public struct ALONetworkSidebar: View {
         onApprove: @escaping (UUID) -> Void = { _ in },
         onDecline: @escaping (UUID) -> Void = { _ in },
         nearbyError: String? = nil,
+        nearbyNotice: String? = nil,
         onRetryNearby: @escaping () -> Void = {},
         onCancelJoin: @escaping (UUID) -> Void = { _ in }
     ) {
@@ -46,6 +48,7 @@ public struct ALONetworkSidebar: View {
         self.nearbyNetworks = nearbyNetworks; self.joinRequests = joinRequests
         self.isBusy = isBusy; self.onJoin = onJoin; self.onApprove = onApprove; self.onDecline = onDecline
         self.nearbyError = nearbyError; self.onRetryNearby = onRetryNearby
+        self.nearbyNotice = nearbyNotice
         self.onCancelJoin = onCancelJoin
     }
 
@@ -66,6 +69,11 @@ public struct ALONetworkSidebar: View {
                                 Text(request.name).fontWeight(.medium)
                                 Text("Wants to join \(request.networkName). Approve only if you recognize this person.")
                                     .font(.callout).foregroundStyle(.secondary)
+                                DisclosureGroup("Verify identity") {
+                                    Text("Compare this fingerprint with the person through a trusted conversation.")
+                                        .font(.callout).foregroundStyle(.secondary)
+                                    ALOFingerprint(value: request.fingerprint)
+                                }
                                 HStack {
                                     Button("Approve") { onApprove(request.id) }.buttonStyle(.borderedProminent)
                                     Button("Decline") { onDecline(request.id) }.buttonStyle(.bordered)
@@ -102,6 +110,9 @@ public struct ALONetworkSidebar: View {
                     }
                 }
                 Section("Nearby networks") {
+                    if let nearbyNotice {
+                        Text(nearbyNotice).font(.callout).foregroundStyle(.secondary)
+                    }
                     if let nearbyError {
                         ALOInlineError(message: nearbyError)
                         Button("Try again", action: onRetryNearby)
@@ -111,9 +122,9 @@ public struct ALONetworkSidebar: View {
                         VStack(alignment: .leading, spacing: 6) {
                             Text(network.name).fontWeight(.medium)
                             if let status = network.status {
-                                Text(status).font(.callout).foregroundStyle(.secondary)
+                                Text(status.message).font(.callout).foregroundStyle(.secondary)
                             }
-                            if network.status == "Waiting for approval" {
+                            if network.status == .waitingForApproval {
                                 Button("Cancel request") { onCancelJoin(network.id) }
                                     .buttonStyle(.bordered)
                                     .frame(minHeight: ALONetworkMetrics.actionHeight)
@@ -140,6 +151,9 @@ public struct ALONetworkSidebar: View {
                         ALOActionLabel(title: "Create network", systemImage: "plus")
                     }.accessibilityIdentifier("ALO.Network.Create")
                     DisclosureGroup("Other ways to connect") {
+                        if !identityFingerprint.isEmpty {
+                            ALOFingerprint(value: identityFingerprint)
+                        }
                         Button(action: onImportNetwork) {
                             ALOActionLabel(title: "Import invitation", systemImage: "square.and.arrow.down")
                         }.accessibilityIdentifier("ALO.Network.Import")

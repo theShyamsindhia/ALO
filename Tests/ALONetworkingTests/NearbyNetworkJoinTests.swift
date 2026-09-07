@@ -5,6 +5,63 @@ import ALORooms
 @testable import ALONetworking
 
 final class NearbyNetworkJoinTests: XCTestCase {
+    func testClientRejectsWrongNetworkOwnerAndRecipient() throws {
+        let owner = UserIdentity.ephemeral(), otherOwner = UserIdentity.ephemeral()
+        let recipient = UserIdentity.ephemeral(), otherRecipient = UserIdentity.ephemeral()
+        let manifest = try NetworkManifest.create(name: "Expected", owner: owner)
+            .addingMember(recipient.publicIdentity, signedBy: owner)
+            .addingMember(otherRecipient.publicIdentity, signedBy: owner)
+        let valid = try NetworkInvitation(manifest: manifest, recipient: recipient.publicIdentity)
+        let response = NearbyNetworkService.Message(kind: "approved", networkID: manifest.id, invitation: valid)
+        XCTAssertNoThrow(try NearbyNetworkService.validatedInvitation(response, networkID: manifest.id,
+            owner: owner.publicIdentity, recipient: recipient.publicIdentity))
+        XCTAssertThrowsError(try NearbyNetworkService.validatedInvitation(response, networkID: UUID(),
+            owner: owner.publicIdentity, recipient: recipient.publicIdentity))
+        XCTAssertThrowsError(try NearbyNetworkService.validatedInvitation(response, networkID: manifest.id,
+            owner: otherOwner.publicIdentity, recipient: recipient.publicIdentity))
+        let wrongRecipient = try NetworkInvitation(manifest: manifest, recipient: otherRecipient.publicIdentity)
+        XCTAssertThrowsError(try NearbyNetworkService.validatedInvitation(.init(kind: "approved", networkID: manifest.id,
+            invitation: wrongRecipient), networkID: manifest.id, owner: owner.publicIdentity, recipient: recipient.publicIdentity))
+        let otherNetwork = try NetworkManifest.create(name: "Other", owner: owner)
+            .addingMember(recipient.publicIdentity, signedBy: owner)
+        let wrongNetwork = try NetworkInvitation(manifest: otherNetwork, recipient: recipient.publicIdentity)
+        XCTAssertThrowsError(try NearbyNetworkService.validatedInvitation(.init(kind: "approved", networkID: manifest.id,
+            invitation: wrongNetwork), networkID: manifest.id, owner: owner.publicIdentity, recipient: recipient.publicIdentity))
+    }
+
+    func testLoopbackRejectsHelloFromDifferentAdvertisedOwner() async throws {
+        let owner = UserIdentity.ephemeral(), manifest = try NetworkManifest.create(name: "Actual", owner: owner)
+        let server = try NearbyNetworkService(user: owner, displayName: "Owner", changed: { _ in }, requestsChanged: { _ in }, failed: { _ in })
+        let client = try NearbyNetworkService(user: .ephemeral(), displayName: "Client", changed: { _ in }, requestsChanged: { _ in }, failed: { _ in })
+        defer { server.stop(); client.stop() }
+        let endpoint = try await server.listenOnLoopback(network: manifest)
+        do {
+            _ = try await client.request(network: NearbyNetwork(id: manifest.id, name: manifest.name,
+                ownerID: UserIdentity.ephemeral().publicIdentity.userID), endpoint: endpoint)
+            XCTFail("A different owner must not be accepted")
+        } catch { guard case NearbyNetworkError.invalidMessage = error else { return XCTFail("Unexpected error: \(error)") } }
+    }
+
+    func testOneHostCannotDisplaceExistingPendingRequestsWithNewIdentities() async throws {
+        let owner = UserIdentity.ephemeral(), manifest = try NetworkManifest.create(name: "Bounded", owner: owner)
+        let twoPending = expectation(description: "Two requests admitted"), requests = Requests()
+        let server = try NearbyNetworkService(user: owner, displayName: "Owner", changed: { _ in },
+            requestsChanged: { value in requests.set(value); if value.count == 2 { twoPending.fulfill() } }, failed: { _ in })
+        let clients = try (0..<3).map { index in try NearbyNetworkService(user: .ephemeral(), displayName: "Client \(index)",
+            changed: { _ in }, requestsChanged: { _ in }, failed: { _ in }) }
+        defer { server.stop(); clients.forEach { $0.stop() } }
+        let endpoint = try await server.listenOnLoopback(network: manifest)
+        let network = NearbyNetwork(id: manifest.id, name: manifest.name, ownerID: owner.publicIdentity.userID)
+        let active = clients.prefix(2).map { client in Task { try await client.request(network: network, endpoint: endpoint) } }
+        defer { active.forEach { $0.cancel() } }
+        await fulfillment(of: [twoPending], timeout: 5)
+        let originalIDs = requests.ids
+        do { _ = try await clients[2].request(network: network, endpoint: endpoint); XCTFail("A third host session must fail") }
+        catch { }
+        XCTAssertEqual(requests.ids, originalIDs)
+        XCTAssertEqual(requests.ids.count, 2)
+    }
+
     func testInboundFloodCannotConsumeOutboundJoinCapacity() {
         XCTAssertTrue(NearbyNetworkService.permitsSession(inboundCount: 16, outboundCount: 0, outbound: true))
         XCTAssertFalse(NearbyNetworkService.permitsSession(inboundCount: 16, outboundCount: 0, outbound: false))
@@ -38,6 +95,7 @@ final class NearbyNetworkJoinTests: XCTestCase {
         var requests = [NearbyNetworkJoinRequest]()
         func set(_ value: [NearbyNetworkJoinRequest]) { lock.lock(); requests = value; lock.unlock() }
         var first: NearbyNetworkJoinRequest? { lock.lock(); defer { lock.unlock() }; return requests.first }
+        var ids: Set<UUID> { lock.lock(); defer { lock.unlock() }; return Set(requests.map(\.id)) }
     }
 
     func testLoopbackOwnerApprovalReturnsSignedInvitation() async throws {
@@ -59,7 +117,7 @@ final class NearbyNetworkJoinTests: XCTestCase {
         XCTAssertEqual(request.displayName, "Requester")
         XCTAssertThrowsError(try manifest.authorize(request.identity, channelID: manifest.mainChannel.id))
         let approved = try manifest.addingMember(request.identity, signedBy: owner)
-        ownerService.respond(id: request.id, invitation: try NetworkInvitation(manifest: approved, recipient: request.identity))
+        try await ownerService.respond(id: request.id, invitation: try NetworkInvitation(manifest: approved, recipient: request.identity))
         let invitation = try await result.value
         XCTAssertEqual(invitation.manifest, approved)
         XCTAssertEqual(invitation.recipient, requester.publicIdentity)
@@ -87,12 +145,14 @@ final class NearbyNetworkJoinTests: XCTestCase {
             defer { result.cancel() }
             await fulfillment(of: [received], timeout: 15)
             let request = try XCTUnwrap(requests.first)
-            if cancel { result.cancel() } else { server.respond(id: request.id, invitation: nil) }
+            if cancel { result.cancel() } else { try await server.respond(id: request.id, invitation: nil) }
             do { _ = try await result.value; XCTFail("No invitation should be returned") }
             catch { if cancel { XCTAssertTrue(error is CancellationError) } }
             await fulfillment(of: [removed], timeout: 3)
             XCTAssertNil(requests.first)
             do { _ = try await server.requestAwaitingApproval(id: request.id); XCTFail("Stale approval must fail") }
+            catch { }
+            do { try await server.respond(id: request.id, invitation: nil); XCTFail("Undeliverable response must throw") }
             catch { }
             XCTAssertFalse(manifest.isMember(requester.publicIdentity))
         }

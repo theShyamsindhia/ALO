@@ -5,6 +5,10 @@ import ALOIdentity
 import ALORooms
 import ALONetworking
 
+public enum NetworkJoinState: Equatable, Sendable {
+    case waitingForApproval, joined, cancelled, failed(String)
+}
+
 public enum NetworkAccountError: LocalizedError {
     case setupRequired, nameRequired, nameTooLong, channelUnavailable
     public var errorDescription: String? {
@@ -30,8 +34,9 @@ public final class NetworkAccountModel: ObservableObject {
     @Published public private(set) var errorMessage: String?
     @Published public private(set) var nearbyNetworks = [NearbyNetwork]()
     @Published public private(set) var pendingJoinRequests = [NearbyNetworkJoinRequest]()
-    @Published public private(set) var joinRequestStatus = [UUID: String]()
+    @Published public private(set) var joinRequestStatus = [UUID: NetworkJoinState]()
     @Published public private(set) var nearbyNetworkError: String?
+    @Published public private(set) var nearbyNetworkNotice: String?
     private var nearbyService: NearbyNetworkService?
     private var nearbyIdentityID: String?
     private var nearbyGeneration = UUID()
@@ -232,7 +237,7 @@ public final class NetworkAccountModel: ObservableObject {
                 stopNearbyNetworking()
                 let expectedID = identity.publicIdentity.userID
                 let generation = nearbyGeneration
-                nearbyService = try NearbyNetworkService(user: identity, displayName: displayName,
+                nearbyService = try NearbyNetworkService(user: identity, displayName: Self.bindingDeviceName(displayName),
                     changed: { [weak self] found in Task { @MainActor in
                         guard let self, self.nearbyIdentityID == expectedID, self.nearbyGeneration == generation else { return }
                         self.discoveredNetworks = found; self.updateNearbyNetworks()
@@ -242,6 +247,9 @@ public final class NetworkAccountModel: ObservableObject {
                     } }, failed: { [weak self] message in Task { @MainActor in
                         guard let self, self.nearbyIdentityID == expectedID, self.nearbyGeneration == generation else { return }
                         self.nearbyNetworkError = message
+                    } }, notice: { [weak self] message in Task { @MainActor in
+                        guard let self, self.nearbyIdentityID == expectedID, self.nearbyGeneration == generation else { return }
+                        self.nearbyNetworkNotice = message
                     } })
                 nearbyIdentityID = expectedID
             }
@@ -255,12 +263,12 @@ public final class NetworkAccountModel: ObservableObject {
         nearbyIdentityID = nil; nearbyService?.stop(); nearbyService = nil
         discoveredNetworks = []; nearbyNetworks = []; pendingJoinRequests = []
         joinRequestTokens = [:]
-        nearbyNetworkError = nil; joinRequestStatus = [:]
+        nearbyNetworkError = nil; nearbyNetworkNotice = nil; joinRequestStatus = [:]
     }
 
     private func updateNearbyNetworks() {
         let memberIDs = Set(networks.map(\.id))
-        let retained = nearbyNetworks.filter { joinRequestStatus[$0.id] == "Waiting for approval" }
+        let retained = nearbyNetworks.filter { joinRequestStatus[$0.id] == .waitingForApproval }
         let foundIDs = Set(discoveredNetworks.map(\.id))
         nearbyNetworks = (discoveredNetworks + retained.filter { !foundIDs.contains($0.id) }).filter { !memberIDs.contains($0.id) }
         pruneJoinRequestStatus()
@@ -278,7 +286,7 @@ public final class NetworkAccountModel: ObservableObject {
     public func requestToJoin(networkID: UUID) async throws {
         let identity = try requireIdentity(), token = identityGeneration
         guard let service = nearbyService else { throw NearbyNetworkError.unavailable }
-        guard joinRequestStatus[networkID] != "Waiting for approval" else { return }
+        guard joinRequestStatus[networkID] != .waitingForApproval else { return }
         guard joinRequestTokens.count < 16 else { throw NearbyNetworkError.busy }
         let requestToken = UUID()
         joinRequestTokens[networkID] = requestToken
@@ -286,16 +294,16 @@ public final class NetworkAccountModel: ObservableObject {
             if joinRequestTokens[networkID] == requestToken { joinRequestTokens[networkID] = nil }
             pruneJoinRequestStatus()
         }
-        joinRequestStatus[networkID] = "Waiting for approval"
+        joinRequestStatus[networkID] = .waitingForApproval
         do {
             let invitation = try await service.request(networkID: networkID)
             try requireCurrentIdentity(identity, generation: token)
             guard nearbyService === service, joinRequestTokens[networkID] == requestToken else { throw CancellationError() }
             _ = try await importInvitation(data: invitation.encoded())
-            joinRequestStatus[networkID] = "Joined"
+            joinRequestStatus[networkID] = .joined
         } catch {
             if nearbyService === service, joinRequestTokens[networkID] == requestToken {
-                joinRequestStatus[networkID] = error is CancellationError ? "Cancelled" : Self.describe(error)
+                joinRequestStatus[networkID] = error is CancellationError ? .cancelled : .failed(Self.describe(error))
             }
             throw error
         }
@@ -304,7 +312,7 @@ public final class NetworkAccountModel: ObservableObject {
     public func cancelJoinRequest(networkID: UUID) {
         joinRequestTokens[networkID] = nil
         nearbyService?.cancelRequest(networkID: networkID)
-        joinRequestStatus[networkID] = "Cancelled"
+        joinRequestStatus[networkID] = .cancelled
         pruneJoinRequestStatus()
     }
 
@@ -316,10 +324,17 @@ public final class NetworkAccountModel: ObservableObject {
         guard nearbyService === service else { throw NearbyNetworkError.unavailable }
         let invitation = try await addMember(data: NetworkMembershipRequest(identity: request.identity).encoded(),
             networkID: request.networkID)
-        service.respond(id: id, invitation: invitation)
+        do { try await service.respond(id: id, invitation: invitation) }
+        catch { throw NearbyNetworkApprovalDeliveryError(underlyingDescription: Self.describe(error)) }
     }
 
-    public func rejectJoinRequest(id: UUID) { nearbyService?.respond(id: id, invitation: nil) }
+    public func rejectJoinRequest(id: UUID) {
+        guard let service = nearbyService else { return }
+        Task { @MainActor in
+            do { try await service.respond(id: id, invitation: nil) }
+            catch { if nearbyService === service { nearbyNetworkError = Self.describe(error) } }
+        }
+    }
 
     public func addMember(data: Data, networkID: UUID) async throws -> NetworkInvitation {
         let identity = try requireIdentity(), token = identityGeneration

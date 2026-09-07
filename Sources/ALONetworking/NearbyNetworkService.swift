@@ -33,6 +33,14 @@ public enum NearbyNetworkError: LocalizedError {
     }
 }
 
+public struct NearbyNetworkApprovalDeliveryError: LocalizedError {
+    public let underlyingDescription: String
+    public init(underlyingDescription: String) { self.underlyingDescription = underlyingDescription }
+    public var errorDescription: String? {
+        "Membership was approved, but the invitation could not be delivered. Ask the person to retry Join. \(underlyingDescription)"
+    }
+}
+
 /// Challenge proof prevents a captured request from being replayed to a different
 /// owner challenge or network. The device claim must also match the live TLS key.
 public struct NearbyNetworkJoinProof: Codable, Sendable {
@@ -66,6 +74,8 @@ public final class NearbyNetworkService: @unchecked Sendable {
     private let changed: @Sendable ([NearbyNetwork]) -> Void
     private let requestsChanged: @Sendable ([NearbyNetworkJoinRequest]) -> Void
     private let failed: @Sendable (String) -> Void
+    private let notice: @Sendable (String?) -> Void
+    private var lastNotice: String?
     private var browser: NWBrowser?
     private var listeners = [UUID: NWListener]()
     private var endpoints = [UUID: (NearbyNetwork, NWEndpoint)]()
@@ -85,6 +95,9 @@ public final class NearbyNetworkService: @unchecked Sendable {
         let connection: NWConnection
         let networkID: UUID
         var completion: ((Result<NetworkInvitation, Error>) -> Void)?
+        var deliveryCompletion: ((Result<Void, Error>) -> Void)?
+        var remoteHost: String?
+        var remoteKeyHash: Data?
         var timeout: DispatchWorkItem?
         init(_ connection: NWConnection, networkID: UUID) { self.connection = connection; self.networkID = networkID }
     }
@@ -103,12 +116,14 @@ public final class NearbyNetworkService: @unchecked Sendable {
     public init(user: UserIdentity, displayName: String,
                 changed: @escaping @Sendable ([NearbyNetwork]) -> Void,
                 requestsChanged: @escaping @Sendable ([NearbyNetworkJoinRequest]) -> Void,
-                failed: @escaping @Sendable (String) -> Void) throws {
+                failed: @escaping @Sendable (String) -> Void,
+                notice: @escaping @Sendable (String?) -> Void = { _ in }) throws {
         installation = try .ephemeral()
         self.user = user
         binding = try DeviceIdentityBinding(user: user, deviceName: displayName, generation: 1,
             installationPublicKeyHash: installation.publicIdentity.publicKeyHash)
         self.changed = changed; self.requestsChanged = requestsChanged; self.failed = failed
+        self.notice = notice
     }
 
     public func start(ownedNetworks: [NetworkManifest]) {
@@ -150,8 +165,10 @@ public final class NearbyNetworkService: @unchecked Sendable {
     private func updateListeners(_ manifests: [NetworkManifest]) {
         let allOwned = manifests.filter { $0.owner == binding.userIdentity }.sorted { $0.id.uuidString < $1.id.uuidString }
         let owned = allOwned.prefix(16)
-        if allOwned.count > 16 {
-            failed("Only 16 owned networks can be advertised nearby at once. Other networks remain available through invitations.")
+        let nextNotice = allOwned.count > 16
+            ? "Only 16 owned networks can be advertised nearby at once. Other networks remain available through invitations." : nil
+        if nextNotice != lastNotice {
+            lastNotice = nextNotice; notice(nextNotice)
         }
         let ids = Set(owned.map(\.id))
         for id in Array(listeners.keys) where !ids.contains(id) {
@@ -222,12 +239,8 @@ public final class NearbyNetworkService: @unchecked Sendable {
                             let proof = try NearbyNetworkJoinProof(user: self.user, device: self.binding, networkID: networkID, nonce: nonce)
                             self.send(Message(kind: "request", networkID: networkID, proof: proof), id: id)
                             self.receive(id, limit: NetworkManifest.maximumEncodedBytes + 8192) { response in
-                                guard response.networkID == networkID else { throw NearbyNetworkError.invalidMessage }
-                                guard response.kind == "approved" else { throw NearbyNetworkError.rejected }
-                                guard let invitation = response.invitation,
-                                      invitation.manifest.id == networkID,
-                                      invitation.manifest.owner == remote.userIdentity,
-                                      invitation.recipient == self.binding.userIdentity else { throw NearbyNetworkError.invalidMessage }
+                                let invitation = try Self.validatedInvitation(response, networkID: networkID,
+                                    owner: remote.userIdentity, recipient: self.binding.userIdentity)
                                 self.finish(id, result: .success(invitation))
                             }
                         } }
@@ -245,11 +258,24 @@ public final class NearbyNetworkService: @unchecked Sendable {
 
     private func accept(_ connection: NWConnection, networkID: UUID) {
         guard hasSessionCapacity(outbound: false) else { connection.cancel(); return }
+        guard case .hostPort(let host, _) = connection.endpoint else { connection.cancel(); return }
+        let remoteHost = String(describing: host)
+        guard Self.permitsRemoteSession(existingCount: sessions.values.filter {
+            $0.completion == nil && $0.remoteHost == remoteHost
+        }.count) else { connection.cancel(); return }
         let id = UUID(); sessions[id] = Session(connection, networkID: networkID)
+        sessions[id]?.remoteHost = remoteHost
         let nonce = UUID()
         connection.stateUpdateHandler = { [weak self] state in
             guard let self, self.sessions[id] != nil else { return }
             if case .ready = state {
+                do {
+                    let hash = try SecureNetworkParameters.peerIdentity(connection: connection).publicKeyHash
+                    guard Self.permitsRemoteSession(existingCount: self.sessions.values.filter {
+                        $0.completion == nil && $0.remoteKeyHash == hash
+                    }.count) else { throw NearbyNetworkError.busy }
+                    self.sessions[id]?.remoteKeyHash = hash
+                } catch { self.finish(id, result: .failure(error)); return }
                 self.send(Message(kind: "hello", networkID: networkID, binding: self.binding, nonce: nonce), id: id)
                 self.receive(id, limit: 8192) { message in
                     guard message.kind == "request", message.networkID == networkID, let proof = message.proof else {
@@ -287,21 +313,33 @@ public final class NearbyNetworkService: @unchecked Sendable {
     static func permitsSession(inboundCount: Int, outboundCount: Int, outbound: Bool) -> Bool {
         (outbound ? outboundCount : inboundCount) < 16
     }
+    static func permitsRemoteSession(existingCount: Int) -> Bool { existingCount < 2 }
 
     private func verify(_ device: DeviceIdentityBinding, connection: NWConnection) throws {
         let peer = try SecureNetworkParameters.peerIdentity(connection: connection)
         try device.verify(expectedInstallationPublicKeyHash: peer.publicKeyHash)
     }
 
-    public func respond(id: UUID, invitation: NetworkInvitation?) {
-        queue.async { [self] in
-            guard let request = pending[id] else { return }
-            if let invitation {
-                guard invitation.manifest.id == request.networkID, invitation.recipient == request.identity,
-                      invitation.manifest.owner == binding.userIdentity else { return }
+    public func respond(id: UUID, invitation: NetworkInvitation?) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            queue.async { [self] in
+                do {
+                    guard let request = pending[id], let session = sessions[id], session.deliveryCompletion == nil else {
+                        throw NearbyNetworkError.unavailable
+                    }
+                    if let invitation {
+                        guard invitation.manifest.id == request.networkID, invitation.recipient == request.identity,
+                              invitation.manifest.owner == binding.userIdentity else { throw NearbyNetworkError.invalidMessage }
+                        _ = try invitation.encoded()
+                    }
+                    session.deliveryCompletion = { continuation.resume(with: $0) }
+                    send(Message(kind: invitation == nil ? "rejected" : "approved", networkID: request.networkID,
+                                 invitation: invitation), id: id, close: true)
+                } catch {
+                    continuation.resume(throwing: error)
+                    finish(id, result: .failure(error))
+                }
             }
-            send(Message(kind: invitation == nil ? "rejected" : "approved", networkID: request.networkID,
-                         invitation: invitation), id: id, close: true)
         }
     }
 
@@ -369,6 +407,7 @@ public final class NearbyNetworkService: @unchecked Sendable {
     private func finish(_ id: UUID, result: Result<NetworkInvitation, Error>) {
         guard let session = sessions.removeValue(forKey: id) else { return }
         session.timeout?.cancel(); session.connection.cancel(); session.completion?(result)
+        if case .failure(let error) = result { session.deliveryCompletion?(.failure(error)) }
         if pending.removeValue(forKey: id) != nil { publishRequests() }
     }
     private func send(_ message: Message, id: UUID, close: Bool = false) {
@@ -379,7 +418,12 @@ public final class NearbyNetworkService: @unchecked Sendable {
             let frame = withUnsafeBytes(of: &length) { Data($0) } + data
             sessions[id]?.connection.send(content: frame, completion: .contentProcessed { [weak self] error in
                 if let error { self?.finish(id, result: .failure(error)) }
-                else if close { self?.finish(id, result: .failure(NearbyNetworkError.rejected)) }
+                else if close {
+                    let delivered = self?.sessions[id]?.deliveryCompletion
+                    self?.sessions[id]?.deliveryCompletion = nil
+                    delivered?(.success(()))
+                    self?.finish(id, result: .failure(NearbyNetworkError.rejected))
+                }
             })
         } catch { finish(id, result: .failure(error)) }
     }
@@ -402,6 +446,17 @@ public final class NearbyNetworkService: @unchecked Sendable {
         let message = try JSONDecoder().decode(Message.self, from: data)
         guard message.version == 1 else { throw NearbyNetworkError.invalidMessage }
         return message
+    }
+    static func validatedInvitation(_ response: Message, networkID: UUID, owner: PublicUserIdentity,
+                                    recipient: PublicUserIdentity) throws -> NetworkInvitation {
+        guard response.networkID == networkID else { throw NearbyNetworkError.invalidMessage }
+        guard response.kind == "approved" else { throw NearbyNetworkError.rejected }
+        guard let invitation = response.invitation, invitation.manifest.id == networkID,
+              invitation.manifest.owner == owner, invitation.recipient == recipient else { throw NearbyNetworkError.invalidMessage }
+        // The wire wrapper needs extra JSON overhead; independently enforce the
+        // invitation's own document limit before handing it to the repository.
+        _ = try invitation.encoded()
+        return invitation
     }
     private func read(_ id: UUID, count: Int, handle: @escaping (Data) throws -> Void) {
         sessions[id]?.connection.receive(minimumIncompleteLength: count, maximumLength: count) { [weak self] data, _, _, error in

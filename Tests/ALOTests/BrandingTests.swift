@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import ALONetworking
 @testable import ALO
 
 struct BrandingTests {
@@ -24,6 +25,16 @@ struct BrandingTests {
         let services = try #require(plist["NSBonjourServices"] as? [String])
         #expect(services.contains(HostServer.serviceType))
         #expect(services.contains(MeshRoomBrowser.serviceType))
+        #expect(services.contains(NearbyNetworkService.serviceType))
+        let mobileData = try Data(contentsOf: root.appendingPathComponent("iOS/ALOApp/Info.plist"))
+        let mobile = try #require(PropertyListSerialization.propertyList(from: mobileData, format: nil) as? [String: Any])
+        try RoomDiscovery.validateApplicationConfiguration(mobile)
+        try RoomDiscovery.validateApplicationConfiguration(plist)
+        var missingBootstrap = plist
+        missingBootstrap["NSBonjourServices"] = services.filter { $0 != NearbyNetworkService.serviceType }
+        #expect(throws: RoomDiscovery.ConfigurationError.self) {
+            try RoomDiscovery.validateApplicationConfiguration(missingBootstrap)
+        }
         #expect(HostServer.serviceType == "_werai-audio._tcp")
         #expect(MeshRoomBrowser.serviceType == "_werai-mesh._tcp")
     }

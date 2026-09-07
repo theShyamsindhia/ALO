@@ -14,7 +14,6 @@ struct MacNetworkSetupView: View {
     @State private var name = ""
     @State private var packageText = ""
     @State private var recoveryImport = ""
-    @State private var recoveryText: String?
     @State private var recoveryExported = false
     @State private var busy = false
     @State private var error: String?
@@ -116,7 +115,6 @@ struct MacNetworkSetupView: View {
     private var identitySetup: some View {
         ALOIdentitySetupView(stage: account.identity == nil ? .identity : .recovery,
             displayName: $account.displayName, recoveryImportText: $recoveryImport,
-            fingerprint: account.identity?.publicIdentity.userID, recoveryText: recoveryText,
             recoveryExported: recoveryExported, isBusy: busy, errorMessage: error ?? account.errorMessage,
             onCreateIdentity: { perform { try account.createIdentity() } },
             onRestoreIdentity: { perform { try account.restoreIdentity(data: Data(recoveryImport.utf8)); recoveryImport = "" } },
@@ -127,9 +125,8 @@ struct MacNetworkSetupView: View {
                     recoveryImport = ""
                 }
             },
-            onRevealRecovery: { perform { recoveryText = String(decoding: try account.recoveryData(), as: UTF8.self) } },
             onExportRecovery: exportRecovery,
-            onContinue: { performAsync { try await account.completeIdentitySetup(); recoveryText = nil; recoveryImport = "" } })
+            onContinue: { performAsync { try await account.completeIdentitySetup(); recoveryImport = "" } })
     }
 
     private var networkBrowser: some View {
@@ -138,10 +135,11 @@ struct MacNetworkSetupView: View {
                 identityName: account.displayName, identityFingerprint: account.identity?.publicIdentity.userID ?? "",
                 onCreateNetwork: { present(.createNetwork) }, onImportNetwork: { present(.importNetwork) },
                 onExportPublicIdentity: { perform { try savePublic(try account.publicIdentityData(), name: "ALO-public-identity.json") } },
-                nearbyNetworks: account.nearbyNetworks.map { .init(id: $0.id, name: $0.name, status: account.joinRequestStatus[$0.id]) },
+                nearbyNetworks: account.nearbyNetworks.map { .init(id: $0.id, name: $0.name, status: account.joinRequestStatus[$0.id].map(joinState)) },
                 joinRequests: account.pendingJoinRequests.map { request in
                     .init(id: request.id, name: request.displayName,
-                          networkName: account.networks.first(where: { $0.id == request.networkID })?.name ?? "your network")
+                          networkName: account.networks.first(where: { $0.id == request.networkID })?.name ?? "your network",
+                          fingerprint: request.identity.userID)
                 }, isBusy: busy,
                 onJoin: { id in Task { @MainActor in
                     do { try await account.requestToJoin(networkID: id) }
@@ -151,6 +149,7 @@ struct MacNetworkSetupView: View {
                 onApprove: { id in performAsync { try await account.approveJoinRequest(id: id) } },
                 onDecline: { id in account.rejectJoinRequest(id: id) },
                 nearbyError: account.nearbyNetworkError,
+                nearbyNotice: account.nearbyNetworkNotice,
                 onRetryNearby: { Task { @MainActor in account.stopNearbyNetworking(); await account.startNearbyNetworking() } },
                 onCancelJoin: { id in account.cancelJoinRequest(networkID: id) })
                 .frame(minWidth: 250, idealWidth: 280, maxWidth: account.networks.isEmpty ? .infinity : 300)
@@ -261,6 +260,15 @@ struct MacNetworkSetupView: View {
         (account.selectedNetwork?.members ?? []).map { member in
             ALOMemberSummary(id: member.userID, name: member.identity == account.identity?.publicIdentity ? account.displayName : "Member \(member.userID.suffix(8))",
                 fingerprint: member.userID, isCurrentUser: member.identity == account.identity?.publicIdentity)
+        }
+    }
+
+    private func joinState(_ state: NetworkJoinState) -> ALONearbyJoinState {
+        switch state {
+        case .waitingForApproval: .waitingForApproval
+        case .joined: .joined
+        case .cancelled: .cancelled
+        case .failed(let message): .failed(message)
         }
     }
 

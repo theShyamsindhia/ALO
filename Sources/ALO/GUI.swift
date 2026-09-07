@@ -480,6 +480,7 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     private var walkieBarObserver: AnyCancellable?
     private var setupLayoutObserver: AnyCancellable?
     private var networkJoinObserver: AnyCancellable?
+    private var networkJoinAttention = NetworkJoinAttentionGate()
     private var terminationSignalSources = [DispatchSourceSignal]()
     private var setupWindowFrame: NSRect?
     private var setupTransitionGeneration = 0
@@ -589,17 +590,21 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
         }
 
         networkJoinObserver = model.account.$pendingJoinRequests
-            .map { Set($0.map(\.id)) }.removeDuplicates()
-            .sink { [weak self] requests in
-                guard !requests.isEmpty else { return }
+            .map { !$0.isEmpty }.removeDuplicates()
+            .sink { [weak self] pending in
+                guard let self,
+                      self.networkJoinAttention.shouldNotify(pending: pending, now: ProcessInfo.processInfo.systemUptime) else { return }
                 DispatchQueue.main.async { [weak self] in
                     guard let self, !self.model.account.pendingJoinRequests.isEmpty,
                           let window = self.window else { return }
-                    // Approval must remain reachable while a channel is playing.
-                    // Show the normal network UI without stealing keyboard focus.
+                    if self.model.phase == .live {
+                        NSApp.requestUserAttention(.informationalRequest)
+                        return
+                    }
                     self.setupTransitionGeneration &+= 1
                     self.restoreSetupWindow()
                     window.setContentSize(NSSize(width: SetupWindow.width, height: 640))
+                    self.setupWindowFrame = window.frame
                     window.orderFront(nil)
                 }
             }
@@ -611,6 +616,14 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !model.account.pendingJoinRequests.isEmpty, let window {
+            setupTransitionGeneration &+= 1
+            restoreSetupWindow()
+            window.setContentSize(NSSize(width: SetupWindow.width, height: 640))
+            setupWindowFrame = window.frame
+            window.makeKeyAndOrderFront(nil)
+            return true
+        }
         if model.phase == .live {
             if model.videoFullscreen {
                 fullScreenVideoController?.show()
