@@ -650,20 +650,22 @@ final class SecureMacMediaHost {
             await withCheckedContinuation { continuation in
                 queue.async {
                     guard !self.lock.withLock({ self.stopped }) else { continuation.resume(returning: nil); return }
-                    let report = self.player.syncReport()
-                    let format = self.player.outputHardwareFormatForDiagnostics
+                    let local = self.player.localDiagnosticReport()
+                    let report = local.playback
+                    let format = local.hardwareFormat
                     continuation.resume(returning: ReceiverTimingDiagnostics(
                         roundTripMilliseconds: 0, clockOffsetMilliseconds: 0, jitterMilliseconds: 0,
-                        recommendedBufferMilliseconds: Double(self.player.targetLatencyNanos) / 1_000_000,
-                        outputLatencyMilliseconds: Double(self.player.outputLatencyForTimingNanos) / 1_000_000,
-                        renderHeadroomMilliseconds: Double(self.player.renderSchedulingHeadroomForTimingNanos) / 1_000_000,
+                        recommendedBufferMilliseconds: Double(local.activeDelay) / 1_000_000,
+                        outputLatencyMilliseconds: Double(local.outputLatency) / 1_000_000,
+                        renderHeadroomMilliseconds: Double(local.renderHeadroom) / 1_000_000,
                         outputSampleRate: format?.sampleRate, outputChannelCount: format?.channelCount,
                         latenessMilliseconds: Double(report.latenessNanos) / 1_000_000,
                         latePacketCount: report.latePacketCount, resyncCount: report.resyncCount,
                         currentDriftMilliseconds: report.driftNanos.map { Double($0) / 1_000_000 },
                         driftMeasurementAgeMilliseconds: report.driftSampleAgeNanos.map { Double($0) / 1_000_000 },
-                        activePlayoutBufferMilliseconds: Double(self.player.activePlayoutDelayNanos) / 1_000_000,
-                        automaticSyncState: self.player.automaticSyncState))
+                        activePlayoutBufferMilliseconds: Double(local.activeDelay) / 1_000_000,
+                        automaticSyncState: local.automaticState,
+                        renderObservation: local.observation))
                 }
             }
         }

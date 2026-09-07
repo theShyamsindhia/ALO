@@ -3,6 +3,16 @@ import Testing
 @testable import ALO
 
 struct FutureRenderClockTests {
+    @Test func rejectedLatencyCannotRetainNewFutureAllowance() {
+        #expect(AudioOutputRenderBudget.futureLeadAfterLatencyRefresh(proposed: 25_000_000, latencyAccepted: false) == nil)
+        #expect(AudioOutputRenderBudget.futureLeadAfterLatencyRefresh(proposed: 25_000_000, latencyAccepted: true) == 25_000_000)
+        #expect(AudioOutputRenderBudget.futureLeadAfterLatencyRefresh(proposed: nil, latencyAccepted: true) == nil)
+    }
+
+    @Test func invalidExplicitWindowFailsClosedEvenForPastSamples() {
+        #expect(!RenderDriftEstimate.clockIsWithinWindow(nowNanos: 100, renderLocalNanos: 99,
+            permittedFutureLeadNanos: RenderDriftEstimate.maximumFutureLeadNanos + 1))
+    }
     private func estimate(now: UInt64 = 10_000_000_000, render: UInt64 = 10_020_000_000,
                           budget: UInt64 = 25_000_000, sample: Int64 = 48_000,
                           rate: Double = 48_000, captureOffset: Double = 0) -> RenderDriftEstimate? {

@@ -12,6 +12,7 @@ struct SecureMacPlaybackTimelineTests {
         var renderSchedulingHeadroomForTimingNanos: UInt64 = 25_000_000
         var outputHardwareFormatForDiagnostics: AudioOutputHardwareFormat?
         var onSyncReport: (() -> Void)?
+        var renderObservation: RenderObservation?
         var outstandingPlaybackBufferCount = 0
         var pendingPlaybackPacketCount = 0
         var packets: [AudioPacket] = []
@@ -242,6 +243,44 @@ struct SecureMacPlaybackTimelineTests {
         #expect(result.activePlayoutBufferMilliseconds == 400)
         #expect(result.automaticSyncState == "Automatic drift realignment off")
         renderer.stop(); queue.sync {}
+    }
+
+    @Test func hostDiagnosticsUseOneAudibleTrackAndIncludeObservation() async throws {
+        let rig = try Rig()
+        try start(rig)
+        let next = UUID()
+        try rig.output.prepare(id: next, anchor: anchor(capture: 1_200_000_000, frame: 9_600, delay: 400_000_000), clockOffsetNanos: 0)
+        try rig.output.commit(id: next)
+        var recorder = RenderObservationRecorder()
+        recorder.record(.init(reason: .measured, observedAtNanos: 1))
+        rig.players[0].renderObservation = recorder.snapshot(at: 1)
+        rig.players[0].outputLatencyForTimingNanos = 10_000_000
+        rig.players[1].outputLatencyForTimingNanos = 300_000_000
+        rig.players[0].onSyncReport = { [unowned rig] in rig.now = 1_600_000_000 }
+        let queue = DispatchQueue(label: "alo.test.host-observation")
+        let renderer = SecureMacMediaHost.LocalRenderer(player: rig.output, timeline: CapturedMediaTimeline(),
+            epoch: 4, queue: queue, nowNanos: { rig.now })
+        let result = try #require(await renderer.diagnostics())
+        #expect(result.renderObservation?.sample.reason == .measured)
+        #expect(result.outputLatencyMilliseconds == 10)
+        #expect(result.activePlayoutBufferMilliseconds == 250)
+        renderer.stop(); queue.sync {}
+    }
+
+    @Test func transmittedTimingUsesAudibleTrackHardwareAndPlaybackTogether() throws {
+        let rig = try Rig()
+        try start(rig)
+        let next = UUID()
+        try rig.output.prepare(id: next, anchor: anchor(capture: 1_200_000_000, frame: 9_600, delay: 400_000_000), clockOffsetNanos: 0)
+        try rig.output.commit(id: next)
+        rig.players[0].outputLatencyForTimingNanos = 10_000_000
+        rig.players[1].outputLatencyForTimingNanos = 300_000_000
+        rig.players[1].renderSchedulingHeadroomForTimingNanos = 60_000_000
+        rig.players[0].onSyncReport = { [unowned rig] in rig.now = 1_600_000_000 }
+        let result = try #require(SecureMacMediaReceiver.timingReport(player: rig.output,
+            jitter: NetworkJitterEstimator(), roundTripNanos: 4_000_000, screenTiming: nil))
+        #expect(result.hardwareOutputFloorNanos == 250_000_000)
+        #expect(result.networkRecommendedDelayNanos == 250_000_000)
     }
 
     @Test("Maximum room delay retains callback slack beyond its scheduled PCM depth")

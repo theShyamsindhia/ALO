@@ -4,6 +4,22 @@ import Testing
 @testable import ALO
 
 struct RenderObservationTests {
+    @Test(arguments: [-12.5, 12.5])
+    func phaseAndAppliedRateRemainSignedAndLocal(phase: Double) throws {
+        var recorder = RenderObservationRecorder()
+        recorder.record(.init(reason: .measuredRealigned, observedAtNanos: 1,
+            signedPhaseErrorMilliseconds: phase, appliedPlaybackRate: 1))
+        let measured = try #require(recorder.snapshot(at: 1))
+        #expect(measured.sample.signedPhaseErrorMilliseconds == phase)
+        #expect(measured.detail.contains("signed controller phase \(String(format: "%.3f", phase)) ms"))
+        #expect(measured.detail.contains("applied playback rate 1.000000"))
+        recorder.record(.init(reason: .missingClock, observedAtNanos: 2))
+        let missing = try #require(recorder.snapshot(at: 2))
+        #expect(missing.detail.contains("signed controller phase unavailable"))
+        #expect(missing.detail.contains("applied playback rate unavailable"))
+        #expect(missing.sample.signedPhaseErrorMilliseconds == nil)
+    }
+
     @Test func measuredRealignmentIsDistinctAndStillOnePollOutcome() throws {
         let outcome = RenderObservationReason.afterMeasurement(realigned: true)
         #expect(outcome.label == "measured-realigned")

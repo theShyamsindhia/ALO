@@ -359,22 +359,29 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
         guard let receiver else { return }
         let now = MonotonicClock.nowNanos()
         guard force || now >= lastTimingReportNanos && now - lastTimingReportNanos >= 1_000_000_000 else { return }
-        let floor = RoomTiming.outputLatencyFloor(player.outputLatencyForTimingNanos,
-            renderSchedulingHeadroomNanos: player.renderSchedulingHeadroomForTimingNanos)
         let freshClock = clock.flatMap { now >= $0.sampledAtLocalNanos && now - $0.sampledAtLocalNanos <= MediaReceiverTimingReport.maximumAgeNanos ? $0 : nil }
-        let network = jitter.recommendedPlayoutDelayNanos(roundTripNanos: freshClock?.roundTripNanos,
-            outputLatencyNanos: player.outputLatencyForTimingNanos,
-            renderSchedulingHeadroomNanos: player.renderSchedulingHeadroomForTimingNanos)
-        let rendered = player.syncReport()
-        let playback = PlaybackSyncReport(measuredAtNanos: 0, latenessNanos: rendered.latenessNanos,
-            latePacketCount: rendered.latePacketCount, resyncCount: rendered.resyncCount,
-            driftNanos: freshClock == nil ? nil : rendered.driftNanos,
-            driftSampleAgeNanos: freshClock == nil ? nil : rendered.driftSampleAgeNanos,
-            screenTiming: screenTiming.presentationSnapshot(videoDecoder.presentationTimingSnapshot).relativeTimingReport)
-        guard let report = try? MediaReceiverTimingReport(hardwareOutputFloorNanos: floor,
-            networkRecommendedDelayNanos: max(floor, network), roundTripNanos: freshClock?.roundTripNanos,
-            playback: playback) else { return }
+        guard let report = Self.timingReport(player: player, jitter: jitter, roundTripNanos: freshClock?.roundTripNanos,
+            screenTiming: screenTiming.presentationSnapshot(videoDecoder.presentationTimingSnapshot).relativeTimingReport) else { return }
         receiver.updateTiming(report)
         lastTimingReportNanos = now
+    }
+
+    static func timingReport(player: SecureMacPlaybackTimeline, jitter: NetworkJitterEstimator,
+                             roundTripNanos: UInt64?, screenTiming: PlaybackScreenTimingReport?) -> MediaReceiverTimingReport? {
+        let local = player.localDiagnosticReport()
+        let floor = RoomTiming.outputLatencyFloor(local.outputLatency,
+            renderSchedulingHeadroomNanos: local.renderHeadroom)
+        let network = jitter.recommendedPlayoutDelayNanos(roundTripNanos: roundTripNanos,
+            outputLatencyNanos: local.outputLatency,
+            renderSchedulingHeadroomNanos: local.renderHeadroom)
+        let rendered = local.playback
+        let playback = PlaybackSyncReport(measuredAtNanos: 0, latenessNanos: rendered.latenessNanos,
+            latePacketCount: rendered.latePacketCount, resyncCount: rendered.resyncCount,
+            driftNanos: roundTripNanos == nil ? nil : rendered.driftNanos,
+            driftSampleAgeNanos: roundTripNanos == nil ? nil : rendered.driftSampleAgeNanos,
+            screenTiming: screenTiming)
+        return try? MediaReceiverTimingReport(hardwareOutputFloorNanos: floor,
+            networkRecommendedDelayNanos: max(floor, network), roundTripNanos: roundTripNanos,
+            playback: playback)
     }
 }

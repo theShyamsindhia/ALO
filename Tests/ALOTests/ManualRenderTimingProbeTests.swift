@@ -125,7 +125,14 @@ struct ManualRenderTimingProbeTests {
                          "Test requires advancing playback, not a watchdog-detectable stall")
             previousSample = time.sampleTime
             player.maintainSync()
-            if step == 0 { #expect(unit.rate == 1.01, "A brief missing sample should preserve the prior rate") }
+            #expect(player.renderObservation?.sample.appliedPlaybackRate == Double(unit.rate),
+                    "Every poll, including the neutralization transition, reports the post-policy rate")
+            if step == 0 {
+                #expect(unit.rate == 1.01, "A brief missing sample should preserve the prior rate")
+                #expect(player.renderObservation?.sample.appliedPlaybackRate == Double(unit.rate))
+            }
+            #expect(player.renderObservation?.sample.signedPhaseErrorMilliseconds == nil,
+                    "A missing clock must not repeat a prior phase measurement")
             #expect(player.syncReport().driftNanos == nil)
             try await Task.sleep(nanoseconds: pollDelayNanos)
         }
@@ -134,6 +141,8 @@ struct ManualRenderTimingProbeTests {
         #expect(player.syncReport().latePacketCount == 0)
         #expect(abs(unit.rate - 1) < 0.000_005,
                 "Production player retained a prior rate correction for over a second without a usable render host clock")
+        #expect(player.renderObservation?.sample.appliedPlaybackRate == Double(unit.rate),
+                "Diagnostics must capture the applied rate after missing-clock neutralization")
         unit.rate = 1.01
         player.resetStream()
         #expect(unit.rate == 1, "Stream reset must discard the previous rate")

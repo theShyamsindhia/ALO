@@ -3636,7 +3636,10 @@ final class ALOViewModel: ObservableObject {
             // while this value identifies local monotonic sampling time.
             // Never include identities, channel names, source audio or metadata.
             let detail = DiagnosticRedactor.redact(result.detail)
-            syncHealthLogger.notice("Dev timing sample monotonic_ns=\(sampledAt, privacy: .public) outcome=\(result.outcome.rawValue, privacy: .public): \(detail, privacy: .public)")
+            for part in DevTimingLogChunks.make(detail: "outcome=\(result.outcome.rawValue): \(detail)",
+                                                sampledAtNanos: sampledAt) {
+                syncHealthLogger.notice("\(part.line, privacy: .public)")
+            }
         }
         if liveSyncHealth.recentTransitions.last?.outcome != result.outcome {
             // Anonymous, transition-only evidence; never log peer names or content.

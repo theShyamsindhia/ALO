@@ -286,3 +286,137 @@ the acoustic latency of Bluetooth earphones.
 These failures were reproduced before production fixes. Regression passes,
 independent review and physical playback validation remain release gates; do not
 treat the implementation or this document as proof that those gates have passed.
+
+## Fixed dev candidate deployment checkpoint (2026-09-07)
+
+- Installed revision `6f7d33c5b6acd04f70162484b36535e8dced306d` on Raj's Mac;
+  strict code-signature verification and canonical icon transparency passed.
+- Signed executable SHA256:
+  `8ca572d7ecd5f9782f23db0626f9756c00b2a707d2e3e4d4094118b23572c300`.
+  Matching archive SHA256:
+  `fb61dbacc3b95f13a0f0bf4f44b1587c33858dffcd66a11bb1971bc7923a2a04`.
+  Sent the archive through the existing Anytype coordination chat with a verified
+  Shyam mention and attachment; remote installation is not yet confirmed.
+- Production ALO remains stopped. The updated Dev process is waiting in
+  `SecItemCopyMatching` while loading its existing identity. Normal user-owned
+  Keychain approval is required; no identity reset or security bypass was used.
+- The previous diagnostic process was terminated for this dev-only replacement
+  after normal termination did not finish its blocked Keychain read. Existing
+  identity/network data was preserved.
+- CodeRabbit's committed-diff review is clean. Claude found additional snapshot,
+  lifecycle-continuity, and rejected-measurement consistency issues; these are
+  being reproduced and addressed before final review. CI run `34144640529` for
+  this exact revision passed all three jobs, including required Mac tests and
+  repeatable room scenarios. This is a test candidate, not a release or paired-sync pass.
+
+The follow-up regression run (`future-reporting-red.log`) failed at runtime with
+10 assertions: rejected latency kept a future allowance, four explicit player
+stop paths retained old sample continuity, the host omitted/mixed local timing,
+and transmitted receiver timing combined the audible predecessor with successor
+hardware. The last case reported a 480 ms hardware floor / 485 ms recommended
+delay instead of the audible track's 250 ms values. Those are concrete test
+results, not a claim that this transition occurred in the physical baseline.
+
+### Paired-run acceptance and evidence limits
+
+After both users finish normal Keychain approval and both installed executable
+hashes match, start a bounded synchronization-only unified-log capture on each
+Mac. Use `log stream --style ndjson --level default --timeout 720` with predicate
+`subsystem == "in.werai.audio.dev" AND category == "synchronization" AND (eventMessage BEGINSWITH "Dev timing sample" OR eventMessage BEGINSWITH "Dev timing unavailable" OR eventMessage BEGINSWITH "Playback timing")`.
+Keep output and stderr in a private temporary directory, retain dropped-log
+notices, and poll the running capture handle rather than blocking the agent for
+720 seconds. This collects numeric diagnostics, not microphone/screen/audio.
+
+- Record an agreed UTC START independently, without track titles. The recording
+  must contain a full 60-second startup and 600-second uninterrupted playback
+  after START; the extra minute is arming time, not playback evidence.
+- Startup must establish advancing sample time, increasing measured counters,
+  and fresh finite drift. Record time to first measurement and the final 30
+  seconds of startup; do not erase initial unavailable observations.
+- During uninterrupted playback, require observations from both devices without
+  unexplained log gaps longer than three seconds, observation/drift ages no more
+  than 500 ms, peer reports no more than 2.5 seconds old, and software drift below
+  40 ms. Record new late/resync/drop events and any route/pause changes. These
+  prevent a clean-run verdict even if the final snapshot recovers.
+- Report sampled p50/p95/max and unavailable duration. Missing/stale evidence,
+  dropped logs, or elevated RTT (40 ms or more) is inconclusive, not an acoustic
+  pass. One-second samples cannot rule out every between-poll transient.
+- Use a separate 180-second capture for leave/rejoin: 30 seconds stable, receiver
+  leaves for 15 seconds, then rejoins. The test target is fresh advancing timing
+  within 60 seconds of rejoin and another 30 seconds stable; this is an acceptance
+  target, not a product guarantee. Compare counters within their own player
+  sessions, never subtract across resets.
+
+The installed `6f` candidate's numeric reports do not expose actual varispeed rate or signed controller
+phase error. They demonstrate repeated estimator acceptance and report freshness,
+not that a non-unit correction was applied or neutralized when needed. Separate
+physical listening/acoustic evidence is necessary for alignment; low RTT and
+small inferred residual cannot exclude asymmetric clock-offset error.
+
+The follow-up source now records signed controller phase only for a valid current
+estimate and the actual audio-unit playback rate after that poll's correction or
+missing-clock neutralization. These are local observation fields, not new wire
+fields or acoustic measurements. Missing phase is explicit; measured-and-realigned
+polls retain their distinct reason. An actual offline production-player test checks
+reported versus applied rate on every poll, including the 1.01-to-1.0 transition.
+This supersedes the missing-fields limitation for the new source, not for the
+already installed candidate or prior logs.
+
+Review follow-ups passed regression-first: `future-reporting-red.log` reproduced
+10 runtime assertions; `future-reporting-green.log` passed 68 tests after fixing
+single-track host/wire snapshots, all explicit stop continuity resets, and both
+rejected-latency allowance paths. `applied-rate-telemetry-green.log` then passed
+69 tests in 11 suites, including the new rate/phase telemetry checks and combined
+clock simulations. Invalid explicit future budgets remain fail-closed rather
+than being silently clamped. No playback correction formula, wire schema, native
+layout, identity data, or installed app was changed by this follow-up. Paired
+playback and Bluetooth validation remain pending.
+
+A native Logger probe also reproduced truncation of the old whole-detail dynamic
+log value near 1 KB, so previous line tails cannot establish absent rate/counter
+values. Dev timing samples now use UTF-8-safe numbered chunks: 640-byte payloads,
+under 800 bytes including the same monotonic sample ID and `part=index/count`
+framing. The production transition logger is unchanged. The exact-helper native
+probe preserved all 49 messages for numeric and Unicode payloads (maximum 704
+bytes per line): `/tmp/alo-log-limit.278o5f/chunks-stream.ndjson`.
+Capture consumers must group parts by Mac/process and monotonic sample ID and
+require exactly every index before interpreting the reassembled sample; missing,
+duplicate, or mixed-snapshot parts invalidate that sample rather than imply a
+missing field. Retain the original parts with the reconstructed evidence.
+The final `dev-timing-chunks-green.log` run passed 71 tests in 12 suites,
+including Unicode sizing/reassembly and incomplete-capture rejection.
+
+The future-render allowance has speaker-route evidence only. Neither the inspected
+CoreAudio nor AVAudioNode contract establishes that every Bluetooth route's future
+host lead excludes device/transport latency. Bluetooth validation must measure
+the actual route's buffer, rate, safety, presentation latency, future-host lead
+distribution and gate counts during startup, steady playback and route changes,
+then perform the paired playback/listening test. Do not claim all earphones fixed
+from a Mac-speaker production-player test.
+
+### Deferred native-window implementation notes
+
+Deployment update: Raj completed normal Keychain approval; the installed `6f`
+Dev process is responsive in Main with Shyam visible and paused. No playback
+controls were changed for this inspection. Finder Get Info showed the installed
+Dev icon with a clean rounded preview and no opaque square/fringe; canonical
+asset verification and signature checks also passed. This resolves the earlier
+local startup blocker, not the still-pending paired playback validation.
+
+Read-only inspection confirms the screenshot's custom chrome is still in the
+current source; it is not a stale screenshot. `ALOAppDelegate` hides native
+traffic-light buttons and the title, makes the setup window transparent, and
+uses a fixed 800-by-640 idle size. `MacNetworkSetupView` adds a second ALO/Networks
+header with custom close/recovery buttons, a 24-point rounded material clip and
+10-point outer inset. Its sidebar is a native sidebar List inside a plain HStack,
+not a native split-view window, with another material surface. This combination
+must be addressed at the window and container boundaries, not by recoloring rows.
+
+After paired sync validation, scope the replacement to the identity-ready
+Networks browser: native title/toolbar and traffic lights, an edge-aligned native
+split-view sidebar/detail, compact resizable initial dimensions, and a quieter
+empty state. Preserve the accepted identity onboarding and existing import,
+approval, members, identity-export and channel actions. Verify transitions between
+onboarding, browser, joining, failure and live playback, including reopen with a
+pending approval and a minimum-size/long-label render. No UI layout changes were
+made during this inspection; sync remains the prerequisite.

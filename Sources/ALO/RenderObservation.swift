@@ -46,6 +46,10 @@ struct RenderObservationSample: Sendable, Equatable {
     var outputBufferMilliseconds: Double?
     var outputSafetyMilliseconds: Double?
     var permittedFutureLeadMilliseconds: Double?
+    /// Signed controller input for this poll only, not acoustic offset.
+    var signedPhaseErrorMilliseconds: Double?
+    /// Actual audio-unit rate after this poll's correction/holdover handling.
+    var appliedPlaybackRate: Double?
 
     static func signedAgeMilliseconds(now: UInt64, sample: UInt64) -> Double {
         now >= sample ? Double(now - sample) / 1_000_000 : -Double(sample - now) / 1_000_000
@@ -75,7 +79,8 @@ struct RenderObservation: Sendable, Equatable {
             let count = counts[reason.rawValue]
             return count == 0 ? nil : "\(reason.label)=\(count)"
         }.joined(separator: ",")
-        return "render observation \(sample.reason.label), age \(number(observationAgeMilliseconds)) ms, poll/observed render ages \(number(sample.renderAgeAtPollMilliseconds))/\(number(sample.renderAgeAtObservationMilliseconds)) ms, packet age \(number(sample.packetAgeMilliseconds)) ms, anchor margin \(number(sample.anchorMarginMilliseconds)) ms, sample delta \(sampleTimeDelta.map(String.init) ?? "unavailable"), player Hz \(number(sample.sampleRate)), output buffer/safety \(number(sample.outputBufferMilliseconds))/\(number(sample.outputSafetyMilliseconds)) ms, permitted future lead \(sample.permittedFutureLeadMilliseconds.map { number($0) + " ms" } ?? "unavailable (strict 0)"), polls {\(counters)}"
+        let rate = sample.appliedPlaybackRate.map { String(format: "%.6f", $0) } ?? "unavailable"
+        return "render observation \(sample.reason.label), age \(number(observationAgeMilliseconds)) ms, poll/observed render ages \(number(sample.renderAgeAtPollMilliseconds))/\(number(sample.renderAgeAtObservationMilliseconds)) ms, packet age \(number(sample.packetAgeMilliseconds)) ms, anchor margin \(number(sample.anchorMarginMilliseconds)) ms, sample delta \(sampleTimeDelta.map(String.init) ?? "unavailable"), player Hz \(number(sample.sampleRate)), output buffer/safety \(number(sample.outputBufferMilliseconds))/\(number(sample.outputSafetyMilliseconds)) ms, permitted future lead \(sample.permittedFutureLeadMilliseconds.map { number($0) + " ms" } ?? "unavailable (strict 0)"), signed controller phase \(number(sample.signedPhaseErrorMilliseconds)) ms, applied playback rate \(rate), polls {\(counters)}"
     }
 }
 
