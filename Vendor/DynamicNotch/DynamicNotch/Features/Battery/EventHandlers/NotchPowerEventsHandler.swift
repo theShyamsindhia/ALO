@@ -2,19 +2,45 @@ import SwiftUI
 internal import AppKit
 
 @MainActor
+protocol PowerEventSoundPlaying: AnyObject {
+    func play(_ event: PowerEvent)
+}
+
+@MainActor
+final class PowerEventSoundPlayer: PowerEventSoundPlaying {
+    func play(_ event: PowerEvent) {
+        switch event {
+        case .lowPower:
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                NSSound(named: "LowBatterySound")?.play()
+            }
+        case .fullPower:
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                NSSound(named: "Glass")?.play()
+            }
+        case .charger:
+            break
+        }
+    }
+}
+
+@MainActor
 final class NotchPowerEventsHandler {
     private let notchViewModel: NotchViewModel
     private let powerService: PowerService
     private let settingsViewModel: SettingsViewModel
+    private let soundPlayer: any PowerEventSoundPlaying
     
     init(
         notchViewModel: NotchViewModel,
         powerService: PowerService,
         settingsViewModel: SettingsViewModel,
+        soundPlayer: (any PowerEventSoundPlaying)? = nil
     ) {
         self.notchViewModel = notchViewModel
         self.powerService = powerService
         self.settingsViewModel = settingsViewModel
+        self.soundPlayer = soundPlayer ?? PowerEventSoundPlayer()
     }
     
     func handle(_ event: PowerEvent) {
@@ -63,15 +89,11 @@ final class NotchPowerEventsHandler {
         switch event {
         case .lowPower:
             if settingsViewModel.battery.lowBatterySound {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                    NSSound(named: "LowBatterySound")?.play()
-                }
+                soundPlayer.play(event)
             }
         case .fullPower:
             if settingsViewModel.battery.fullBatterySound {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    NSSound(named: "Glass")?.play()
-                }
+                soundPlayer.play(event)
             }
         case .charger:
             break

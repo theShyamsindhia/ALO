@@ -165,17 +165,20 @@ struct DurableAuthorizationProjectionTests {
     func optionalSidecarOverflowDoesNotPreventOpeningAValidArchive(inert: Bool) throws {
         let good = event("archived-message", 1)
         let saved = try rawDocument([good])
-        let sidecar = inert
-            ? (1...1_025).map { index in
+        let sidecar: [MeshRoomEvent]
+        if inert {
+            sidecar = (1...1_025).map { index in
                 MeshRoomEvent(id: "sidecar-\(index)", roomID: room,
                     version: .init(counter: UInt64(index + 10), nodeID: "revoked-\(index)"),
                     kind: .chat, text: "Inert sidecar")
             }
-            : (1...300).map { index in
+        } else {
+            sidecar = (1...300).map { index in
                 MeshRoomEvent(id: "sidecar-\(index)", roomID: room,
                     version: .init(counter: UInt64(index + 10), nodeID: "allowed"),
                     kind: .chat, text: String(repeating: "x", count: 8_192))
             }
+        }
         let recovered = try AutomergeRoomStateSync.recovering(roomID: room,
             savedDocument: saved, legacyEvents: sidecar,
             eventProjector: { $0.version.nodeID == "allowed" })

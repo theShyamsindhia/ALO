@@ -77,14 +77,19 @@ final class NotchTimerEventsHandlerTests: XCTestCase {
     func testLocalTimerFinishedShowsTimerFinishedLiveActivity() async {
         let context = makeContext()
         let localTimerViewModel = LocalTimerViewModel()
+        let soundPlayer = FakeTimerSoundPlayer()
         let localHandler = NotchLocalTimerEventsHandler(
             notchViewModel: context.notchViewModel,
             localTimerViewModel: localTimerViewModel,
             timerViewModel: context.timerViewModel,
-            settingsViewModel: context.settingsViewModel
+            settingsViewModel: context.settingsViewModel,
+            timerSoundPlayer: soundPlayer
         )
 
         localHandler.handleLocalTimerFinished()
+
+        XCTAssertEqual(soundPlayer.playCount, 1)
+        XCTAssertTrue(soundPlayer.isPlaying)
 
         await assertEventually {
             await MainActor.run {
@@ -96,11 +101,13 @@ final class NotchTimerEventsHandlerTests: XCTestCase {
     func testDismissingTimerFinishedLiveActivityIsNotRestorable() async {
         let context = makeContext()
         let localTimerViewModel = LocalTimerViewModel()
+        let soundPlayer = FakeTimerSoundPlayer()
         let localHandler = NotchLocalTimerEventsHandler(
             notchViewModel: context.notchViewModel,
             localTimerViewModel: localTimerViewModel,
             timerViewModel: context.timerViewModel,
-            settingsViewModel: context.settingsViewModel
+            settingsViewModel: context.settingsViewModel,
+            timerSoundPlayer: soundPlayer
         )
 
         localHandler.handleLocalTimerFinished()
@@ -220,6 +227,20 @@ private extension NotchTimerEventsHandlerTests {
         @MainActor
         func publish(_ snapshot: ClockTimerSnapshot?) {
             onSnapshotChange?(snapshot)
+        }
+    }
+
+    final class FakeTimerSoundPlayer: TimerSoundPlaying {
+        private(set) var isPlaying = false
+        private(set) var playCount = 0
+
+        func play(sound: TimerSound, isSoundEnabled: Bool, loop: Bool) {
+            playCount += 1
+            isPlaying = isSoundEnabled
+        }
+
+        func stop() {
+            isPlaying = false
         }
     }
 }

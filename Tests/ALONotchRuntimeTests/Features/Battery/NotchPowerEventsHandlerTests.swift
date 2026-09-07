@@ -4,7 +4,7 @@ import XCTest
 @MainActor
 final class NotchPowerEventsHandlerTests: XCTestCase {
 
-    private func makeHandler() -> (NotchPowerEventsHandler, NotchViewModel, SettingsViewModel, PowerService) {
+    private func makeHandler() -> (NotchPowerEventsHandler, NotchViewModel, SettingsViewModel, PowerService, FakePowerEventSoundPlayer) {
         let suiteName = "NotchPowerEventsHandlerTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
         defaults.removePersistentDomain(forName: suiteName)
@@ -16,18 +16,20 @@ final class NotchPowerEventsHandlerTests: XCTestCase {
             queueDelay: 0
         )
         let powerService = PowerService(startMonitoring: false)
+        let soundPlayer = FakePowerEventSoundPlayer()
 
         let handler = NotchPowerEventsHandler(
             notchViewModel: notchViewModel,
             powerService: powerService,
-            settingsViewModel: settingsViewModel
+            settingsViewModel: settingsViewModel,
+            soundPlayer: soundPlayer
         )
 
-        return (handler, notchViewModel, settingsViewModel, powerService)
+        return (handler, notchViewModel, settingsViewModel, powerService, soundPlayer)
     }
 
     func testChargerEventPresentsChargerNotificationWhenEnabled() async {
-        let (handler, notchViewModel, settingsViewModel, _) = makeHandler()
+        let (handler, notchViewModel, settingsViewModel, _, _) = makeHandler()
         settingsViewModel.battery.isChargerTemporaryActivityEnabled = true
 
         handler.handle(.charger)
@@ -40,7 +42,7 @@ final class NotchPowerEventsHandlerTests: XCTestCase {
     }
 
     func testChargerEventSuppressedWhenDisabledInSettings() async {
-        let (handler, notchViewModel, settingsViewModel, _) = makeHandler()
+        let (handler, notchViewModel, settingsViewModel, _, _) = makeHandler()
         settingsViewModel.battery.isChargerTemporaryActivityEnabled = false
 
         handler.handle(.charger)
@@ -50,10 +52,12 @@ final class NotchPowerEventsHandlerTests: XCTestCase {
     }
 
     func testLowPowerEventPresentsLowPowerNotificationWhenEnabled() async {
-        let (handler, notchViewModel, settingsViewModel, _) = makeHandler()
+        let (handler, notchViewModel, settingsViewModel, _, soundPlayer) = makeHandler()
         settingsViewModel.battery.isLowPowerTemporaryActivityEnabled = true
 
         handler.handle(.lowPower)
+
+        XCTAssertEqual(soundPlayer.playedEvents, [.lowPower])
 
         await assertEventually {
             await MainActor.run {
@@ -63,7 +67,7 @@ final class NotchPowerEventsHandlerTests: XCTestCase {
     }
 
     func testLowPowerEventSuppressedWhenDisabledInSettings() async {
-        let (handler, notchViewModel, settingsViewModel, _) = makeHandler()
+        let (handler, notchViewModel, settingsViewModel, _, _) = makeHandler()
         settingsViewModel.battery.isLowPowerTemporaryActivityEnabled = false
 
         handler.handle(.lowPower)
@@ -73,10 +77,12 @@ final class NotchPowerEventsHandlerTests: XCTestCase {
     }
 
     func testFullPowerEventPresentsFullPowerNotificationWhenEnabled() async {
-        let (handler, notchViewModel, settingsViewModel, _) = makeHandler()
+        let (handler, notchViewModel, settingsViewModel, _, soundPlayer) = makeHandler()
         settingsViewModel.battery.isFullPowerTemporaryActivityEnabled = true
 
         handler.handle(.fullPower)
+
+        XCTAssertEqual(soundPlayer.playedEvents, [.fullPower])
 
         await assertEventually {
             await MainActor.run {
@@ -86,12 +92,21 @@ final class NotchPowerEventsHandlerTests: XCTestCase {
     }
 
     func testFullPowerEventSuppressedWhenDisabledInSettings() async {
-        let (handler, notchViewModel, settingsViewModel, _) = makeHandler()
+        let (handler, notchViewModel, settingsViewModel, _, _) = makeHandler()
         settingsViewModel.battery.isFullPowerTemporaryActivityEnabled = false
 
         handler.handle(.fullPower)
 
         try? await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertNil(notchViewModel.notchModel.temporaryNotificationContent)
+    }
+}
+
+@MainActor
+private final class FakePowerEventSoundPlayer: PowerEventSoundPlaying {
+    private(set) var playedEvents: [PowerEvent] = []
+
+    func play(_ event: PowerEvent) {
+        playedEvents.append(event)
     }
 }
