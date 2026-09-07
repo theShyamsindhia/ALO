@@ -74,3 +74,7 @@ test('malformed host listener clock RTT cannot evade validation', () => {
   const input = rows().map(r => ({ ...r, eventMessage: r.eventMessage + ' · listener 2 clock RTT NaN ms' }));
   assert.equal(analyzeRows(input).verdict, 'inconclusive');
 });
+test('an unavailable snapshot between otherwise healthy samples is retained', () => {
+  const unavailable = { ...row(100.5), eventMessage: 'Dev timing unavailable: A timing snapshot arrived too late to be treated as current.' };
+  assert.equal(analyzeRows([...rows(), unavailable]).verdict, 'inconclusive');
+});

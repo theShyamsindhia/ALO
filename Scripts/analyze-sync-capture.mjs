@@ -20,11 +20,12 @@ export function analyzeRows(rows, { start, end, requiredSeconds = 660 } = {}) {
   for (const row of rows) {
     if (!row || typeof row !== 'object' || Array.isArray(row)) { issues.add('invalid log record'); continue; }
     const message = row.eventMessage;
-    if (typeof message !== 'string' || !message.startsWith('Dev timing sample')) continue;
+    if (typeof message !== 'string' || (!message.startsWith('Dev timing sample') && !message.startsWith('Dev timing unavailable:'))) continue;
     const time = Date.parse(String(row.timestamp).replace(' ', 'T'));
     if (!Number.isFinite(time)) { issues.add('invalid sample timestamp'); continue; }
     if (time < from || time > to) continue;
     relevantLines++;
+    if (message.startsWith('Dev timing unavailable:')) { issues.add('timing snapshot unavailable during observation'); continue; }
     const process = `${row.bootUUID ?? ''}:${row.processID ?? 'unknown'}:${row.processImageUUID ?? 'unknown'}`;
     if (row.processID === undefined) issues.add('missing process identity');
     if (/<…>|<\.\.\.>/.test(message)) { issues.add('truncated sample'); continue; }

@@ -23,6 +23,12 @@ alignment, proves unobserved intervals, or substitutes for listening on the actu
 output routes. A passing steady-state interval does not prove startup, rejoin,
 sleep/wake, Bluetooth switching, or pause/resume behavior.
 
+In particular, a free-running render clock can remain aligned while underruns
+and expired silence shift the actual content. See the
+[2026-09-07 incident and native PCM regression](sync-incident-2026-09-07.md).
+User-reported audible failure overrides any software-only release assessment;
+never dismiss it because this checker returns zero.
+
 The parser supports the old single-line dev format and uniquely identified
 chunked dev samples. Missing/duplicate/mixed chunks, truncated lines, absent
 metrics, process changes, counter resets, malformed input, and unavailable or
