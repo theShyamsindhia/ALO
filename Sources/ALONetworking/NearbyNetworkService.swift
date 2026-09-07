@@ -118,8 +118,8 @@ public final class NearbyNetworkService: @unchecked Sendable {
             let parameters = NWParameters(); parameters.includePeerToPeer = true
             let browser = NWBrowser(for: .bonjourWithTXTRecord(type: Self.serviceType, domain: nil), using: parameters)
             self.browser = browser
-            browser.browseResultsChangedHandler = { [weak self] results, _ in
-                guard let self else { return }
+            browser.browseResultsChangedHandler = { [weak self, weak browser] results, _ in
+                guard let self, let browser, self.browser === browser else { return }
                 var found = [UUID: (NearbyNetwork, NWEndpoint)]()
                 for result in results.prefix(256) {
                     guard case .bonjour(let record) = result.metadata, record["v"] == "1",
@@ -134,9 +134,9 @@ public final class NearbyNetworkService: @unchecked Sendable {
             browser.stateUpdateHandler = { [weak self, weak browser] state in
                 guard let self, let browser, self.browser === browser else { return }
                 if case .failed(let error) = state {
-                    self.failed(error.localizedDescription); browser.cancel(); self.browser = nil
+                    self.failed(Self.discoveryErrorMessage(error)); browser.cancel(); self.browser = nil
                 }
-                if case .waiting(let error) = state { self.failed(error.localizedDescription) }
+                if case .waiting(let error) = state { self.failed(Self.discoveryErrorMessage(error)) }
             }
             browser.start(queue: queue)
         }
@@ -148,7 +148,11 @@ public final class NearbyNetworkService: @unchecked Sendable {
     }
 
     private func updateListeners(_ manifests: [NetworkManifest]) {
-        let owned = manifests.filter { $0.owner == binding.userIdentity }.prefix(16)
+        let allOwned = manifests.filter { $0.owner == binding.userIdentity }.sorted { $0.id.uuidString < $1.id.uuidString }
+        let owned = allOwned.prefix(16)
+        if allOwned.count > 16 {
+            failed("Only 16 owned networks can be advertised nearby at once. Other networks remain available through invitations.")
+        }
         let ids = Set(owned.map(\.id))
         for id in Array(listeners.keys) where !ids.contains(id) {
             listeners.removeValue(forKey: id)?.cancel()
@@ -167,11 +171,19 @@ public final class NearbyNetworkService: @unchecked Sendable {
                 listener.stateUpdateHandler = { [weak self, weak listener] state in
                     guard let self, let listener, self.listeners[network.id] === listener else { return }
                     if case .failed(let error) = state {
-                        self.failed(error.localizedDescription); listener.cancel(); self.listeners[network.id] = nil
+                        self.failed(Self.discoveryErrorMessage(error)); listener.cancel(); self.listeners[network.id] = nil
                     }
                 }
                 listeners[network.id] = listener; listener.start(queue: queue)
             } catch { failed(error.localizedDescription) }
+        }
+    }
+
+    static func discoveryErrorMessage(_ error: NWError) -> String {
+        switch error {
+        case .dns(-65570), .posix(.EACCES), .posix(.EPERM):
+            return "Local Network access is blocked. Allow ALO in Settings → Privacy & Security → Local Network, then retry nearby networks."
+        default: return error.localizedDescription
         }
     }
 
@@ -192,7 +204,7 @@ public final class NearbyNetworkService: @unchecked Sendable {
                 do {
                     guard !cancellation.isCancelled else { throw CancellationError() }
                     guard let (network, endpoint) = endpoints[networkID] else { throw NearbyNetworkError.unavailable }
-                    guard sessions.count < 16 else { throw NearbyNetworkError.busy }
+                    guard hasSessionCapacity(outbound: true) else { throw NearbyNetworkError.busy }
                     let connection = NWConnection(to: endpoint, using: try parameters())
                     let session = Session(connection, networkID: networkID)
                     session.completion = { continuation.resume(with: $0) }
@@ -232,7 +244,7 @@ public final class NearbyNetworkService: @unchecked Sendable {
     }
 
     private func accept(_ connection: NWConnection, networkID: UUID) {
-        guard sessions.count < 16 else { connection.cancel(); return }
+        guard hasSessionCapacity(outbound: false) else { connection.cancel(); return }
         let id = UUID(); sessions[id] = Session(connection, networkID: networkID)
         let nonce = UUID()
         connection.stateUpdateHandler = { [weak self] state in
@@ -252,11 +264,28 @@ public final class NearbyNetworkService: @unchecked Sendable {
                     self.pending[id] = NearbyNetworkJoinRequest(id: id, networkID: networkID,
                         displayName: remote.deviceName, identity: remote.userIdentity)
                     self.armTimeout(id, seconds: 120); self.publishRequests()
+                    // Keep a read outstanding while the owner decides. EOF must
+                    // retire Cancel/disconnect promptly; extra bytes are invalid
+                    // because this protocol accepts exactly one join request.
+                    connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { [weak self] _, _, _, error in
+                        self?.finish(id, result: .failure(error ?? NearbyNetworkError.unavailable))
+                    }
                 }
             }
             if case .failed(let error) = state { self.finish(id, result: .failure(error)) }
         }
         armTimeout(id, seconds: 10); connection.start(queue: queue)
+    }
+
+    private func hasSessionCapacity(outbound: Bool) -> Bool {
+        let outgoing = sessions.values.filter { $0.completion != nil }.count
+        return Self.permitsSession(inboundCount: sessions.count - outgoing, outboundCount: outgoing, outbound: outbound)
+    }
+
+    /// Separate reservations keep remote approval traffic from consuming all
+    /// locally initiated Join capacity. Each direction permits at most 16.
+    static func permitsSession(inboundCount: Int, outboundCount: Int, outbound: Bool) -> Bool {
+        (outbound ? outboundCount : inboundCount) < 16
     }
 
     private func verify(_ device: DeviceIdentityBinding, connection: NWConnection) throws {
@@ -273,6 +302,19 @@ public final class NearbyNetworkService: @unchecked Sendable {
             }
             send(Message(kind: invitation == nil ? "rejected" : "approved", networkID: request.networkID,
                          invitation: invitation), id: id, close: true)
+        }
+    }
+
+    /// Resolve approval against live transport state, rather than a possibly
+    /// stale presentation snapshot. The owner's explicit approval begins here.
+    public func requestAwaitingApproval(id: UUID) async throws -> NearbyNetworkJoinRequest {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async { [self] in
+                guard let request = pending[id], sessions[id] != nil else {
+                    continuation.resume(throwing: NearbyNetworkError.unavailable); return
+                }
+                continuation.resume(returning: request)
+            }
         }
     }
 

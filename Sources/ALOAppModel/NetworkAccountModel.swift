@@ -263,14 +263,29 @@ public final class NetworkAccountModel: ObservableObject {
         let retained = nearbyNetworks.filter { joinRequestStatus[$0.id] == "Waiting for approval" }
         let foundIDs = Set(discoveredNetworks.map(\.id))
         nearbyNetworks = (discoveredNetworks + retained.filter { !foundIDs.contains($0.id) }).filter { !memberIDs.contains($0.id) }
+        pruneJoinRequestStatus()
+    }
+
+    private func pruneJoinRequestStatus() {
+        let visibleIDs = Set(nearbyNetworks.map(\.id))
+        joinRequestStatus = joinRequestStatus.filter { visibleIDs.contains($0.key) || joinRequestTokens[$0.key] != nil }
+        if joinRequestStatus.count > 128 {
+            let completed = joinRequestStatus.keys.filter { joinRequestTokens[$0] == nil }.sorted { $0.uuidString < $1.uuidString }
+            for id in completed.prefix(joinRequestStatus.count - 128) { joinRequestStatus[id] = nil }
+        }
     }
 
     public func requestToJoin(networkID: UUID) async throws {
         let identity = try requireIdentity(), token = identityGeneration
         guard let service = nearbyService else { throw NearbyNetworkError.unavailable }
         guard joinRequestStatus[networkID] != "Waiting for approval" else { return }
+        guard joinRequestTokens.count < 16 else { throw NearbyNetworkError.busy }
         let requestToken = UUID()
         joinRequestTokens[networkID] = requestToken
+        defer {
+            if joinRequestTokens[networkID] == requestToken { joinRequestTokens[networkID] = nil }
+            pruneJoinRequestStatus()
+        }
         joinRequestStatus[networkID] = "Waiting for approval"
         do {
             let invitation = try await service.request(networkID: networkID)
@@ -290,12 +305,15 @@ public final class NetworkAccountModel: ObservableObject {
         joinRequestTokens[networkID] = nil
         nearbyService?.cancelRequest(networkID: networkID)
         joinRequestStatus[networkID] = "Cancelled"
+        pruneJoinRequestStatus()
     }
 
     public func approveJoinRequest(id: UUID) async throws {
-        guard let request = pendingJoinRequests.first(where: { $0.id == id }), let service = nearbyService else {
+        guard let service = nearbyService else {
             throw NearbyNetworkError.unavailable
         }
+        let request = try await service.requestAwaitingApproval(id: id)
+        guard nearbyService === service else { throw NearbyNetworkError.unavailable }
         let invitation = try await addMember(data: NetworkMembershipRequest(identity: request.identity).encoded(),
             networkID: request.networkID)
         service.respond(id: id, invitation: invitation)

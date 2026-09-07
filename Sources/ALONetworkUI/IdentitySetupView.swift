@@ -151,10 +151,11 @@ public struct ALOIdentitySetupView: View {
         .accessibilityIdentifier("ALO.Identity.Restore")
       }
       Button(
-        mode == .create ? "Already use ALO? Restore your identity" : "Create a new identity instead"
+        mode == .create ? "Restore an existing identity" : "Create a new identity"
       ) {
         mode = mode == .create ? .restore : .create
       }
+      .buttonStyle(.borderless)
       .frame(minHeight: ALONetworkMetrics.actionHeight)
       .disabled(isBusy)
     }

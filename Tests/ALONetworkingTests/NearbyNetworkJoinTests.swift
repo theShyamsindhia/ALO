@@ -1,9 +1,25 @@
 import XCTest
+import Network
 import ALOIdentity
 import ALORooms
 @testable import ALONetworking
 
 final class NearbyNetworkJoinTests: XCTestCase {
+    func testInboundFloodCannotConsumeOutboundJoinCapacity() {
+        XCTAssertTrue(NearbyNetworkService.permitsSession(inboundCount: 16, outboundCount: 0, outbound: true))
+        XCTAssertFalse(NearbyNetworkService.permitsSession(inboundCount: 16, outboundCount: 0, outbound: false))
+        XCTAssertTrue(NearbyNetworkService.permitsSession(inboundCount: 0, outboundCount: 16, outbound: false))
+        XCTAssertFalse(NearbyNetworkService.permitsSession(inboundCount: 0, outboundCount: 16, outbound: true))
+        XCTAssertFalse(NearbyNetworkService.permitsSession(inboundCount: 16, outboundCount: 16, outbound: true))
+        XCTAssertFalse(NearbyNetworkService.permitsSession(inboundCount: 16, outboundCount: 16, outbound: false))
+    }
+    func testDiscoveryPermissionErrorsExplainWhereToEnableLocalNetwork() {
+        for error in [NWError.dns(-65570), .posix(.EACCES), .posix(.EPERM)] {
+            let message = NearbyNetworkService.discoveryErrorMessage(error)
+            XCTAssertTrue(message.contains("Privacy & Security → Local Network"))
+            XCTAssertTrue(message.contains("retry nearby networks"))
+        }
+    }
     func testWireRejectsInvalidVersionsOversizedFramesAndMalformedJSON() throws {
         XCTAssertEqual(try NearbyNetworkService.frameLength(Data([0, 0, 32, 0]), limit: 8192), 8192)
         for header in [Data(), Data([0, 0, 0, 0]), Data([0, 0, 32, 1]), Data([255, 255, 255, 255])] {
@@ -54,8 +70,14 @@ final class NearbyNetworkJoinTests: XCTestCase {
             let owner = UserIdentity.ephemeral(), requester = UserIdentity.ephemeral()
             let manifest = try NetworkManifest.create(name: "No admission", owner: owner)
             let received = expectation(description: "Authenticated request arrives"), requests = Requests()
+            let removed = expectation(description: "Owner pending request is removed promptly")
             let server = try NearbyNetworkService(user: owner, displayName: "Owner", changed: { _ in },
-                requestsChanged: { value in requests.set(value); if !value.isEmpty { received.fulfill() } }, failed: { _ in })
+                requestsChanged: { value in
+                    let previouslyPending = requests.first != nil
+                    requests.set(value)
+                    if !value.isEmpty { received.fulfill() }
+                    else if previouslyPending { removed.fulfill() }
+                }, failed: { _ in })
             let client = try NearbyNetworkService(user: requester, displayName: "Requester", changed: { _ in },
                 requestsChanged: { _ in }, failed: { _ in })
             defer { server.stop(); client.stop() }
@@ -68,6 +90,10 @@ final class NearbyNetworkJoinTests: XCTestCase {
             if cancel { result.cancel() } else { server.respond(id: request.id, invitation: nil) }
             do { _ = try await result.value; XCTFail("No invitation should be returned") }
             catch { if cancel { XCTAssertTrue(error is CancellationError) } }
+            await fulfillment(of: [removed], timeout: 3)
+            XCTAssertNil(requests.first)
+            do { _ = try await server.requestAwaitingApproval(id: request.id); XCTFail("Stale approval must fail") }
+            catch { }
             XCTAssertFalse(manifest.isMember(requester.publicIdentity))
         }
     }
