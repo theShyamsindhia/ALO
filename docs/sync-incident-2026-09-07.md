@@ -391,3 +391,99 @@ before audio began; this classifies the error but does not establish why
 automatic port selection failed in the full local run. No production networking
 change was made on that evidence. Probe log:
 `/tmp/alo-cohort-full.c0bHv3/control-lifecycle-evidence.log`.
+
+### Paired coalescing candidate: first listener's excluded network vote
+
+Both Macs subsequently installed the same `f1c72fd` Dev executable (signed
+SHA-256 `f7249b6d6002151f51efc683a14bd1271875e248e333f574f28598e909eb33be`).
+Raj's PID was 72971; Shyam's verified test PID was 97460 after a startup restart
+not performed by his coordinating agent. Production remained quit and existing
+identity/network data was preserved. Raj reported **clean so far**. That audible
+improvement is recorded alongside, not substituted for, the continuity evidence.
+
+The proposed eleven-minute run was shortened after confirmed counter growth.
+During 22:14–22:17 UTC, Raj recorded 179 complete measured snapshots, maximum
+software drift 0.5 ms, render age 24 ms, RTT 3.8 ms and sample gap 1.024 seconds.
+Receiver resyncs grew from 16 to 80. Shyam reported 179 complete snapshots with
+own late/resync/native-position counters all zero throughout, active/channel
+buffer 250 ms, timing-change count zero, and the receiver's recommendation
+550 ms with **network vote late join** in every snapshot. This is a failed
+continuity window, not acoustic alignment proof or a 660-second pass.
+
+The receiver log is `/tmp/alo-f1-live.7jWPES/live.ndjson`; startup/mixed-build
+history is separate at `/tmp/alo-dev-candidate.C6W3aG/startup-sync.ndjson`.
+No local compilers/tests or output/source changes ran during the agreed window.
+Later samples may include resumed test load and are excluded from that result.
+Sender raw logs remain on the other Mac; the sender figures above are its
+coordinator's report, not an independent local reanalysis of its raw file.
+
+Code inspection confirms the existing policy deliberately freezes an empty
+network-voting cohort one second after capture starts. Thus the first remote
+listener can be excluded permanently if its first report arrives later. A
+causal buffering regression is required before changing that rule. Any change
+must preserve a shared future cutover, exclude arbitrary later joiners from
+repeated global network-delay changes, and avoid reopening eligibility merely
+because a report expires or a participant leaves. Receiver-only buffering would
+break shared alignment. Reported packet age is time since player admission, not
+measured network transit; do not use it as a transport-delay trace.
+
+Shyam later reported choppy incoming Raj-to-Shyam voice when Raj spoke. The
+exact time and overlap with the agreed media window are unconfirmed. Neither
+coordinating agent reported activating voice, but that does not exclude user
+activity: the window's microphone-off condition is not verified. This is a
+separate voice-path symptom; the sender's zero media-recovery count does not
+establish voice quality. The first-listener buffering hypothesis likewise does
+not establish the cause of the voice symptom.
+
+Shyam clarified that Spotify remained smooth and only incoming push-to-talk
+voice was choppy and quiet. Nearby devices also produced an audible echo;
+direct-plus-delayed voice and microphone recapture remain unverified alternatives.
+The remote agent's targeted retained-log search found no voice transition events
+for 22:10–22:23 UTC. Missing instrumentation cannot establish that voice was off.
+Shyam subsequently placed that voice incident at approximately 03:56–03:57 IST
+on September 8 (22:26–22:27 UTC September 7), after the shortened media interval.
+His coordinator found 534 synchronization events but no matching voice-session
+events in the 22:25:30–22:28:30 retained-log interval. The reported later voice
+incident is not attributed to the earlier media test; unknown voice activity in
+that earlier interval still cannot be ruled out from absent logging.
+
+Apple DTS notes that peer-to-peer Wi-Fi can introduce hundreds of milliseconds
+of latency and also affect infrastructure traffic, and recommends measuring the
+actual environment ([P2P networking between Apple devices](https://developer.apple.com/forums/thread/751839)).
+ALO opts into peer-to-peer discovery and transport. That is a reason to test
+delivery gaps, not proof of the active path or this incident's transport cause.
+Do not disable nearby networking or change system network settings on this
+hypothesis alone.
+
+#### First-listener regression, before production correction
+
+`/tmp/alo-f1-live.7jWPES/delivery-gap-policy-integrated-red.log` retains the
+meaningful failing run. Synthetic source packets are captured every 5 ms; a
+300 ms delivery gap holds 60 packets, then releases those original timestamps.
+The actual player and native offline PCM output are used, not a substitute
+buffer-policy model. With 250 ms, the pre-gap marker is frame 24,048 and recovery
+occurs at tick 260 (15 late packets, one resync). A fixed 550 ms control delivers
+all 601 packets with markers 24,048 and 96,048 and no recovery. The mode deriving
+its budget from the unchanged production first-listener policy selects 250 ms
+and fails the no-recovery assertion. Policy tests separately fail first-listener
+eligibility, delay selection, and atomic acceptance before removal interleaves.
+
+The original run's 550 ms control failed its pre-gap prerequisite: its offline
+graph was not rendered during the future-start interval, while maintenance
+treated that as a stalled graph. The corrected offline adapter begins regular
+maintenance when native rendering starts, identically in all modes. No queued
+PCM is reseeded, and all post-start maintenance and marker bounds are retained.
+This isolates delivery-gap behavior; it does **not** validate a real 600 ms
+hardware future start or future cutover. That requires a separate native test
+and installed two-Mac startup observations. The live jitter numbers do not prove
+that the synthetic 300 ms delivery gap occurred on either Mac.
+
+With the minimal nonempty-cohort guard and atomic post-insertion freeze, the
+same policy-selected mode uses the existing 600 ms live-increase result and
+passes all 601 packets, markers 24,048/96,048, and zero late/resync counts. All
+five policy tests pass, including record/remove/record without an intervening
+delay calculation. The fixed 250 ms failing-budget control still recovers at
+tick 260. Log: `/tmp/alo-f1-live.7jWPES/policy-green-voice-red.log`.
+That combined run contains 37 tests and one separate expected voice RED: four
+real old-route completion callbacks consume all 1,920 new-route frame credits.
+It is not a wholly passing run or evidence that the voice bug is already fixed.

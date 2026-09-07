@@ -21,13 +21,29 @@ import ALOCore
             localHardwareFloor: 250_000_000, playing: true)
         #expect(bluetoothDelay == 400_000_000)
     }
-    @Test func emptyStartupCohortDoesNotBecomeLateJoinerNetworkVote() throws {
+    // Deliberate requirement revision: capture may start before any remote
+    // listener exists. Enroll the first actual listener once, not every late join.
+    @Test func firstActualRemoteListenerEstablishesPreviouslyEmptyCohort() throws {
         var policy = SecureRoomTimingPolicy()
         policy.captureStarted(at: 0)
-        policy.record(peer: UUID(), report: try report(600_000_000), receivedAt: 10_000_000_000)
+        let first = UUID()
+        policy.record(peer: first, report: try report(550_000_000), receivedAt: 10_000_000_000)
         let delay = policy.desiredDelay(now: 10_000_000_000, current: 250_000_000,
             localHardwareFloor: 250_000_000, playing: true)
-        #expect(delay == 250_000_000)
+        #expect(delay == 600_000_000)
+        #expect(policy.measurements(at: 10_000_000_000).first?.isNetworkTimingEligible == true)
+        policy.record(peer: first, report: try report(550_000_000), receivedAt: 10_500_000_000)
+        #expect(policy.desiredDelay(now: 10_500_000_000, current: delay,
+            localHardwareFloor: 250_000_000, playing: true) == delay)
+        let second = UUID()
+        policy.record(peer: second, report: try report(600_000_000), receivedAt: 10_600_000_000)
+        #expect(policy.measurements(at: 10_600_000_000).first(where: { $0.peerID == second })?.isNetworkTimingEligible == false)
+        policy.remove(peer: first)
+        let later = UUID()
+        policy.record(peer: later, report: try report(600_000_000), receivedAt: 14_000_000_000)
+        #expect(policy.measurements(at: 14_000_000_000).first(where: { $0.peerID == later })?.isNetworkTimingEligible == false)
+        #expect(policy.desiredDelay(now: 14_000_000_000, current: delay,
+            localHardwareFloor: 250_000_000, playing: true) == delay)
     }
     @Test func staleReportsNeverMoveLivePlaybackBackward() throws {
         var policy = SecureRoomTimingPolicy()
@@ -38,6 +54,21 @@ import ALOCore
             localHardwareFloor: 250_000_000, playing: false)
         #expect(live == 450_000_000)
         #expect(paused == 250_000_000)
+    }
+    @Test func firstPostGraceAcceptanceFreezesBeforeRemovalCanInterleave() throws {
+        var policy = SecureRoomTimingPolicy()
+        policy.captureStarted(at: 0)
+        let first = UUID()
+        policy.record(peer: first, report: try report(550_000_000), receivedAt: 10_000_000_000)
+        #expect(policy.measurements(at: 10_000_000_000).first?.isNetworkTimingEligible == true)
+        // receiveTiming records before a separate updateTiming lock acquisition.
+        // Removal can interleave without any desiredDelay call in between.
+        policy.remove(peer: first)
+        let second = UUID()
+        policy.record(peer: second, report: try report(600_000_000), receivedAt: 10_100_000_000)
+        #expect(policy.measurements(at: 10_100_000_000).first?.isNetworkTimingEligible == false)
+        #expect(policy.desiredDelay(now: 10_100_000_000, current: 250_000_000,
+            localHardwareFloor: 250_000_000, playing: true) == 250_000_000)
     }
     @Test func diagnosticSamplesAgeWithoutBecomingFreshWhenPolled() throws {
         var policy = SecureRoomTimingPolicy()

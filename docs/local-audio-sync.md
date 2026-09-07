@@ -46,6 +46,31 @@ delay and acoustic latency remain physical acceptance concerns. Test uninterrupt
 two-device playback, Bluetooth changes, late joins and source/network interruptions.
 Never claim audible perfection from a green simulation.
 
+### Shared buffer negotiation
+
+`SecureRoomTimingPolicy` separates network-delay votes from hardware output
+floors. Once the initial listener cohort is established, later listeners cannot
+repeatedly raise the entire channel's network allowance. Fresh hardware output
+latency still applies to every synchronized output. During uninterrupted playback,
+the shared delay never decreases; a genuine increase uses the existing bounded
+future-cutover transaction, not a receiver-only delay or immediate global reset.
+
+Capture can start before any other device joins. An empty cohort is therefore
+not final: the first actual listener after the startup grace period establishes
+it atomically when its report is accepted. This must happen before a concurrent
+removal can interleave with the subsequent delay calculation. Once established,
+removal or report expiry never reopens eligibility to unrelated later joiners.
+Keep the first-listener and record/remove/record regressions when changing this
+policy; a permanently frozen empty cohort strands that listener on the default
+buffer despite its measured recommendation.
+
+The delivery-gap test uses actual native offline PCM markers and a budget
+selected by this production policy. Its synthetic 300 ms gap is a controlled
+mechanism test, not a recorded network trace. Offline rendering cannot establish
+hardware future-start behavior; real 600 ms startup and shared future cutover
+still need native and two-device validation. See the incident record for current
+results and limitations.
+
 ## Receiver correction and diagnostics
 
 Room settings → Automatically keep this Mac in sync is enabled by default and persists per Mac. A fresh measured error of at least 40 ms must persist for one second before hard realignment. Corrections have an eight-second cooldown; missing/stale samples and pauses clear accumulated evidence. Small errors continue to use the existing bounded ±1% playback-rate correction. This preference controls optional drift realignment, not mandatory recovery from a stopped render clock or changed audio device.
