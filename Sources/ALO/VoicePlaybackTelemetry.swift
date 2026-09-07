@@ -28,14 +28,25 @@ struct VoicePlaybackTelemetry: Sendable {
         else { Self.increment(&acceptedAudioBuffers); self.levels = levels }
     }
     mutating func droppedAtCapacity() { Self.increment(&capDrops) }
-    mutating func resetForConfiguration() { Self.increment(&configurationResets) }
+    mutating func resetForConfiguration() {
+        Self.increment(&configurationResets)
+        previousArrival = nil
+        maximumArrivalGapNanos = 0
+    }
     private static func increment(_ value: inout UInt64) { if value < UInt64.max { value += 1 } }
 
-    func detail(session: UInt64, queuedFrames: Int64, participantGain: Float) -> String {
+    func detail(session: UInt64, queuedFrames: Int64, participantGain: Float,
+                levelerGain: Float, playerConfigurationResets: UInt64) -> String {
         let signal = levels.map {
             "last_audio_input_rms=\($0.inputRMS) last_audio_input_peak=\($0.inputPeak) last_audio_leveled_rms=\($0.outputRMS) last_audio_leveled_peak=\($0.outputPeak)"
         } ?? "last_audio_input_rms=unavailable last_audio_input_peak=unavailable last_audio_leveled_rms=unavailable last_audio_leveled_peak=unavailable"
-        return "voice_playback session=\(session) accepted_audio=\(acceptedAudioBuffers) concealment=\(concealmentBuffers) cap_drops=\(capDrops) config_resets=\(configurationResets) player_arrival_gap_max_ns=\(maximumArrivalGapNanos) queued_frames=\(queuedFrames) participant_gain=\(participantGain) \(signal)"
+        return "voice_playback session=\(session) accepted_audio=\(acceptedAudioBuffers) concealment=\(concealmentBuffers) cap_drops=\(capDrops) config_resets=\(configurationResets) player_config_resets=\(playerConfigurationResets) player_ingress_gap_max_ns=\(maximumArrivalGapNanos) queued_frames=\(queuedFrames) participant_volume=\(participantGain) leveler_gain=\(levelerGain) \(signal)"
+    }
+}
+
+enum VoiceDiagnosticLoggingPolicy {
+    static func enabled(bundleIdentifier: String?, explicitOptIn: String?) -> Bool {
+        bundleIdentifier == "in.werai.audio.dev" || explicitOptIn == "1"
     }
 }
 

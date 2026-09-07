@@ -800,21 +800,27 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
     private var configurationObserver: NSObjectProtocol?
     private var configurationRecoveryWorkItem: DispatchWorkItem?
     private var configurationRecoveryPending = false
-    private var deferredRecoveryMessages = [WalkieTalkieMessage]()
+    private var deferredRecoveryMessages = [(message: WalkieTalkieMessage, receivedAtNanos: UInt64)]()
     private var muted = false
     private var participantVolumes = [String: Double]()
     private var diagnosticOrdinal: UInt64 = 0
     private var diagnosticThrottle = VoiceDiagnosticThrottle()
-    private static let diagnosticLogger = Logger(subsystem: "in.werai.alo", category: "voice-timing")
+    private var playerConfigurationResets: UInt64 = 0
+    private static let diagnosticsEnabled = VoiceDiagnosticLoggingPolicy.enabled(
+        bundleIdentifier: Bundle.main.bundleIdentifier,
+        explicitOptIn: ProcessInfo.processInfo.environment["ALO_VOICE_DIAGNOSTICS"])
+    private static let diagnosticLogger = Logger(
+        subsystem: Bundle.main.bundleIdentifier ?? "in.werai.audio", category: "voice-timing")
     // Test-only delivery control for actual native completion callbacks.
     // Production leaves nil and dispatches the existing completion immediately.
     private let completionDelivery: ((@escaping @Sendable () -> Void) -> Void)?
 
     func playbackSnapshotForTesting(sessionID: String) -> (
         scheduledFrames: AVAudioFramePosition?, configurationRecoveryPending: Bool,
-        telemetry: VoicePlaybackTelemetry?
+        telemetry: VoicePlaybackTelemetry?, isEnding: Bool?, playerConfigurationResets: UInt64
     ) {
-        queue.sync { (sessions[sessionID]?.scheduledFrames, configurationRecoveryPending, sessions[sessionID]?.telemetry) }
+        queue.sync { (sessions[sessionID]?.scheduledFrames, configurationRecoveryPending,
+            sessions[sessionID]?.telemetry, sessions[sessionID]?.lifecycle.isEnding, playerConfigurationResets) }
     }
 
     static func makePlaybackBuffer(
@@ -867,9 +873,10 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
     }
 
     func accept(_ message: WalkieTalkieMessage) {
+        let receivedAtNanos = MonotonicClock.nowNanos()
         queue.async { [weak self] in
             guard let self, !self.muted else { return }
-            self.acceptOnQueue(message)
+            self.acceptOnQueue(message, receivedAtNanos: receivedAtNanos)
         }
     }
 
@@ -897,14 +904,14 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
         queue.sync { stopAllOnQueue() }
     }
 
-    private func acceptOnQueue(_ message: WalkieTalkieMessage) {
+    private func acceptOnQueue(_ message: WalkieTalkieMessage, receivedAtNanos: UInt64) {
         if configurationRecoveryPending {
             // AVAudioPlayerNode clears scheduled buffers when its engine's route
             // changes. Hold the small wireless settle window instead of
             // restarting on an intermediate format or silently dropping speech.
-            deferredRecoveryMessages.append(message)
+            deferredRecoveryMessages.append((message, receivedAtNanos))
             if deferredRecoveryMessages.count > 32 {
-                if let audioIndex = deferredRecoveryMessages.firstIndex(where: { $0.kind == .audio }) {
+                if let audioIndex = deferredRecoveryMessages.firstIndex(where: { $0.message.kind == .audio }) {
                     deferredRecoveryMessages.remove(at: audioIndex)
                 } else {
                     deferredRecoveryMessages.removeFirst()
@@ -932,7 +939,7 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
             // Secure voice uses 10 ms datagrams; legacy voice uses 20 ms.
             // Conceal exactly one packet's duration, not a fixed legacy chunk.
             session.jitter.configurePacketFramesBeforeFirstAudio(data.count / 2)
-            session.telemetry.received(at: MonotonicClock.nowNanos())
+            session.telemetry.received(at: receivedAtNanos)
             let output = session.jitter.insert(sequence: message.sequence, data: data)
             schedule(output, for: session)
             armTimeout(for: session)
@@ -1081,9 +1088,11 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
     }
 
     private func publishDiagnostics(for session: Session) {
+        guard Self.diagnosticsEnabled else { return }
         guard diagnosticThrottle.admit(at: MonotonicClock.nowNanos()) else { return }
         let detail = session.telemetry.detail(session: session.diagnosticOrdinal,
-            queuedFrames: session.scheduledFrames, participantGain: session.player.volume)
+            queuedFrames: session.scheduledFrames, participantGain: session.player.volume,
+            levelerGain: session.leveler.gain, playerConfigurationResets: playerConfigurationResets)
         Self.diagnosticLogger.notice("\(detail, privacy: .public)")
     }
 
@@ -1097,7 +1106,7 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
             // Replay any speech that arrived during the settle window; its
             // session will attach a node, retain the output, and start it.
             configurationRecoveryPending = false
-            for message in deferred { acceptOnQueue(message) }
+            for item in deferred { acceptOnQueue(item.message, receivedAtNanos: item.receivedAtNanos) }
             return
         }
         audioOutput.withGraph { engine in
@@ -1120,12 +1129,14 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
             session.player.play()
         }
         configurationRecoveryPending = false
-        for message in deferred { acceptOnQueue(message) }
+        for item in deferred { acceptOnQueue(item.message, receivedAtNanos: item.receivedAtNanos) }
     }
 
     private func scheduleConfigurationRecovery() {
         if !configurationRecoveryPending {
             configurationRecoveryPending = true
+            if playerConfigurationResets < UInt64.max { playerConfigurationResets += 1 }
+            let endingIDs = sessions.values.filter { $0.lifecycle.isEnding }.map(\.id)
             for session in sessions.values {
                 // Native callbacks can arrive after stop and after new-route
                 // PCM is queued on the same Session. Retire their credits first.
@@ -1137,6 +1148,9 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
                 session.jitter.resetForRouteChange()
                 setSessionActive(session, false)
             }
+            // Ending sessions cancelled their timers and awaited the callbacks
+            // just retired above. Finish cleanup explicitly outside iteration.
+            for id in endingIDs { stopSession(id) }
         }
         configurationRecoveryWorkItem?.cancel()
         let work = DispatchWorkItem { [weak self] in

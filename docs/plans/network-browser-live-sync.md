@@ -726,3 +726,25 @@ There were no new Session/Sendable warnings. A separate single zero-PCM real-out
 sample positions, zero resync, then advancing positive sample time; maximum poll
 gap 18.671 ms. Log: `/tmp/alo-future-start.5ttuFH/hardware-startup.log`. That probe
 does not measure acoustic alignment, microphone capture or two-device voice.
+
+Follow-up review exposed an ending-session cleanup regression: after `.ended`
+cancelled its timers, route reset fenced its remaining callbacks but left the
+session and output lease alive. A second constructed native-callback test failed
+both session removal and output idle-stop assertions before the cleanup change
+(`/tmp/alo-voice-route-red.dKN5y2/ending-route-red.log`). The fix explicitly retires
+ending sessions outside the dictionary reset iteration. Callback postponement is
+deliberately injected by the test; neither regression claims that such callback
+delay was measured during a physical route change.
+
+Retained speech-energy logging now requires the Dev bundle or explicit
+`ALO_VOICE_DIAGNOSTICS=1`, with the actual bundle logger subsystem. It includes
+separate participant volume and adaptive leveler gain. `player_ingress_gap_max_ns`
+uses entry timestamps preserved through deferred recovery; it is not wire delay.
+Route reset clears that gap baseline, and a player-level cumulative reset count
+survives session retirement for later diagnostics. Emission remains bounded and
+sampled across sessions; no unthrottled route-event logging was introduced.
+
+The follow-up passed 37 tests across three voice suites (167.08 s build,
+1.043 s runtime), including ending-session removal/output idle stop, old/new
+callback generations, privacy gating, quiet/zero leveler branches and existing
+voice controls. Log: `/tmp/alo-voice-route-red.dKN5y2/voice-review-green.log`.

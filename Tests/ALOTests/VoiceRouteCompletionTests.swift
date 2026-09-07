@@ -23,6 +23,38 @@ private final class HeldVoiceCompletions: @unchecked Sendable {
 /// notification/debounce path. This does not reproduce a physical route switch.
 @Suite(.serialized)
 struct VoiceRouteCompletionTests {
+    @Test func endingSessionReleasesOutputAcrossConfigurationReset() throws {
+        let output = RoomAudioOutputEngine(idleStopDelay: .milliseconds(10))
+        let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2))
+        try output.engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 480)
+        let held = HeldVoiceCompletions()
+        let player = WalkieTalkiePlayer(audioOutput: output, completionDelivery: { held.hold($0) })
+        defer { held.release(); player.stop(); output.engine.stop() }
+        let sessionID = "ending-route-test"
+        for sequence in UInt64(0)..<4 {
+            player.accept(.init(kind: .audio, senderID: "sender", senderName: "Sender",
+                targetID: "receiver", sessionID: sessionID, sequence: sequence,
+                sampleRate: 48_000, pcm16Mono: Data(repeating: 0, count: 960)))
+        }
+        try #require(waitUntil { player.playbackSnapshotForTesting(sessionID: sessionID).scheduledFrames == 1_920 })
+        let scratch = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 480))
+        for _ in 0..<5 { try #require(try output.engine.renderOffline(480, to: scratch) == .success) }
+        try #require(waitUntil { held.count == 4 }, "Require real pending native callbacks")
+        player.accept(.init(kind: .ended, senderID: "sender", senderName: "Sender",
+            targetID: "receiver", sessionID: sessionID, sequence: 4, sampleRate: 48_000))
+        try #require(waitUntil { player.playbackSnapshotForTesting(sessionID: sessionID).isEnding == true })
+        NotificationCenter.default.post(name: .AVAudioEngineConfigurationChange, object: output.engine)
+        try #require(waitUntil {
+            player.playbackSnapshotForTesting(sessionID: sessionID).scheduledFrames != 1_920
+        }, "Actual configuration reset must retire the queued frame accounting")
+        held.release()
+        #expect(waitUntil { player.playbackSnapshotForTesting(sessionID: sessionID).scheduledFrames == nil },
+            "Ending session must retire even when its old native callbacks are fenced")
+        #expect(waitUntil { !output.isRunning }, "Ending route reset must release its output client")
+        #expect(player.playbackSnapshotForTesting(sessionID: sessionID).playerConfigurationResets == 1,
+            "Player diagnostics retain reset evidence after the ending session is gone")
+    }
+
     @Test func oldNativeCallbacksCannotConsumeNewRouteCredits() throws {
         let output = RoomAudioOutputEngine()
         let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2))
