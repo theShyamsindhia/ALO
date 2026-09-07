@@ -19,6 +19,7 @@ struct RoomSyncSample: Identifiable, Equatable, Sendable {
 struct RoomSyncIncident: Equatable, Sendable {
     enum Trigger: String, Sendable {
         case driftExceeded = "drift-threshold"
+        // An unknown measurement, not proof of failed or misaligned playback.
         case measurementMissing = "measurement-missing"
     }
     let participantNumber: Int
@@ -269,8 +270,11 @@ struct RoomSyncMonitor {
                     trigger: trigger, occurredAt: occurredAt,
                     samples: Array(trace.samples.suffix(Self.incidentLeadingSamples))),
                 remainingSamples: Self.incidentFollowingSamples))
-            if recordings.count > Self.maximumIncidents {
-                recordings.removeFirst(recordings.count - Self.maximumIncidents)
+            while recordings.count > Self.maximumIncidents {
+                // Preserve measured excursions ahead of unknown gaps. Within
+                // each kind, keep the newest evidence under the same hard cap.
+                let oldestGap = recordings.firstIndex { $0.evidence.trigger == .measurementMissing }
+                recordings.remove(at: oldestGap ?? recordings.startIndex)
             }
         }
     }

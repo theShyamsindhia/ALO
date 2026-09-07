@@ -18,8 +18,14 @@ states with actual native renders, not only bitmap existence assertions.
 2. Install matching ALO Dev commit with isolated bundle ID, identity and network
    stores. Optional game records/packs and icon stores are still shared: exclude
    those features from this test rather than claiming complete data isolation. Record installed
-   source revision, binary SHA, OS and output type. Do not use Developer ID or run
-   local signing commands; the installer preserves the linker's executable.
+   source revision, binary SHA, OS and output type. The user approved certificate-free
+   ad-hoc signing of ALO Dev on September 7. Seal the completed bundle after all
+   resources/plist changes; verify with `codesign --verify --deep --strict`.
+   Developer ID/notarization are not used. Ad-hoc validity is not Gatekeeper trust:
+   downloaded dev builds may require normal first-open approval. Never disable
+   system-wide security or remove quarantine as part of this installer.
+   The plist records the pre-sign input binary hash; compare the separately reported
+   signed executable hash between Macs (embedding that hash would change the signature).
 3. Create an isolated dev network/channel. Shyam broadcasts the Spotify audio
    already playing; Raj receives. Confirm both processes are dev, not release.
 4. Capture per-second `in.werai.audio.dev` / `synchronization` unified-log samples
@@ -38,6 +44,11 @@ states with actual native renders, not only bitmap existence assertions.
 
 - Regression first for every confirmed defect, including incident hysteresis.
 - Bounded traces/incidents through missing samples and recovery; privacy tests.
+- A missing-measurement incident means timing evidence was unavailable, not proof
+  of an audible failure. Keep immediate gaps: delaying their recording to wait for
+  slower now-playing metadata could hide brief real stalls. Explicitly known
+  pauses are notice-only; ambiguous missing samples stay unknown. Under retention
+  pressure, preserve measured drift before discarding older missing-only evidence.
 - Existing deterministic clock, route, rejoin, call and strict live timing tests
   remain required. No threshold relaxation to manufacture a passing result.
 - Claude/CodeRabbit review and CI before a ready PR. Maintainer owns merge.
@@ -67,3 +78,7 @@ a fallback, not an event subscription. Never expose local API credentials.
   transfer timed out from Shyam and was stopped without changing network settings.
 - Physical playback validation is still pending. These results do not establish
   the cause of the reported audible drift or claim a playback fix.
+- The original transferred ce6cb97 bundle failed strict resource-seal validation.
+  Re-sealing that exact bundle with certificate-free ad-hoc signing passes strict
+  validation and launches locally. Shyam has instructions to apply the same seal
+  to his checksum-verified archive and compare signed executable hashes.

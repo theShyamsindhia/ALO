@@ -73,6 +73,8 @@ struct RoomSyncMonitorTests {
         #expect(monitor.traces.count == RoomSyncMonitor.maximumParticipants)
         #expect(monitor.incidents.count == RoomSyncMonitor.maximumIncidents)
         #expect(Set(monitor.incidents.map(\.participantNumber)).count == RoomSyncMonitor.maximumIncidents)
+        #expect(monitor.incidents.first?.participantNumber == 81 - RoomSyncMonitor.maximumIncidents)
+        #expect(monitor.incidents.last?.participantNumber == 80)
         #expect(monitor.events.count <= RoomSyncMonitor.maximumEvents)
         monitor.reset()
         #expect(monitor.traces.isEmpty)
@@ -117,6 +119,28 @@ struct RoomSyncMonitorTests {
         #expect(monitor.incidents.first?.trigger == .driftExceeded)
         #expect(monitor.incidents.first?.samples.contains { $0.driftMilliseconds == nil } == true)
         #expect(monitor.orderedTraces.first?.latest?.driftMilliseconds == nil)
+    }
+
+    @Test("Missing-measurement churn preserves measured drift evidence within the cap")
+    func missingMeasurementsPreferentiallyEvictOlderGaps() {
+        var monitor = RoomSyncMonitor()
+        let participants = [RoomParticipant(id: "local", name: "Private Mac")]
+        let samples: [Double?] = [70, 10] + Array(repeating: [nil, 10] as [Double?], count: 20).flatMap { $0 }
+        for (index, drift) in samples.enumerated() {
+            monitor.observe(participants: participants, currentParticipantID: "local",
+                timing: timing(localDrift: drift, localRTT: 2, buffer: 250, jitter: 1,
+                    output: 20, localLate: 0, localResync: 0,
+                    peerID: nil, peerDrift: nil, peerLate: 0, peerResync: 0, roomTimingChanges: 0),
+                sampledAtNanos: UInt64(index + 1) * 1_000_000_000,
+                occurredAt: Date(timeIntervalSince1970: Double(index)))
+        }
+        #expect(monitor.incidents.count == RoomSyncMonitor.maximumIncidents)
+        #expect(monitor.incidents.first?.trigger == .driftExceeded)
+        #expect(monitor.incidents.first?.occurredAt == Date(timeIntervalSince1970: 0))
+        let gaps = monitor.incidents.filter { $0.trigger == .measurementMissing }
+        #expect(gaps.count == RoomSyncMonitor.maximumIncidents - 1)
+        #expect(gaps.first?.occurredAt == Date(timeIntervalSince1970: 12))
+        #expect(gaps.last?.occurredAt == Date(timeIntervalSince1970: 40))
     }
 
     @Test("Records every participant and explains measured timing changes")
