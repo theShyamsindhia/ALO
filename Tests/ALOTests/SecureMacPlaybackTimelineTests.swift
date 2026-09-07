@@ -10,7 +10,8 @@ struct SecureMacPlaybackTimelineTests {
         var clockOffsetNanos: Int64?
         var outputLatencyForTimingNanos: UInt64 = 0
         var renderSchedulingHeadroomForTimingNanos: UInt64 = 25_000_000
-        var outputHardwareFormatForDiagnostics: AudioOutputHardwareFormat? { nil }
+        var outputHardwareFormatForDiagnostics: AudioOutputHardwareFormat?
+        var onSyncReport: (() -> Void)?
         var outstandingPlaybackBufferCount = 0
         var pendingPlaybackPacketCount = 0
         var packets: [AudioPacket] = []
@@ -44,7 +45,8 @@ struct SecureMacPlaybackTimelineTests {
             if !playing { pauseCalls += 1; outstandingPlaybackBufferCount = 0; pendingPlaybackPacketCount = 0; activity(false) }
         }
         func syncReport() -> PlaybackSyncReport {
-            .init(measuredAtNanos: 0, latenessNanos: 0, latePacketCount: 0, resyncCount: 0)
+            onSyncReport?()
+            return .init(measuredAtNanos: 0, latenessNanos: 0, latePacketCount: 0, resyncCount: 0)
         }
         func stop() { stops += 1; outstandingPlaybackBufferCount = 0; activity(false) }
     }
@@ -204,6 +206,29 @@ struct SecureMacPlaybackTimelineTests {
         rig.now = 1_600_000_000
         #expect(rig.output.activePlayoutDelayNanos == 400_000_000)
         #expect(rig.output.automaticSyncState == "Watching local audio timing")
+    }
+
+    @Test func diagnosticSnapshotRetainsOnePlayerAcrossCutoverDuringRead() throws {
+        let rig = try Rig()
+        try start(rig)
+        let next = UUID()
+        try rig.output.prepare(id: next, anchor: anchor(capture: 1_200_000_000, frame: 9_600, delay: 400_000_000), clockOffsetNanos: 0)
+        try rig.output.commit(id: next)
+        rig.players[0].automaticSyncEnabled = false
+        rig.players[0].outputLatencyForTimingNanos = 10_000_000
+        rig.players[0].renderSchedulingHeadroomForTimingNanos = 30_000_000
+        rig.players[0].outputHardwareFormatForDiagnostics = .init(sampleRate: 44_100, channelCount: 2)
+        rig.players[1].outputLatencyForTimingNanos = 80_000_000
+        rig.players[1].renderSchedulingHeadroomForTimingNanos = 60_000_000
+        rig.players[1].outputHardwareFormatForDiagnostics = .init(sampleRate: 48_000, channelCount: 2)
+        // A clock boundary can pass between individual property reads.
+        rig.players[0].onSyncReport = { [unowned rig] in rig.now = 1_600_000_000 }
+        let snapshot = rig.output.localDiagnosticReport()
+        #expect(snapshot.activeDelay == 250_000_000)
+        #expect(snapshot.automaticState == "Automatic drift realignment off")
+        #expect(snapshot.outputLatency == 10_000_000)
+        #expect(snapshot.renderHeadroom == 30_000_000)
+        #expect(snapshot.hardwareFormat?.sampleRate == 44_100)
     }
 
     @Test func secureHostDiagnosticsExposeRealPlaybackBufferAndAutomaticSyncState() async throws {

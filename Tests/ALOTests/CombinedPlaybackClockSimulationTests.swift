@@ -7,10 +7,10 @@ import ALOTiming
 /// timing math, not AVAudioEngine, device latency reporting, or acoustic output.
 @Suite("Combined two-output continuous playback timing")
 struct CombinedPlaybackClockSimulationTests {
-    @Test(arguments: [false, true])
-    func independentClocksAndControlQueuePlateaus(asymmetricQueue: Bool) {
-        let result = CombinedClockSimulation.run(asymmetricQueue: asymmetricQueue)
-        print("Combined playback asymmetric=\(asymmetricQueue): \(result)")
+    @Test(arguments: [false, true], [0.0, 0.020])
+    func independentClocksAndControlQueuePlateaus(asymmetricQueue: Bool, renderLead: Double) {
+        let result = CombinedClockSimulation.run(asymmetricQueue: asymmetricQueue, renderLead: renderLead)
+        print("Combined playback asymmetric=\(asymmetricQueue) renderLead=\(renderLead): \(result)")
         #expect(result.discontinuities == 0)
         #expect(result.validMeasurements > 20_000)
         #expect(result.maximumRateCorrection <= 0.01)
@@ -74,7 +74,7 @@ private enum CombinedClockSimulation {
         var offset: Int64?
         var renderStart: Double?
         var rendered = 0.0
-        var correction = 0.0
+        var rateController = PlaybackRateController()
         var rate = 1.0
         init(monotonic: Oscillator, sampleOscillator: Double, latency: Double, cadence: Double) {
             self.monotonic = monotonic; self.sampleOscillator = sampleOscillator
@@ -83,7 +83,7 @@ private enum CombinedClockSimulation {
         }
     }
 
-    static func run(asymmetricQueue: Bool) -> Result {
+    static func run(asymmetricQueue: Bool, renderLead: Double) -> Result {
         let host = Oscillator(epoch: 900, rate: 1.000030)
         let captureRate = 0.999880
         let outputs = [
@@ -167,16 +167,20 @@ private enum CombinedClockSimulation {
                     }
                     guard let start = output.renderStart, now >= start + 0.004,
                           let offset = output.offset else { continue }
-                    let renderLocal = output.monotonic.nanos(now)
+                    let observedLocal = output.monotonic.nanos(now)
+                    let renderLocal = output.monotonic.nanos(now + renderLead)
                     let renderHost = UInt64(Int64(renderLocal) + offset)
-                    if let estimate = RenderDriftEstimate(nowNanos: renderLocal, renderLocalNanos: renderLocal,
+                    // A future node timestamp describes the projected sample
+                    // position at that timestamp, not the observation position.
+                    let renderPosition = output.rendered + renderLead * output.sampleOscillator * output.rate
+                    if let estimate = RenderDriftEstimate(nowNanos: observedLocal, renderLocalNanos: renderLocal,
                         renderHostNanos: renderHost, outputLatencyNanos: UInt64(output.latency * 1e9),
                         captureAnchorNanos: captureAnchor, playoutDelayNanos: delay,
-                        sampleTime: Int64(output.rendered * 48_000), sampleRate: 48_000,
-                        captureOffsetNanos: output.tracker.offsetNanos) {
-                        output.correction = PlaybackRateCorrection.next(previous: output.correction,
-                            errorSeconds: estimate.errorSeconds)
-                        let nextRate = Float(1 + output.correction)
+                        sampleTime: Int64(renderPosition * 48_000), sampleRate: 48_000,
+                        captureOffsetNanos: output.tracker.offsetNanos,
+                        permittedFutureLeadNanos: renderLead > 0 ? 25_000_000 : 0) {
+                        let nextRate = output.rateController.updateFresh(errorSeconds: estimate.errorSeconds,
+                            sampledAtNanos: estimate.freshnessNanos)
                         if abs(Float(output.rate) - nextRate) > 0.000_005 { output.rate = Double(nextRate) }
                         result.validMeasurements += 1
                         result.maximumEstimatedError = max(result.maximumEstimatedError, abs(estimate.errorSeconds))
@@ -184,9 +188,9 @@ private enum CombinedClockSimulation {
                             result.finalWindowMaximumEstimatedError = max(result.finalWindowMaximumEstimatedError,
                                 abs(estimate.errorSeconds))
                         }
-                        result.maximumRateCorrection = max(result.maximumRateCorrection, abs(output.correction))
+                        result.maximumRateCorrection = max(result.maximumRateCorrection, abs(Double(nextRate) - 1))
                         result.maximumClockBias = max(result.maximumClockBias,
-                            abs(Double(renderHost) - Double(host.nanos(now))) / 1e9)
+                            abs(Double(renderHost) - Double(host.nanos(now + renderLead))) / 1e9)
                     }
                 }
             }

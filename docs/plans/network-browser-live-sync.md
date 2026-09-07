@@ -154,6 +154,86 @@ unhealthy verdict, and changing to listener clears old remote recovery state.
 This is a test checkpoint, not completed two-Mac validation. The old Raj Dev app
 was normally quit before installing this candidate; production ALO stays closed.
 
+### Installed instrumented checkpoint
+
+- Candidate: `8993691b34e8bd0e100f534e8755af3114ba783b` (not a release).
+- Installed signed executable SHA256:
+  `2f7f8eccdcd693cc782d1c88af1fd74439be287eb1fe9dda5e660b263dcc7984`.
+- Matching archive SHA256:
+  `38b4c58261b3da7c5536c2fbae73ae87383b7298a8a3730a26d89b00ca458f44`.
+- Archive delivered through the agreed Anytype chat, with a verified structured
+  Shyam mention and file attachment. Remote installation is not yet confirmed.
+- Raj's startup is waiting in `SecItemCopyMatching` while loading the existing
+  dev identity. A process sample confirms this is before network startup. Normal
+  Keychain approval must be completed by the user; do not reset keys or change
+  access controls to get a test running. No paired playback evidence exists for
+  this candidate yet.
+- The subsequent `e9c527f` change only repairs the shell regression fixture's
+  process-substitution lifetime issue observed on CI; it does not change the
+  shared app binary.
+
+Any later future-render fix must preserve the raw render timestamp for phase
+calculation while keeping freshness and rate holdover on a nonfuture observation
+basis. Past render timestamps must retain their actual age: repeatedly polling
+an old timestamp must never manufacture fresh evidence. Exercise the production
+player, not just a copy of its mathematical branch, and keep missing/invalid,
+stale, route-change, overflow and bounded-holdover controls.
+
+History identifies the strict future-time rejection at commit `cfdf432`
+(0.14.9), when inline playback phase arithmetic moved into `RenderDriftEstimate`.
+Its parent used the raw render host timestamp for phase correction and stamped
+measurement freshness with polling time. The extraction added `now >= render`
+and aged reports from render time instead. This is a concrete regression path
+consistent with the hardware probe, not proof that every historical dropout had
+that cause. Retain the extraction's overflow, finite-value, stale-sample and newer
+capture-clock protections; do not restore the older unchecked arithmetic.
+
+The opt-in `LiveProductionRenderProbeTests` then exercised the actual
+`SynchronizedPlayer` with three seconds of zero PCM on Raj's real default output.
+All 135 maintenance polls reported `render-ahead-of-poll`, with 134 advancing
+sample observations, zero late packets and zero resyncs. Representative signed
+render ages at observation were −15.639, −15.407 and −19.662 ms, with a 10.667 ms
+output buffer and 1 ms safety offset. This confirms the failing gate in the
+production playback class, independently of Keychain or the paired app setup.
+It does not prove acoustic alignment or network delivery. The probe is explicitly
+opt-in and uses no identity, network, microphone, capture, route or volume change;
+default CI must not require access to a physical audio output.
+
+Before changing playback policy, the same opt-in production-player probe added
+expectations for more than 20 accepted measurements and a nonnil drift/age report.
+Both failed at runtime (`production-future-render-red.log`): 135 future-time
+rejections, zero accepted measurements, no drift report, still 134 advancing
+sample observations and zero late packets/resyncs. The other 31 cases in that
+batch passed after the diagnostic fixes. Preserve this RED evidence alongside the
+later GREEN run; hardware tests must not claim two-device acoustic sync.
+
+### Bounded future-time correction: local GREEN
+
+`future-render-green.log` records 94 Swift Testing cases plus 14 XCTest cases
+passing. The unchanged useful-measurement/report assertions now pass on real
+output: 126 accepted measurements, eight expected pre-timeline startup polls,
+133 advancing sample observations, zero future-time rejections, zero late packets
+and zero resyncs. Estimated local software phase error ranged from 2,624 to
+14,083 ns; these numbers are not two-device or acoustic accuracy measurements.
+
+The acceptance allowance is derived from two measured I/O buffers plus the
+device safety offset and an empirical 2 ms margin. Geometry must be valid and
+the computed allowance must fit a 250 ms engineering horizon; missing or
+unsupported geometry retains strict future-time rejection. This is not an Apple
+guarantee or an acoustic/Bluetooth latency model. The current route yielded a
+24.333 ms allowance. A 4,096-frame/44.1 kHz regression prevents unnecessarily
+rejecting plausible larger buffers. Route geometry refreshes independently of
+whether a transient zero presentation-latency measurement is retained.
+
+The raw render timestamp still defines phase; `min(render, observed)` defines
+freshness for reports and rate holdover. Both zero-lead and 20 ms future-lead
+six-minute simulations pass the original normal-path bound, while the asymmetric
+network scenario still exposes its documented clock-uncertainty limitation.
+Four diagnostic review findings are fixed as well: distinguish measured
+realignment, populate legacy observations, snapshot one player consistently at
+cutover, and reset sample-delta continuity after intentional resynchronization.
+Paired Spotify validation, final reviews/CI and native UI work remain pending.
+
 ## Timing evidence must have an independent reference
 
 The combined six-minute simulation separates host monotonic time, capture sample

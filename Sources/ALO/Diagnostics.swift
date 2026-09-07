@@ -211,6 +211,7 @@ struct DiagnosticRoomContext: Sendable, Equatable {
                 parts.append("render drift not currently measured")
             }
             if let observation = receiver.renderObservation { parts.append(observation.detail) }
+            else { parts.append("render observation unavailable (no local poll recorded)") }
             if let video = receiver.video, video.presentedCount > 0 || video.pendingCount > 0 {
                 let miss = video.latestDeadlineMissNanos.map { Self.milliseconds(Double($0) / 1_000_000) } ?? "not measured"
                 parts.append("screen deadline miss at UI handoff \(miss), peak \(Self.milliseconds(Double(video.maximumDeadlineMissNanos) / 1_000_000)), \(video.pendingCount) pending")

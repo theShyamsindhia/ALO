@@ -4,6 +4,39 @@ import Testing
 @testable import ALO
 
 struct RenderObservationTests {
+    @Test func measuredRealignmentIsDistinctAndStillOnePollOutcome() throws {
+        let outcome = RenderObservationReason.afterMeasurement(realigned: true)
+        #expect(outcome.label == "measured-realigned")
+        #expect(outcome != .recovery)
+        var recorder = RenderObservationRecorder()
+        recorder.record(.init(reason: outcome, observedAtNanos: 1))
+        let snapshot = try #require(recorder.snapshot(at: 1))
+        #expect(snapshot.counts.reduce(0, +) == 1)
+        #expect(snapshot.counts[outcome.rawValue] == 1)
+    }
+
+    @Test func deliberateRecoveryDoesNotFabricateSampleClockRegression() throws {
+        var recorder = RenderObservationRecorder()
+        recorder.record(.init(reason: .measured, observedAtNanos: 1, sampleTime: 200_000))
+        recorder.record(.init(reason: .recovery, observedAtNanos: 2, sampleTime: 200_240))
+        recorder.record(.init(reason: .measured, observedAtNanos: 3, sampleTime: 0))
+        #expect(try #require(recorder.snapshot(at: 3)).sampleTimeDelta == nil)
+        recorder.record(.init(reason: .measured, observedAtNanos: 4, sampleTime: 240))
+        #expect(try #require(recorder.snapshot(at: 4)).sampleTimeDelta == 240)
+        #expect(try #require(recorder.snapshot(at: 4)).counts.reduce(0, +) == 4)
+    }
+
+    @Test func missingObservationIsExplicitInsteadOfSilentlyAbsent() {
+        let receiver = ReceiverTimingDiagnostics(roundTripMilliseconds: 4, clockOffsetMilliseconds: 0,
+            jitterMilliseconds: 0, recommendedBufferMilliseconds: 250, outputLatencyMilliseconds: 1,
+            renderHeadroomMilliseconds: 25, outputSampleRate: 48_000, outputChannelCount: 2,
+            latenessMilliseconds: 0, latePacketCount: 0, resyncCount: 0)
+        let detail = DiagnosticRoomContext(isActive: true, role: .listener, participantCount: 2,
+            remotePeerCount: 1, syncLabel: "Checking", audioIsRendering: false, hasBroadcaster: true,
+            timing: .init(receiver: receiver, host: nil)).result.detail
+        #expect(detail.contains("render observation unavailable"))
+    }
+
     @Test(arguments: [UInt64(11_593_167), 22_250_625])
     func recordedHardwareFutureLeadIsRejectedByCurrentPolicy(lead: UInt64) {
         // Bounds recorded on the actual 48kHz/512-frame output in the separate

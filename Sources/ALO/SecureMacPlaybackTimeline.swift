@@ -351,9 +351,13 @@ final class SecureMacPlaybackTimeline {
         reportingPlayer.syncReport()
     }
 
-    func localDiagnosticReport() -> (playback: PlaybackSyncReport, observation: RenderObservation?) {
+    func localDiagnosticReport() -> (playback: PlaybackSyncReport, observation: RenderObservation?,
+        activeDelay: UInt64, automaticState: String, outputLatency: UInt64, renderHeadroom: UInt64,
+        hardwareFormat: AudioOutputHardwareFormat?) {
         let player = reportingPlayer
-        return (player.syncReport(), player.renderObservation)
+        return (player.syncReport(), player.renderObservation, player.activePlayoutDelayNanos,
+                player.automaticSyncState, player.outputLatencyForTimingNanos, player.renderSchedulingHeadroomForTimingNanos,
+                player.outputHardwareFormatForDiagnostics)
     }
 
     func stop() {

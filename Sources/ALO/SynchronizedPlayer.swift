@@ -33,6 +33,23 @@ struct AudioOutputRenderBudget {
     static let safetyMarginNanos: UInt64 = 10_000_000
     static let maximumHeadroomNanos: UInt64 = 200_000_000
 
+    /// Two IO buffers plus the device safety offset matched the observed native
+    /// output lead. The 2ms margin is empirical, not an Apple timing guarantee.
+    /// Missing/unsupported geometry stays unknown; never invent a sample rate
+    /// or add Bluetooth presentation latency to the host-clock allowance.
+    static func permittedFutureLeadNanos(bufferFrames: UInt32?, safetyOffsetFrames: UInt32?,
+                                         sampleRate: Double?) -> UInt64? {
+        guard let bufferFrames, bufferFrames > 0, let safetyOffsetFrames,
+              let sampleRate, sampleRate.isFinite, sampleRate > 0 else { return nil }
+        let doubled = UInt64(bufferFrames).multipliedReportingOverflow(by: 2)
+        let frames = doubled.partialValue.addingReportingOverflow(UInt64(safetyOffsetFrames))
+        guard !doubled.overflow, !frames.overflow else { return nil }
+        let nanos = ceil(Double(frames.partialValue) * 1_000_000_000 / sampleRate) + 2_000_000
+        guard nanos.isFinite, nanos >= 0,
+              nanos <= Double(RenderDriftEstimate.maximumFutureLeadNanos) else { return nil }
+        return UInt64(nanos)
+    }
+
     static func schedulingHeadroomNanos(
         bufferFrames: UInt32?,
         safetyOffsetFrames: UInt32?,
@@ -104,6 +121,7 @@ final class SynchronizedPlayer {
     private var renderObservationRecorder = RenderObservationRecorder()
     private var outputBufferMilliseconds: Double?
     private var outputSafetyMilliseconds: Double?
+    private var permittedFutureLeadNanos: UInt64?
     var renderObservation: RenderObservation? {
         renderObservationRecorder.snapshot(at: MonotonicClock.nowNanos())
     }
@@ -253,6 +271,7 @@ final class SynchronizedPlayer {
         observation.observedAtNanos = MonotonicClock.nowNanos()
         observation.outputBufferMilliseconds = outputBufferMilliseconds
         observation.outputSafetyMilliseconds = outputSafetyMilliseconds
+        observation.permittedFutureLeadMilliseconds = permittedFutureLeadNanos.map { Double($0) / 1_000_000 }
         if let lastPacketReceivedNanos {
             observation.packetAgeMilliseconds = RenderObservationSample.signedAgeMilliseconds(now: now, sample: lastPacketReceivedNanos)
         }
@@ -296,26 +315,29 @@ final class SynchronizedPlayer {
         guard let lastPacketReceivedNanos,
               now >= lastPacketReceivedNanos,
               now - lastPacketReceivedNanos <= 500_000_000 else { return }
-        observation.reason = RenderObservationSample.clockGate(pollNanos: now, renderNanos: renderLocalNanos) ?? .invalidTimeline
+        observation.reason = RenderObservationSample.clockGate(pollNanos: observation.observedAtNanos,
+            renderNanos: renderLocalNanos, permittedFutureLeadNanos: permittedFutureLeadNanos ?? 0) ?? .invalidTimeline
         guard let estimate = RenderDriftEstimate(
-                nowNanos: now, renderLocalNanos: renderLocalNanos,
+                nowNanos: observation.observedAtNanos, renderLocalNanos: renderLocalNanos,
                 renderHostNanos: renderHostNanos, outputLatencyNanos: outputLatencyNanos,
                 captureAnchorNanos: anchorCaptureNanos, playoutDelayNanos: targetLatencyNanos,
                 sampleTime: playerTime.sampleTime, sampleRate: playerTime.sampleRate,
-                captureOffsetNanos: captureTimeline.offsetNanos
+                captureOffsetNanos: captureTimeline.offsetNanos,
+                permittedFutureLeadNanos: permittedFutureLeadNanos ?? 0
               ) else { return }
         let absoluteErrorNanos = estimate.magnitudeNanos
         observation.reason = .measured
-        // Age belongs to the audio render sample, not the polling timer.
-        latestDriftMeasurement = (absoluteErrorNanos, renderLocalNanos)
+        // Keep raw render time for phase; freshness preserves past sample age
+        // but cannot claim a future observation in reports or rate holdover.
+        latestDriftMeasurement = (absoluteErrorNanos, estimate.freshnessNanos)
         if automaticSyncPolicy.shouldRealign(driftNanos: absoluteErrorNanos, now: now) {
-            observation.reason = .recovery
+            observation.reason = .afterMeasurement(realigned: true)
             latestLatenessNanos = absoluteErrorNanos
             hardResynchronize()
             return
         }
         let rate = rateController.updateFresh(errorSeconds: estimate.errorSeconds,
-                                              sampledAtNanos: renderLocalNanos)
+                                              sampledAtNanos: estimate.freshnessNanos)
         if abs(varispeed.rate - rate) > 0.000_005 {
             varispeed.rate = rate
         }
@@ -717,16 +739,18 @@ final class SynchronizedPlayer {
         else { return }
         lastOutputStateRefreshNanos = nowNanos
         let measuredLatencyNanos = measuredOutputLatencyNanos()
+        // Geometry can disappear/change even when a transient zero presentation
+        // latency must be ignored. Refresh/clear its future-lead allowance on
+        // every scheduled running refresh, independently of that phase policy.
+        let refreshedHeadroom = measuredRenderSchedulingHeadroomNanos(
+            deviceID: currentOutputDeviceID(), hardwareFormat: currentOutputHardwareFormat())
         guard Self.shouldAcceptOutputLatencyMeasurement(
             engineIsRunning: audioOutput.isRunning,
             previousLatencyNanos: outputLatencyNanos,
             measuredLatencyNanos: measuredLatencyNanos
         ) else { return }
         outputLatencyNanos = measuredLatencyNanos
-        renderSchedulingHeadroomNanos = measuredRenderSchedulingHeadroomNanos(
-            deviceID: currentOutputDeviceID(),
-            hardwareFormat: currentOutputHardwareFormat()
-        )
+        renderSchedulingHeadroomNanos = refreshedHeadroom
     }
 
     private func measuredRenderSchedulingHeadroomNanos(
@@ -735,11 +759,15 @@ final class SynchronizedPlayer {
     ) -> UInt64 {
         guard let deviceID else {
             outputBufferMilliseconds = nil; outputSafetyMilliseconds = nil
+            permittedFutureLeadNanos = nil
             return RoomTiming.renderSchedulingHeadroomNanos
         }
         let bufferFrames = Self.audioDeviceUInt32Property(deviceID: deviceID, selector: kAudioDevicePropertyBufferFrameSize)
         let safetyFrames = Self.audioDeviceUInt32Property(deviceID: deviceID, selector: kAudioDevicePropertySafetyOffset)
-        let sampleRate = Self.audioDeviceNominalSampleRate(deviceID) ?? hardwareFormat?.sampleRate ?? Double(AudioPacket.sampleRate)
+        let measuredRate = Self.audioDeviceNominalSampleRate(deviceID) ?? hardwareFormat?.sampleRate
+        let sampleRate = measuredRate ?? Double(AudioPacket.sampleRate)
+        permittedFutureLeadNanos = AudioOutputRenderBudget.permittedFutureLeadNanos(
+            bufferFrames: bufferFrames, safetyOffsetFrames: safetyFrames, sampleRate: measuredRate)
         outputBufferMilliseconds = sampleRate > 0 ? bufferFrames.map { Double($0) * 1000 / sampleRate } : nil
         outputSafetyMilliseconds = sampleRate > 0 ? safetyFrames.map { Double($0) * 1000 / sampleRate } : nil
         return AudioOutputRenderBudget.schedulingHeadroomNanos(
@@ -920,6 +948,7 @@ final class SynchronizedPlayer {
     }
 
     private func hardResynchronize() {
+        renderObservationRecorder.resetSampleTimeContinuity()
         scheduledCompletions.invalidate()
         player.stop()
         rateController.reset()

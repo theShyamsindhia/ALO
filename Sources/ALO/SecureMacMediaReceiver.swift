@@ -167,7 +167,7 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
         queue.sync {
             let local = player.localDiagnosticReport()
             let report = local.playback
-            let format = player.outputHardwareFormatForDiagnostics
+            let format = local.hardwareFormat
             let now = MonotonicClock.nowNanos()
             let fresh = clock.flatMap { now >= $0.sampledAtLocalNanos && now - $0.sampledAtLocalNanos <= 5_000_000_000 ? $0 : nil }
             return ReceiverTimingDiagnostics(
@@ -176,10 +176,10 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
                 jitterMilliseconds: Double(jitter.jitterNanos) / 1_000_000,
                 recommendedBufferMilliseconds: Double(jitter.recommendedPlayoutDelayNanos(
                     roundTripNanos: fresh?.roundTripNanos,
-                    outputLatencyNanos: player.outputLatencyForTimingNanos,
-                    renderSchedulingHeadroomNanos: player.renderSchedulingHeadroomForTimingNanos)) / 1_000_000,
-                outputLatencyMilliseconds: Double(player.outputLatencyForTimingNanos) / 1_000_000,
-                renderHeadroomMilliseconds: Double(player.renderSchedulingHeadroomForTimingNanos) / 1_000_000,
+                    outputLatencyNanos: local.outputLatency,
+                    renderSchedulingHeadroomNanos: local.renderHeadroom)) / 1_000_000,
+                outputLatencyMilliseconds: Double(local.outputLatency) / 1_000_000,
+                renderHeadroomMilliseconds: Double(local.renderHeadroom) / 1_000_000,
                 outputSampleRate: format?.sampleRate, outputChannelCount: format?.channelCount,
                 latenessMilliseconds: Double(report.latenessNanos) / 1_000_000,
                 latePacketCount: report.latePacketCount, resyncCount: report.resyncCount,
@@ -187,8 +187,8 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
                 driftMeasurementAgeMilliseconds: fresh == nil ? nil : report.driftSampleAgeNanos.map { Double($0) / 1_000_000 },
                 video: screenTiming.presentationSnapshot(videoDecoder.presentationTimingSnapshot),
                 videoEnabled: screenTiming.videoEnabled,
-                activePlayoutBufferMilliseconds: Double(player.activePlayoutDelayNanos) / 1_000_000,
-                automaticSyncState: player.automaticSyncState,
+                activePlayoutBufferMilliseconds: Double(local.activeDelay) / 1_000_000,
+                automaticSyncState: local.automaticState,
                 renderObservation: local.observation)
         }
     }

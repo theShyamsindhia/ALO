@@ -33,15 +33,28 @@ public struct LocalAudioSyncPolicy: Sendable {
 /// This measures software playout timing; it cannot measure acoustic speaker delay.
 public struct RenderDriftEstimate: Sendable {
     public static let maximumAgeNanos: UInt64 = 250_000_000
+    /// Engineering horizon, not a guarantee about any output device's timing.
+    public static let maximumFutureLeadNanos: UInt64 = maximumAgeNanos
     public let errorSeconds: Double
     public let magnitudeNanos: UInt64
+    /// Future render phase is useful, but freshness must never be in the future.
+    /// Preserve the actual age of already-past samples rather than refreshing
+    /// them on every maintenance poll.
+    public let freshnessNanos: UInt64
+
+    public static func clockIsWithinWindow(nowNanos: UInt64, renderLocalNanos: UInt64,
+                                          permittedFutureLeadNanos: UInt64 = 0) -> Bool {
+        guard permittedFutureLeadNanos <= maximumFutureLeadNanos else { return false }
+        if renderLocalNanos > nowNanos { return renderLocalNanos - nowNanos <= permittedFutureLeadNanos }
+        return nowNanos - renderLocalNanos <= maximumAgeNanos
+    }
 
     public init?(nowNanos: UInt64, renderLocalNanos: UInt64, renderHostNanos: UInt64,
                  outputLatencyNanos: UInt64, captureAnchorNanos: UInt64,
                  playoutDelayNanos: UInt64, sampleTime: Int64, sampleRate: Double,
-                 captureOffsetNanos: Double = 0) {
-        guard nowNanos >= renderLocalNanos,
-              nowNanos - renderLocalNanos <= Self.maximumAgeNanos,
+                 captureOffsetNanos: Double = 0, permittedFutureLeadNanos: UInt64 = 0) {
+        guard Self.clockIsWithinWindow(nowNanos: nowNanos, renderLocalNanos: renderLocalNanos,
+                                      permittedFutureLeadNanos: permittedFutureLeadNanos),
               sampleTime >= 0, sampleRate.isFinite, sampleRate > 0, captureOffsetNanos.isFinite else { return nil }
         let audible = renderHostNanos.addingReportingOverflow(outputLatencyNanos)
         let start = captureAnchorNanos.addingReportingOverflow(playoutDelayNanos)
@@ -51,6 +64,7 @@ public struct RenderDriftEstimate: Sendable {
         let magnitude = abs(errorSeconds) * 1_000_000_000
         guard magnitude.isFinite, magnitude < Double(UInt64.max) else { return nil }
         magnitudeNanos = UInt64(magnitude)
+        freshnessNanos = min(nowNanos, renderLocalNanos)
     }
 }
 

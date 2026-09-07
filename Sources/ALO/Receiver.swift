@@ -287,7 +287,8 @@ final class Receiver {
                 video: screenTiming.presentationSnapshot(videoDecoder.presentationTimingSnapshot),
                 videoEnabled: screenTiming.videoEnabled,
                 activePlayoutBufferMilliseconds: Double(player.activePlayoutDelayNanos) / 1_000_000,
-                automaticSyncState: player.automaticSyncState
+                automaticSyncState: player.automaticSyncState,
+                renderObservation: player.renderObservation
             )
         }
     }

@@ -7,6 +7,9 @@ enum RenderObservationReason: Int, CaseIterable, Sendable {
     case detached, paused, notStarted, recovery, missingClock, missingAnchor
     case missingRenderTime, invalidHostTime, missingPlayerTime, invalidSampleTime
     case stalePacket, clockRange, renderAheadOfPoll, staleRender, invalidTimeline, measured
+    case measuredRealigned
+
+    static func afterMeasurement(realigned: Bool) -> Self { realigned ? .measuredRealigned : .measured }
 
     var label: String {
         switch self {
@@ -26,6 +29,7 @@ enum RenderObservationReason: Int, CaseIterable, Sendable {
         case .staleRender: "render-stale"
         case .invalidTimeline: "timeline-not-estimable"
         case .measured: "measured"
+        case .measuredRealigned: "measured-realigned"
         }
     }
 }
@@ -41,15 +45,18 @@ struct RenderObservationSample: Sendable, Equatable {
     var sampleRate: Double?
     var outputBufferMilliseconds: Double?
     var outputSafetyMilliseconds: Double?
+    var permittedFutureLeadMilliseconds: Double?
 
     static func signedAgeMilliseconds(now: UInt64, sample: UInt64) -> Double {
         now >= sample ? Double(now - sample) / 1_000_000 : -Double(sample - now) / 1_000_000
     }
 
-    static func clockGate(pollNanos: UInt64, renderNanos: UInt64) -> RenderObservationReason? {
+    static func clockGate(pollNanos: UInt64, renderNanos: UInt64,
+                          permittedFutureLeadNanos: UInt64 = 0) -> RenderObservationReason? {
+        if RenderDriftEstimate.clockIsWithinWindow(nowNanos: pollNanos, renderLocalNanos: renderNanos,
+            permittedFutureLeadNanos: permittedFutureLeadNanos) { return nil }
         if renderNanos > pollNanos { return .renderAheadOfPoll }
-        if pollNanos - renderNanos > RenderDriftEstimate.maximumAgeNanos { return .staleRender }
-        return nil
+        return .staleRender
     }
 }
 
@@ -68,7 +75,7 @@ struct RenderObservation: Sendable, Equatable {
             let count = counts[reason.rawValue]
             return count == 0 ? nil : "\(reason.label)=\(count)"
         }.joined(separator: ",")
-        return "render observation \(sample.reason.label), age \(number(observationAgeMilliseconds)) ms, poll/observed render ages \(number(sample.renderAgeAtPollMilliseconds))/\(number(sample.renderAgeAtObservationMilliseconds)) ms, packet age \(number(sample.packetAgeMilliseconds)) ms, anchor margin \(number(sample.anchorMarginMilliseconds)) ms, sample delta \(sampleTimeDelta.map(String.init) ?? "unavailable"), player Hz \(number(sample.sampleRate)), output buffer/safety \(number(sample.outputBufferMilliseconds))/\(number(sample.outputSafetyMilliseconds)) ms, polls {\(counters)}"
+        return "render observation \(sample.reason.label), age \(number(observationAgeMilliseconds)) ms, poll/observed render ages \(number(sample.renderAgeAtPollMilliseconds))/\(number(sample.renderAgeAtObservationMilliseconds)) ms, packet age \(number(sample.packetAgeMilliseconds)) ms, anchor margin \(number(sample.anchorMarginMilliseconds)) ms, sample delta \(sampleTimeDelta.map(String.init) ?? "unavailable"), player Hz \(number(sample.sampleRate)), output buffer/safety \(number(sample.outputBufferMilliseconds))/\(number(sample.outputSafetyMilliseconds)) ms, permitted future lead \(sample.permittedFutureLeadMilliseconds.map { number($0) + " ms" } ?? "unavailable (strict 0)"), polls {\(counters)}"
     }
 }
 
@@ -90,6 +97,16 @@ struct RenderObservationRecorder {
             previousSampleTime = current
         }
         latest = sample
+        // The defer recording a recovery still contains the pre-stop sample.
+        // Do not reseed continuity from it after hardResynchronize cleared it.
+        if sample.reason == .recovery || sample.reason == .measuredRealigned {
+            resetSampleTimeContinuity()
+        }
+    }
+
+    mutating func resetSampleTimeContinuity() {
+        previousSampleTime = nil
+        sampleTimeDelta = nil
     }
 
     func snapshot(at now: UInt64) -> RenderObservation? {
