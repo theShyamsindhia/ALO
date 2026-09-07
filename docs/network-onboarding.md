@@ -71,3 +71,17 @@ belong to the app; these views never show platform-specific panels themselves.
 The views use the inherited system appearance, native focus treatment, SF Symbols,
 and minimum button-label heights of 40 points on macOS and 44 points on iOS.
 They add no custom motion.
+
+## Foreground and asynchronous actions
+
+Capture activation and explicit channel-selection intent before scheduling async
+work. `ForegroundChannelLifecycle` invalidates queued activation and join tokens
+when the user leaves, retries, selects another channel, or backgrounds the app.
+Recheck those tokens after account loading and channel preparation. An identity
+setup completion is not a foreground event and must not reconnect a backgrounded
+app. SwiftUI's initial task also checks the current active scene phase.
+
+While a membership confirmation is busy, prevent opening a replacement sheet or
+accepting/clearing the pending confirmation. Disable the relevant native alert
+actions as well as guarding their handlers, so automatic alert dismissal cannot
+silently discard an unperformed operation.

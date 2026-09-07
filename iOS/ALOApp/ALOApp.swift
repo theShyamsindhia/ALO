@@ -32,7 +32,11 @@ import ALORooms
     var body: some Scene {
         WindowGroup {
             ContentView(model: model, account: account)
-                .task { model.activate() }
+                .task {
+                    // SwiftUI may schedule this after the scene has already backgrounded.
+                    guard !Task.isCancelled, scenePhase == .active else { return }
+                    model.activate()
+                }
                 .onChange(of: scenePhase) { _, phase in
                     switch phase {
                     case .active: model.activate()

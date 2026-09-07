@@ -6,6 +6,36 @@ import ALOCore
 
 @Suite("Bounded audio sender bursts", .serialized)
 struct AudioSenderBurstTests {
+    @Test(arguments: [UInt64(20_000_000), 80_000_000])
+    func idleListenerRetriesWhenAnotherListenersOutstandingAudioDrains(waitNanos: UInt64) throws {
+        let fixture = try AudioBurstFixture(peerCount: 2)
+        defer { fixture.stop() }
+        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 8 * 240 * 2),
+            captureTimeNanos: fixture.audioNowNanos)
+        fixture.barrier()
+        fixture.advanceAudioClock(by: 200_000_000)
+        for _ in 0..<8 { #expect(fixture.completeOne(to: 9)) }
+        // Listener 9 is idle, but listener 10 still occupies the shared path.
+        // Retained service evidence correctly bars an immediate send. This
+        // fresh terminal capture must wait for the other listener's completions.
+        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 240 * 2),
+            captureTimeNanos: fixture.audioNowNanos - 40_000_000)
+        fixture.barrier()
+        #expect(fixture.host.audioSenderSnapshot().first(where: { $0.udpPort == 9 })?.pending == 1)
+        fixture.advanceAudioClock(by: waitNanos)
+        for _ in 0..<8 { #expect(fixture.completeOne(to: 10)) }
+        let snapshot = try #require(fixture.host.audioSenderSnapshot().first(where: { $0.udpPort == 9 }))
+        if waitNanos < 80_000_000 {
+            #expect(fixture.probe.sequences(to: 9) == Array(0..<9))
+            #expect(snapshot.expiredWait == 0)
+        } else {
+            #expect(fixture.probe.sequences(to: 9) == Array(0..<8))
+            #expect(snapshot.expiredWait == 1, "Another listener cannot extend the 80ms residence cap")
+        }
+        #expect(snapshot.admissionRejected == 0)
+        fixture.drain()
+    }
+
     @Test func completionSamplesOlderThanTheSenderQueueHorizonDoNotStarveARecoveringPeer() throws {
         let fixture = try AudioBurstFixture()
         defer { fixture.stop() }
@@ -71,6 +101,39 @@ struct AudioSenderBurstTests {
         fixture.drain()
         #expect(fixture.probe.sequences == Array(0..<8))
         #expect(fixture.host.audioSenderSnapshot().first?.expiredWait == 1)
+    }
+
+    @Test func captureAcquisitionAgeDoesNotConsumeTheTerminalRetryResidenceBudget() throws {
+        let fixture = try AudioBurstFixture()
+        defer { fixture.stop() }
+        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 8 * 240 * 2),
+            captureTimeNanos: fixture.audioNowNanos - 40_000_000)
+        fixture.barrier()
+        fixture.advanceAudioClock(by: 16_000_000)
+        fixture.completeOne()
+        fixture.advanceAudioClock(by: 16_000_000)
+        fixture.completeOne()
+        fixture.advanceAudioClock(by: 30_000_000)
+        // The terminal capture is fresh on arrival but cannot yet fit behind
+        // six outstanding sends. Its 40ms acquisition age is not queue wait.
+        fixture.host.acceptAudio(samples: [Int16](repeating: 1, count: 240 * 2),
+            captureTimeNanos: fixture.audioNowNanos - 40_000_000)
+        fixture.barrier()
+        #expect(fixture.probe.sequences == Array(0..<8))
+        fixture.advanceAudioClock(by: 48_000_000)
+        fixture.completeOne()
+        #expect(fixture.host.audioSenderSnapshot().first?.pending == 1,
+            "Fresh-on-arrival audio must retain its remaining 80ms queue residence budget")
+        // The path drains after 73ms queue residence, at 113ms capture age.
+        // Every send still has to satisfy the unchanged 225ms admission budget.
+        for _ in 0..<5 {
+            fixture.advanceAudioClock(by: 5_000_000)
+            fixture.completeOne()
+        }
+        #expect(fixture.probe.sequences == Array(0..<9))
+        let snapshot = try #require(fixture.host.audioSenderSnapshot().first)
+        #expect(snapshot.admissionRejected == 0 && snapshot.expiredWait == 0)
+        fixture.drain()
     }
 
     @Test func unfinishedCompletionIntervalBudgetsOutstandingAudio() throws {
@@ -353,23 +416,28 @@ private final class AudioBurstFixture {
     let probe = AudioBurstProbe()
     let host: HostServer
     let control: NWConnection
+    private var additionalControls: [NWConnection] = []
     private let queue = DispatchQueue(label: "alo.tests.audio-burst-control")
     private let joined = DispatchSemaphore(value: 0)
     private let participantID = UUID().uuidString
 
-    init() throws {
+    init(peerCount: Int = 1) throws {
         let probe = self.probe
         let ready = DispatchSemaphore(value: 0)
         let joined = self.joined
         host = HostServer(roomName: "Audio burst regression", receiverCountHandler: {
-            if $0 == 1 { joined.signal() }
+            if $0 == peerCount { joined.signal() }
         }, advertise: false, listenerReadyHandler: { port in
             probe.lock.withLock { probe.port = port }; ready.signal()
         }, outboundSend: { connection, bytes, complete, completion in
             if let packet = AudioPacket(data: bytes) {
                 probe.lock.withLock {
                     probe.sent.append(packet.sequence)
-                    probe.completions.append(completion)
+                    let port: UInt16
+                    if case .hostPort(_, let destination) = connection.endpoint { port = destination.rawValue }
+                    else { port = 0 }
+                    probe.sentByPort[port, default: []].append(packet.sequence)
+                    probe.completions.append((port, completion))
                 }
             } else {
                 connection.send(content: bytes, isComplete: complete,
@@ -382,12 +450,17 @@ private final class AudioBurstFixture {
             host.stop(); throw AudioBurstError.listenerNotReady
         }
         control = NWConnection(host: "127.0.0.1", port: port, using: .tcp)
-        control.start(queue: queue)
-        let join = try ControlMessage(type: "join", udpPort: 9, videoPort: 9,
-            displayName: "Burst receiver", participantID: participantID).encodedLine()
-        control.send(content: join, completion: .contentProcessed { _ in })
+        for index in 0..<peerCount {
+            let connection = index == 0 ? control : NWConnection(host: "127.0.0.1", port: port, using: .tcp)
+            if index > 0 { additionalControls.append(connection) }
+            connection.start(queue: queue)
+            let join = try ControlMessage(type: "join", udpPort: UInt16(9 + index), videoPort: 9,
+                displayName: "Burst receiver", participantID: index == 0 ? participantID : "\(participantID)-\(index)").encodedLine()
+            connection.send(content: join, completion: .contentProcessed { _ in })
+        }
         guard joined.wait(timeout: .now() + 3) == .success else {
-            control.cancel(); host.stop(); throw AudioBurstError.joinFailed
+            control.cancel(); additionalControls.forEach { $0.cancel() }
+            host.stop(); throw AudioBurstError.joinFailed
         }
     }
 
@@ -414,16 +487,25 @@ private final class AudioBurstFixture {
                 return callbacks
             }
             if callbacks.isEmpty { return }
-            callbacks.forEach { $0(nil) }
+            callbacks.forEach { $0.completion(nil) }
             barrier()
         }
     }
     func completeOne() {
         let callback = probe.lock.withLock { probe.completions.removeFirst() }
-        callback(nil)
+        callback.completion(nil)
         barrier()
     }
-    func stop() { control.cancel(); host.stop() }
+    func completeOne(to port: UInt16) -> Bool {
+        let callback = probe.lock.withLock {
+            probe.completions.firstIndex(where: { $0.port == port }).map { probe.completions.remove(at: $0) }
+        }
+        guard let callback else { return false }
+        callback.completion(nil)
+        barrier()
+        return true
+    }
+    func stop() { control.cancel(); additionalControls.forEach { $0.cancel() }; host.stop() }
 }
 
 private enum AudioBurstError: Error { case listenerNotReady, joinFailed }
@@ -432,6 +514,8 @@ private final class AudioBurstProbe: @unchecked Sendable {
     var port: NWEndpoint.Port?
     var audioNowNanos = MonotonicClock.nowNanos()
     var sent: [UInt32] = []
-    var completions: [(NWError?) -> Void] = []
+    var sentByPort: [UInt16: [UInt32]] = [:]
+    var completions: [(port: UInt16, completion: (NWError?) -> Void)] = []
     var sequences: [UInt32] { lock.withLock { sent } }
+    func sequences(to port: UInt16) -> [UInt32] { lock.withLock { sentByPort[port] ?? [] } }
 }

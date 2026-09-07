@@ -90,9 +90,25 @@ verification alone cannot establish that an unseen event predates revocation.
   report an unsent edit without disabling media or future durable work; only local
   failures carry `RoomStateOperationRejection` and may restore composer drafts.
   Generation/access fences reject late completions after leave or revocation.
+- Split durable events from live control before cryptographic validation. Cold
+  history-proof verification must run on the durable worker, not the executor
+  shared with media. Recheck authorization when publishing the result; a proof
+  cache hit never freezes membership or negotiated capability decisions.
+- Suppress only exact-byte duplicates already known or pending, within the same
+  bounded pending-work lifetime. Same-ID/different-byte events still require
+  validation and cannot inherit a success. Publish committed history through the
+  paced snapshot sender: a 500-event relay must not become 500 immediate TLS
+  frames or 500 independent full-history transactions. Remote rejection is a
+  diagnostic, not an assertion that the local composer's edit was unsent.
 - Receipts cover exact bytes and are saved in an installation-signed,
   network/channel-bound archive. A snapshot from one worker must not erase a
   newly committed replica receipt awaiting ingestion on another worker.
+- Recovery distinguishes the authoritative saved document from its optional
+  events sidecar. Policy/retention rejection of the document fails closed without
+  replacing it. If the document loaded successfully, a quota-rejected sidecar
+  migration leaves that committed document usable. An authorization change still
+  aborts recovery; without a valid document, rejected sidecar history must not
+  silently become a successful empty restore.
 
 A fresh device may therefore omit unseen history from removed users while still
 converging the raw document and receiving new authorized messages. Already

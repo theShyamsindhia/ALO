@@ -1122,11 +1122,15 @@ final class HostServer {
             let schedulingHeadroom = RoomTiming.renderSchedulingHeadroomNanos
             let admissionBudget = groupPlayoutDelayNanos > schedulingHeadroom
                 ? groupPlayoutDelayNanos - schedulingHeadroom : 0
-            // The final completion on a recovered path can be slow even when
-            // current capture is already waiting behind it. Probe that idle
-            // path with fresh audio instead of rejecting the whole pending
-            // burst using evidence from work that has finished draining.
-            if client.audioSendsInFlight == 0 {
+            // The final completion on a recovered fanout can be slow even when
+            // current capture is already waiting behind it. Only a fully idle
+            // fanout can discard that evidence: one listener becoming idle does
+            // not empty the shared link while other listeners still have sends
+            // outstanding. Their backlog still consumes its delivery budget.
+            let fanoutIsIdle = client.audioSendsInFlight == 0 && !clients.values.contains {
+                $0.audio != nil && $0.audioSendsInFlight > 0
+            }
+            if fanoutIsIdle {
                 client.audioCompletionDurations.removeAll()
                 client.audioCompletionIntervals.removeAll()
                 client.lastAudioCompletionNanos = nil
@@ -1169,11 +1173,18 @@ final class HostServer {
                 // A busy path is not a permanent rejection of fresh capture.
                 // Keep it in the existing bounded FIFO until a completion frees
                 // capacity, even if capture ends before another callback arrives.
-                // Already-old capture cannot consume this recovery window;
-                // the same 80ms freshness/wait bounds still expire it. Every
-                // retry must pass the unchanged delivery-budget checks above.
-                if client.audioSendsInFlight > 0,
-                   captureAge < Self.maximumPendingAudioSpanNanos {
+                // Qualify freshness when capture enters the queue: acquisition
+                // age must not consume its separate 80ms residence allowance.
+                // Already-old arrivals get no recovery window, and retries
+                // must still pass every unchanged delivery-budget check above.
+                let acquisitionAge = packet.enqueuedAtNanos >= packet.captureTimeNanos
+                    ? packet.enqueuedAtNanos - packet.captureTimeNanos : 0
+                let queueResidence = submittedAt >= packet.enqueuedAtNanos
+                    ? submittedAt - packet.enqueuedAtNanos : 0
+                if !fanoutIsIdle,
+                   acquisitionAge < Self.maximumPendingAudioSpanNanos,
+                   queueResidence < Self.maximumPendingAudioWaitNanos,
+                   captureAge < admissionBudget {
                     client.pendingAudio.insert(packet, at: 0)
                     break
                 }
@@ -1196,6 +1207,7 @@ final class HostServer {
                         connection.cancel()
                         client.audio = nil
                         self.discardPendingAudio(for: client)
+                        self.drainAudioAfterCompletion(of: client, maxInFlight: maxInFlight)
                         return
                     }
                     if completedAt >= submittedAt {
@@ -1213,12 +1225,31 @@ final class HostServer {
                         }
                     }
                     client.lastAudioCompletionNanos = completedAt
-                    self.drainAudio(for: client, over: connection, maxInFlight: maxInFlight)
+                    self.drainAudioAfterCompletion(of: client, maxInFlight: maxInFlight)
                 }
             }
         }
         if client.audioSendsInFlight <= max(1, maxInFlight) / 2, client.pendingAudio.isEmpty {
             client.audioBacklogCongested = false
+        }
+    }
+
+    private func drainAudioAfterCompletion(of completedClient: Client, maxInFlight: Int) {
+        // An idle listener can be waiting on shared-link capacity even though
+        // it has no completion of its own left to wake it. Give those listeners
+        // another bounded admission attempt alongside the completing listener,
+        // favoring the least-served member of the current fanout cohort.
+        let ready = clients.values.filter {
+            $0.audio != nil && ($0 === completedClient
+                || ($0.audioSendsInFlight == 0 && !$0.pendingAudio.isEmpty))
+        }.sorted {
+            let left = $0.audioSent - $0.audioFanoutEpochSent
+            let right = $1.audioSent - $1.audioFanoutEpochSent
+            return left == right ? ($0.id ?? "") < ($1.id ?? "") : left < right
+        }
+        for client in ready {
+            guard let connection = client.audio else { continue }
+            drainAudio(for: client, over: connection, maxInFlight: maxInFlight)
         }
     }
 

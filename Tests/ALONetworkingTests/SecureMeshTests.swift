@@ -7,6 +7,159 @@ import ALOCore
 
 @Suite("Actual secure mesh runtime", .serialized)
 struct SecureMeshTests {
+    @Test func mixedSignedHistoryVerifiesDurableProofsOnlyAfterTheWorkerRuns() async throws {
+        let room = RoomConfiguration.secure(name: "Durable proof queue boundary")
+        let blocked = try RejectOnceRoomStateSync(roomID: room.id, blockFirstChat: true)
+        let receiver = try SecureMeshNode(room: room, identity: .ephemeral(), disableStateSync: true,
+            roomStateSyncOverride: blocked)
+        let sender = try SecureMeshNode(room: room, identity: .ephemeral(), disableStateSync: true)
+        defer { blocked.release(); receiver.stop(); sender.stop() }
+        let signer = SecureRoomEventPolicy(roomID: room.id, identity: sender.identity, capabilities: .desktop,
+            networkAuthorization: try sender.networkFixture.authorization(for: sender.identity))
+        let durable = try #require(signer.sign(MeshRoomEvent(id: "deferred-valid", roomID: room.id,
+            version: .init(counter: 10, nodeID: sender.id), kind: .chat, text: "Valid mixed history")))
+        let original = try #require(signer.sign(MeshRoomEvent(id: "deferred-invalid", roomID: room.id,
+            version: .init(counter: 11, nodeID: sender.id), kind: .chat, text: "Original bytes")))
+        let invalid = MeshRoomEvent(id: original.id, roomID: room.id, version: original.version,
+            kind: .chat, text: "Tampered bytes").authorized(with: try #require(original.authorization))
+        let live = try #require(signer.sign(MeshRoomEvent(id: "immediate-live", roomID: room.id,
+            version: .init(counter: 12, nodeID: sender.id), kind: .broadcaster,
+            broadcasterID: sender.id, broadcasterEpoch: 1, mediaServiceName: "Live state", isBroadcasting: true)))
+        try receiver.start(); try sender.start()
+        let port = try await receiver.readyPort()
+        sender.control.connectForTesting(to: .hostPort(host: "127.0.0.1", port: port), expectedNodeID: receiver.id)
+        try await meshEventually {
+            receiver.state.read { $0.participants.count == 2 } && sender.state.read { $0.participants.count == 2 }
+        }
+        receiver.control.publishChat("Hold the durable worker")
+        try await meshEventually { blocked.isBlocked }
+        let repeated = Array(repeating: MeshEnvelope(type: "event", event: durable), count: 32)
+        sender.control.sendRoomStateSyncEnvelopesForTesting(
+            [MeshEnvelope(type: "sync", events: [durable, invalid])] + repeated + [MeshEnvelope(type: "event", event: live)],
+            peerID: receiver.id)
+        try await meshEventually { receiver.state.read { $0.replica.broadcaster?.nodeID == sender.id } }
+        // The live event proves the mixed envelope completed the media path.
+        // The worker is held, so a durable cache hit proves misplaced crypto.
+        #expect(blocked.isBlocked)
+        #expect(receiver.control.hasVerifiedEventForTesting(live))
+        #expect(!receiver.control.hasVerifiedEventForTesting(durable))
+        #expect(receiver.control.acceptedEventReceiptCountForTesting == 0)
+        #expect(await receiver.control.pendingDurableCommitsForTesting() == 2, "One blocked local job and one exact-deduplicated remote batch")
+        #expect(receiver.state.read { $0.replica.chatEvents.isEmpty })
+        blocked.release()
+        try await meshEventually { receiver.state.read { $0.replica.chatEvents.contains { $0.id == durable.id } } }
+        #expect(receiver.control.hasVerifiedEventForTesting(durable))
+        #expect(!receiver.control.hasVerifiedEventForTesting(invalid))
+        #expect(!blocked.attempts.contains { $0.id == invalid.id })
+        #expect(receiver.control.acceptedEventReceiptCountForTesting == 1)
+        await receiver.control.waitForDurableWorkForTesting()
+        #expect(blocked.attempts.filter { $0.id == durable.id }.count == 1)
+        #expect(receiver.state.read { !$0.replica.chatEvents.contains { $0.id == invalid.id } })
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let digest = Data(SHA256.hash(data: Data("alo.network.accepted-event.v1\0".utf8) + (try encoder.encode(invalid))))
+        try await meshEventually { receiver.state.read { $0.savedArchive != nil } }
+        #expect(try !archiveReceiptDigests(#require(receiver.state.read { $0.savedArchive })).contains(digest))
+        let marker = try #require(signer.sign(MeshRoomEvent(id: "second-live", roomID: room.id,
+            version: .init(counter: 13, nodeID: sender.id), kind: .broadcaster,
+            broadcasterID: sender.id, broadcasterEpoch: 2, mediaServiceName: "Second live state", isBroadcasting: true)))
+        sender.control.sendRoomStateSyncEnvelopesForTesting(repeated + [MeshEnvelope(type: "event", event: marker)], peerID: receiver.id)
+        try await meshEventually { receiver.state.read { $0.replica.broadcaster?.epoch == 2 } }
+        await receiver.control.waitForDurableWorkForTesting()
+        #expect(blocked.attempts.filter { $0.id == durable.id }.count == 1, "Committed exact duplicates never reach Core again")
+        let different = try #require(signer.sign(MeshRoomEvent(id: durable.id, roomID: room.id,
+            version: durable.version, kind: .chat, text: "Different validly signed bytes under the same ID")))
+        let finalMarker = try #require(signer.sign(MeshRoomEvent(id: "third-live", roomID: room.id,
+            version: .init(counter: 14, nodeID: sender.id), kind: .broadcaster,
+            broadcasterID: sender.id, broadcasterEpoch: 3, mediaServiceName: "Third live state", isBroadcasting: true)))
+        sender.control.sendRoomStateSyncEnvelopesForTesting(
+            [MeshEnvelope(type: "event", event: different), MeshEnvelope(type: "event", event: finalMarker)], peerID: receiver.id)
+        try await meshEventually { receiver.state.read { $0.replica.broadcaster?.epoch == 3 } }
+        await receiver.control.waitForDurableWorkForTesting()
+        #expect(blocked.attempts.contains { $0.id == different.id && $0.text == different.text }, "Different same-ID bytes are not deduplicated as an exact success")
+        #expect(receiver.state.read { $0.replica.chatEvents.first?.text == durable.text })
+        #expect(receiver.control.acceptedEventReceiptCountForTesting == 1)
+    }
+
+    @Test func invalidLocalDurableEditStillReportsRejectionAndDoesNotEarnAReceipt() async throws {
+        let room = RoomConfiguration.secure(name: "Invalid local durable edit")
+        let node = try SecureMeshNode(room: room)
+        defer { node.stop() }
+        try node.start()
+        // publishChat limits graphemes, while durable admission bounds UTF-8.
+        let oversized = String(repeating: "👨‍👩‍👧‍👦", count: 400)
+        #expect(oversized.count <= 2_000 && oversized.utf8.count > 8_192)
+        node.control.publishChat(oversized)
+        try await meshEventually { node.state.read { !$0.rejectedOperations.isEmpty } }
+        #expect(node.state.read { $0.rejectedOperations == [.authorizationChanged] && $0.replica.chatEvents.isEmpty })
+        #expect(node.control.acceptedEventReceiptCountForTesting == 0)
+        node.control.publishChat("A valid edit still succeeds")
+        try await meshEventually { node.state.read { $0.replica.chatEvents.count == 1 } }
+        #expect(node.state.read { $0.replica.chatEvents.first?.text == "A valid edit still succeeds" })
+        #expect(node.control.acceptedEventReceiptCountForTesting == 1)
+    }
+
+    @Test func remoteDurableQuotaRejectionNeverClaimsALocalEditWasNotSent() async throws {
+        let room = RoomConfiguration.secure(name: "Remote quota diagnostic")
+        let rejected = try RejectOnceRoomStateSync(roomID: room.id)
+        let receiver = try SecureMeshNode(room: room, identity: .ephemeral(), disableStateSync: true,
+            roomStateSyncOverride: rejected)
+        let sender = try SecureMeshNode(room: room, identity: .ephemeral(), disableStateSync: true)
+        defer { receiver.stop(); sender.stop() }
+        try receiver.start(); try sender.start()
+        let port = try await receiver.readyPort()
+        sender.control.connectForTesting(to: .hostPort(host: "127.0.0.1", port: port), expectedNodeID: receiver.id)
+        try await meshEventually { sender.state.read { $0.participants.count == 2 } }
+        sender.control.publishChat("Remote rejected allocation")
+        try await meshEventually { rejected.attempts.contains { $0.text == "Remote rejected allocation" } }
+        await receiver.control.waitForDurableWorkForTesting()
+        #expect(receiver.state.read { $0.operationRejectionDescriptions.isEmpty })
+        #expect(receiver.control.acceptedEventReceiptCountForTesting == 0)
+        sender.control.publishChat("Remote valid retry")
+        try await meshEventually { receiver.state.read { $0.replica.chatEvents.contains { $0.text == "Remote valid retry" } } }
+        #expect(receiver.state.read { $0.operationRejectionDescriptions.isEmpty })
+    }
+
+    @Test func relayedSignedHistoryUsesPacedBatchesWithoutFloodingTheDurableWorker() async throws {
+        let room = RoomConfiguration.secure(name: "Paced three-peer durable relay")
+        let blocked = try RejectOnceRoomStateSync(roomID: room.id, blockFirstChat: true)
+        let source = try SecureMeshNode(room: room, identity: .ephemeral(), disableStateSync: true)
+        let relay = try SecureMeshNode(room: room, identity: .ephemeral(), disableStateSync: true)
+        let receiver = try SecureMeshNode(room: room, identity: .ephemeral(), disableStateSync: true, roomStateSyncOverride: blocked)
+        defer { blocked.release(); source.stop(); relay.stop(); receiver.stop() }
+        let signer = SecureRoomEventPolicy(roomID: room.id, identity: source.identity, capabilities: .desktop,
+            networkAuthorization: try source.networkFixture.authorization(for: source.identity))
+        let events = try (1...500).map { index in
+            try #require(signer.sign(MeshRoomEvent(id: "relayed-\(index)", roomID: room.id,
+                version: .init(counter: UInt64(index), nodeID: source.id), kind: .chat, text: "Relayed signed history \(index)")))
+        }
+        try source.start(); try relay.start(); try receiver.start()
+        let port = try await relay.readyPort()
+        source.control.connectForTesting(to: .hostPort(host: "127.0.0.1", port: port), expectedNodeID: relay.id)
+        receiver.control.connectForTesting(to: .hostPort(host: "127.0.0.1", port: port), expectedNodeID: relay.id)
+        try await fullMeshEventually([source, relay, receiver])
+        let initialConnections = await receiver.control.secureConnectionsForTesting()
+        #expect(initialConnections.count == 2)
+        receiver.control.publishChat("Hold the downstream durable worker")
+        try await meshEventually { blocked.isBlocked }
+        // Pace the source fixture below the transport's 1 MiB queue so this
+        // tests the relay's production fanout, not an oversized test injection.
+        var sent = 0
+        for envelope in MeshControlPlane.synchronizationEnvelopes(events: events, versionVector: nil) {
+            source.control.sendRoomStateSyncEnvelopesForTesting([envelope], peerID: relay.id)
+            sent += envelope.events?.count ?? 0
+            try await meshEventually(reason: "Relay did not commit source page through event \(sent)") { relay.state.read { $0.replica.chatEvents.count >= sent } }
+        }
+        relay.control.publishBroadcaster(active: true, mediaServiceName: "Relay remains live")
+        try await meshEventually(reason: "Downstream live marker was lost after the relay broadcast 500 durable events") { receiver.state.read { $0.replica.broadcaster?.nodeID == relay.id } }
+        #expect(await receiver.control.secureConnectionsForTesting() == initialConnections)
+        #expect(await receiver.control.pendingDurableCommitsForTesting() <= 16, "A 500-event relay must not create 500 serial full-history transactions")
+        #expect(receiver.control.acceptedEventReceiptCountForTesting == 0)
+        blocked.release()
+        try await meshEventually(reason: "Downstream did not receive the 500 relayed events after its worker was released") { receiver.state.read { $0.replica.chatEvents.count == 500 } }
+        #expect(await receiver.control.secureConnectionsForTesting() == initialConnections)
+        #expect(receiver.state.read { $0.operationRejectionDescriptions.count == 1 }, "Only the deliberately rejected local blocker can produce a composer notice")
+    }
+
     @Test func rejectedNetworkDurableOperationHasNoProjectionGossipOrReceiptAndNextEditSucceeds() async throws {
         let room = RoomConfiguration.secure(name: "Atomic local operation rejection")
         let rejecting = try RejectOnceRoomStateSync(roomID: room.id)
@@ -489,7 +642,7 @@ private final class RejectOnceRoomStateSync: RoomStateSync, @unchecked Sendable 
         if reject {
             if blockFirstChat {
                 lock.withLock { enteredGate = true }
-                guard gate.wait(timeout: .now() + 5) == .success else { throw RoomStateSyncError.processingTimedOut }
+                guard gate.wait(timeout: .now() + 20) == .success else { throw RoomStateSyncError.processingTimedOut }
             }
             throw RoomStateSyncError.retentionCapacity
         }
@@ -538,6 +691,7 @@ private final class MeshTestState: @unchecked Sendable {
         var connectionAttempts = 0
         var savedArchive: Data?
         var rejectedOperations = [RoomStateSyncError]()
+        var operationRejectionDescriptions = [String]()
         var stopCompleted = false
     }
     private let lock = NSLock()
@@ -575,6 +729,7 @@ private final class SecureMeshNode {
             },
             roomStatePersistenceHandler: { archive in observation.update { $0.savedArchive = archive } },
             roomStateOperationRejectedHandler: { error in
+                observation.update { $0.operationRejectionDescriptions.append(error.localizedDescription) }
                 let underlying = (error as? RoomStateOperationRejection)?.underlyingError ?? error
                 if let underlying = underlying as? RoomStateSyncError { observation.update { $0.rejectedOperations.append(underlying) } }
             },
@@ -593,12 +748,12 @@ private final class SecureMeshNode {
     }
 }
 
-private func meshEventually(_ condition: () -> Bool) async throws {
+private func meshEventually(reason: String = "Secure mesh did not reach the expected state within 8 seconds", _ condition: () -> Bool) async throws {
     for _ in 0..<400 {
         if condition() { return }
         try await Task.sleep(for: .milliseconds(20))
     }
-    try #require(condition(), "Secure mesh did not reach the expected state within 8 seconds")
+    try #require(condition(), Comment(rawValue: reason))
 }
 
 private func fullMeshEventually(_ nodes: [SecureMeshNode]) async throws {

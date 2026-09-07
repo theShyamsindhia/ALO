@@ -161,6 +161,48 @@ struct DurableAuthorizationProjectionTests {
         }
     }
 
+    @Test(arguments: [false, true])
+    func optionalSidecarOverflowDoesNotPreventOpeningAValidArchive(inert: Bool) throws {
+        let good = event("archived-message", 1)
+        let saved = try rawDocument([good])
+        let sidecar = inert
+            ? (1...1_025).map { index in
+                MeshRoomEvent(id: "sidecar-\(index)", roomID: room,
+                    version: .init(counter: UInt64(index + 10), nodeID: "revoked-\(index)"),
+                    kind: .chat, text: "Inert sidecar")
+            }
+            : (1...300).map { index in
+                MeshRoomEvent(id: "sidecar-\(index)", roomID: room,
+                    version: .init(counter: UInt64(index + 10), nodeID: "allowed"),
+                    kind: .chat, text: String(repeating: "x", count: 8_192))
+            }
+        let recovered = try AutomergeRoomStateSync.recovering(roomID: room,
+            savedDocument: saved, legacyEvents: sidecar,
+            eventProjector: { $0.version.nodeID == "allowed" })
+        #expect(try recovered.snapshot().retainedEvents == [good])
+        let next = event("next-message", 2)
+        #expect(try recovered.ingest([next]) == [next])
+        // Without a usable archive there is no committed state to fall back to.
+        // Never turn the sole rejected sidecar into a successful empty restore.
+        #expect(throws: inert ? RoomStateSyncError.untrustedHistoryLimit : .retentionCapacity) {
+            try AutomergeRoomStateSync.recovering(roomID: room,
+                savedDocument: Data("malformed".utf8), legacyEvents: sidecar,
+                eventProjector: { $0.version.nodeID == "allowed" })
+        }
+    }
+
+    @Test func optionalSidecarCannotMaskAConcurrentAuthorizationChange() throws {
+        let access = ProjectionAccess()
+        let add = event("archived-add", 1, kind: .queueAdd, item: "song")
+        let remove = event("sidecar-remove", 2, kind: .queueRemove, item: "song")
+        access.revokeDuringNextRemoval = true
+        #expect(throws: RoomStateSyncError.authorizationChanged) {
+            try AutomergeRoomStateSync.recovering(roomID: room,
+                savedDocument: rawDocument([add]), legacyEvents: [remove],
+                eventProjector: { access.project($0) }, projectionRevision: { access.revision })
+        }
+    }
+
     @Test func installationsOfOneRootShareTheSameChatRetentionLimit() throws {
         let events = (1...600).map { index in
             MeshRoomEvent(id: "multi-device-\(index)", roomID: room,

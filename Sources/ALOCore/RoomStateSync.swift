@@ -173,8 +173,9 @@ public final class AutomergeRoomStateSync: RoomStateSync, @unchecked Sendable {
     }
 
     /// Recovers from a corrupt sidecar, then migrates valid legacy events.
-    /// Policy/retention rejection is not corruption: propagate it so the caller
-    /// can disable this session without overwriting its existing archive.
+    /// Policy/retention rejection of the archive is not corruption: propagate
+    /// it without replacing the archive. An optional events sidecar can lag or
+    /// lead a valid archive; its atomic quota rejection leaves that archive usable.
     public static func recovering(
         roomID: String,
         savedDocument: Data?,
@@ -195,7 +196,8 @@ public final class AutomergeRoomStateSync: RoomStateSync, @unchecked Sendable {
         let recovered = loaded ?? AutomergeRoomStateSync(roomID: roomID, document: Document(), eventValidator: eventValidator,
                                                         eventProjector: eventProjector, projectionRevision: projectionRevision, eventScope: eventScope)
         do { _ = try recovered.ingest(legacyEvents) }
-        catch where requiresArchivePreservation(error) { throw error }
+        catch where (error as? RoomStateSyncError) == .authorizationChanged { throw error }
+        catch where loaded == nil && requiresArchivePreservation(error) { throw error }
         catch { /* A rejected legacy migration must not erase the loaded document. */ }
         return recovered
     }

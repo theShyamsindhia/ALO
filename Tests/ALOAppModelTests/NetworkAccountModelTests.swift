@@ -10,6 +10,61 @@ import ALONetworking
 @Suite("Shared network account model")
 @MainActor
 struct NetworkAccountModelTests {
+    @Test(arguments: [false, true], [false, true])
+    func healthyNetworkAcknowledgementRetiresOnlyTheOldRevocationNotice(
+        authorizeChannel: Bool, damagedRecord: Bool
+    ) async throws {
+        let fixture = try AccountModelFixture()
+        defer { fixture.cleanup() }
+        try await fixture.finishNewIdentity(name: "Member")
+        let owner = UserIdentity.ephemeral()
+        let member = try #require(fixture.model.identity)
+        let revokedNetwork = try NetworkManifest.create(name: "Old network A", owner: owner)
+            .addingMember(member.publicIdentity, signedBy: owner)
+        let invitation = try NetworkInvitation(manifest: revokedNetwork, recipient: member.publicIdentity)
+        try await fixture.model.importInvitation(data: invitation.encoded())
+        let healthy = try await fixture.model.createNetwork(name: "Healthy network B")
+        let damaged = damagedRecord ? try await fixture.model.createNetwork(name: "Unreadable network C") : nil
+        fixture.model.selectedNetworkID = revokedNetwork.id.uuidString
+        let revoked = try revokedNetwork.removingMember(userID: member.publicIdentity.userID, signedBy: owner)
+        try fixture.repository.acceptUpdate(revoked, anchoredTo: revokedNetwork)
+        if let damaged {
+            let record = fixture.repository.directoryURL.appendingPathComponent(damaged.id.uuidString.lowercased() + ".json")
+            try Data("invalid fixture policy".utf8).write(to: record)
+        }
+
+        await fixture.model.refresh()
+        #expect(fixture.model.selectedNetworkID == healthy.id.uuidString)
+        #expect(fixture.model.networks == [healthy])
+        let originalNotice = try #require(fixture.model.errorMessage)
+        #expect(originalNotice.contains("Old network A"), "A retained notice must identify the old network, not imply B was denied")
+        #expect(originalNotice.contains("not allowed"))
+        await fixture.model.refresh()
+        #expect(fixture.model.errorMessage == originalNotice, "An observer refresh must not erase the warning before the user acts")
+
+        if authorizeChannel {
+            await #expect(throws: UserIdentityError.self) {
+                try await fixture.model.authorization(channelID: healthy.mainChannel.id.uuidString,
+                    installationHash: Data(repeating: 11, count: 31), deviceName: "Invalid fixture device")
+            }
+            #expect(fixture.model.errorMessage == originalNotice, "A failed authorization must not acknowledge the notice")
+            _ = try await fixture.model.authorization(channelID: healthy.mainChannel.id.uuidString,
+                installationHash: Data(repeating: 11, count: 32), deviceName: "Fixture device")
+        } else {
+            // Selecting the already-auto-selected B is still an explicit user acknowledgement.
+            fixture.model.selectedNetworkID = healthy.id.uuidString
+        }
+        #expect(fixture.model.errorMessage?.contains("not allowed") != true)
+        #expect(fixture.model.errorMessage?.contains("Old network A") != true)
+        if let damaged {
+            #expect(fixture.model.errorMessage?.contains(damaged.id.uuidString.lowercased()) == true)
+        } else {
+            #expect(fixture.model.errorMessage == nil)
+        }
+        await fixture.model.refresh()
+        #expect(fixture.model.errorMessage?.contains("not allowed") != true)
+    }
+
     @Test func blockedRepositoryAuthorizationLeavesMainActorResponsive() async throws {
         let fixture = try AccountModelFixture()
         defer { fixture.cleanup() }
@@ -105,12 +160,13 @@ struct NetworkAccountModelTests {
 
         await fixture.model.refresh()
         let message = try #require(fixture.model.errorMessage)
-        #expect(message.hasPrefix(NetworkAccountModel.describe(NetworkAuthorityError.notMember)))
+        let accessLoss = "Network “Selected network” is no longer available. " + NetworkAccountModel.describe(NetworkAuthorityError.notMember)
+        #expect(message.hasPrefix(accessLoss))
         #expect(message.contains(unrelated.id.uuidString.lowercased()))
         #expect(fixture.model.networks.isEmpty)
         #expect(fixture.model.room(channelID: joined.mainChannel.id.uuidString) == nil)
         await fixture.model.refresh()
-        #expect(fixture.model.errorMessage?.hasPrefix(NetworkAccountModel.describe(NetworkAuthorityError.notMember)) == true)
+        #expect(fixture.model.errorMessage?.hasPrefix(accessLoss) == true)
     }
 
     @Test func freshGenerationIgnoresLegacyOnboardingRoomsAndSelectionWithoutLoadingKeys() async throws {

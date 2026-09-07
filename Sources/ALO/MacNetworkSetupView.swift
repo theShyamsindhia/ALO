@@ -58,9 +58,11 @@ struct MacNetworkSetupView: View {
                     get: { pendingImport != nil || pendingMember != nil || removingMember != nil },
                     set: { if !$0 { clearConfirmation() } })) {
                     Button("Cancel", role: .cancel, action: clearConfirmation)
+                        .disabled(busy)
                     Button(confirmationAction, role: removingMember == nil ? nil : .destructive) {
                         confirmAction()
                     }
+                    .disabled(busy)
                 } message: { Text(confirmationMessage) }
         }
         .onChange(of: account.selectedNetworkID) { _, _ in
@@ -95,6 +97,7 @@ struct MacNetworkSetupView: View {
     }
 
     private func confirmAction() {
+        guard !busy else { return }
         let pendingImport = pendingImport, pendingMember = pendingMember
         let removingMember = removingMember, confirmationNetworkID = confirmationNetworkID
         clearConfirmation()
@@ -218,14 +221,16 @@ struct MacNetworkSetupView: View {
                         Spacer()
                         if account.selectedNetwork?.owner == account.identity?.publicIdentity, member.role != .owner {
                             Button("Remove", role: .destructive) {
+                                guard !busy else { return }
                                 confirmationNetworkID = account.selectedNetwork?.id
                                 removingMember = member
                             }
+                            .disabled(busy)
                         }
                     }.padding(.vertical, 8)
                 }
                 if let error { Text(error).foregroundStyle(.red).padding() }
-                HStack { Spacer(); Button("Done") { sheet = nil }.keyboardShortcut(.cancelAction) }.padding()
+                HStack { Spacer(); Button("Done") { sheet = nil }.keyboardShortcut(.cancelAction).disabled(busy) }.padding()
             }
         }
     }
@@ -243,6 +248,7 @@ struct MacNetworkSetupView: View {
     }
 
     private func present(_ next: Sheet) {
+        guard !busy else { return }
         error = nil; name = ""; packageText = ""; invitation = nil; privateChannel = false; allowed = []; sheet = next
     }
 

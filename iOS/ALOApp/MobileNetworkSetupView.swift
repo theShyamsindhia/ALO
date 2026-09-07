@@ -124,7 +124,7 @@ struct MobileNetworkSetupView: View {
             }
         }
         .onChange(of: account.identityReady) { _, ready in
-            if ready { recoveryText = nil; recoveryImportText = ""; model.activate() }
+            if ready { recoveryText = nil; recoveryImportText = ""; model.refreshAccountIfActive() }
         }
         .onChange(of: path) { _, _ in pendingConfirmation = nil }
     }
@@ -169,7 +169,8 @@ struct MobileNetworkSetupView: View {
                 ALOChannelList(network: summary(network), channels: account.channels.map {
                     ALOChannelSummary(id: $0.id.uuidString, name: $0.name, isPrivate: $0.isPrivate, isMain: $0.isMain)
                 }, selectedChannelID: Binding(get: { model.room?.id }, set: { id in
-                    if let id { perform { _ = await model.joinChannel(id) } }
+                    guard !busy, let id, let request = model.prepareChannelJoin(id) else { return }
+                    perform { _ = await model.joinChannel(request) }
                 }), isBusy: busy,
                 onCreateChannel: {
                     channelName = ""; privateChannel = false; selectedMemberIDs = []

@@ -32,9 +32,9 @@ import ALOAppModel
     private var store: MobileRoomStore?
     private var mesh: MeshControlPlane?
     private var generation: UInt64 = 0
-    private var activationGeneration: UInt64 = 0
-    private var joinIntent: UInt64 = 0
-    private var foreground = false
+    private let activationLifecycle = ForegroundChannelLifecycle()
+    private var joinIntent: UInt64 { activationLifecycle.joinGeneration }
+    private var foreground: Bool { activationLifecycle.isForeground }
     private var accountAccessObservation: AnyCancellable?
     private let lastChannelKey = "alo.networks-v1.ios.last-channel"
     private let lastChannelUserKey = "alo.networks-v1.ios.last-channel-user"
@@ -194,16 +194,23 @@ import ALOAppModel
     }
 
     func activate() {
-        Task { [weak self] in await self?.activateAccount() }
+        backgroundPlayback = false; backgroundMonitor?.cancel(); backgroundMonitor = nil
+        activationLifecycle.activate { [weak self] activation in
+            await self?.activateAccount(activation)
+        }
     }
 
-    private func activateAccount(reconnect: Bool = true) async {
-        activationGeneration &+= 1
-        let activation = activationGeneration
-        foreground = true
-        backgroundPlayback = false; backgroundMonitor?.cancel(); backgroundMonitor = nil
+    /// Identity completion can arrive after suspension; it is not a foreground event.
+    func refreshAccountIfActive() {
+        guard foreground else { return }
+        activate()
+    }
+
+    private func activateAccount(_ activation: ForegroundChannelLifecycle.Activation,
+                                 reconnect: Bool = true) async {
+        guard !Task.isCancelled, activationLifecycle.accepts(activation) else { return }
         await account.resume()
-        guard foreground, activationGeneration == activation, account.identityReady else { return }
+        guard !Task.isCancelled, activationLifecycle.accepts(activation), account.identityReady else { return }
         if !started {
             started = true
             do {
@@ -248,16 +255,31 @@ import ALOAppModel
         // Browsing is explicit: opening the app does not trigger Local Network permission.
     }
 
-    @discardableResult
-    func joinChannel(_ channelID: String) async -> Bool {
-        joinIntent &+= 1
-        let intent = joinIntent
-        guard account.identityReady else {
+    struct ChannelJoinRequest {
+        fileprivate let channelID: String
+        fileprivate let userID: String
+        fileprivate let intent: ForegroundChannelLifecycle.JoinIntent
+    }
+
+    /// Capture the user's selection synchronously, before the view queues its async action.
+    func prepareChannelJoin(_ channelID: String) -> ChannelJoinRequest? {
+        guard account.identityReady, let userID = account.identity?.publicIdentity.userID else {
             errorMessage = "Complete identity setup before joining a channel."
-            return false
+            return nil
         }
-        if !started { await activateAccount(reconnect: false) }
-        guard foreground, let identity, let choice = account.room(channelID: channelID) else {
+        guard let intent = activationLifecycle.beginJoin() else { return nil }
+        return ChannelJoinRequest(channelID: channelID, userID: userID, intent: intent)
+    }
+
+    @discardableResult
+    func joinChannel(_ request: ChannelJoinRequest) async -> Bool {
+        guard !Task.isCancelled, activationLifecycle.accepts(request.intent), account.identityReady,
+              account.identity?.publicIdentity.userID == request.userID else { return false }
+        if !started { await activateAccount(request.intent.activation, reconnect: false) }
+        guard !Task.isCancelled, activationLifecycle.accepts(request.intent), account.identityReady,
+              account.identity?.publicIdentity.userID == request.userID else { return false }
+        let channelID = request.channelID, intent = joinIntent
+        guard let identity, let choice = account.room(channelID: channelID) else {
             errorMessage = "This identity does not have access to that channel. Import an updated invitation from the network owner."
             return false
         }
@@ -266,11 +288,11 @@ import ALOAppModel
             _ = try await account.authorization(channelID: channelID,
                 installationHash: identity.publicIdentity.publicKeyHash, deviceName: UIDevice.current.name)
         } catch {
-            guard foreground, generation == token, joinIntent == intent else { return false }
+            guard !Task.isCancelled, activationLifecycle.accepts(request.intent), generation == token else { return false }
             errorMessage = "Channel access could not be verified. Import an updated invitation and try again."
             return false
         }
-        guard foreground, generation == token, joinIntent == intent, account.identityReady,
+        guard !Task.isCancelled, activationLifecycle.accepts(request.intent), generation == token, joinIntent == intent, account.identityReady,
               account.identity?.publicIdentity.userID == userID, account.room(channelID: channelID) != nil else { return false }
         disconnectRuntime()
         errorMessage = nil
@@ -285,11 +307,13 @@ import ALOAppModel
 
     func retry() {
         guard foreground, let room else { return }
+        activationLifecycle.invalidatePendingWork()
         disconnectRuntime()
         connect(room)
     }
 
     func leave() {
+        activationLifecycle.invalidatePendingWork()
         if !isTemporarySimulatorSession {
             UserDefaults.standard.removeObject(forKey: lastChannelKey)
             UserDefaults.standard.removeObject(forKey: lastChannelUserKey)
@@ -304,7 +328,7 @@ import ALOAppModel
         // open in the background. Stopping it may require a new output anchor.
         voice.endOpenLine()
         let canContinue = canContinueBackgroundPlayback
-        foreground = false
+        activationLifecycle.suspend()
         backgroundPlayback = canContinue
         synchronizeVideo()
         if canContinue {

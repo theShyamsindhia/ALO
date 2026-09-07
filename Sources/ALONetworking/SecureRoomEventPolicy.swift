@@ -335,6 +335,14 @@ final class SecureRoomEventPolicy: @unchecked Sendable {
 
     var acceptedHistoryCountForTesting: Int { lock.withLock { acceptedHistory.count } }
 
+    /// Read-only exact-byte diagnostic; observing a queued event must neither
+    /// verify it nor populate the successful-proof cache.
+    func hasVerifiedEventForTesting(_ event: MeshRoomEvent) -> Bool {
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        guard let encoded = try? encoder.encode(event) else { return false }
+        return verificationLock.withLock { verifiedEvents[event.id]?.encodedEvent == encoded }
+    }
+
     private func cachedVerifiedEvent(_ event: MeshRoomEvent) -> VerifiedEvent? {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         guard let encodedEvent = try? encoder.encode(event) else { return nil }

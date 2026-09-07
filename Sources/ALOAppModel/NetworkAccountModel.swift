@@ -30,7 +30,11 @@ public final class NetworkAccountModel: ObservableObject {
     @Published public private(set) var errorMessage: String?
     @Published public var displayName = ""
     @Published public var selectedNetworkID: String? {
-        didSet { if !updatingSelection { accessLossNotice = nil } }
+        didSet {
+            guard !updatingSelection, let selectedID = selectedNetworkID.flatMap(UUID.init(uuidString:)),
+                  networks.contains(where: { $0.id == selectedID }) else { return }
+            acknowledgeAccessLoss(for: selectedID)
+        }
     }
     public let repository: NetworkRepository
     private let defaults: UserDefaults
@@ -39,6 +43,7 @@ public final class NetworkAccountModel: ObservableObject {
     private var refreshGeneration: UInt64 = 0
     private var updatingSelection = false
     private var accessLossNotice: (networkID: UUID, message: String)?
+    private var listingDiagnosticMessage: String?
     private lazy var worker = NetworkAccountRepositoryWorker(repository: repository) { [weak self] in
         Task { @MainActor [weak self] in await self?.refresh() }
     }
@@ -122,11 +127,13 @@ public final class NetworkAccountModel: ObservableObject {
         let request = refreshGeneration
         let identityToken = identityGeneration
         guard identityReady, let identity else {
+            accessLossNotice = nil; listingDiagnosticMessage = nil
             networks = []; selectedNetworkID = nil
             networkRecordDiagnostics = []; additionalNetworkRecordDiagnosticCount = 0
             return
         }
         let selectedID = selectedNetworkID.flatMap(UUID.init(uuidString:))
+        let selectedName = networks.first(where: { $0.id == selectedID })?.name
         do {
             let result = try await worker.perform { worker in
                 let listing = try worker.repository.listing(for: identity.publicIdentity)
@@ -149,9 +156,11 @@ public final class NetworkAccountModel: ObservableObject {
             let visible = listing.networks
             networkRecordDiagnostics = listing.diagnostics
             additionalNetworkRecordDiagnosticCount = listing.omittedDiagnosticCount
+            listingDiagnosticMessage = Self.describeListingDiagnostics(listing)
             let selectionMessage = selectedID?.uuidString == selectedNetworkID ? result.selectionMessage : nil
             if let selectedID, let selectionMessage {
-                accessLossNotice = (selectedID, selectionMessage)
+                let affectedNetwork = selectedName.map { "Network “\($0)”" } ?? "Network \(selectedID.uuidString)"
+                accessLossNotice = (selectedID, "\(affectedNetwork) is no longer available. \(selectionMessage)")
             } else if let notice = accessLossNotice, visible.contains(where: { $0.id == notice.networkID }) {
                 accessLossNotice = nil
             }
@@ -163,10 +172,11 @@ public final class NetworkAccountModel: ObservableObject {
             }
             // Access loss is actionable even when an unrelated record is damaged.
             // Keep it through observer/manual refresh races until repaired or
-            // the user explicitly chooses another network.
-            errorMessage = [accessLossNotice?.message, Self.describeListingDiagnostics(listing)].compactMap { $0 }.nilIfEmptyJoined()
+            // the user selects or freshly authorizes a channel in another network.
+            publishListingError()
         } catch {
             guard request == refreshGeneration, identityToken == identityGeneration, !Task.isCancelled else { return }
+            accessLossNotice = nil; listingDiagnosticMessage = nil
             networks = []; selectedNetworkID = nil
             networkRecordDiagnostics = []; additionalNetworkRecordDiagnosticCount = 0
             errorMessage = Self.describe(error)
@@ -275,7 +285,21 @@ public final class NetworkAccountModel: ObservableObject {
         // Policy may advance while the continuation waits for MainActor. This
         // fast snapshot check takes no repository or durable-transaction lock.
         _ = try authorization.policy.snapshot().authorize(identity.publicIdentity, channelID: channelUUID)
+        acknowledgeAccessLoss(for: network.id)
         return authorization
+    }
+
+    /// A healthy explicit selection (including the auto-selected value) or fresh
+    /// channel authorization acknowledges the old network's notice. This is only
+    /// presentation state; it never grants access or suppresses storage diagnostics.
+    private func acknowledgeAccessLoss(for networkID: UUID) {
+        guard let notice = accessLossNotice, notice.networkID != networkID else { return }
+        accessLossNotice = nil
+        publishListingError()
+    }
+
+    private func publishListingError() {
+        errorMessage = [accessLossNotice?.message, listingDiagnosticMessage].compactMap { $0 }.nilIfEmptyJoined()
     }
 
     private func requireCurrentIdentity(_ expected: UserIdentity, generation: UInt64) throws {
@@ -304,6 +328,7 @@ public final class NetworkAccountModel: ObservableObject {
         identityReady = false
         identity = nil
         accessLossNotice = nil
+        listingDiagnosticMessage = nil
         networks = []
         selectedNetworkID = nil
         networkRecordDiagnostics = []
