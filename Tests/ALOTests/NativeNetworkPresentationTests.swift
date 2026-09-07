@@ -6,7 +6,7 @@ import Testing
 extension NativePresentationTests {
     @Suite(.serialized) @MainActor
     struct NativeNetworkPresentationTests {
-        @Test("Network browser at compact and regular sizes", arguments: [false, true], ["normal", "long", "empty", "pending"])
+        @Test("Network browser at compact and regular sizes", arguments: [false, true], ["normal", "long", "empty", "pending", "owner-empty"])
         func browserRenders(dark: Bool, state: String) async throws {
             _ = NSApplication.shared
             let folder = ProcessInfo.processInfo.environment["ALO_NETWORKS_SNAPSHOT_DIR"].map {

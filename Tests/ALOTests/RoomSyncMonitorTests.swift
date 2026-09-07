@@ -24,7 +24,7 @@ struct RoomSyncMonitorTests {
         #expect(evidence[0].samples.contains { $0.driftMilliseconds == 70 } == true)
         #expect(evidence[0].samples.contains { $0.driftMilliseconds == nil } == true)
         #expect(evidence[0].samples.last?.driftMilliseconds == 10)
-        #expect(evidence[0].samples.count <= 45)
+        #expect(evidence[0].samples.count <= RoomSyncMonitor.maximumIncidentSamples)
         let room = DiagnosticRoomContext(isActive: false, role: .none, participantCount: 0,
             remotePeerCount: 0, syncLabel: "Disconnected", audioIsRendering: false,
             hasBroadcaster: false, timing: nil)
@@ -38,6 +38,8 @@ struct RoomSyncMonitorTests {
         #expect(!report.contains(participant.id))
         #expect(!report.contains(participant.name))
         #expect(report.contains("acoustic"))
+        #expect(report.contains("most recent channel session"))
+        #expect(report.contains("may predate the current inactive state"))
     }
 
     @Test("Recovery survives intermediate drift and missing measurements")
@@ -95,6 +97,26 @@ struct RoomSyncMonitorTests {
         #expect(monitor.incidents[0].samples.count == 2)
         #expect(monitor.incidents[0].samples.last?.driftMilliseconds == nil)
         #expect(!monitor.events.contains { $0.title == "You returned to sync" })
+    }
+
+    @Test("Expected pause and leave gaps do not evict failure evidence")
+    func expectedInterruptionDoesNotCreateIncidents() {
+        var monitor = RoomSyncMonitor()
+        let participants = [RoomParticipant(id: "local", name: "Private Mac")]
+        for index in 0...20 {
+            monitor.observe(participants: participants, currentParticipantID: "local",
+                timing: timing(localDrift: index == 0 ? 70 : 10, localRTT: 2, buffer: 250, jitter: 1,
+                    output: 20, localLate: 0, localResync: 0,
+                    peerID: nil, peerDrift: nil, peerLate: 0, peerResync: 0, roomTimingChanges: 0),
+                sampledAtNanos: UInt64(index * 2 + 1) * 1_000_000_000)
+            monitor.markUnavailable(participants: participants, currentParticipantID: "local",
+                sampledAtNanos: UInt64(index * 2 + 2) * 1_000_000_000,
+                reason: "Playback paused", kind: .notice)
+        }
+        #expect(monitor.incidents.count == 1)
+        #expect(monitor.incidents.first?.trigger == .driftExceeded)
+        #expect(monitor.incidents.first?.samples.contains { $0.driftMilliseconds == nil } == true)
+        #expect(monitor.orderedTraces.first?.latest?.driftMilliseconds == nil)
     }
 
     @Test("Records every participant and explains measured timing changes")

@@ -32,7 +32,7 @@ struct NetworkBrowserFixture: View {
             Divider()
             if let network = networks.first {
                 VStack(spacing: 0) {
-                    ALOChannelList(network: network, channels: [
+                    ALOChannelList(network: network, channels: state == "owner-empty" ? [] : [
                         .init(id: "main", name: "Main", isPrivate: false, isMain: true),
                         .init(id: "music", name: state == "long" ? "Music for focused work and collaborative listening sessions" : "Music", isPrivate: false),
                         .init(id: "private", name: "After hours", isPrivate: true)
@@ -41,7 +41,9 @@ struct NetworkBrowserFixture: View {
                     HStack {
                         Button("Members", systemImage: "person.2") {}
                         Spacer()
-                        Button("Join channel", systemImage: "arrow.right.circle.fill") {}.buttonStyle(.borderedProminent)
+                        if state != "owner-empty" {
+                            Button("Join channel", systemImage: "arrow.right.circle.fill") {}.buttonStyle(.borderedProminent)
+                        }
                     }.padding(16)
                 }
             } else {

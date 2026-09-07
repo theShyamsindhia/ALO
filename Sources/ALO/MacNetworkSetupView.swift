@@ -181,12 +181,11 @@ struct MacNetworkSetupView: View {
                     } actions: {
                         Button("Create network") { present(.createNetwork) }.buttonStyle(.borderedProminent)
                     }
-                    if let error = error ?? account.errorMessage ?? model.errorMessage { Text(error).foregroundStyle(.red).padding() }
                 }
             }
         }
         .safeAreaInset(edge: .bottom) {
-            if account.networks.isEmpty, let message = error ?? account.errorMessage ?? model.errorMessage {
+            if account.selectedNetwork == nil, let message = error ?? account.errorMessage ?? model.errorMessage {
                 Label(message, systemImage: "exclamationmark.triangle")
                     .font(.callout).padding().frame(maxWidth: .infinity, alignment: .leading)
             }

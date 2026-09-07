@@ -326,7 +326,8 @@ enum DiagnosticReportBuilder {
         context: DiagnosticReportContext,
         results: [DiagnosticCheckID: DiagnosticCheckResult]
     ) -> String {
-        let timestamp = ISO8601DateFormatter().string(from: context.generatedAt)
+        let dateFormatter = ISO8601DateFormatter()
+        let timestamp = dateFormatter.string(from: context.generatedAt)
         var lines = [
             "ALO Diagnostics",
             "Generated: \(timestamp)",
@@ -355,20 +356,20 @@ enum DiagnosticReportBuilder {
             lines.append("")
             lines.append("Recent synchronization transitions (up to 16)")
             for event in context.recentSyncEvents.suffix(16) {
-                let time = event.checkedAt.map { ISO8601DateFormatter().string(from: $0) } ?? "unknown time"
+                let time = event.checkedAt.map { dateFormatter.string(from: $0) } ?? "unknown time"
                 lines.append("- \(time): \(event.outcome.label) — \(DiagnosticRedactor.redact(event.detail))")
             }
         }
         if !context.syncIncidents.isEmpty {
             lines.append("")
-            lines.append("Synchronization incident evidence (up to 16 incidents, 45 samples each)")
+            lines.append("Synchronization incident evidence (up to \(RoomSyncMonitor.maximumIncidents) incidents, \(RoomSyncMonitor.maximumIncidentSamples) samples each)")
             lines.append("Software render-clock measurements; these do not measure acoustic alignment between speakers.")
-            lines.append("Participant numbers are anonymous within this channel session. Missing measurements are gaps, not zero drift.")
+            lines.append("Evidence is retained from the most recent channel session and may predate the current inactive state. Participant numbers are anonymous within that session. Missing measurements are gaps, not zero drift.")
             for incident in context.syncIncidents.suffix(RoomSyncMonitor.maximumIncidents) {
-                let date = ISO8601DateFormatter().string(from: incident.occurredAt)
+                let date = dateFormatter.string(from: incident.occurredAt)
                 lines.append("- \(date) participant=\(incident.participantNumber) local=\(incident.isLocal) trigger=\(incident.trigger.rawValue)")
-                for sample in incident.samples.suffix(45) {
-                    let time = ISO8601DateFormatter().string(from: sample.occurredAt)
+                for sample in incident.samples.suffix(RoomSyncMonitor.maximumIncidentSamples) {
+                    let time = dateFormatter.string(from: sample.occurredAt)
                     lines.append("  \(time) monotonic-ns=\(sample.sampledAtNanos) drift-ms=\(metric(sample.driftMilliseconds)) rtt-ms=\(metric(sample.roundTripMilliseconds)) late-packets=\(sample.latePacketCount.map(String.init) ?? "unavailable") resyncs=\(sample.resyncCount.map(String.init) ?? "unavailable") buffer-ms=\(metric(sample.bufferMilliseconds)) jitter-ms=\(metric(sample.jitterMilliseconds)) output-path-ms=\(metric(sample.outputPathMilliseconds))")
                 }
             }

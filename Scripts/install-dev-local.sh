@@ -1,6 +1,7 @@
 #!/bin/bash
 # Local-only dev installation. Never uses a signing identity, modifies release
-# ALO, strips the linked executable, or touches either app's user data.
+# ALO, strips the linked executable, or migrates user data. Some optional game
+# and icon stores are shared at runtime; exclude those from isolated dev tests.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -8,7 +9,7 @@ if [[ $# -gt 1 || ( $# -eq 1 && "$1" != "--skip-build" ) ]]; then
     echo "Usage: bash Scripts/install-dev-local.sh [--skip-build]" >&2
     exit 2
 fi
-if ps -axo comm= | grep -Eq '^/Applications/(ALO|ALO Dev)\.app/Contents/MacOS/alo$'; then
+if ps -axww -o comm= | grep -E '/(ALO|ALO Dev)\.app/Contents/MacOS/alo$' > /dev/null; then
     echo "Quit both ALO and ALO Dev before installing the dev build." >&2
     exit 1
 fi
@@ -50,7 +51,7 @@ fi
 destination='/Applications/ALO Dev.app'
 if [[ -e "$destination" ]]; then
     test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$destination/Contents/Info.plist")" = 'in.werai.audio.dev'
-    backup_dir="$(mktemp -d /Applications/alo-dev-backup.XXXXXX)"
+    backup_dir="$(mktemp -d /tmp/alo-dev-backup.XXXXXX)"
     mv "$destination" "$backup_dir/ALO Dev.app"
     echo "Previous dev app preserved at: $backup_dir/ALO Dev.app"
 fi
@@ -58,4 +59,4 @@ mv "$staged_app" "$destination"
 echo "Installed: $destination"
 echo "Source: $(git rev-parse HEAD)"
 echo "No signing command was run. macOS may request dev-app permissions."
-echo "Staging directory retained: $stage_dir"
+rmdir "$stage_dir"

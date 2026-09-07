@@ -63,6 +63,7 @@ struct RoomSyncMonitor {
     static let maximumIncidents = 16
     private static let incidentLeadingSamples = 15
     private static let incidentFollowingSamples = 30
+    static let maximumIncidentSamples = incidentLeadingSamples + incidentFollowingSamples
 
     private struct IncidentRecording {
         let participantID: String
@@ -187,7 +188,8 @@ struct RoomSyncMonitor {
                          isLocal: isLocal,
                          driftMilliseconds: nil,
                          roundTripMilliseconds: nil,
-                         sampledAtNanos: sampledAtNanos, occurredAt: occurredAt)
+                         sampledAtNanos: sampledAtNanos, occurredAt: occurredAt,
+                         recordsMissingIncident: kind != .notice)
             state.hadFreshDrift = false
             participantStates[participant.id] = state
             interrupted = true
@@ -209,7 +211,8 @@ struct RoomSyncMonitor {
         resyncCount: UInt64? = nil,
         bufferMilliseconds: Double? = nil,
         jitterMilliseconds: Double? = nil,
-        outputPathMilliseconds: Double? = nil
+        outputPathMilliseconds: Double? = nil,
+        recordsMissingIncident: Bool = true
     ) {
         if traces[participantID] == nil {
             if traces.count >= Self.maximumParticipants,
@@ -255,7 +258,7 @@ struct RoomSyncMonitor {
         if let driftMilliseconds, driftMilliseconds >= Self.correctionThresholdMilliseconds,
            state?.wasOutsideTolerance != true {
             trigger = .driftExceeded
-        } else if driftMilliseconds == nil, state?.hadFreshDrift == true {
+        } else if recordsMissingIncident, driftMilliseconds == nil, state?.hadFreshDrift == true {
             trigger = .measurementMissing
         } else {
             trigger = nil

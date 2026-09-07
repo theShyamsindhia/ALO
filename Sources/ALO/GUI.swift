@@ -3653,13 +3653,13 @@ final class ALOViewModel: ObservableObject {
     private func invalidateLiveSyncSample(reason: String, kind: RoomSyncEvent.Kind = .warning) {
         meshSession?.publishPlaybackTiming(nil)
         if localAudioTiming != nil { localAudioTiming = nil }
-        // Guard before mutating the @Published value: even an unchanged inout
-        // write would otherwise redraw the whole model on every idle timer tick.
-        guard liveSyncHealth.hasCurrentSample else { return }
         if ALOAppFlavor.isDevelopment {
             let detail = DiagnosticRedactor.redact(reason)
             syncHealthLogger.notice("Dev timing unavailable: \(detail, privacy: .public)")
         }
+        // Log dev liveness even during an ongoing gap, but guard before mutating
+        // @Published state: an unchanged inout write redraws the idle model.
+        guard liveSyncHealth.hasCurrentSample else { return }
         roomSyncMonitor.markUnavailable(participants: participants,
                                         currentParticipantID: currentParticipantID,
                                         sampledAtNanos: MonotonicClock.nowNanos(),

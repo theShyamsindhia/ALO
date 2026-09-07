@@ -379,6 +379,9 @@ public struct ALOChannelList: View {
                         .help(network.name).accessibilityAddTraits(.isHeader)
                     Text("\(network.memberCount) \(network.memberCount == 1 ? "member" : "members") · \(channels.count) \(channels.count == 1 ? "channel" : "channels")")
                         .font(.callout).foregroundStyle(.secondary)
+                    Text("Public channels are visible only to network members.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)
                 Menu {
@@ -424,8 +427,22 @@ public struct ALOChannelList: View {
                         .accessibilityIdentifier("ALO.Channel.\(channel.id)")
                     }
                     if channels.isEmpty {
+                        #if os(macOS)
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text(isBusy ? "Loading channels…" : (network.isOwner
+                                ? "No channels yet. Create one for your network."
+                                : "No channels available. Import an updated invitation to refresh your access."))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if network.isOwner && !isBusy {
+                                Button("Create channel…", systemImage: "plus", action: onCreateChannel)
+                                    .accessibilityIdentifier("ALO.Channel.CreateEmpty")
+                            }
+                        }.padding(.vertical, 8)
+                        #else
                         Text(isBusy ? "Loading channels…" : "No channels available. Import an updated invitation to refresh your access.")
                             .foregroundStyle(.secondary)
+                        #endif
                     }
                 }
                 #if !os(macOS)
