@@ -12,7 +12,6 @@ struct MobileNetworkSetupView: View {
     @ObservedObject var model: MobileRoomModel
     @State private var path: [Route] = []
     @State private var recoveryImportText = ""
-    @State private var recoveryText: String?
     @State private var recoveryExported = false
     @State private var invitationText = ""
     @State private var publicIdentityText = ""
@@ -124,7 +123,7 @@ struct MobileNetworkSetupView: View {
             }
         }
         .onChange(of: account.identityReady) { _, ready in
-            if ready { recoveryText = nil; recoveryImportText = ""; model.refreshAccountIfActive() }
+            if ready { recoveryImportText = ""; model.refreshAccountIfActive() }
         }
         .onChange(of: path) { _, _ in pendingConfirmation = nil }
     }
@@ -132,7 +131,6 @@ struct MobileNetworkSetupView: View {
     private var identitySetup: some View {
         ALOIdentitySetupView(stage: account.identity == nil ? .identity : .recovery,
             displayName: $account.displayName, recoveryImportText: $recoveryImportText,
-            fingerprint: account.identity?.publicIdentity.userID, recoveryText: recoveryText,
             recoveryExported: recoveryExported, isBusy: busy,
             errorMessage: errorMessage ?? account.errorMessage,
             onCreateIdentity: { perform { try account.createIdentity() } },
@@ -141,9 +139,6 @@ struct MobileNetworkSetupView: View {
                 recoveryImportText = ""
             } },
             onImportRecoveryFile: { chooseFile(.recovery) },
-            onRevealRecovery: { perform {
-                recoveryText = String(decoding: try account.recoveryData(), as: UTF8.self)
-            } },
             onExportRecovery: { prepareExport(recovery: true) { try account.recoveryData() } },
             onContinue: { perform { try await account.completeIdentitySetup() } })
     }
@@ -159,7 +154,24 @@ struct MobileNetworkSetupView: View {
             onImportNetwork: openInvitationImport,
             onExportPublicIdentity: { prepareExport(recovery: false, filename: "ALO public identity.txt") {
                 try account.publicIdentityData()
-            } })
+            } },
+            nearbyNetworks: account.nearbyNetworks.map { .init(id: $0.id, name: $0.name, status: account.joinRequestStatus[$0.id].map(joinState)) },
+            joinRequests: account.pendingJoinRequests.map { request in
+                .init(id: request.id, name: request.displayName,
+                      networkName: account.networks.first(where: { $0.id == request.networkID })?.name ?? "your network",
+                      fingerprint: request.identity.userID)
+            }, isBusy: busy,
+            onJoin: { id in Task { @MainActor in
+                do { try await account.requestToJoin(networkID: id) }
+                catch is CancellationError { }
+                catch { errorMessage = NetworkAccountModel.describe(error) }
+            } },
+            onApprove: { id in perform { try await account.approveJoinRequest(id: id) } },
+            onDecline: { id in perform { try await account.rejectJoinRequest(id: id) } },
+            nearbyError: account.nearbyNetworkError,
+            nearbyNotice: account.nearbyNetworkNotice,
+            onRetryNearby: { Task { @MainActor in account.stopNearbyNetworking(); await account.startNearbyNetworking() } },
+            onCancelJoin: { id in account.cancelJoinRequest(networkID: id) })
     }
 
     @ViewBuilder private func destination(_ route: Route) -> some View {
@@ -233,6 +245,15 @@ struct MobileNetworkSetupView: View {
                         goBack()
                     } }, onCancel: goBack)
             }
+        }
+    }
+
+    private func joinState(_ state: NetworkJoinState) -> ALONearbyJoinState {
+        switch state {
+        case .waitingForApproval: .waitingForApproval
+        case .joined: .joined
+        case .cancelled: .cancelled
+        case .failed(let message): .failed(message)
         }
     }
 

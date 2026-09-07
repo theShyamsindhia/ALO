@@ -193,9 +193,9 @@ import ALOAppModel
         Task { @MainActor in audio.close() }
     }
 
-    func activate() {
+    func activate(refreshIfForeground: Bool = false) {
         backgroundPlayback = false; backgroundMonitor?.cancel(); backgroundMonitor = nil
-        activationLifecycle.activate { [weak self] activation in
+        activationLifecycle.activate(refreshIfForeground: refreshIfForeground) { [weak self] activation in
             await self?.activateAccount(activation)
         }
     }
@@ -203,7 +203,7 @@ import ALOAppModel
     /// Identity completion can arrive after suspension; it is not a foreground event.
     func refreshAccountIfActive() {
         guard foreground else { return }
-        activate()
+        activate(refreshIfForeground: true)
     }
 
     private func activateAccount(_ activation: ForegroundChannelLifecycle.Activation,
@@ -211,6 +211,8 @@ import ALOAppModel
         guard !Task.isCancelled, activationLifecycle.accepts(activation) else { return }
         await account.resume()
         guard !Task.isCancelled, activationLifecycle.accepts(activation), account.identityReady else { return }
+        if !isTemporarySimulatorSession { await account.startNearbyNetworking() }
+        guard !Task.isCancelled, activationLifecycle.accepts(activation) else { return }
         if !started {
             started = true
             do {
@@ -329,6 +331,7 @@ import ALOAppModel
         voice.endOpenLine()
         let canContinue = canContinueBackgroundPlayback
         activationLifecycle.suspend()
+        account.stopNearbyNetworking()
         backgroundPlayback = canContinue
         synchronizeVideo()
         if canContinue {

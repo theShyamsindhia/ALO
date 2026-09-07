@@ -48,7 +48,8 @@ public struct NearbyRoom: Identifiable, Equatable, Sendable {
 public enum RoomDiscovery {
     public static func validateApplicationConfiguration(_ info: [String: Any]) throws {
         let declared = Set(info["NSBonjourServices"] as? [String] ?? [])
-        let required: Set<String> = [MeshRoomBrowser.secureServiceType, SecureMediaDatagramPublisher.serviceType]
+        let required: Set<String> = [MeshRoomBrowser.secureServiceType, SecureMediaDatagramPublisher.serviceType,
+                                     NearbyNetworkService.serviceType]
         guard required.isSubset(of: declared),
               let explanation = info["NSLocalNetworkUsageDescription"] as? String,
               !explanation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {

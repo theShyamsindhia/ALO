@@ -33,7 +33,7 @@ public struct ALOCreateNetworkView: View {
             } header: {
                 Text("Create network").accessibilityAddTraits(.isHeader)
             } footer: {
-                Text("Your network includes #Main automatically. Add people using their public identities; invitations work without a server.")
+                Text("Your network starts with a Main channel. People nearby can ask to join; you decide who gets in.")
             }
             if let message = localError ?? errorMessage {
                 Section { ALOInlineError(message: message) }

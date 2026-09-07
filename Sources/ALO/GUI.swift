@@ -479,6 +479,8 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     private var floatingBarObserver: AnyCancellable?
     private var walkieBarObserver: AnyCancellable?
     private var setupLayoutObserver: AnyCancellable?
+    private var networkJoinObserver: AnyCancellable?
+    private var networkJoinAttention = NetworkJoinAttentionGate()
     private var terminationSignalSources = [DispatchSourceSignal]()
     private var setupWindowFrame: NSRect?
     private var setupTransitionGeneration = 0
@@ -587,6 +589,26 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async { self?.resizeSetupWindow(animated: true) }
         }
 
+        networkJoinObserver = model.account.$pendingJoinRequests
+            .map { !$0.isEmpty }.removeDuplicates()
+            .sink { [weak self] pending in
+                guard let self,
+                      self.networkJoinAttention.shouldNotify(pending: pending, now: ProcessInfo.processInfo.systemUptime) else { return }
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, !self.model.account.pendingJoinRequests.isEmpty,
+                          let window = self.window else { return }
+                    if self.model.phase == .live {
+                        NSApp.requestUserAttention(.informationalRequest)
+                        return
+                    }
+                    self.setupTransitionGeneration &+= 1
+                    self.restoreSetupWindow()
+                    window.setContentSize(NSSize(width: SetupWindow.width, height: 640))
+                    self.setupWindowFrame = window.frame
+                    window.orderFront(nil)
+                }
+            }
+
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -604,6 +626,15 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
             }
         } else {
             window?.makeKeyAndOrderFront(nil)
+        }
+        // A nearby request cannot replace the user's normal playback restore,
+        // especially fullscreen video. Approvals are an additional non-key UI.
+        if !model.videoFullscreen, !model.account.pendingJoinRequests.isEmpty, let window {
+            setupTransitionGeneration &+= 1
+            restoreSetupWindow()
+            window.setContentSize(NSSize(width: SetupWindow.width, height: 640))
+            setupWindowFrame = window.frame
+            window.orderFront(nil)
         }
         return true
     }
@@ -1574,6 +1605,7 @@ struct ParticipantRoomActivity: Equatable {
 final class ALOViewModel: ObservableObject {
     let account: NetworkAccountModel
     private var accountObserver: AnyCancellable?
+    private var nearbyAccountObserver: AnyCancellable?
     var peerVersionHandler: (String) -> Void = { _ in }
     enum Mode: String, CaseIterable {
         case share = "Create network"
@@ -1854,6 +1886,17 @@ final class ALOViewModel: ObservableObject {
         }
         accountObserver = self.account.objectWillChange.sink { [weak self] in
             Task { @MainActor [weak self] in self?.refreshNetworkChannels() }
+        }
+        // Keep discovery available when setup is hidden so an owner can receive
+        // join requests. Test/render models opt out of all live discovery.
+        if discoverRooms {
+            nearbyAccountObserver = self.account.$identityReady.removeDuplicates().sink { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    if self.account.identityReady { await self.account.startNearbyNetworking() }
+                    else { self.account.stopNearbyNetworking() }
+                }
+            }
         }
     }
 

@@ -9,8 +9,8 @@
     <key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
     <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
     <key>LSRequiresIPhoneOS</key><true/>
-    <key>NSLocalNetworkUsageDescription</key><string>ALO discovers nearby rooms and connects directly to room members for encrypted chat and shared media.</string>
-    <key>NSBonjourServices</key><array><string>_alo-peer._tcp</string><string>_alo-data._udp</string></array>
+    <key>NSLocalNetworkUsageDescription</key><string>ALO finds nearby networks and connects directly to members for encrypted messages, voice, and shared media.</string>
+    <key>NSBonjourServices</key><array><string>_alo-network._tcp</string><string>_alo-peer._tcp</string><string>_alo-data._udp</string></array>
     <key>NSMicrophoneUsageDescription</key><string>ALO uses your microphone only when you explicitly start talking to room members.</string>
     <key>UILaunchScreen</key><dict/>
     <key>UIBackgroundModes</key><array><string>audio</string></array>

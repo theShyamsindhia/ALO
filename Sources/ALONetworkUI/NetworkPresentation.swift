@@ -1,5 +1,40 @@
 import SwiftUI
 
+public enum ALONearbyJoinState: Equatable, Sendable {
+    case waitingForApproval
+    case joined
+    case cancelled
+    case failed(String)
+
+    var message: String {
+        switch self {
+        case .waitingForApproval: "Waiting for approval"
+        case .joined: "Joined"
+        case .cancelled: "Cancelled"
+        case .failed(let message): message
+        }
+    }
+}
+
+public struct ALONearbyNetworkSummary: Identifiable, Sendable {
+    public let id: UUID
+    public let name: String
+    public let status: ALONearbyJoinState?
+    public init(id: UUID, name: String, status: ALONearbyJoinState? = nil) {
+        self.id = id; self.name = name; self.status = status
+    }
+}
+
+public struct ALOJoinRequestSummary: Identifiable, Sendable {
+    public let id: UUID
+    public let name: String
+    public let networkName: String
+    public let fingerprint: String
+    public init(id: UUID, name: String, networkName: String, fingerprint: String) {
+        self.id = id; self.name = name; self.networkName = networkName; self.fingerprint = fingerprint
+    }
+}
+
 /// Display values only. The coordinator must verify membership and signatures before
 /// supplying networks or channels. These values never authorize access.
 public struct ALONetworkSummary: Identifiable, Hashable, Sendable {

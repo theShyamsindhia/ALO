@@ -10,20 +10,20 @@ file pickers, clipboard actions, and connection state.
 Present `ALOIdentitySetupView` in `.identity` until an identity has been prepared,
 then use `.recovery`. Its creation and restoration actions must retain the same
 prepared identity across a failed persistence or export operation. Never create a
-replacement identity when retrying a save. Keep `recoveryText` nil until the user
-chooses Reveal. Set `recoveryExported` only after an export actually succeeds.
+replacement identity when retrying a save. The primary flow asks only for a name,
+then saves a recovery key. Do not show raw private keys or fingerprints in this
+flow. Set `recoveryExported` only after an export actually succeeds.
 
-The recovery screen makes the unencrypted-kit warning bold. Continue requires
+The recovery screen explains the unencrypted-key risk. Continue requires
 both a successful file export and confirmation that the backup was saved privately.
-The revealed kit supports text selection and copying, but copying alone does not
-satisfy the export requirement. The prepared root is already saved before this
+Copying alone does not satisfy the export requirement. The prepared root is already saved before this
 step; `onContinue` records completion of setup. Returning an error keeps the same
 identity and recovery kit available for retry.
 
 On iOS, the Files picker accepts recovery documents up to 8 KiB using a bounded read. The Files
 exporter requests owner-only permissions and complete file protection; destination
 and replacement behavior belong to the selected file provider. Mark the backup
-exported only after the exporter reports success. Revealing or opening a picker
+exported only after the exporter reports success. Opening a picker
 does not count as a completed backup.
 
 Native text controls preserve typing, selection, Paste, and Select All. Forms
@@ -33,6 +33,29 @@ visible and busy actions retain their labels. The embedding app must provide its
 standard Edit menu on macOS so keyboard editing commands reach hosted controls.
 
 ## Networks and channels
+
+The main joining path is nearby discovery followed by an owner-approved request.
+The separate `_alo-network._tcp` Bonjour service bootstraps membership; it does
+not carry channel traffic or bypass channel authorization. An owner running ALO
+advertises owned networks. Requesters authenticate a root-signed device binding
+against their live TLS key and a fresh owner challenge; the owner explicitly
+approves before ALO persists and sends a signed, recipient-bound invitation.
+
+Network names and display names are self-asserted, not real-world identity
+verification. The normal nearby experience is trust-on-first-use; owners should
+approve expected people, not every request. Manual fingerprint-verified exchange
+remains available as an advanced path. Discovery never grants membership.
+
+Waiting for approval is per network, not a global busy state. Permit cancel and
+retry. Show discovery failures with a retry action instead of an endless spinner.
+Keep the service running when the Mac setup window is hidden so approvals remain
+reachable. iOS suspends bootstrap discovery in the background. Native render
+fixtures and temporary simulator sessions do not start live discovery.
+
+Both app bundles declare the Bonjour service and local-network usage description.
+Use peer-to-peer-aware Network framework listeners and browsers. See Apple's
+[local network privacy guidance](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy)
+and [networking API guidance](https://developer.apple.com/documentation/technotes/tn3151-choosing-the-right-networking-api).
 
 `ALONetworkSidebar` uses a binding for the selected network ID.
 `ALOChannelList` uses a binding for the selected channel ID. The app supplies
