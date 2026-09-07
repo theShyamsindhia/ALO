@@ -127,3 +127,66 @@ failed or succeeded. A separate pre-install capture was preserved.
 
 These results are offline native-render evidence. No repaired build had yet
 been installed or released for this incident; two-Mac validation was pending.
+
+### Candidate review and CI follow-up
+
+Candidate `67c255b` was committed, pushed, packaged and shared for checksum
+verification, but installation was explicitly held. CodeRabbit reported no
+findings; Claude identified active packet-admission failures retaining an invalid
+content mapping and a concealment admission window shorter than the scheduling
+lead of large-buffer output devices. Those require separate regression coverage
+and disposition before installation.
+
+CI run `34155255083` passed both app builds, but the full Mac run failed with
+22 issues across the three new native-offline suites (1,148 tests / 185 suites
+executed). Every issue was a fixture arrival/deadline prerequisite: the runner
+woke after the intended admission window. These are not valid reproduction of
+the PCM defect, nor a passing CI result. The existing strict live-timing tests
+passed. The follow-up is to control the offline fixtures' monotonic clock while
+retaining actual native PCM rendering, native sample advancement, and unchanged
+marker assertions—not to relax live thresholds, skip tests, or retry until green.
+
+Shyam's sender also recorded a second timing stall overlapping the subtle-echo
+capture: late20/resync2 at 19:13:42.130154 UTC, a snapshot timeout and stale result,
+then late40/resync3 at 19:13:49.998276 UTC. The valid samples' monotonic timestamps
+advanced 7.868 seconds in the same process. Historical log export warned of a
+wall-clock adjustment; that warning does not prove an adjustment caused the
+stall. Preserve monotonic evidence and avoid treating cross-device wall times as
+precise physical alignment measurements.
+
+### Remaining small-offset measurement limits
+
+The player's current phase estimate compensates `outputNode.presentationLatency`,
+the device/stream term. Native graph characterization separately observes about
+1 ms of pipeline delay, with rate-conversion effects requiring their own checks.
+Equal graph delay on both Macs largely cancels in a relative comparison; this
+does not establish the cause of the reported subtle echo. Current telemetry does
+not independently observe content correspondence or acoustic alignment.
+
+A further latency change requires a production-player native impulse regression
+at 48/44.1 kHz and rates 0.99/1/1.01, separating constant phase bias from accumulating
+interval error. Do not simply add downstream latency queries to the live polling
+loop: the incident stack already observed native latency-related IPC waiting.
+Any additional hardware/graph measurement must be bounded and separately assessed
+for interference with playback.
+
+At approximately 19:47 UTC, before installing any replacement, the user again
+reported a **large delay without crackling**. The receiver's preceding five
+minutes contained 298 samples, maximum monotonic sample gap 1.024 seconds,
+unchanged late1534/resync36, and approximately 0.5 ms reported phase error.
+A new three-second stack sample again observed native buffer-command completion
+querying output presentation latency/CoreAudio, and maintenance waiting on the
+engine lock. These observations motivate a bounded silent-output callback-mode
+comparison; sample counts alone do not establish callback latency or causality.
+Do not swap completion types based only on those stacks: queue accounting also
+participates in audible predecessor retirement, so rendered and played-back
+completion semantics are not interchangeable.
+
+The matching sender history later showed 601 samples from 19:42:00–19:52:10 UTC
+in PID841: own late94/resync8 initially, late115/resync9 at 19:48:26.067439,
+resync10 at 19:48:31.098907, and resync11 at 19:51:30.821737. Two stale-snapshot
+warnings preceded the first transition. The reported maximum valid-sample wall
+gap was 4.325 seconds; retain the earlier wall-clock caveat. Listener reports
+remained resync36/drift0.5ms. This establishes repeated sender timing disruption
+during the audible incident, not its exact acoustic cause. The remote history
+was preserved; a new remote live capture was not started.

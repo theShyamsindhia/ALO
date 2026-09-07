@@ -4,21 +4,22 @@ import Testing
 import ALOCore
 @testable import ALO
 
-/// Native offline PCM oracle, not an acoustic or valid-host-clock measurement.
+/// Native offline PCM with controlled admission time, not acoustic or valid-host-clock evidence.
 @Suite(.serialized) @MainActor
 struct ContiguousUnderrunTests {
     @Test(arguments: [UInt64(0), 20_834, 60_000_000], [0, 1, 2, 3])
     func contiguousSourceFramesDoNotHideNativeUnderrun(gapNanos: UInt64, timingChange: Int) async throws {
+        var fixtureNow = MonotonicClock.nowNanos()
         let output = RoomAudioOutputEngine()
         let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2))
         try output.engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 240)
         var measurement = SynchronizedPlayer.OutputTimingMeasurement(latencyNanos: 100_000_000,
             bufferFrames: 512, safetyFrames: 48, sampleRate: 48_000)
-        let player = try SynchronizedPlayer(audioOutput: output, liveDJAudio: DJLiveAudio(), outputTimingMeasurement: { measurement })
+        let player = try SynchronizedPlayer(audioOutput: output, liveDJAudio: DJLiveAudio(), outputTimingMeasurement: { measurement }, nowNanos: { fixtureNow })
         defer { player.stop(); output.engine.stop() }
         let node = try #require(output.engine.attachedNodes.compactMap { $0 as? AVAudioPlayerNode }.first)
         player.clockOffsetNanos = 0
-        let capture = MonotonicClock.nowNanos()
+        let capture = fixtureNow
         player.accept(AudioPacket(sequence: 0, frameIndex: 0, captureTimeNanos: capture,
                                   samples: [Int16](repeating: 0, count: 480)))
         try #require(player.expectedSequenceForTesting == 1)
@@ -51,11 +52,8 @@ struct ContiguousUnderrunTests {
 
         let desired = capture + 5_000_000 + player.activePlayoutDelayNanos - player.outputLatencyForTimingNanos
         let wake = gapNanos == 0 ? desired - 20_000_000 : desired + gapNanos
-        let now = MonotonicClock.nowNanos()
-        if now < wake {
-            try await ContinuousClock().sleep(for: .nanoseconds(Int64(wake - now)), tolerance: .zero)
-        }
-        let arrival = MonotonicClock.nowNanos()
+        fixtureNow = wake
+        let arrival = fixtureNow
         // Keep the current 100ms late-packet reset branch out of this RED.
         try #require(arrival < desired + 90_000_000,
                      "Fixture missed the under-threshold arrival window")
@@ -72,7 +70,7 @@ struct ContiguousUnderrunTests {
             let revisedCapture = try #require(RoomTiming.clientTimeNanos(hostTimeNanos: capture + 5_000_000,
                 clockOffsetNanos: clockOffset))
             let revised = revisedCapture + player.activePlayoutDelayNanos - player.outputLatencyForTimingNanos
-            try #require(revised > MonotonicClock.nowNanos() + player.renderSchedulingHeadroomForTimingNanos,
+            try #require(revised > fixtureNow + player.renderSchedulingHeadroomForTimingNanos,
                          "Fixture timing mutation must actually move the desired deadline beyond the near-deadline gate")
             if timingChange == 3 { try #require(player.outputLatencyForTimingNanos == 1_000_000) }
         }
@@ -82,7 +80,7 @@ struct ContiguousUnderrunTests {
         if gapNanos > 0 {
             #expect(player.syncReport().resyncCount == 1)
             #expect(player.syncReport().driftNanos == nil)
-            player.accept(AudioPacket(sequence: 2, frameIndex: 480, captureTimeNanos: MonotonicClock.nowNanos(),
+            player.accept(AudioPacket(sequence: 2, frameIndex: 480, captureTimeNanos: fixtureNow,
                                       samples: [Int16](repeating: 24_000, count: 480)))
             #expect(player.expectedSequenceForTesting == 3)
             node.play() // Preserve real queued marker; adapt only offline host start.

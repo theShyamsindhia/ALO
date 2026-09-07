@@ -135,7 +135,7 @@ final class SynchronizedPlayer {
     private var outputSafetyMilliseconds: Double?
     private var permittedFutureLeadNanos: UInt64?
     var renderObservation: RenderObservation? {
-        renderObservationRecorder.snapshot(at: MonotonicClock.nowNanos())
+        renderObservationRecorder.snapshot(at: nowNanos())
     }
     private var latePacketCount: UInt64 = 0
     private var resyncCount: UInt64 = 0
@@ -160,6 +160,8 @@ final class SynchronizedPlayer {
     private let scheduledCompletions = PlaybackBufferCompletions()
     // Test-only delay injection after admission; production callers leave nil.
     private let beforeNativeSchedule: (() -> Void)?
+    private let failBufferAllocation: (() -> Bool)?
+    private let nowNanos: () -> UInt64
 
     /// Includes hardware-buffered PCM, not just the receive-side jitter queue.
     var outstandingPlaybackBufferCount: Int { scheduledCompletions.count }
@@ -181,10 +183,14 @@ final class SynchronizedPlayer {
         playbackActivityChanged: ((Bool) -> Void)? = nil,
         liveDJAudio: DJLiveAudio = .shared,
         outputTimingMeasurement: (() -> OutputTimingMeasurement)? = nil,
-        beforeNativeSchedule: (() -> Void)? = nil
+        beforeNativeSchedule: (() -> Void)? = nil,
+        failBufferAllocation: (() -> Bool)? = nil,
+        nowNanos: @escaping () -> UInt64 = MonotonicClock.nowNanos
     ) throws {
         self.audioOutput = audioOutput
         self.beforeNativeSchedule = beforeNativeSchedule
+        self.failBufferAllocation = failBufferAllocation
+        self.nowNanos = nowNanos
         self.outputTimingMeasurement = outputTimingMeasurement
         self.liveDJAudio = liveDJAudio
         self.playbackActivityChanged = playbackActivityChanged
@@ -243,7 +249,7 @@ final class SynchronizedPlayer {
             guard packet.captureTimeNanos >= cutover else { return }
             resyncCutoverCaptureNanos = nil
         }
-        let now = MonotonicClock.nowNanos()
+        let now = nowNanos()
         lastPacketReceivedNanos = now
         pending[packet.sequence] = packet
         if expectedSequence == nil {
@@ -255,7 +261,7 @@ final class SynchronizedPlayer {
     func maintainSync() {
         // An unavailable render clock is unknown, not a fresh zero-error sample.
         latestDriftMeasurement = nil
-        let now = MonotonicClock.nowNanos()
+        let now = nowNanos()
         var observation = RenderObservationSample(observedAtNanos: now)
         defer {
             if latestDriftMeasurement == nil {
@@ -288,7 +294,7 @@ final class SynchronizedPlayer {
 
         let renderTime = player.lastRenderTime
         let playerTime = renderTime.flatMap { player.playerTime(forNodeTime: $0) }
-        observation.observedAtNanos = MonotonicClock.nowNanos()
+        observation.observedAtNanos = nowNanos()
         observation.outputBufferMilliseconds = outputBufferMilliseconds
         observation.outputSafetyMilliseconds = outputSafetyMilliseconds
         observation.permittedFutureLeadMilliseconds = permittedFutureLeadNanos.map { Double($0) / 1_000_000 }
@@ -387,6 +393,12 @@ final class SynchronizedPlayer {
                     anchorFrameIndex: anchorFrameIndex, anchorCaptureNanos: anchorCaptureNanos
                 ) {
                 case .stale:
+                    // Covered duplicate PCM is harmless; an unqueued new tail
+                    // cannot be skipped while retaining the source/sample map.
+                    let end = packet.frameIndex.addingReportingOverflow(UInt64(packet.frameCount))
+                    if end.overflow || (scheduledContentEnd.map({ end.partialValue > $0.frame }) ?? true) {
+                        hardResynchronize(reason: .contentAdmissionDropped)
+                    }
                     expectedSequence = sequence &+ 1
                     continue
                 case .discontinuous:
@@ -402,11 +414,13 @@ final class SynchronizedPlayer {
 
             guard let localCaptureNanos = RoomTiming.clientTimeNanos(hostTimeNanos: packet.captureTimeNanos,
                                                                     clockOffsetNanos: offset) else {
+                if hasStarted { hardResynchronize(reason: .contentAdmissionDropped) }
                 expectedSequence = sequence &+ 1
                 continue
             }
             let audibleTime = localCaptureNanos.addingReportingOverflow(targetLatencyNanos)
             guard !audibleTime.overflow else {
+                if hasStarted { hardResynchronize(reason: .contentAdmissionDropped) }
                 expectedSequence = sequence &+ 1
                 continue
             }
@@ -414,7 +428,7 @@ final class SynchronizedPlayer {
             let desiredRenderNanos = desiredAudibleNanos > outputLatencyNanos
                 ? desiredAudibleNanos - outputLatencyNanos
                 : desiredAudibleNanos
-            let now = MonotonicClock.nowNanos()
+            let now = nowNanos()
 
             if hasStarted, now > desiredRenderNanos + Self.hardResyncThresholdNanos {
                 latestLatenessNanos = now - desiredRenderNanos
@@ -445,6 +459,7 @@ final class SynchronizedPlayer {
             let djSamples = liveDJAudio.process(packet.samples, stage: .listening,
                                                        captureTimeNanos: packet.captureTimeNanos)
             guard let buffer = makeBuffer(djSamples.count == packet.samples.count ? djSamples : packet.samples) else {
+                if hasStarted { hardResynchronize(reason: .contentAdmissionDropped) }
                 expectedSequence = sequence &+ 1
                 continue
             }
@@ -497,10 +512,10 @@ final class SynchronizedPlayer {
         if !roomPlaybackIsPlaying { return "Suspended while playback is paused" }
         if !hasStarted { return "Waiting for live audio" }
         if !automaticSyncPolicy.enabled { return "Automatic drift realignment off" }
-        if automaticSyncPolicy.isCoolingDown(at: MonotonicClock.nowNanos()) { return "Settling after realignment" }
+        if automaticSyncPolicy.isCoolingDown(at: nowNanos()) { return "Settling after realignment" }
         guard let sample = latestDriftMeasurement,
-              MonotonicClock.nowNanos() >= sample.time,
-              MonotonicClock.nowNanos() - sample.time <= RenderDriftEstimate.maximumAgeNanos
+              nowNanos() >= sample.time,
+              nowNanos() - sample.time <= RenderDriftEstimate.maximumAgeNanos
         else { return "Waiting for a fresh timing measurement" }
         return sample.magnitude >= LocalAudioSyncPolicy.thresholdNanos
             ? "Checking sustained playback drift" : "Watching estimated playback timing"
@@ -550,7 +565,7 @@ final class SynchronizedPlayer {
             muted: participantMuted,
             duckingGain: duckingGain
         ))
-        updatePlaybackActivity(nowNanos: MonotonicClock.nowNanos())
+        updatePlaybackActivity(nowNanos: nowNanos())
     }
 
     private func updatePlaybackActivity(nowNanos: UInt64) {
@@ -567,7 +582,7 @@ final class SynchronizedPlayer {
     }
 
     func syncReport() -> PlaybackSyncReport {
-        let now = MonotonicClock.nowNanos()
+        let now = nowNanos()
         return PlaybackSyncReport(
             measuredAtNanos: now,
             latenessNanos: latestLatenessNanos,
@@ -606,7 +621,7 @@ final class SynchronizedPlayer {
         latestDriftMeasurement = nil
         resyncCutoverCaptureNanos = cutoverCaptureNanos
         resyncCount &+= 1
-        automaticSyncPolicy.didRealign(at: MonotonicClock.nowNanos())
+        automaticSyncPolicy.didRealign(at: nowNanos())
         setPlaybackActive(false)
     }
 
@@ -653,7 +668,7 @@ final class SynchronizedPlayer {
             configurationGate.takePendingChange()
         }
         guard pending else { return }
-        let now = MonotonicClock.nowNanos()
+        let now = nowNanos()
         guard now >= recoveryRetryNotBeforeNanos else {
             configurationLock.withLock { configurationGate.markChanged() }
             return
@@ -751,7 +766,7 @@ final class SynchronizedPlayer {
             recoveryRetryNotBeforeNanos = 0
         } catch {
             fputs("Audio output recovery failed: \(error.localizedDescription)\n", stderr)
-            recoveryRetryNotBeforeNanos = MonotonicClock.nowNanos() + 500_000_000
+            recoveryRetryNotBeforeNanos = nowNanos() + 500_000_000
             configurationLock.withLock { configurationGate.markChanged() }
         }
     }
@@ -769,7 +784,7 @@ final class SynchronizedPlayer {
             deviceID: activeOutputDeviceID,
             hardwareFormat: activeOutputHardwareFormat, latencyAccepted: true
         )
-        lastOutputStateRefreshNanos = MonotonicClock.nowNanos()
+        lastOutputStateRefreshNanos = nowNanos()
     }
 
     private func refreshOutputTimingIfNeeded(nowNanos: UInt64) {
@@ -1034,7 +1049,7 @@ final class SynchronizedPlayer {
         driftRecovery.reset()
         latestDriftMeasurement = nil
         resyncCount &+= 1
-        automaticSyncPolicy.didRealign(at: MonotonicClock.nowNanos())
+        automaticSyncPolicy.didRealign(at: nowNanos())
         if let next = earliestPending() {
             expectedSequence = next.sequence
         }
@@ -1044,18 +1059,19 @@ final class SynchronizedPlayer {
         guard hasStarted,
               let next = earliestPending(), next.sequence != sequence
         else { return false }
-        let now = MonotonicClock.nowNanos()
+        let now = nowNanos()
         // Freeze the queued-content deadline: later clock/latency updates cannot
-        // revive an expired native interval. A 50ms window from the FIRST missing
-        // frame gives every supported gap a usable reorder window; larger gaps
-        // commit concealment earlier than the old successor-based gate.
+        // revive an expired native interval. Reserve at least measured enqueue
+        // headroom from the FIRST missing frame; large-output routes trade a
+        // shorter reorder wait for timely native admission.
         let missingRender = scheduledContentEnd?.render
         let nativePassed = scheduledContentEnd.map { nativeRenderHasPassedSourceFrame($0.frame) } ?? false
-        if !windowAdmitted, !nativePassed, let missingRender, missingRender > now, missingRender - now > 50_000_000 { return false }
+        let admissionWindow = max(50_000_000, renderSchedulingHeadroomNanos)
+        if !windowAdmitted, !nativePassed, let missingRender, missingRender > now, missingRender - now > admissionWindow { return false }
         guard !nativePassed, budget > 0, PlaybackConcealmentPolicy.canFill(expectedSequence: sequence, nextSequence: next.sequence,
             sourceEndFrame: scheduledContentEnd?.frame, nextFrame: next.frameIndex,
             missingRenderNanos: missingRender, nowNanos: now) else {
-            hardResynchronize(reason: .concealmentDiscontinuity)
+            hardResynchronize(reason: nativePassed ? .nativeSourcePositionPassed : .concealmentDiscontinuity)
             expectedSequence = next.sequence
             return true
         }
@@ -1095,6 +1111,7 @@ final class SynchronizedPlayer {
     }
 
     private func makeBuffer(_ samples: [Int16]) -> AVAudioPCMBuffer? {
+        if failBufferAllocation?() == true { return nil }
         let frames = samples.count / Int(AudioPacket.channelCount)
         guard let buffer = AVAudioPCMBuffer(
             pcmFormat: format,
@@ -1121,7 +1138,7 @@ final class SynchronizedPlayer {
         // Recover conservatively only after enqueue stalls for a packet duration
         // AND the whole admitted source window has passed. This is not proof of
         // displacement, nor an atomic guarantee for sub-packet enqueue races.
-        let ended = MonotonicClock.nowNanos()
+        let ended = nowNanos()
         let duration = UInt64(buffer.frameLength) * 1_000_000_000 / UInt64(AudioPacket.sampleRate)
         if let sourceFrame, ended >= admittedAtNanos, ended - admittedAtNanos >= duration {
             let end = sourceFrame.addingReportingOverflow(UInt64(buffer.frameLength))

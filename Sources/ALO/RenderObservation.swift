@@ -5,12 +5,14 @@ enum PlaybackContentRecoveryReason: String, Sendable {
     case concealmentDiscontinuity = "concealment-discontinuity"
     case nativeSourcePositionPassed = "native-source-position-passed"
     case enqueueWindowPassed = "enqueue-window-passed"
+    case contentAdmissionDropped = "content-admission-dropped"
 }
 
 struct PlaybackContentRecoveryDiagnostics: Equatable, Sendable {
     private(set) var concealment: UInt64 = 0
     private(set) var nativePosition: UInt64 = 0
     private(set) var enqueueWindow: UInt64 = 0
+    private(set) var admissionDropped: UInt64 = 0
     private(set) var lastReason: PlaybackContentRecoveryReason?
     mutating func record(_ reason: PlaybackContentRecoveryReason) {
         lastReason = reason
@@ -18,10 +20,11 @@ struct PlaybackContentRecoveryDiagnostics: Equatable, Sendable {
         case .concealmentDiscontinuity: if concealment < .max { concealment += 1 }
         case .nativeSourcePositionPassed: if nativePosition < .max { nativePosition += 1 }
         case .enqueueWindowPassed: if enqueueWindow < .max { enqueueWindow += 1 }
+        case .contentAdmissionDropped: if admissionDropped < .max { admissionDropped += 1 }
         }
     }
     var detail: String {
-        "content recoveries concealment=\(concealment), native-position=\(nativePosition), enqueue-window=\(enqueueWindow), last=\(lastReason?.rawValue ?? "none")"
+        "content recoveries concealment=\(concealment), native-position=\(nativePosition), enqueue-window=\(enqueueWindow), admission-dropped=\(admissionDropped), last=\(lastReason?.rawValue ?? "none")"
     }
 }
 

@@ -514,6 +514,51 @@ fields, completion callback policy or UI layout changed. Source remains uninstal
 pending review and real-device validation; green offline tests do not establish
 that the user's live crackling or every possible underrun is fixed.
 
+### Review of candidate 67c255b: admission continuity and deterministic fixtures
+
+`admission-all-guards-red.log` reproduced eight runtime assertions: active clock
+conversion failure, buffer-allocation failure and audible-time overflow retained
+the old source mapping and failed fresh native marker recovery; a 4096-frame
+output fixture deferred concealment at 75 ms lead despite approximately 96 ms
+measured scheduling headroom. Allocation failure uses a default-nil internal
+test seam; decoded packet validation and overflow prerequisites remain asserted.
+
+`controlled-admission-red.log` retained those failures and reproduced the same
+mapping loss for a stale packet containing unqueued source frames. The scoped
+fix retires active mapping on the three admission failures and on stale packet
+tails extending beyond the checked queued source end. Fully covered stale
+duplicates remain ignored. Concealment now reserves the larger of 50 ms and
+measured scheduling headroom. Recovery details distinguish admission drops from
+passed native source position; expired native intervals no longer increment the
+generic concealment counter.
+
+CI on 67c255b missed wall-clock fixture wake prerequisites under load. The native
+offline tests now inject a controlled scheduling clock; production defaults to
+the real monotonic clock, and native sample positions and PCM remain actual
+AVAudioEngine output. No live/network timing test was converted. Independent
+clock-only and native-only advancement controls pin the post-enqueue AND gate;
+the latter is a synthetic branch control, not a claim that physical underrun
+occurs in zero elapsed time.
+
+Removing wall waits exposed a near-future native scheduling quantum in the
+already-empty timely-loss fixture. Timely cases now accept two real seed packets
+and retain one known queued packet after rendering the first. Their exact oracle
+includes those 240 known frames, missing-frame silence, and the original bounded
+graph delay. The original 200-packet empty-queue recovery and contiguous boundary
+oracles remain unchanged. The first combined run passed every actual PCM/control
+case; its sole failure was an old formatter literal omitting the new counter,
+not an audio failure. The final `review-admission-green-2.log` run passed all
+57 tests in 11 suites (single-thread, nice-19 build; 0.087 s test execution).
+This includes the precise new recovery-count formatter, native fresh-marker
+recovery for each rejected admission, stale-overlap/covered-duplicate controls,
+large-headroom concealment, and the unchanged expired-content oracles.
+
+Separate bounded audit still required: the late-packet comparison adds 100 ms to
+an unsigned desired render time without checking overflow. Near-maximum timestamp
+reachability was identified by arithmetic inspection, not yet an isolated runtime
+RED; this pass deliberately does not claim to fix or test that separate path.
+No paired acoustic or live crackling success follows from these offline results.
+
 ### Deferred native-window implementation notes
 
 Deployment update: Raj completed normal Keychain approval; the installed `6f`
