@@ -17,6 +17,7 @@ struct FutureHardwareStartupTests {
             samples.append(sample)
         }
         var validatesFutureStart: Bool {
+            // Establish some progress, not playback-rate accuracy or acoustics.
             samples.count >= 5 && samples.allSatisfy { $0 < 0 }
                 && zip(samples, samples.dropFirst()).allSatisfy { pair in pair.0 <= pair.1 }
                 && (samples.last ?? 0) > (samples.first ?? 0)
@@ -36,6 +37,14 @@ struct FutureHardwareStartupTests {
         #expect(!evidence([0, 100, 200, 300, 400]).validatesFutureStart)
         #expect(!evidence([nil, nil, nil, nil, nil]).validatesFutureStart)
         #expect(!evidence([-500, -500, -500, -500, -500]).validatesFutureStart)
+        #expect(!evidence([-500, -400, -300, -200]).validatesFutureStart)
+        #expect(!evidence([-400, -300, -200, -100, 0]).validatesFutureStart)
+        #expect(evidence([-500, -400, -300, -200, -100], observed: 500_000_000).validatesFutureStart)
+        #expect(!evidence([-500, -400, -300, -200, -100], observed: 500_000_001).validatesFutureStart)
+        #expect(evidence([-500, -400, -300, -200, -100], render: 550_000_000).validatesFutureStart)
+        #expect(!evidence([-500, -400, -300, -200, -100], render: 550_000_001).validatesFutureStart)
+        #expect(!evidence([-500, -400, -300, -200, -100], observed: 700_000_000).validatesFutureStart)
+        #expect(!evidence([-500, -400, -300, -200, -100], render: 700_000_000).validatesFutureStart)
         #expect(!evidence([-500, -400, -300, -200, -100], observed: 550_000_000).validatesFutureStart)
         #expect(!evidence([-500, -400, -300, -200, -100], render: 575_000_000).validatesFutureStart)
         #expect(!evidence([-500, -400, -300, -200, -100], render: nil).validatesFutureStart)
@@ -102,12 +111,13 @@ struct FutureHardwareStartupTests {
             try await Task.sleep(nanoseconds: 5_000_000)
         }
         print("HARDWARE_FUTURE_START leadMs=\(Double(expectedStart-began)/1e6) polls=\(prestartPolls) nil=\(prestartNil) min=\(String(describing: prestartMinimum)) max=\(String(describing: prestartMaximum)) preResync=\(prestartRecoveries) finalSample=\(String(describing: finalSample)) finalResync=\(player.syncReport().resyncCount) maxPollGapMs=\(Double(maxPollGap)/1e6)")
+        print("HARDWARE_FUTURE_EARLY count=\(earlyClock.samples.count) first=\(String(describing: earlyClock.samples.first)) last=\(String(describing: earlyClock.samples.last))")
+        try #require(maxPollGap < 100_000_000, "Scheduler stall invalidates this startup-only isolation")
         try #require(prestartPolls >= 10)
-        // Keep the original ten total polls. Five additional safely early,
-        // valid observations exclude a deadline-crossing read without allowing
+        // Keep the original ten total polls. At least five of those same polls
+        // must provide safely early valid observations, excluding a deadline-crossing read without allowing
         // an immediate start or missing native clock to masquerade as success.
         #expect(earlyClock.validatesFutureStart, "Expected advancing negative native samples well before the scheduled start")
-        try #require(maxPollGap < 100_000_000, "Scheduler stall invalidates this startup-only isolation")
         #expect(prestartRecoveries == 0, "Scheduled future start is not a stalled active renderer")
         #expect((finalSample ?? -1) > 0, "Actual hardware player must advance after the future start")
         #expect(player.syncReport().resyncCount == 0)

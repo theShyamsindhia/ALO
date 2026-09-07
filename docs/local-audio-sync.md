@@ -71,7 +71,9 @@ despite its measured recommendation.
 Immediate first-listener founding after the capture grace period is intentional:
 it favors stable shared timing over enrolling a second, nearly simultaneous
 listener whose report arrives later. There is no new enrollment window after
-the first report. Changing that tradeoff requires an explicit policy decision,
+the first post-grace report when no cohort exists yet. Reports received during
+the original capture grace period can still form a multi-listener cohort.
+Changing that tradeoff requires an explicit policy decision,
 not reopening enrollment on expiry or removal. Founder departure does not lower
 the shared delay while playback continues.
 
