@@ -4,6 +4,19 @@ import Testing
 @testable import ALO
 
 struct RenderObservationTests {
+    @Test func contentRecoveryReasonsAreDistinctCumulativeAndExplicitlyUnavailable() throws {
+        var counts = PlaybackContentRecoveryDiagnostics()
+        counts.record(.concealmentDiscontinuity)
+        counts.record(.nativeSourcePositionPassed)
+        counts.record(.enqueueWindowPassed)
+        #expect(counts.concealment == 1 && counts.nativePosition == 1 && counts.enqueueWindow == 1)
+        #expect(counts.lastReason == .enqueueWindowPassed)
+        var recorder = RenderObservationRecorder()
+        recorder.record(.init(observedAtNanos: 1, contentRecovery: counts))
+        #expect(try #require(recorder.snapshot(at: 1)).detail.contains("content recoveries concealment=1, native-position=1, enqueue-window=1, last=enqueue-window-passed"))
+        recorder.record(.init(observedAtNanos: 2))
+        #expect(try #require(recorder.snapshot(at: 2)).detail.contains("content recoveries unavailable"))
+    }
     @Test(arguments: [-12.5, 12.5])
     func phaseAndAppliedRateRemainSignedAndLocal(phase: Double) throws {
         var recorder = RenderObservationRecorder()

@@ -78,3 +78,15 @@ test('an unavailable snapshot between otherwise healthy samples is retained', ()
   const unavailable = { ...row(100.5), eventMessage: 'Dev timing unavailable: A timing snapshot arrived too late to be treated as current.' };
   assert.equal(analyzeRows([...rows(), unavailable]).verdict, 'inconclusive');
 });
+test('verbatim macOS log timestamps with microseconds and UTC offsets normalize and sort', () => {
+  const input = [
+    { ...row(1), timestamp: '2026-09-08 06:06:03.123456+0530' },
+    { ...row(0), timestamp: '2026-09-07 17:36:02.123456-0700' },
+  ];
+  const report = analyzeRows(input, { requiredSeconds: 1 });
+  assert.equal(report.verdict, 'sampled software criteria met');
+  assert.equal(report.firstUTC, '2026-09-08T00:36:02.123Z');
+  assert.equal(report.lastUTC, '2026-09-08T00:36:03.123Z');
+  assert.equal(report.spanSeconds, 1);
+  assert.deepEqual(report.limitations, []);
+});

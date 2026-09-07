@@ -3644,7 +3644,9 @@ final class ALOViewModel: ObservableObject {
         if liveSyncHealth.recentTransitions.last?.outcome != result.outcome {
             // Anonymous, transition-only evidence; never log peer names or content.
             let detail = DiagnosticRedactor.redact(result.detail)
-            syncHealthLogger.notice("Playback timing \(result.outcome.rawValue, privacy: .public): \(detail, privacy: .public)")
+            for line in DevTimingLogChunks.transitionLines(detail: "\(result.outcome.rawValue): \(detail)", sampledAtNanos: sampledAt) {
+                syncHealthLogger.notice("\(line, privacy: .public)")
+            }
         }
         liveSyncHealth.observe(result, at: sampledAt)
     }

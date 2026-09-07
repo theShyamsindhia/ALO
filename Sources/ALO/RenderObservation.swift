@@ -1,6 +1,30 @@
 import Foundation
 import ALOCore
 
+enum PlaybackContentRecoveryReason: String, Sendable {
+    case concealmentDiscontinuity = "concealment-discontinuity"
+    case nativeSourcePositionPassed = "native-source-position-passed"
+    case enqueueWindowPassed = "enqueue-window-passed"
+}
+
+struct PlaybackContentRecoveryDiagnostics: Equatable, Sendable {
+    private(set) var concealment: UInt64 = 0
+    private(set) var nativePosition: UInt64 = 0
+    private(set) var enqueueWindow: UInt64 = 0
+    private(set) var lastReason: PlaybackContentRecoveryReason?
+    mutating func record(_ reason: PlaybackContentRecoveryReason) {
+        lastReason = reason
+        switch reason {
+        case .concealmentDiscontinuity: if concealment < .max { concealment += 1 }
+        case .nativeSourcePositionPassed: if nativePosition < .max { nativePosition += 1 }
+        case .enqueueWindowPassed: if enqueueWindow < .max { enqueueWindow += 1 }
+        }
+    }
+    var detail: String {
+        "content recoveries concealment=\(concealment), native-position=\(nativePosition), enqueue-window=\(enqueueWindow), last=\(lastReason?.rawValue ?? "none")"
+    }
+}
+
 /// Local-only evidence about why the existing estimator accepted/rejected a
 /// poll. These are policy gates, not diagnoses of hardware or acoustic output.
 enum RenderObservationReason: Int, CaseIterable, Sendable {
@@ -50,6 +74,7 @@ struct RenderObservationSample: Sendable, Equatable {
     var signedPhaseErrorMilliseconds: Double?
     /// Actual audio-unit rate after this poll's correction/holdover handling.
     var appliedPlaybackRate: Double?
+    var contentRecovery: PlaybackContentRecoveryDiagnostics?
 
     static func signedAgeMilliseconds(now: UInt64, sample: UInt64) -> Double {
         now >= sample ? Double(now - sample) / 1_000_000 : -Double(sample - now) / 1_000_000
@@ -80,7 +105,8 @@ struct RenderObservation: Sendable, Equatable {
             return count == 0 ? nil : "\(reason.label)=\(count)"
         }.joined(separator: ",")
         let rate = sample.appliedPlaybackRate.map { String(format: "%.6f", $0) } ?? "unavailable"
-        return "render observation \(sample.reason.label), age \(number(observationAgeMilliseconds)) ms, poll/observed render ages \(number(sample.renderAgeAtPollMilliseconds))/\(number(sample.renderAgeAtObservationMilliseconds)) ms, packet age \(number(sample.packetAgeMilliseconds)) ms, anchor margin \(number(sample.anchorMarginMilliseconds)) ms, sample delta \(sampleTimeDelta.map(String.init) ?? "unavailable"), player Hz \(number(sample.sampleRate)), output buffer/safety \(number(sample.outputBufferMilliseconds))/\(number(sample.outputSafetyMilliseconds)) ms, permitted future lead \(sample.permittedFutureLeadMilliseconds.map { number($0) + " ms" } ?? "unavailable (strict 0)"), signed controller phase \(number(sample.signedPhaseErrorMilliseconds)) ms, applied playback rate \(rate), polls {\(counters)}"
+        let recovery = sample.contentRecovery?.detail ?? "content recoveries unavailable"
+        return "render observation \(sample.reason.label), age \(number(observationAgeMilliseconds)) ms, poll/observed render ages \(number(sample.renderAgeAtPollMilliseconds))/\(number(sample.renderAgeAtObservationMilliseconds)) ms, packet age \(number(sample.packetAgeMilliseconds)) ms, anchor margin \(number(sample.anchorMarginMilliseconds)) ms, sample delta \(sampleTimeDelta.map(String.init) ?? "unavailable"), player Hz \(number(sample.sampleRate)), output buffer/safety \(number(sample.outputBufferMilliseconds))/\(number(sample.outputSafetyMilliseconds)) ms, permitted future lead \(sample.permittedFutureLeadMilliseconds.map { number($0) + " ms" } ?? "unavailable (strict 0)"), signed controller phase \(number(sample.signedPhaseErrorMilliseconds)) ms, applied playback rate \(rate), polls {\(counters)}, \(recovery)"
     }
 }
 

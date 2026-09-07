@@ -375,14 +375,17 @@ playback and Bluetooth validation remain pending.
 A native Logger probe also reproduced truncation of the old whole-detail dynamic
 log value near 1 KB, so previous line tails cannot establish absent rate/counter
 values. Dev timing samples now use UTF-8-safe numbered chunks: 640-byte payloads,
-under 800 bytes including the same monotonic sample ID and `part=index/count`
-framing. The production transition logger is unchanged. The exact-helper native
+under 800 bytes including monotonic time, a per-snapshot UUID and `part=index/count`
+framing. Production transition logs now use the same bounded framing while
+remaining transition-only; dev logs remain per-sample. The earlier exact-helper native
 probe preserved all 49 messages for numeric and Unicode payloads (maximum 704
 bytes per line): `/tmp/alo-log-limit.278o5f/chunks-stream.ndjson`.
-Capture consumers must group parts by Mac/process and monotonic sample ID and
+Capture consumers must group parts by Mac/process and snapshot UUID and
 require exactly every index before interpreting the reassembled sample; missing,
 duplicate, or mixed-snapshot parts invalidate that sample rather than imply a
-missing field. Retain the original parts with the reconstructed evidence.
+missing field. Verify identical kind, monotonic time and count across the parts.
+The UUID separates independently collected snapshots even when their timestamps
+coincide. Retain the original parts with the reconstructed evidence.
 The final `dev-timing-chunks-green.log` run passed 71 tests in 12 suites,
 including Unicode sizing/reassembly and incomplete-capture rejection.
 
@@ -393,6 +396,123 @@ the actual route's buffer, rate, safety, presentation latency, future-host lead
 distribution and gate counts during startup, steady playback and route changes,
 then perform the paired playback/listening test. Do not claim all earphones fixed
 from a Mac-speaker production-player test.
+
+### Live choppy-audio incident — 2026-09-07
+
+The longer paired capture failed; the earlier steady interval is not a completed
+sync pass. The numeric analyzer flagged the incident before the user's choppy-audio
+report. Preserve `/tmp/alo-paired-sync-6f.thDvOO/raj-stream.ndjson` and
+`/tmp/alo-live-incident.mnK6rb/raj-stream.ndjson`. Times below are UTC:
+
+- 17:46:25.883: local timing snapshot exceeded its 2.5-second timeout;
+  17:46:29.204: its result was rejected as late.
+- 17:46:30.252: first observed increase to 22 late packets / 1 resync, after
+  an 8.066-second gap between monotonic timing samples. Subsequent 2.6–4.7-second
+  gaps accompanied further counter bursts.
+- 17:47:58.800: 1270 late / 28 resyncs despite a small fresh render residual.
+  A small post-recovery residual does not establish uninterrupted audio.
+- 17:48:59: only the agent-owned test build was cancelled: swift-test PID 54747,
+  driver 54829, frontend 54834. It began about 17:45:16 and was still compiling
+  tests with `-num-threads 14`; no tests from that retry had begun. The frontend's
+  instantaneous CPU readings were 8.3% at 17:48:18 and 17.3% immediately before
+  cancellation. This was controlled removal of a load confound, not an audio fix.
+- 17:49:16.264: another increase to 1484 late / 34 resyncs; those counters then
+  remained unchanged through at least 17:50:18. Temporal improvement does not
+  prove build load was the root cause. Installed Dev PID 29346 was not changed.
+
+The actual-process stack at 17:48:38.615 is stronger evidence of the immediate
+blocking mechanism: `/tmp/alo-live-incident.mnK6rb/raj-process-stack.txt` shows
+38 sampled stacks in `scheduleBuffer → GetAttachAndEngineLock → sleep` and
+26 in `lastRenderTime → GetAttachAndEngineLock → sleep` on the serial secure
+playback queue (lines 975–1020). Another 98 stacks traverse AVAudioPlayerNode
+buffer-command destruction and output/device-latency queries (lines 652 onward).
+These are stack sample counts, not independently measured delay durations. They
+establish engine-lock contention during this incident, not its initiating cause
+or proof that delayed completion accounting alone caused every lost deadline.
+
+Next regression work holds real playback completion delivery deterministically
+to test bounded scheduling/accounting. Its default-nil injection must preserve
+production behavior. No new builds are allowed during the active capture; resume
+only after coordination, with bounded `-j 2` rather than another 14-thread build.
+The four review fixes remain uncommitted/unverified: logging RED reproduced three
+runtime assertions; the first GREEN attempt hit an offline fixture precondition;
+the corrected-fixture retry was cancelled before testing. Do not label it GREEN
+or push these fixes until the resumed checks pass. UI work remains deferred.
+
+### Native content-timeline regressions and pending fixes
+
+The actual production-player offline regression reproduced expired concealment:
+no-gap marker 1 ms; 200 missing packets produced a 1001 ms marker delay while
+late/resync counters remained zero. The useful RED log is
+`/tmp/alo-underrun-probe.5kSv5c/production-concealment-zero-tolerance.log`;
+earlier attempts that missed their arrival deadline were fixture failures, not RED.
+The fix tracks scheduled source-frame/capture ends, reanchors expired or ambiguous
+missing ranges, bounds silence work to ten packets per drain, checks capacity
+per silence and removes recursive backfill. It preserves timely one-packet loss
+and modular sequence ordering. This changes neither callback type nor queue size.
+
+The low-priority single-thread run
+`/tmp/alo-underrun-probe.5kSv5c/concealment-nice-single-thread.log` verified the
+expired fix with 0/1/200 gaps at normal and wrapping sequences, including a fresh
+real marker after intentional reanchoring. The four prior review fixes also
+passed their controls. The entire run was NOT green: 50 of 51 tests passed;
+the separate contiguous-packet case meaningfully failed with 61 ms content delay,
+arrival below the old 100 ms threshold, and zero late/resync counts.
+
+A source-relative native sample-position precheck is now being added for that
+contiguous case. It must be verified with a fresh-packet recovery oracle. It is
+not an atomic guarantee against an engine-lock wait during the subsequent
+schedule call; a separate real-native test will exercise that check/enqueue race
+before any post-check or scheduling change is accepted. None of these offline
+markers is an acoustic measurement, and no full sync pass or installation follows
+from these intermediate results. See `docs/sync-incident-2026-09-07.md` for the
+continuing real-device incident, including direct concealment/engine-lock stacks.
+
+The subsequent `enqueue-race-mutation-red-2.log` run established two more real
+failures: changing target delay, clock offset, or measured output latency bypassed
+the near-deadline guard despite a passed native source position; and an injected
+60–65 ms admission/enqueue delay shifted actual native markers by about 58.5 ms
+at rates 0.99/1/1.01 while all three no-delay controls remained about 1 ms. The
+injection advances the real offline engine but is not an engine-lock reproduction.
+The same run caught a new boundary regression: equality with the next source
+frame is valid. The guard must use strictly greater, with exact-equality and
+one-frame-past controls, rather than treating equality as an underrun.
+
+Verified targeted coverage now includes an unconditional valid native source-position
+precheck (mutable deadlines cannot waive it) and a conservative post-enqueue
+check: the entire admission-through-enqueue interval must exceed one packet
+duration AND native position must be past the entire admitted packet window.
+This avoids resetting merely because normal audio starts playing during a call.
+It is not an atomic placement proof, does not cover every sub-packet race, and
+does not fix the separate initial-start scheduling race. No queue sizes or
+completion callback types have been changed.
+
+The final `content-recovery-green.log` run passed all 54 tests in 10 suites
+(192.74 s single-thread, nice-19 build; 8.211 s tests). The earlier
+`content-continuity-green.log` was not fully green: four 9/10-loss normal/wrap
+cases exposed repeated application of the first-missing-frame admission window.
+Admission is now once per contiguous gap within one drain, reset on a real packet
+or new drain. Every silence still checks native position, expiry, exact source
+frames, capacity and the shared ten-packet work limit.
+
+Actual offline PCM controls now preserve 1/9/10 missing packets as 5/45/50 ms
+silence plus approximately 1 ms graph delay, with no resync, including sequence
+wrap. Both 200-packet expired cases recover explicitly and render a newly
+received packet approximately 1 ms after the fresh reference; they do not replay
+the old one-second backfill. Contiguous one-frame/60-ms underruns and mutable
+target/offset/output-timing cases trigger recovery before fresh content. Injected
+enqueue-delay cases at rates 0.99/1/1.01 recover and render fresh markers within
+1–1.625 ms of the new reference; their no-delay controls remain approximately
+1 ms from the original source reference. These are offline marker measurements,
+not paired acoustic alignment, and the reference intentionally changes on reset.
+
+Local observation details now include bounded, saturating recovery counts and the
+last reason: concealment discontinuity, passed native source position, or passed
+enqueue window. Actual production-path tests assert these distinct counts;
+missing observations explicitly report recovery telemetry unavailable. No wire
+fields, completion callback policy or UI layout changed. Source remains uninstalled
+pending review and real-device validation; green offline tests do not establish
+that the user's live crackling or every possible underrun is fixed.
 
 ### Deferred native-window implementation notes
 
