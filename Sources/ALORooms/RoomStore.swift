@@ -208,7 +208,7 @@ public final class RoomStore {
             + [latestPlayback, latestVideo].compactMap { $0 }
             + Array(chats)
         guard let data = try? JSONEncoder().encode(compacted) else { return }
-        try? data.write(to: eventsURL(roomID: roomID), options: .atomic)
+        try? writeAtomically(data, to: eventsURL(roomID: roomID))
     }
 
     public func loadRoomStateDocument(roomID: String) -> Data? {
@@ -242,7 +242,7 @@ public final class RoomStore {
         for (roomID, write) in writes where !forgottenRoomIDs.contains(roomID) {
             if let events = write.events { writeEvents(events, roomID: roomID) }
             if let document = write.document {
-                try? document.write(to: roomStateURL(roomID: roomID), options: .atomic)
+                try? writeAtomically(document, to: roomStateURL(roomID: roomID))
             }
         }
     }
@@ -264,7 +264,17 @@ public final class RoomStore {
         let updatedIDs = Set(rooms.map(\.id))
         records += try storedRecords().filter { !updatedIDs.contains($0.id) && !removingRoomIDs.contains($0.id) }
         let data = try JSONEncoder().encode(records)
-        try data.write(to: fileURL, options: .atomic)
+        try writeAtomically(data, to: fileURL)
+    }
+
+    /// Custom namespaces may not exist on first launch. Atomic writes create
+    /// the destination file, not its parents; prepare only the parent directory
+    /// for every write path, including state saved before channel metadata.
+    /// Errors deliberately propagate to metadata callers so startup can retry.
+    private func writeAtomically(_ data: Data, to destination: URL) throws {
+        try FileManager.default.createDirectory(
+            at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: destination, options: .atomic)
     }
 
     private func storedRecords() throws -> [StoredRoom] {

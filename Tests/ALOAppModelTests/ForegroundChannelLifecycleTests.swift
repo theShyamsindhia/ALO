@@ -4,6 +4,47 @@ import Testing
 @Suite("Foreground channel lifecycle")
 @MainActor
 struct ForegroundChannelLifecycleTests {
+    @Test func repeatedForegroundActivationPreservesManualJoin() async throws {
+        let lifecycle = ForegroundChannelLifecycle()
+        await lifecycle.activate { _ in }.value
+        let intent = try #require(lifecycle.beginJoin())
+        var automaticReconnects = 0
+        // Permission sheets and Control Center pass through inactive without suspend.
+        await lifecycle.activate { _ in automaticReconnects += 1 }.value
+        #expect(lifecycle.accepts(intent))
+        #expect(automaticReconnects == 0)
+    }
+
+    @Test func explicitAccountRefreshRunsWithoutInvalidatingJoin() async throws {
+        let lifecycle = ForegroundChannelLifecycle()
+        await lifecycle.activate { _ in }.value
+        let intent = try #require(lifecycle.beginJoin())
+        var refreshes = 0
+        await lifecycle.activate(refreshIfForeground: true) { activation in
+            #expect(lifecycle.accepts(activation))
+            refreshes += 1
+        }.value
+        #expect(refreshes == 1)
+        #expect(lifecycle.accepts(intent))
+        lifecycle.suspend()
+        #expect(!lifecycle.accepts(intent))
+    }
+
+    @Test func repeatedActivationDoesNotCancelAccountSetup() async throws {
+        let lifecycle = ForegroundChannelLifecycle()
+        var resume: CheckedContinuation<Void, Never>?
+        var completions = 0
+        let task = lifecycle.activate { activation in
+            await withCheckedContinuation { resume = $0 }
+            if !Task.isCancelled, lifecycle.accepts(activation) { completions += 1 }
+        }
+        while resume == nil { await Task.yield() }
+        await lifecycle.activate { _ in Issue.record("Duplicate activation ran setup") }.value
+        try #require(resume).resume()
+        await task.value
+        #expect(completions == 1)
+    }
+
     @Test func suspendBeforeQueuedActivationDoesNotStartWork() async {
         let lifecycle = ForegroundChannelLifecycle()
         var starts = 0

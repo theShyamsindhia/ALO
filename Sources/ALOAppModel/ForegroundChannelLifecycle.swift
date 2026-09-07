@@ -21,8 +21,16 @@ public final class ForegroundChannelLifecycle {
     deinit { activationTask?.cancel() }
 
     @discardableResult
-    public func activate(_ operation: @escaping @MainActor (Activation) async -> Void) -> Task<Void, Never> {
-        invalidatePendingWork()
+    public func activate(refreshIfForeground: Bool = false,
+                         _ operation: @escaping @MainActor (Activation) async -> Void) -> Task<Void, Never> {
+        // Inactive -> active (e.g. a permission sheet) is not a new foreground
+        // session. Neither cancel the user's join nor reconnect an older channel.
+        if isForeground {
+            guard refreshIfForeground else { return Task {} }
+            activationTask?.cancel()
+        } else {
+            invalidatePendingWork()
+        }
         isForeground = true
         let activation = Activation(generation: activationGeneration)
         let task = Task { [weak self] in
