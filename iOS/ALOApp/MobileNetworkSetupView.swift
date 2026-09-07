@@ -159,7 +159,22 @@ struct MobileNetworkSetupView: View {
             onImportNetwork: openInvitationImport,
             onExportPublicIdentity: { prepareExport(recovery: false, filename: "ALO public identity.txt") {
                 try account.publicIdentityData()
-            } })
+            } },
+            nearbyNetworks: account.nearbyNetworks.map { .init(id: $0.id, name: $0.name, status: account.joinRequestStatus[$0.id]) },
+            joinRequests: account.pendingJoinRequests.map { request in
+                .init(id: request.id, name: request.displayName,
+                      networkName: account.networks.first(where: { $0.id == request.networkID })?.name ?? "your network")
+            }, isBusy: busy,
+            onJoin: { id in Task { @MainActor in
+                do { try await account.requestToJoin(networkID: id) }
+                catch is CancellationError { }
+                catch { errorMessage = NetworkAccountModel.describe(error) }
+            } },
+            onApprove: { id in perform { try await account.approveJoinRequest(id: id) } },
+            onDecline: { id in account.rejectJoinRequest(id: id) },
+            nearbyError: account.nearbyNetworkError,
+            onRetryNearby: { Task { @MainActor in account.stopNearbyNetworking(); await account.startNearbyNetworking() } },
+            onCancelJoin: { id in account.cancelJoinRequest(networkID: id) })
     }
 
     @ViewBuilder private func destination(_ route: Route) -> some View {

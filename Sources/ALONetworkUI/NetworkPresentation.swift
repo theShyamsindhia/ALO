@@ -1,5 +1,23 @@
 import SwiftUI
 
+public struct ALONearbyNetworkSummary: Identifiable, Sendable {
+    public let id: UUID
+    public let name: String
+    public let status: String?
+    public init(id: UUID, name: String, status: String? = nil) {
+        self.id = id; self.name = name; self.status = status
+    }
+}
+
+public struct ALOJoinRequestSummary: Identifiable, Sendable {
+    public let id: UUID
+    public let name: String
+    public let networkName: String
+    public init(id: UUID, name: String, networkName: String) {
+        self.id = id; self.name = name; self.networkName = networkName
+    }
+}
+
 /// Display values only. The coordinator must verify membership and signatures before
 /// supplying networks or channels. These values never authorize access.
 public struct ALONetworkSummary: Identifiable, Hashable, Sendable {

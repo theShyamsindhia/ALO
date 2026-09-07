@@ -28,6 +28,15 @@ public final class NetworkAccountModel: ObservableObject {
     @Published public private(set) var networkRecordDiagnostics = [NetworkRepository.RecordDiagnostic]()
     @Published public private(set) var additionalNetworkRecordDiagnosticCount = 0
     @Published public private(set) var errorMessage: String?
+    @Published public private(set) var nearbyNetworks = [NearbyNetwork]()
+    @Published public private(set) var pendingJoinRequests = [NearbyNetworkJoinRequest]()
+    @Published public private(set) var joinRequestStatus = [UUID: String]()
+    @Published public private(set) var nearbyNetworkError: String?
+    private var nearbyService: NearbyNetworkService?
+    private var nearbyIdentityID: String?
+    private var nearbyGeneration = UUID()
+    private var joinRequestTokens = [UUID: UUID]()
+    private var discoveredNetworks = [NearbyNetwork]()
     @Published public var displayName = ""
     @Published public var selectedNetworkID: String? {
         didSet {
@@ -165,6 +174,8 @@ public final class NetworkAccountModel: ObservableObject {
                 accessLossNotice = nil
             }
             networks = visible
+            nearbyService?.start(ownedNetworks: networks)
+            updateNearbyNetworks()
             if !networks.contains(where: { $0.id.uuidString == selectedNetworkID }) {
                 updatingSelection = true
                 selectedNetworkID = networks.first?.id.uuidString
@@ -213,6 +224,84 @@ public final class NetworkAccountModel: ObservableObject {
     public func publicIdentityData() throws -> Data {
         try NetworkMembershipRequest(identity: requireIdentity().publicIdentity).encoded()
     }
+
+    public func startNearbyNetworking() async {
+        guard identityReady, let identity else { return }
+        do {
+            if nearbyIdentityID != identity.publicIdentity.userID {
+                stopNearbyNetworking()
+                let expectedID = identity.publicIdentity.userID
+                let generation = nearbyGeneration
+                nearbyService = try NearbyNetworkService(user: identity, displayName: displayName,
+                    changed: { [weak self] found in Task { @MainActor in
+                        guard let self, self.nearbyIdentityID == expectedID, self.nearbyGeneration == generation else { return }
+                        self.discoveredNetworks = found; self.updateNearbyNetworks()
+                    } }, requestsChanged: { [weak self] requests in Task { @MainActor in
+                        guard let self, self.nearbyIdentityID == expectedID, self.nearbyGeneration == generation else { return }
+                        self.pendingJoinRequests = requests
+                    } }, failed: { [weak self] message in Task { @MainActor in
+                        guard let self, self.nearbyIdentityID == expectedID, self.nearbyGeneration == generation else { return }
+                        self.nearbyNetworkError = message
+                    } })
+                nearbyIdentityID = expectedID
+            }
+            nearbyService?.start(ownedNetworks: networks)
+            updateNearbyNetworks()
+        } catch { nearbyNetworkError = Self.describe(error) }
+    }
+
+    public func stopNearbyNetworking() {
+        nearbyGeneration = UUID()
+        nearbyIdentityID = nil; nearbyService?.stop(); nearbyService = nil
+        discoveredNetworks = []; nearbyNetworks = []; pendingJoinRequests = []
+        joinRequestTokens = [:]
+        nearbyNetworkError = nil; joinRequestStatus = [:]
+    }
+
+    private func updateNearbyNetworks() {
+        let memberIDs = Set(networks.map(\.id))
+        let retained = nearbyNetworks.filter { joinRequestStatus[$0.id] == "Waiting for approval" }
+        let foundIDs = Set(discoveredNetworks.map(\.id))
+        nearbyNetworks = (discoveredNetworks + retained.filter { !foundIDs.contains($0.id) }).filter { !memberIDs.contains($0.id) }
+    }
+
+    public func requestToJoin(networkID: UUID) async throws {
+        let identity = try requireIdentity(), token = identityGeneration
+        guard let service = nearbyService else { throw NearbyNetworkError.unavailable }
+        guard joinRequestStatus[networkID] != "Waiting for approval" else { return }
+        let requestToken = UUID()
+        joinRequestTokens[networkID] = requestToken
+        joinRequestStatus[networkID] = "Waiting for approval"
+        do {
+            let invitation = try await service.request(networkID: networkID)
+            try requireCurrentIdentity(identity, generation: token)
+            guard nearbyService === service, joinRequestTokens[networkID] == requestToken else { throw CancellationError() }
+            _ = try await importInvitation(data: invitation.encoded())
+            joinRequestStatus[networkID] = "Joined"
+        } catch {
+            if nearbyService === service, joinRequestTokens[networkID] == requestToken {
+                joinRequestStatus[networkID] = error is CancellationError ? "Cancelled" : Self.describe(error)
+            }
+            throw error
+        }
+    }
+
+    public func cancelJoinRequest(networkID: UUID) {
+        joinRequestTokens[networkID] = nil
+        nearbyService?.cancelRequest(networkID: networkID)
+        joinRequestStatus[networkID] = "Cancelled"
+    }
+
+    public func approveJoinRequest(id: UUID) async throws {
+        guard let request = pendingJoinRequests.first(where: { $0.id == id }), let service = nearbyService else {
+            throw NearbyNetworkError.unavailable
+        }
+        let invitation = try await addMember(data: NetworkMembershipRequest(identity: request.identity).encoded(),
+            networkID: request.networkID)
+        service.respond(id: id, invitation: invitation)
+    }
+
+    public func rejectJoinRequest(id: UUID) { nearbyService?.respond(id: id, invitation: nil) }
 
     public func addMember(data: Data, networkID: UUID) async throws -> NetworkInvitation {
         let identity = try requireIdentity(), token = identityGeneration
@@ -324,6 +413,7 @@ public final class NetworkAccountModel: ObservableObject {
     }
 
     private func clearLoadedIdentity() {
+        stopNearbyNetworking()
         identityGeneration &+= 1
         identityReady = false
         identity = nil

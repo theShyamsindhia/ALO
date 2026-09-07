@@ -56,11 +56,15 @@ inert; received files, Downloads and recovery files are never deleted by setup.
 Download the latest disk image, drag **ALO** into **Applications**, and open it.
 If you built from source, open `dist/ALO.app`:
 
-- Create an identity, or restore one using its recovery file. Save the recovery
-  file privately and acknowledge its warning.
-- Create a network, or send its owner your **public identity**. After verifying
-  the fingerprint, the owner grants membership and sends a recipient-bound invitation.
-  Verify the owner's fingerprint before importing it. Never send your recovery file as an invitation.
+- Enter your name and continue. ALO creates your identity behind the scenes.
+  Save your recovery key privately; use Restore if you already have one.
+- Choose a nearby network and click **Join**. Its owner can approve or decline
+  the request directly in ALO—no copying identity documents or invitation JSON.
+  The owner must have ALO running and be reachable to approve new members.
+  Or choose **Create network** to start your own, with a Main channel ready to use.
+- Nearby names are discovery hints, not verified real-world identities. Only
+  approve people you expect. Manual verified invitations remain available for
+  trusted exchanges; never send your recovery key as an invitation.
 - Select and join a channel. The last joined channel can reopen on the next launch
   only if your current identity still has access.
 - Broadcast media, talk, chat or send files. Leaving does not delete the network.

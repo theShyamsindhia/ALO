@@ -33,7 +33,7 @@ struct MacNetworkSetupView: View {
         VStack(spacing: 0) {
             HStack {
                 Text("ALO").font(.title3.weight(.bold))
-                Text(account.identityReady ? "Networks" : "Identity setup").foregroundStyle(.secondary)
+                Text(account.identityReady ? "Networks" : "Set up ALO").foregroundStyle(.secondary)
                 Spacer()
                 if account.identityReady {
                     Button { exportRecovery() } label: { Image(systemName: "key").frame(width: 40, height: 40) }
@@ -137,8 +137,24 @@ struct MacNetworkSetupView: View {
             ALONetworkSidebar(networks: account.networks.map(summary), selectedNetworkID: $account.selectedNetworkID,
                 identityName: account.displayName, identityFingerprint: account.identity?.publicIdentity.userID ?? "",
                 onCreateNetwork: { present(.createNetwork) }, onImportNetwork: { present(.importNetwork) },
-                onExportPublicIdentity: { perform { try savePublic(try account.publicIdentityData(), name: "ALO-public-identity.json") } })
-                .frame(width: 250)
+                onExportPublicIdentity: { perform { try savePublic(try account.publicIdentityData(), name: "ALO-public-identity.json") } },
+                nearbyNetworks: account.nearbyNetworks.map { .init(id: $0.id, name: $0.name, status: account.joinRequestStatus[$0.id]) },
+                joinRequests: account.pendingJoinRequests.map { request in
+                    .init(id: request.id, name: request.displayName,
+                          networkName: account.networks.first(where: { $0.id == request.networkID })?.name ?? "your network")
+                }, isBusy: busy,
+                onJoin: { id in Task { @MainActor in
+                    do { try await account.requestToJoin(networkID: id) }
+                    catch is CancellationError { }
+                    catch { self.error = NetworkAccountModel.describe(error) }
+                } },
+                onApprove: { id in performAsync { try await account.approveJoinRequest(id: id) } },
+                onDecline: { id in account.rejectJoinRequest(id: id) },
+                nearbyError: account.nearbyNetworkError,
+                onRetryNearby: { Task { @MainActor in account.stopNearbyNetworking(); await account.startNearbyNetworking() } },
+                onCancelJoin: { id in account.cancelJoinRequest(networkID: id) })
+                .frame(minWidth: 250, idealWidth: 280, maxWidth: account.networks.isEmpty ? .infinity : 300)
+            if !account.networks.isEmpty {
             Divider()
             VStack(spacing: 0) {
                 if let network = account.selectedNetwork {
@@ -162,13 +178,19 @@ struct MacNetworkSetupView: View {
                     ContentUnavailableView {
                         Label("Your networks live here", systemImage: "network")
                     } description: {
-                        Text("Create a network with a Main channel, or import an invitation issued to your identity. Old Spaces aren't carried into this new system.")
+                        Text("Choose a network to see its channels.")
                     } actions: {
                         Button("Create network") { present(.createNetwork) }.buttonStyle(.borderedProminent)
-                        Button("Import invitation") { present(.importNetwork) }
                     }
                     if let error = error ?? account.errorMessage ?? model.errorMessage { Text(error).foregroundStyle(.red).padding() }
                 }
+            }
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
+            if account.networks.isEmpty, let message = error ?? account.errorMessage ?? model.errorMessage {
+                Label(message, systemImage: "exclamationmark.triangle")
+                    .font(.callout).padding().frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
@@ -270,7 +292,7 @@ struct MacNetworkSetupView: View {
         perform {
             guard let identity = account.identity else { throw NetworkAccountError.setupRequired }
             let panel = NSSavePanel()
-            panel.title = "Save your unencrypted ALO identity"
+            panel.title = "Save your recovery key"
             panel.message = "Anyone with this file can impersonate you. Save it privately."
             panel.nameFieldStringValue = "ALO-identity-\(identity.publicIdentity.userID.suffix(8)).txt"
             panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first

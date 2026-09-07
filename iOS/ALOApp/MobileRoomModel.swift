@@ -211,6 +211,8 @@ import ALOAppModel
         guard !Task.isCancelled, activationLifecycle.accepts(activation) else { return }
         await account.resume()
         guard !Task.isCancelled, activationLifecycle.accepts(activation), account.identityReady else { return }
+        if !isTemporarySimulatorSession { await account.startNearbyNetworking() }
+        guard !Task.isCancelled, activationLifecycle.accepts(activation) else { return }
         if !started {
             started = true
             do {
@@ -329,6 +331,7 @@ import ALOAppModel
         voice.endOpenLine()
         let canContinue = canContinueBackgroundPlayback
         activationLifecycle.suspend()
+        account.stopNearbyNetworking()
         backgroundPlayback = canContinue
         synchronizeVideo()
         if canContinue {

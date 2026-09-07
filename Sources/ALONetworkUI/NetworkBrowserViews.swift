@@ -8,6 +8,15 @@ public struct ALONetworkSidebar: View {
     private let onCreateNetwork: () -> Void
     private let onImportNetwork: () -> Void
     private let onExportPublicIdentity: () -> Void
+    private let nearbyNetworks: [ALONearbyNetworkSummary]
+    private let joinRequests: [ALOJoinRequestSummary]
+    private let isBusy: Bool
+    private let onJoin: (UUID) -> Void
+    private let onApprove: (UUID) -> Void
+    private let onDecline: (UUID) -> Void
+    private let nearbyError: String?
+    private let onRetryNearby: () -> Void
+    private let onCancelJoin: (UUID) -> Void
 
     public init(
         networks: [ALONetworkSummary],
@@ -16,7 +25,16 @@ public struct ALONetworkSidebar: View {
         identityFingerprint: String,
         onCreateNetwork: @escaping () -> Void,
         onImportNetwork: @escaping () -> Void,
-        onExportPublicIdentity: @escaping () -> Void
+        onExportPublicIdentity: @escaping () -> Void,
+        nearbyNetworks: [ALONearbyNetworkSummary] = [],
+        joinRequests: [ALOJoinRequestSummary] = [],
+        isBusy: Bool = false,
+        onJoin: @escaping (UUID) -> Void = { _ in },
+        onApprove: @escaping (UUID) -> Void = { _ in },
+        onDecline: @escaping (UUID) -> Void = { _ in },
+        nearbyError: String? = nil,
+        onRetryNearby: @escaping () -> Void = {},
+        onCancelJoin: @escaping (UUID) -> Void = { _ in }
     ) {
         self.networks = networks
         _selectedNetworkID = selectedNetworkID
@@ -25,6 +43,10 @@ public struct ALONetworkSidebar: View {
         self.onCreateNetwork = onCreateNetwork
         self.onImportNetwork = onImportNetwork
         self.onExportPublicIdentity = onExportPublicIdentity
+        self.nearbyNetworks = nearbyNetworks; self.joinRequests = joinRequests
+        self.isBusy = isBusy; self.onJoin = onJoin; self.onApprove = onApprove; self.onDecline = onDecline
+        self.nearbyError = nearbyError; self.onRetryNearby = onRetryNearby
+        self.onCancelJoin = onCancelJoin
     }
 
     public var body: some View {
@@ -37,6 +59,21 @@ public struct ALONetworkSidebar: View {
             .padding(16)
 
             List(selection: $selectedNetworkID) {
+                if !joinRequests.isEmpty {
+                    Section("Requests to join") {
+                        ForEach(joinRequests) { request in
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(request.name).fontWeight(.medium)
+                                Text("Wants to join \(request.networkName). Approve only if you recognize this person.")
+                                    .font(.callout).foregroundStyle(.secondary)
+                                HStack {
+                                    Button("Approve") { onApprove(request.id) }.buttonStyle(.borderedProminent)
+                                    Button("Decline") { onDecline(request.id) }.buttonStyle(.bordered)
+                                }.frame(minHeight: ALONetworkMetrics.actionHeight).disabled(isBusy)
+                            }.padding(.vertical, 4)
+                        }
+                    }
+                }
                 Section("Your networks") {
                     ForEach(networks) { network in
                         HStack(spacing: 10) {
@@ -58,19 +95,58 @@ public struct ALONetworkSidebar: View {
                     }
                     if networks.isEmpty {
                         VStack(alignment: .leading, spacing: 6) {
-                            Text("Your first network starts here.").fontWeight(.medium)
-                            Text("Create a network for your group, or import an invitation from its owner.")
+                            Text("Find your people.").fontWeight(.medium)
+                            Text("Join a nearby network, or create one for your group.")
                                 .foregroundStyle(.secondary)
                         }.padding(.vertical, 6)
+                    }
+                }
+                Section("Nearby networks") {
+                    if let nearbyError {
+                        ALOInlineError(message: nearbyError)
+                        Button("Try again", action: onRetryNearby)
+                            .frame(minHeight: ALONetworkMetrics.actionHeight)
+                    }
+                    ForEach(nearbyNetworks) { network in
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(network.name).fontWeight(.medium)
+                            if let status = network.status {
+                                Text(status).font(.callout).foregroundStyle(.secondary)
+                            }
+                            if network.status == "Waiting for approval" {
+                                Button("Cancel request") { onCancelJoin(network.id) }
+                                    .buttonStyle(.bordered)
+                                    .frame(minHeight: ALONetworkMetrics.actionHeight)
+                                    .accessibilityLabel("Cancel request to join \(network.name)")
+                            } else {
+                            Button("Join") { onJoin(network.id) }
+                                .buttonStyle(.bordered)
+                                .frame(minHeight: ALONetworkMetrics.actionHeight)
+                                .disabled(isBusy)
+                                .accessibilityLabel("Join \(network.name)")
+                            }
+                        }
+                    }
+                    if nearbyNetworks.isEmpty {
+                        Text("Nearby networks appear here while their owner has ALO open. Connect to the same local network.")
+                            .font(.callout).foregroundStyle(.secondary)
+                    } else {
+                        Text("The owner approves your request before you can enter.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 Section {
                     Button(action: onCreateNetwork) {
                         ALOActionLabel(title: "Create network", systemImage: "plus")
                     }.accessibilityIdentifier("ALO.Network.Create")
-                    Button(action: onImportNetwork) {
-                        ALOActionLabel(title: "Import invitation", systemImage: "square.and.arrow.down")
-                    }.accessibilityIdentifier("ALO.Network.Import")
+                    DisclosureGroup("Other ways to connect") {
+                        Button(action: onImportNetwork) {
+                            ALOActionLabel(title: "Import invitation", systemImage: "square.and.arrow.down")
+                        }.accessibilityIdentifier("ALO.Network.Import")
+                        Button(action: onExportPublicIdentity) {
+                            ALOActionLabel(title: "Share public identity…", systemImage: "square.and.arrow.up")
+                        }.accessibilityIdentifier("ALO.Identity.SharePublic")
+                    }
                 }
             }
             .listStyle(.sidebar)
@@ -79,12 +155,6 @@ public struct ALONetworkSidebar: View {
             Divider()
             VStack(alignment: .leading, spacing: 8) {
                 Label(identityName, systemImage: "person.crop.circle").fontWeight(.medium)
-                ALOFingerprint(value: identityFingerprint)
-                Button(action: onExportPublicIdentity) {
-                    ALOActionLabel(title: "Share public identity…", systemImage: "square.and.arrow.up")
-                }
-                .help("Send your public identity to a network owner so they can add you.")
-                .accessibilityIdentifier("ALO.Identity.SharePublic")
             }
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)

@@ -479,6 +479,7 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     private var floatingBarObserver: AnyCancellable?
     private var walkieBarObserver: AnyCancellable?
     private var setupLayoutObserver: AnyCancellable?
+    private var networkJoinObserver: AnyCancellable?
     private var terminationSignalSources = [DispatchSourceSignal]()
     private var setupWindowFrame: NSRect?
     private var setupTransitionGeneration = 0
@@ -586,6 +587,22 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
         .sink { [weak self] _ in
             DispatchQueue.main.async { self?.resizeSetupWindow(animated: true) }
         }
+
+        networkJoinObserver = model.account.$pendingJoinRequests
+            .map { Set($0.map(\.id)) }.removeDuplicates()
+            .sink { [weak self] requests in
+                guard !requests.isEmpty else { return }
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, !self.model.account.pendingJoinRequests.isEmpty,
+                          let window = self.window else { return }
+                    // Approval must remain reachable while a channel is playing.
+                    // Show the normal network UI without stealing keyboard focus.
+                    self.setupTransitionGeneration &+= 1
+                    self.restoreSetupWindow()
+                    window.setContentSize(NSSize(width: SetupWindow.width, height: 640))
+                    window.orderFront(nil)
+                }
+            }
 
     }
 
@@ -1574,6 +1591,7 @@ struct ParticipantRoomActivity: Equatable {
 final class ALOViewModel: ObservableObject {
     let account: NetworkAccountModel
     private var accountObserver: AnyCancellable?
+    private var nearbyAccountObserver: AnyCancellable?
     var peerVersionHandler: (String) -> Void = { _ in }
     enum Mode: String, CaseIterable {
         case share = "Create network"
@@ -1854,6 +1872,17 @@ final class ALOViewModel: ObservableObject {
         }
         accountObserver = self.account.objectWillChange.sink { [weak self] in
             Task { @MainActor [weak self] in self?.refreshNetworkChannels() }
+        }
+        // Keep discovery available when setup is hidden so an owner can receive
+        // join requests. Test/render models opt out of all live discovery.
+        if discoverRooms {
+            nearbyAccountObserver = self.account.$identityReady.removeDuplicates().sink { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    if self.account.identityReady { await self.account.startNearbyNetworking() }
+                    else { self.account.stopNearbyNetworking() }
+                }
+            }
         }
     }
 
