@@ -24,6 +24,7 @@ struct MobileNetworkSetupView: View {
     @State private var selectedMemberIDs = Set<String>()
     @State private var busy = false
     @State private var errorMessage: String?
+    @State private var nearbyJoinFeedback = ALONearbyJoinFeedback()
     @State private var importKind = ImportKind.invitation
     @State private var showImporter = false
     @State private var exportDocument: MobileNetworkDocument?
@@ -113,10 +114,10 @@ struct MobileNetworkSetupView: View {
             }
         .safeAreaInset(edge: .bottom) {
             if account.identityReady, path.isEmpty || path.last == .channels,
-               let message = errorMessage ?? account.errorMessage ?? model.errorMessage {
+               let message = nearbyJoinFeedback.errorMessage ?? errorMessage ?? account.errorMessage ?? model.errorMessage {
                 VStack(alignment: .leading, spacing: 6) {
                     Label(message, systemImage: "exclamationmark.triangle")
-                    Button("Dismiss message") { errorMessage = nil; model.errorMessage = nil }
+                    Button("Dismiss message") { nearbyJoinFeedback.dismissError(); errorMessage = nil; model.errorMessage = nil }
                 }
                 .font(.callout).padding().frame(maxWidth: .infinity, alignment: .leading)
                 .background(.regularMaterial)
@@ -161,17 +162,22 @@ struct MobileNetworkSetupView: View {
                       networkName: account.networks.first(where: { $0.id == request.networkID })?.name ?? "your network",
                       fingerprint: request.identity.userID)
             }, isBusy: busy,
-            onJoin: { id in Task { @MainActor in
-                do { try await account.requestToJoin(networkID: id) }
-                catch is CancellationError { }
-                catch { errorMessage = NetworkAccountModel.describe(error) }
-            } },
+            onJoin: { id in
+                let attempt = nearbyJoinFeedback.begin()
+                Task { @MainActor in
+                    do {
+                        try await account.requestToJoin(networkID: id)
+                        nearbyJoinFeedback.finish(attempt)
+                    } catch is CancellationError { nearbyJoinFeedback.finish(attempt) }
+                    catch { nearbyJoinFeedback.finish(attempt, errorMessage: NetworkAccountModel.describe(error)) }
+                }
+            },
             onApprove: { id in perform { try await account.approveJoinRequest(id: id) } },
             onDecline: { id in perform { try await account.rejectJoinRequest(id: id) } },
             nearbyError: account.nearbyNetworkError,
             nearbyNotice: account.nearbyNetworkNotice,
             onRetryNearby: { Task { @MainActor in account.stopNearbyNetworking(); await account.startNearbyNetworking() } },
-            onCancelJoin: { id in account.cancelJoinRequest(networkID: id) })
+            onCancelJoin: { id in nearbyJoinFeedback.cancel(); account.cancelJoinRequest(networkID: id) })
     }
 
     @ViewBuilder private func destination(_ route: Route) -> some View {

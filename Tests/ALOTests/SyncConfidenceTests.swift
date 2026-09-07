@@ -6,12 +6,82 @@ import ALOCore
 
 @Suite("Synchronization confidence under asymmetric paths")
 struct SyncConfidenceTests {
+    @Test("Chart evidence is unknown before samples and after they expire")
+    func chartEvidenceNeverManufacturesGreen() {
+        var health = LiveSyncHealth()
+        #expect(health.evidence(at: 0) == .unknown)
+        #expect(health.evidence(at: 0).title == "No current timing")
+        health.observe(listenerContext(drift: nil, rtt: nil).result, at: 1)
+        #expect(health.evidence(at: 2) == .needsAttention)
+        health.observe(listenerContext(drift: 2, rtt: 2).result, at: 3)
+        #expect(health.evidence(at: 4) == .estimated)
+        #expect(health.evidence(at: 2_500_000_003) == .unknown)
+        health.invalidateCurrentSample()
+        #expect(health.evidence(at: 4) == .unknown)
+    }
+
+    @Test("Video warnings and independent signals do not tighten each other's bands")
+    func recoveryIsSignalSpecific() {
+        var health = LiveSyncHealth()
+        func tick(drift: Double?, rtt: Double?, video: VideoPresentationTimingSnapshot? = nil) -> DiagnosticOutcome {
+            var room = listenerContext(drift: drift, rtt: rtt, video: video)
+            room.recovery = health.recovery
+            let result = room.result
+            health.observe(result, at: 1)
+            return result.outcome
+        }
+        let lateVideo = VideoPresentationTimingSnapshot(measuredAtNanos: 1_000_000_000,
+            latestHandoffAtNanos: 1_000_000_000, latestDeadlineMissNanos: 150_000_000,
+            maximumDeadlineMissNanos: 150_000_000, presentedCount: 1,
+            pendingCount: 0, oldestPendingDeadlineNanos: nil)
+        #expect(tick(drift: 30, rtt: 35, video: lateVideo) == .warning)
+        #expect(tick(drift: 30, rtt: 35) == .passed)
+        #expect(tick(drift: 70, rtt: 35) == .warning)
+        #expect(tick(drift: 20, rtt: 35) == .passed)
+        #expect(tick(drift: 30, rtt: 82) == .warning)
+        #expect(tick(drift: 30, rtt: 30) == .passed)
+    }
+
+    @Test("Recovery state follows only the participant that exceeded the threshold")
+    func recoveryIsParticipantSpecific() {
+        var state = SyncRecoveryState()
+        let outside = state.observeDrift(70, age: 1, participant: "a")
+        #expect(!outside)
+        let other = state.observeDrift(30, age: 1, participant: "b")
+        #expect(other)
+        let missing = state.observeDrift(nil, age: nil, participant: "a")
+        #expect(!missing)
+        let intermediate = state.observeDrift(30, age: 1, participant: "a")
+        #expect(!intermediate)
+        let recovered = state.observeDrift(20, age: 1, participant: "a")
+        #expect(recovered)
+        let clockOutside = state.observeClockRTT(82, participant: "a")
+        #expect(!clockOutside)
+        let otherClock = state.observeClockRTT(35, participant: "b")
+        #expect(otherClock)
+        state.retainParticipants(["b"])
+        #expect(state.clockParticipants.isEmpty)
+    }
+
+    @Test("A transient missing sample does not tighten healthy unrelated signals forever")
+    func missingSampleMustNotLatchHealthySignals() {
+        var health = LiveSyncHealth()
+        health.observe(listenerContext(drift: 30, rtt: 35).result, at: 1)
+        #expect(health.result?.outcome == .passed)
+        health.observe(listenerContext(drift: nil, rtt: 35).result, at: 2)
+        #expect(health.result?.outcome == .warning)
+        var resumed = listenerContext(drift: 30, rtt: 35)
+        resumed.recovery = health.recovery
+        #expect(resumed.result.outcome == .passed,
+            "Neither drift nor RTT crossed its warning threshold; missing data must not latch both")
+    }
+
     @Test("Drift and clock warnings retain hysteresis across missing measurements")
     func recoveryRequiresMeasuredRecovery() {
         var health = LiveSyncHealth()
         func tick(drift: Double?, rtt: Double?) -> DiagnosticOutcome {
             var room = listenerContext(drift: drift, rtt: rtt)
-            room.requiresRecovery = health.requiresRecovery
+            room.recovery = health.recovery
             let result = room.result
             health.observe(result, at: 1)
             return result.outcome
@@ -20,7 +90,7 @@ struct SyncConfidenceTests {
         #expect(tick(drift: 70, rtt: 2) == .warning)
         #expect(tick(drift: 30, rtt: 2) == .warning)
         health.invalidateCurrentSample()
-        #expect(health.requiresRecovery)
+        #expect(!health.recovery.driftParticipants.isEmpty)
         #expect(tick(drift: nil, rtt: 2) == .warning)
         #expect(tick(drift: 30, rtt: 2) == .warning)
         #expect(tick(drift: 20, rtt: 2) == .passed)
@@ -74,14 +144,15 @@ struct SyncConfidenceTests {
         #expect(!room.result.detail.contains("listener clock"))
     }
 
-    private func listenerContext(drift: Double?, rtt: Double?, age: Double? = 10) -> DiagnosticRoomContext {
+    private func listenerContext(drift: Double?, rtt: Double?, age: Double? = 10,
+                                 video: VideoPresentationTimingSnapshot? = nil) -> DiagnosticRoomContext {
         let receiver = ReceiverTimingDiagnostics(roundTripMilliseconds: rtt,
             clockOffsetMilliseconds: 0, jitterMilliseconds: 0,
             recommendedBufferMilliseconds: 250, outputLatencyMilliseconds: 10,
             renderHeadroomMilliseconds: 25, outputSampleRate: 48_000,
             outputChannelCount: 2, latenessMilliseconds: 0,
             latePacketCount: 0, resyncCount: 0,
-            currentDriftMilliseconds: drift, driftMeasurementAgeMilliseconds: age)
+            currentDriftMilliseconds: drift, driftMeasurementAgeMilliseconds: age, video: video)
         return DiagnosticRoomContext(isActive: true, role: .listener,
             participantCount: 2, remotePeerCount: 1, syncLabel: "Checking sync",
             audioIsRendering: true, hasBroadcaster: true,

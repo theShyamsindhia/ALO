@@ -17,6 +17,7 @@ struct MacNetworkSetupView: View {
     @State private var recoveryExported = false
     @State private var busy = false
     @State private var error: String?
+    @State private var nearbyJoinFeedback = ALONearbyJoinFeedback()
     @State private var selectedChannelID: String?
     @State private var privateChannel = false
     @State private var allowed = Set<String>()
@@ -142,24 +143,29 @@ struct MacNetworkSetupView: View {
                           networkName: account.networks.first(where: { $0.id == request.networkID })?.name ?? "your network",
                           fingerprint: request.identity.userID)
                 }, isBusy: busy,
-                onJoin: { id in Task { @MainActor in
-                    do { try await account.requestToJoin(networkID: id) }
-                    catch is CancellationError { }
-                    catch { self.error = NetworkAccountModel.describe(error) }
-                } },
+                onJoin: { id in
+                    let attempt = nearbyJoinFeedback.begin()
+                    Task { @MainActor in
+                        do {
+                            try await account.requestToJoin(networkID: id)
+                            nearbyJoinFeedback.finish(attempt)
+                        } catch is CancellationError { nearbyJoinFeedback.finish(attempt) }
+                        catch { nearbyJoinFeedback.finish(attempt, errorMessage: NetworkAccountModel.describe(error)) }
+                    }
+                },
                 onApprove: { id in performAsync { try await account.approveJoinRequest(id: id) } },
                 onDecline: { id in performAsync { try await account.rejectJoinRequest(id: id) } },
                 nearbyError: account.nearbyNetworkError,
                 nearbyNotice: account.nearbyNetworkNotice,
                 onRetryNearby: { Task { @MainActor in account.stopNearbyNetworking(); await account.startNearbyNetworking() } },
-                onCancelJoin: { id in account.cancelJoinRequest(networkID: id) })
+                onCancelJoin: { id in nearbyJoinFeedback.cancel(); account.cancelJoinRequest(networkID: id) })
                 .frame(minWidth: 210, idealWidth: 230, maxWidth: 260)
             Divider()
             VStack(spacing: 0) {
                 if let network = account.selectedNetwork {
                     ALOChannelList(network: summary(network), channels: account.channels.map {
                         ALOChannelSummary(id: $0.id.uuidString, name: $0.name, isPrivate: $0.isPrivate, isMain: $0.isMain)
-                    }, selectedChannelID: $selectedChannelID, errorMessage: error ?? account.errorMessage ?? model.errorMessage,
+                    }, selectedChannelID: $selectedChannelID, errorMessage: nearbyJoinFeedback.errorMessage ?? error ?? account.errorMessage ?? model.errorMessage,
                     onCreateChannel: { present(.createChannel) }, onAddMember: { present(.addMember) },
                     onImportInvitation: { present(.importNetwork) })
                     Divider()
@@ -185,7 +191,7 @@ struct MacNetworkSetupView: View {
             }
         }
         .safeAreaInset(edge: .bottom) {
-            if account.selectedNetwork == nil, let message = error ?? account.errorMessage ?? model.errorMessage {
+            if account.selectedNetwork == nil, let message = nearbyJoinFeedback.errorMessage ?? error ?? account.errorMessage ?? model.errorMessage {
                 Label(message, systemImage: "exclamationmark.triangle")
                     .font(.callout).padding().frame(maxWidth: .infinity, alignment: .leading)
             }

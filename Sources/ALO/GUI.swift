@@ -3575,7 +3575,7 @@ final class ALOViewModel: ObservableObject {
             audioIsRendering: audioIsRendering,
             hasBroadcaster: hasBroadcaster,
             timing: timing,
-            requiresRecovery: liveSyncHealth.requiresRecovery,
+            recovery: liveSyncHealth.recovery,
             peerPlaybackTiming: Dictionary(participants.compactMap { participant in
                 participant.playbackTiming.map { (participant.id, $0) }
             }, uniquingKeysWith: { _, newest in newest })

@@ -65,8 +65,10 @@ states with actual native renders, not only bitmap existence assertions.
 The user selected the Anytype Agents / alo chat for Shyam/HELD coordination.
 The local API supports SSE messages/stream, but the connector may buffer rather
 than deliver incremental events. An SSE-capable runner can subscribe with bounded
-reconnect/deduplication; otherwise the other agent's 30-second product watcher is
-a fallback, not an event subscription. Never expose local API credentials.
+reconnect/deduplication. Shyam has disabled scheduled polling; do not re-enable it
+without his request. The paired task should remain active under an explicit goal
+and report concrete progress or blockers. Every outgoing coordination message must
+use a structured Shyam mention. Never expose local API credentials.
 
 ## Validation checkpoint (2026-09-07)
 
@@ -86,8 +88,19 @@ a fallback, not an event subscription. Never expose local API credentials.
 - The original transferred ce6cb97 bundle failed strict resource-seal validation.
   Re-sealing that exact bundle with certificate-free ad-hoc signing passes strict
   validation and launches on both Macs. The installed signed executable hashes
-  match. Shyam confirmed identity setup; joining the existing test network and
-  paired playback remain unconfirmed.
+  match. Both dev identities subsequently joined the test network, following an
+  owner approval whose public fingerprint was independently matched. Both devices
+  are visible in Main. Raj's dev Diagnostics confirms one reachable remote peer,
+  but still reports "No broadcaster" despite Shyam reporting Spotify broadcasting.
+  The paired playback baseline has therefore not begun; local Spotify playback,
+  membership, and TLS connectivity must not be counted as successful media delivery.
+  Keep this baseline distinct from the newer source fixes until both installed
+  builds are updated and their revisions verified.
+- `7dc63e3`: Mac and iOS builds passed; required Mac tests failed. The full CI run
+  exposed a screen-diagnostics fixture missing newly required peer RTT, an offline
+  player fixture entering an unrelated late-packet reset on a slow runner, and a
+  download-monitor XCTest callback overfulfilling after the test ended. These are
+  release blockers, not waived checks. Strict live-timing thresholds remain unchanged.
 
 ## Timing evidence must have an independent reference
 

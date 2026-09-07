@@ -99,6 +99,9 @@ jobs:
           ALO_CODESIGN_IDENTITY: ${{ vars.ALO_CODESIGN_IDENTITY || vars.WERAI_CODESIGN_IDENTITY }}
         run: ./Scripts/package.sh --arm64-only
 
+      - name: Verify packaged app icon matches current artwork
+        run: bash Scripts/test-app-icon.sh --verify dist/ALO.app/Contents/Resources/AppIcon.icns
+
       - name: Notarize and staple app and disk image
         env:
           APP_STORE_CONNECT_API_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_KEY_BASE64 }}

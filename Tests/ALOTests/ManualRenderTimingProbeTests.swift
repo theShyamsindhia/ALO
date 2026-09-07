@@ -71,8 +71,8 @@ struct ManualRenderTimingProbeTests {
                 "A fixed graph delay must not masquerade as accumulating drift")
     }
 
-    @Test @MainActor
-    func missingRenderHostTimeDoesNotLatchPriorRate() async throws {
+    @Test(arguments: [UInt64(20_000_000), 100_000_000]) @MainActor
+    func missingRenderHostTimeDoesNotLatchPriorRate(pollDelayNanos: UInt64) async throws {
         let output = RoomAudioOutputEngine()
         let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2))
         try output.engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 960)
@@ -81,7 +81,12 @@ struct ManualRenderTimingProbeTests {
         let node = try #require(output.engine.attachedNodes.compactMap { $0 as? AVAudioPlayerNode }.first)
         let unit = try #require(output.engine.attachedNodes.compactMap { $0 as? AVAudioUnitVarispeed }.first)
         player.clockOffsetNanos = 0
-        let capture = MonotonicClock.nowNanos() + 2_000_000_000
+        let maximumTestDuration: UInt64 = 20_000_000_000
+        // Offline PCM advances in sample time, while CI may schedule each poll
+        // much later than requested. Keep capture beyond the bounded test run:
+        // the old two-second lead accidentally entered late-packet recovery
+        // on slow runners, stopping the node this test needs to keep advancing.
+        let capture = MonotonicClock.nowNanos() + maximumTestDuration + 2_000_000_000
         func packet(_ sequence: UInt32) -> AudioPacket {
             AudioPacket(sequence: sequence, frameIndex: UInt64(sequence) * 240,
                 captureTimeNanos: capture + UInt64(sequence) * 5_000_000,
@@ -104,7 +109,11 @@ struct ManualRenderTimingProbeTests {
         var previousSample: Int64 = -1
         let began = MonotonicClock.nowNanos()
         for step in 0..<60 {
+            try #require(MonotonicClock.nowNanos() - began < maximumTestDuration,
+                         "Offline timing probe exceeded its bounded runtime")
             for offset in 1...4 { player.accept(packet(UInt32(step * 4 + offset))) }
+            try #require(player.syncReport().resyncCount == 0,
+                         "Fixture unexpectedly entered recovery instead of exercising holdover")
             try #require(try output.engine.renderOffline(960, to: buffer) == .success)
             let render = try #require(node.lastRenderTime)
             let time = try #require(node.playerTime(forNodeTime: render))
@@ -118,9 +127,11 @@ struct ManualRenderTimingProbeTests {
             player.maintainSync()
             if step == 0 { #expect(unit.rate == 1.01, "A brief missing sample should preserve the prior rate") }
             #expect(player.syncReport().driftNanos == nil)
-            try await Task.sleep(nanoseconds: 20_000_000)
+            try await Task.sleep(nanoseconds: pollDelayNanos)
         }
-        print("MISSING_RENDER_HOST elapsedMs=\(Double(MonotonicClock.nowNanos() - began) / 1_000_000) finalRate=\(unit.rate) sampleTime=\(previousSample) resyncs=\(player.syncReport().resyncCount)")
+        print("MISSING_RENDER_HOST pollMs=\(pollDelayNanos / 1_000_000) elapsedMs=\(Double(MonotonicClock.nowNanos() - began) / 1_000_000) finalRate=\(unit.rate) sampleTime=\(previousSample) resyncs=\(player.syncReport().resyncCount)")
+        #expect(player.syncReport().resyncCount == 0)
+        #expect(player.syncReport().latePacketCount == 0)
         #expect(abs(unit.rate - 1) < 0.000_005,
                 "Production player retained a prior rate correction for over a second without a usable render host clock")
         unit.rate = 1.01

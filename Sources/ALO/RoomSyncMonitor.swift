@@ -293,7 +293,7 @@ struct RoomSyncMonitor {
             let outside = driftMilliseconds >= Self.correctionThresholdMilliseconds
             if outside && !state.wasOutsideTolerance {
                 appendEvent(.warning, title: "\(name) moved out of sync",
-                            detail: "Measured playback drift reached \(milliseconds(driftMilliseconds)); the correction threshold is 40 ms.",
+                            detail: "Measured playback drift reached \(milliseconds(driftMilliseconds)); the correction threshold is \(milliseconds(Self.correctionThresholdMilliseconds)).",
                             at: occurredAt)
             } else if !outside && state.wasOutsideTolerance
                         && driftMilliseconds <= Self.recoveryThresholdMilliseconds {
@@ -307,7 +307,7 @@ struct RoomSyncMonitor {
             }
             state.hadFreshDrift = true
             // Stay in warning through the hysteresis band and missing samples;
-            // only a measured recovery at <=20 ms closes this incident.
+            // only a measured recovery at the recovery threshold closes this incident.
             if outside { state.wasOutsideTolerance = true }
             else if driftMilliseconds <= Self.recoveryThresholdMilliseconds {
                 state.wasOutsideTolerance = false

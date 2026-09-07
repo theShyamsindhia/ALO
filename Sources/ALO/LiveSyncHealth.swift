@@ -10,15 +10,45 @@ enum SyncHealthTolerance {
     static let clockRTTWarningMilliseconds = 40.0
     static let clockRTTRecoveryMilliseconds = 30.0
 
-    static func acceptsDrift(_ drift: Double?, age: Double?, recovering: Bool) -> Bool {
-        guard let drift, let age, drift.isFinite, drift >= 0,
-              age.isFinite, age >= 0, age <= 500 else { return false }
-        return recovering ? drift <= driftRecoveryMilliseconds : drift < driftWarningMilliseconds
+}
+
+/// Hysteresis belongs to the measured signal and participant that crossed a
+/// threshold. Missing data or a video warning must not latch unrelated signals.
+struct SyncRecoveryState: Equatable, Sendable {
+    static let localParticipant = "local-renderer"
+    private(set) var driftParticipants: Set<String> = []
+    private(set) var clockParticipants: Set<String> = []
+
+    mutating func retainParticipants(_ participants: Set<String>) {
+        driftParticipants.formIntersection(participants)
+        clockParticipants.formIntersection(participants)
     }
 
-    static func acceptsClockRTT(_ roundTrip: Double?, recovering: Bool) -> Bool {
+    mutating func observeDrift(_ drift: Double?, age: Double?, participant: String) -> Bool {
+        guard let drift, let age, drift.isFinite, drift >= 0,
+              age.isFinite, age >= 0, age <= 500 else { return false }
+        if drift >= SyncHealthTolerance.driftWarningMilliseconds { driftParticipants.insert(participant) }
+        else if drift <= SyncHealthTolerance.driftRecoveryMilliseconds { driftParticipants.remove(participant) }
+        return !driftParticipants.contains(participant)
+    }
+
+    mutating func observeClockRTT(_ roundTrip: Double?, participant: String) -> Bool {
         guard let roundTrip, roundTrip.isFinite, roundTrip >= 0 else { return false }
-        return recovering ? roundTrip <= clockRTTRecoveryMilliseconds : roundTrip < clockRTTWarningMilliseconds
+        if roundTrip >= SyncHealthTolerance.clockRTTWarningMilliseconds { clockParticipants.insert(participant) }
+        else if roundTrip <= SyncHealthTolerance.clockRTTRecoveryMilliseconds { clockParticipants.remove(participant) }
+        return !clockParticipants.contains(participant)
+    }
+}
+
+enum LiveSyncEvidence: Equatable {
+    case unknown, needsAttention, estimated
+
+    var title: String {
+        switch self {
+        case .unknown: "No current timing"
+        case .needsAttention: "Check timing"
+        case .estimated: "Estimated sync"
+        }
     }
 }
 
@@ -29,11 +59,11 @@ struct LiveSyncHealth {
     private(set) var recentTransitions: [DiagnosticCheckResult] = []
     /// Preserve warning hysteresis across missing samples, pauses and reconnects
     /// within this monitoring session. A new session replaces this value.
-    private(set) var requiresRecovery = false
+    private(set) var recovery = SyncRecoveryState()
     var hasCurrentSample: Bool { result != nil || sampledAtNanos != nil }
 
     mutating func observe(_ result: DiagnosticCheckResult, at now: UInt64) {
-        requiresRecovery = result.outcome != .passed
+        if let recovery = result.syncRecovery { self.recovery = recovery }
         if recentTransitions.last?.outcome != result.outcome {
             recentTransitions.append(result)
             if recentTransitions.count > 16 { recentTransitions.removeFirst(recentTransitions.count - 16) }
@@ -47,9 +77,21 @@ struct LiveSyncHealth {
         sampledAtNanos = nil
     }
 
-    func playbackLabel(isHost: Bool, now: UInt64) -> String {
+    func currentResult(at now: UInt64) -> DiagnosticCheckResult? {
         guard let result, let sampledAtNanos,
               now >= sampledAtNanos, now - sampledAtNanos < 2_500_000_000 else {
+            return nil
+        }
+        return result
+    }
+
+    func evidence(at now: UInt64) -> LiveSyncEvidence {
+        guard let result = currentResult(at: now) else { return .unknown }
+        return result.outcome == .passed ? .estimated : .needsAttention
+    }
+
+    func playbackLabel(isHost: Bool, now: UInt64) -> String {
+        guard let result = currentResult(at: now) else {
             return isHost ? "Broadcasting · checking sync" : "Checking sync…"
         }
         if result.outcome == .passed { return isHost ? "Broadcasting" : "Estimated sync" }

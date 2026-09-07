@@ -6,6 +6,7 @@ import Network
 import SwiftUI
 import UniformTypeIdentifiers
 import ALOCore
+import ALOTiming
 
 enum DiagnosticCheckID: String, CaseIterable, Hashable, Sendable {
     case screenPermission
@@ -63,6 +64,7 @@ struct DiagnosticCheckResult: Sendable, Equatable {
     let outcome: DiagnosticOutcome
     let detail: String
     let checkedAt: Date?
+    var syncRecovery: SyncRecoveryState? = nil
 
     static let idle = DiagnosticCheckResult(outcome: .idle, detail: "Run this check when you need it.", checkedAt: nil)
     static let running = DiagnosticCheckResult(outcome: .running, detail: "Checking this Mac…", checkedAt: nil)
@@ -142,7 +144,7 @@ struct DiagnosticRoomContext: Sendable, Equatable {
     let audioIsRendering: Bool
     let hasBroadcaster: Bool
     let timing: SessionTimingDiagnostics?
-    var requiresRecovery = false
+    var recovery = SyncRecoveryState()
     /// Only current, epoch-scoped peer telemetry from the control plane. Missing
     /// entries must stay unknown; another participant's RTT is never a proxy.
     var peerPlaybackTiming: [String: PeerPlaybackTiming] = [:]
@@ -156,15 +158,25 @@ struct DiagnosticRoomContext: Sendable, Equatable {
             )
         }
         var parts = ["\(role.rawValue.capitalized), \(remotePeerCount) remote peer\(remotePeerCount == 1 ? "" : "s")", syncLabel]
+        var nextRecovery = recovery
+        if let host = timing?.host {
+            nextRecovery.retainParticipants(Set(host.listeners.map(\.peerID)).union([SyncRecoveryState.localParticipant]))
+        }
+        var receiverSignalsReady = false
+        var listenerSignalsReady: [String: Bool] = [:]
         parts.append("Estimated software timing, not measured acoustic alignment; low RTT does not prove clock accuracy")
         if let receiver = timing?.receiver {
+            let clockReady = nextRecovery.observeClockRTT(receiver.roundTripMilliseconds, participant: SyncRecoveryState.localParticipant)
+            let driftReady = nextRecovery.observeDrift(receiver.currentDriftMilliseconds,
+                age: receiver.driftMeasurementAgeMilliseconds, participant: SyncRecoveryState.localParticipant)
+            receiverSignalsReady = clockReady && driftReady
             if let roundTrip = receiver.roundTripMilliseconds {
                 parts.append("RTT \(Self.milliseconds(roundTrip))")
             }
             if let clockOffset = receiver.clockOffsetMilliseconds {
                 parts.append("clock offset \(Self.signedMilliseconds(clockOffset))")
             }
-            if !SyncHealthTolerance.acceptsClockRTT(receiver.roundTripMilliseconds, recovering: requiresRecovery) {
+            if !clockReady {
                 parts.append("Clock confidence is limited: round-trip timing is missing or elevated")
             }
             parts.append("buffer \(Self.milliseconds(receiver.recommendedBufferMilliseconds))")
@@ -201,7 +213,14 @@ struct DiagnosticRoomContext: Sendable, Equatable {
             parts.append("channel timing changes \(host.roomTimingChangeCount)")
             for (index, listener) in host.listeners.enumerated() {
                 let peerRTT = peerPlaybackTiming[listener.peerID]?.roundTripMilliseconds
-                if let peerRTT, SyncHealthTolerance.acceptsClockRTT(peerRTT, recovering: requiresRecovery) {
+                let clockReady = nextRecovery.observeClockRTT(peerRTT, participant: listener.peerID)
+                let reportIsFresh = listener.playbackReportAgeMilliseconds.map {
+                    $0.isFinite && $0 >= 0 && $0 <= 2_500
+                } ?? false
+                let driftReady = nextRecovery.observeDrift(reportIsFresh ? listener.driftMilliseconds : nil,
+                    age: listener.driftSampleAgeMilliseconds, participant: listener.peerID)
+                listenerSignalsReady[listener.peerID] = clockReady && driftReady
+                if let peerRTT, clockReady {
                     parts.append("listener \(index + 1) clock RTT \(Self.milliseconds(peerRTT))")
                 } else {
                     parts.append("listener \(index + 1) clock confidence is limited: round-trip timing is missing or elevated")
@@ -235,8 +254,7 @@ struct DiagnosticRoomContext: Sendable, Equatable {
         var ready = hasBroadcaster
         if let receiver = timing?.receiver {
             ready = ready && audioIsRendering
-                && SyncHealthTolerance.acceptsClockRTT(receiver.roundTripMilliseconds, recovering: requiresRecovery)
-                && SyncHealthTolerance.acceptsDrift(receiver.currentDriftMilliseconds, age: receiver.driftMeasurementAgeMilliseconds, recovering: requiresRecovery)
+                && receiverSignalsReady
                 && receiver.latenessMilliseconds < Self.driftWarningMilliseconds
             if let video = receiver.video, Self.videoIsCurrentlyLate(video) { ready = false }
             if receiver.videoEnabled, receiver.video?.latestHandoffAtNanos == nil { ready = false }
@@ -252,8 +270,7 @@ struct DiagnosticRoomContext: Sendable, Equatable {
                     && host.listeners.allSatisfy { listener in
                         guard let reportAge = listener.playbackReportAgeMilliseconds,
                               reportAge.isFinite, reportAge >= 0, reportAge <= 2_500 else { return false }
-                        return SyncHealthTolerance.acceptsDrift(listener.driftMilliseconds, age: listener.driftSampleAgeMilliseconds, recovering: requiresRecovery)
-                            && SyncHealthTolerance.acceptsClockRTT(peerPlaybackTiming[listener.peerID]?.roundTripMilliseconds, recovering: requiresRecovery)
+                        return listenerSignalsReady[listener.peerID] == true
                             && (!host.videoEnabled || Self.remoteScreenIsVerified(listener.screenTiming,
                                 reportAgeNanos: UInt64(reportAge * 1_000_000)))
                     }
@@ -263,7 +280,8 @@ struct DiagnosticRoomContext: Sendable, Equatable {
         return DiagnosticCheckResult(
             outcome: ready ? .passed : .warning,
             detail: parts.joined(separator: " · "),
-            checkedAt: Date()
+            checkedAt: Date(),
+            syncRecovery: nextRecovery
         )
     }
 
@@ -776,18 +794,23 @@ private struct DiagnosticsView: View {
     }
 
     private var roomSyncMonitorSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("LIVE ALIGNMENT")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Label(model.phase == .live ? "Live" : "Last channel",
-                      systemImage: model.phase == .live ? "dot.radiowaves.left.and.right" : "clock.arrow.circlepath")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(model.phase == .live ? .green : .secondary)
+        TimelineView(.periodic(from: .now, by: 1)) { _ in
+            let evidence = model.phase == .live
+                ? model.liveSyncHealth.evidence(at: MonotonicClock.nowNanos()) : .unknown
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("LIVE ALIGNMENT")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Label(model.phase == .live ? "Monitoring" : "Last channel",
+                          systemImage: model.phase == .live ? "dot.radiowaves.left.and.right" : "clock.arrow.circlepath")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+                RoomSyncMonitorCard(monitor: model.roomSyncMonitor, isRoomActive: model.phase == .live,
+                                    evidence: evidence)
             }
-            RoomSyncMonitorCard(monitor: model.roomSyncMonitor, isRoomActive: model.phase == .live)
         }
     }
 
@@ -932,6 +955,7 @@ private struct DiagnosticCheckCard: View {
 private struct RoomSyncMonitorCard: View {
     let monitor: RoomSyncMonitor
     let isRoomActive: Bool
+    let evidence: LiveSyncEvidence
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -971,15 +995,23 @@ private struct RoomSyncMonitorCard: View {
 
     private var tolerancePill: some View {
         HStack(spacing: 6) {
-            Circle().fill(.green).frame(width: 7, height: 7)
-            Text("Within 40 ms")
+            Circle().fill(evidenceColor).frame(width: 7, height: 7)
+            Text(evidence.title)
         }
         .font(.caption.weight(.medium))
         .foregroundStyle(.secondary)
         .padding(.horizontal, 9)
         .padding(.vertical, 5)
-        .background(.green.opacity(0.10), in: Capsule())
-        .help("ALO automatically realigns sustained playback drift at 40 milliseconds.")
+        .background(evidenceColor.opacity(0.10), in: Capsule())
+        .help("The measured drift warning threshold is \(Int(SyncHealthTolerance.driftWarningMilliseconds)) milliseconds. Software timing is not a measurement of acoustic alignment.")
+    }
+
+    private var evidenceColor: Color {
+        switch evidence {
+        case .unknown: .secondary
+        case .needsAttention: .orange
+        case .estimated: .green
+        }
     }
 
     private var traceLegend: some View {
@@ -1099,7 +1131,7 @@ private struct RoomSyncChart: View {
                 context.stroke(grid, with: .color(.secondary.opacity(value == threshold ? 0.35 : 0.18)),
                                style: StrokeStyle(lineWidth: value == threshold ? 1.2 : 1,
                                                   dash: value == threshold ? [4, 4] : []))
-                let label = value == threshold ? "40" : String(format: "%.0f", value)
+                let label = String(format: "%.0f", value)
                 context.draw(Text(label).font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(.secondary), at: CGPoint(x: plot.minX - 8, y: y), anchor: .trailing)
             }

@@ -30,6 +30,11 @@ report_install_exit() {
     if [[ -d "$stage_dir" ]]; then
         echo "Dev staging files retained at: $stage_dir"
     fi
+    # A failed move or successful rollback can leave an empty backup directory.
+    # rmdir cannot remove a backup that still contains the previous app.
+    if [[ -n "${backup_dir:-}" && -d "$backup_dir" ]]; then
+        rmdir "$backup_dir" 2>/dev/null || true
+    fi
 }
 trap report_install_exit EXIT
 staged_app="$stage_dir/ALO Dev.app"
@@ -44,11 +49,9 @@ cp Resources/ALOSetupBackground.png "$staged_app/Contents/Resources/"
 for slide in Resources/ALOSetupSlide-*.jpg; do
     cp "$slide" "$staged_app/Contents/Resources/"
 done
-# Reuse the repository's packaged icon; icon generation is not part of this
-# diagnostic install. Seal the completed app below, after all resources/plist edits.
-if [[ -f dist/AppIcon.icns ]]; then
-    cp dist/AppIcon.icns "$staged_app/Contents/Resources/"
-fi
+# Use the same canonical artwork pipeline as release packaging. Missing artwork
+# fails before replacing any installed app; dist may belong to an older build.
+bash Scripts/build-app-icon.sh "$staged_app/Contents/Resources/AppIcon.icns"
 plist="$staged_app/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleIdentifier in.werai.audio.dev' "$plist"
 /usr/libexec/PlistBuddy -c 'Set :CFBundleName ALO Dev' "$plist"

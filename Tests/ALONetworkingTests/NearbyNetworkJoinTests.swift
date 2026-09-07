@@ -5,6 +5,42 @@ import ALORooms
 @testable import ALONetworking
 
 final class NearbyNetworkJoinTests: XCTestCase {
+    func testOwnerApprovalExpiryDoesNotClaimIdentityVerificationFailed() async throws {
+        let owner = UserIdentity.ephemeral(), requester = UserIdentity.ephemeral()
+        let manifest = try NetworkManifest.create(name: "Expiring approval", owner: owner)
+        let arrived = expectation(description: "Verified proof reached owner")
+        let removed = expectation(description: "Owner approval deadline removes pending request")
+        let requests = Requests()
+        let server = try NearbyNetworkService(user: owner, displayName: "Owner", changed: { _ in },
+            requestsChanged: { value in
+                let wasPending = requests.first != nil
+                requests.set(value)
+                if !value.isEmpty { arrived.fulfill() }
+                else if wasPending { removed.fulfill() }
+            }, failed: { _ in })
+        let client = try NearbyNetworkService(user: requester, displayName: "Requester", changed: { _ in },
+            requestsChanged: { _ in }, failed: { _ in })
+        defer { server.stop(); client.stop() }
+        // Exercise the real owner's timer/finish/TLS EOF path. Production is 120s;
+        // shorten only this internal loopback listener, not the requester timer.
+        let endpoint = try await server.listenOnLoopback(network: manifest, approvalTimeout: 0.2)
+        let result = Task { try await client.request(network: .init(id: manifest.id, name: manifest.name,
+            ownerID: owner.publicIdentity.userID), endpoint: endpoint) }
+        defer { result.cancel() }
+        await fulfillment(of: [arrived, removed], timeout: 5)
+        XCTAssertNil(requests.first)
+        do { _ = try await result.value; XCTFail("Expired approval must not grant membership") }
+        catch {
+            print("OWNER_APPROVAL_EXPIRY result=\(error.localizedDescription)")
+            guard case NearbyNetworkError.connectionClosed = error else {
+                return XCTFail("Expected typed connection closure, got \(error)")
+            }
+            XCTAssertFalse(error.localizedDescription.localizedCaseInsensitiveContains("identity"),
+                "A verified request's approval deadline is not an identity verification failure")
+        }
+        XCTAssertFalse(manifest.isMember(requester.publicIdentity))
+    }
+
     func testClientRejectsWrongNetworkOwnerAndRecipient() throws {
         let owner = UserIdentity.ephemeral(), otherOwner = UserIdentity.ephemeral()
         let recipient = UserIdentity.ephemeral(), otherRecipient = UserIdentity.ephemeral()

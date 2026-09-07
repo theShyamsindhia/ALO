@@ -64,11 +64,13 @@ struct LoopbackRoomScaleTests {
 
         """.utf8))
         try #require(waitUntil(timeout: 3) { host.diagnosticsSnapshot().reportingListenerCount == 1 })
-        func result() -> DiagnosticCheckResult {
+        func result(includeClockTelemetry: Bool = true) -> DiagnosticCheckResult {
             DiagnosticRoomContext(isActive: true, role: .broadcaster,
                 participantCount: 2, remotePeerCount: 1, syncLabel: "Broadcasting",
                 audioIsRendering: true, hasBroadcaster: true,
-                timing: SessionTimingDiagnostics(receiver: nil, host: host.diagnosticsSnapshot())).result
+                timing: SessionTimingDiagnostics(receiver: nil, host: host.diagnosticsSnapshot()),
+                peerPlaybackTiming: includeClockTelemetry
+                    ? ["loopback-peer-720": .init(roundTripMilliseconds: 2, driftMilliseconds: 2)] : [:]).result
         }
         #expect(result().outcome == .warning,
             "Healthy audio cannot conceal a current remote screen handoff miss")
@@ -94,6 +96,8 @@ struct LoopbackRoomScaleTests {
         host.setVideoEnabled(false)
         try #require(waitUntil(timeout: 3) { !host.diagnosticsSnapshot().videoEnabled })
         #expect(result().outcome == .passed, "Audio-only rooms do not require screen telemetry")
+        #expect(result(includeClockTelemetry: false).outcome == .warning,
+            "Screen health cannot substitute for missing listener clock telemetry")
         let previousScreen = PlaybackScreenTimingReport(latestHandoffAgeNanos: 10_000_000_000,
             latestDeadlineMissNanos: 0)
         peer.sendRawControl(try ControlMessage(type: "sync_status", participantID: "loopback-peer-720",
