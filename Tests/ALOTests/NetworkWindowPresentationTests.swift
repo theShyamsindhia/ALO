@@ -1,12 +1,15 @@
 import AppKit
 import SwiftUI
 import Testing
+import ALONetworkUI
 @testable import ALO
 
+extension NativePresentationTests {
 @Suite(.serialized)
 @MainActor
 struct NetworkWindowPresentationTests {
     private func makeWindow() -> NSWindow {
+        _ = NSApplication.shared
         let window = NSWindow(contentRect: NSRect(origin: .zero, size: NetworkSetupWindowPresentation.initialContentSize),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
@@ -20,6 +23,7 @@ struct NetworkWindowPresentationTests {
         #expect(!window.styleMask.contains(.fullSizeContentView))
         #expect(window.titleVisibility == .visible)
         #expect(window.isOpaque)
+        #expect(window.collectionBehavior.contains(.fullScreenNone))
         #expect(window.standardWindowButton(.closeButton)?.isHidden == false)
         #expect(window.contentMinSize == NSSize(width: 640, height: 440))
         window.setContentSize(NSSize(width: 920, height: 680))
@@ -31,6 +35,18 @@ struct NetworkWindowPresentationTests {
         window.close()
         #expect(window.isReleasedWhenClosed == false)
         #expect(window.frame == resized)
+    }
+
+    @Test func nativeIdentityTransitionPreservesTheCurrentWindowCenter() {
+        let window = makeWindow()
+        NetworkSetupWindowPresentation.configure(window, identityReady: false)
+        window.setContentSize(NSSize(width: 800, height: 640))
+        window.setFrameOrigin(NSPoint(x: 173, y: 217))
+        let center = NSPoint(x: window.frame.midX, y: window.frame.midY)
+        NetworkSetupWindowPresentation.enterBrowserPreservingCenter(window)
+        #expect(abs(window.frame.midX - center.x) < 0.5)
+        #expect(abs(window.frame.midY - center.y) < 0.5)
+        window.close()
     }
 
     @Test func onboardingChromeRemainsCustomUntilIdentityReady() {
@@ -54,10 +70,37 @@ struct NetworkWindowPresentationTests {
         #expect(NetworkSetupWindowPresentation.shouldApplyIdentityUpdate(false, currentReady: false))
     }
 
+    @Test func nativeSheetCanPresentItsExistingContentAboveMinimumWindow() async throws {
+        let window = makeWindow()
+        NetworkSetupWindowPresentation.configure(window, identityReady: true)
+        window.setContentSize(NetworkSetupWindowPresentation.minimumContentSize)
+        var contentProbe: NSView?
+        window.contentView = NSHostingView(rootView: NetworkSheetFixture(onProbe: { contentProbe = $0 }))
+        window.setFrameOrigin(NSPoint(x: -2000, y: 0))
+        window.orderBack(nil)
+        defer { if let sheet = window.attachedSheet { window.endSheet(sheet) }; window.close() }
+        // Presentation is asynchronous. Wait for observable attachment/layout,
+        // not a presumed animation duration; absence is a fixture prerequisite.
+        for _ in 0..<100 {
+            if let sheet = window.attachedSheet, let probe = contentProbe,
+               probe.window === sheet, probe.bounds.width > 0, probe.bounds.height > 0 { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let sheet = try #require(window.attachedSheet)
+        let contentView = try #require(sheet.contentView)
+        contentView.layoutSubtreeIfNeeded()
+        let probe = try #require(contentProbe)
+        let bounds = probe.convert(probe.bounds, to: contentView)
+        #expect(bounds.width >= 600)
+        #expect(bounds.height >= 520)
+        #expect(contentView.bounds.contains(bounds))
+        print("NETWORK_SHEET parent=\(window.contentLayoutRect.size) sheet=\(contentView.bounds.size) content=\(bounds.size)")
+    }
+
     /// Only public fixture values. Does not initialize the application model,
     /// identities, discovery, or playback. Opt-in PNGs include native frame chrome.
     @Test(arguments: ["empty", "owner-empty", "member-empty", "pending", "long", "error", "populated"])
-    func nativeWindowFixtures(state: String) throws {
+    func nativeWindowFixtures(state: String) async throws {
         for dark in [false, true] {
             for size in [NSSize(width: 640, height: 440), NSSize(width: 760, height: 520)] {
                 let window = makeWindow()
@@ -65,11 +108,15 @@ struct NetworkWindowPresentationTests {
                 window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
                 var sidebarProbe: NSView?
                 window.contentView = NSHostingView(rootView: NetworkBrowserFixture(state: state,
-                    onSidebarProbe: { sidebarProbe = $0 }))
+                    onSidebarProbe: { sidebarProbe = $0 })
+                    .environment(\.controlActiveState, .active)
+                    .transaction { $0.disablesAnimations = true })
                 window.setContentSize(size)
+                try await Task.sleep(for: .milliseconds(300))
                 window.contentView?.layoutSubtreeIfNeeded()
                 let frameView = try #require(window.contentView?.superview)
-                #expect(window.contentLayoutRect.width >= size.width)
+                #expect(window.contentView?.bounds.size == size)
+                #expect(window.contentLayoutRect.size == size)
                 // Render/layout before reading native geometry, including runs
                 // without PNG export. Pixel dimensions alone missed a centered
                 // intrinsic-width empty HStack with an unwanted leading strip.
@@ -78,14 +125,39 @@ struct NetworkWindowPresentationTests {
                 let probe = try #require(sidebarProbe)
                 let bounds = probe.convert(probe.bounds, to: window.contentView)
                 #expect(abs(bounds.minX) < 0.5)
-                #expect(abs(bounds.width - 230) < 0.5)
-                if let directory = ProcessInfo.processInfo.environment["ALO_NETWORK_SNAPSHOT_DIRECTORY"] {
+                #expect(bounds.width >= ALONativeNetworkLayout.minimumSidebarWidth)
+                #expect(bounds.width <= ALONativeNetworkLayout.maximumSidebarWidth)
+                if let directory = ProcessInfo.processInfo.environment["ALO_NETWORKS_SNAPSHOT_DIR"] {
+                    try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
                     let data = try #require(bitmap.representation(using: .png, properties: [:]))
                     try data.write(to: URL(fileURLWithPath: directory)
-                        .appendingPathComponent("\(state)-\(dark ? "dark" : "light")-\(Int(size.width)).png"))
+                        .appendingPathComponent("window-\(state)-\(dark ? "dark" : "light")-\(Int(size.width)).png"))
                 }
                 window.close()
             }
         }
     }
+}
+}
+
+private struct NetworkSheetFixture: View {
+    let onProbe: (NSView) -> Void
+    @State private var presented = false
+    var body: some View {
+        Color.clear
+            .sheet(isPresented: $presented) {
+                ALOCreateChannelView(networkName: "Studio", name: .constant("Music"),
+                    isPrivate: .constant(false), selectedMemberIDs: .constant([]), members: [],
+                    onCreate: {}, onCancel: { presented = false })
+                    .frame(width: 600, height: 520)
+                    .background(NetworkSheetProbe(onCreate: onProbe))
+            }
+            .task { presented = true }
+    }
+}
+
+private struct NetworkSheetProbe: NSViewRepresentable {
+    let onCreate: (NSView) -> Void
+    func makeNSView(context: Context) -> NSView { let view = NSView(); onCreate(view); return view }
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }

@@ -1,5 +1,36 @@
 import SwiftUI
 
+#if os(macOS)
+public enum ALONativeNetworkLayout {
+    public static let minimumSidebarWidth: CGFloat = 210
+    public static let maximumSidebarWidth: CGFloat = 260
+}
+
+/// The same window-owned columns are used by the account adapter and public
+/// render fixtures, so empty detail content cannot recenter an intrinsic HStack.
+public struct ALONativeNetworkColumns<Sidebar: View, Detail: View>: View {
+    private let sidebar: Sidebar
+    private let detail: Detail
+
+    public init(@ViewBuilder sidebar: () -> Sidebar, @ViewBuilder detail: () -> Detail) {
+        self.sidebar = sidebar()
+        self.detail = detail()
+    }
+
+    public var body: some View {
+        GeometryReader { geometry in
+        HStack(spacing: 0) {
+            sidebar.frame(minWidth: ALONativeNetworkLayout.minimumSidebarWidth, idealWidth: 230,
+                          maxWidth: ALONativeNetworkLayout.maximumSidebarWidth)
+            Divider()
+            detail.frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(width: geometry.size.width, height: geometry.size.height, alignment: .leading)
+        }
+    }
+}
+#endif
+
 public struct ALONetworkSidebar: View {
     private let networks: [ALONetworkSummary]
     @Binding private var selectedNetworkID: String?

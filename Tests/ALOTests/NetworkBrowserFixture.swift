@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import ALONetworkUI
 
 /// Deterministic public display values: this fixture never touches an account,
@@ -17,7 +18,7 @@ struct NetworkBrowserFixture: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
+        ALONativeNetworkColumns {
             ALONetworkSidebar(networks: networks, selectedNetworkID: $networkID,
                 identityName: "Raj", identityFingerprint: "public-preview-identity",
                 onCreateNetwork: {}, onImportNetwork: {}, onExportPublicIdentity: {},
@@ -29,9 +30,9 @@ struct NetworkBrowserFixture: View {
                     .init(id: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!,
                           name: "Alex", networkName: "Studio", fingerprint: "public-preview-request")
                 ] : [], onExportRecovery: {})
-                .frame(width: 230)
                 .background(NetworkSidebarGeometryProbe(onCreate: onSidebarProbe))
-            Divider()
+        } detail: {
+            VStack(spacing: 0) {
             if let network = networks.first {
                 VStack(spacing: 0) {
                     ALOChannelList(network: network, channels: state.hasSuffix("-empty") ? [] : [
@@ -60,8 +61,8 @@ struct NetworkBrowserFixture: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
     }
 }
 

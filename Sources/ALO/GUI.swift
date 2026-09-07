@@ -450,9 +450,14 @@ enum NetworkSetupWindowPresentation {
     }
 
     static func configure(_ window: NSWindow, identityReady: Bool) {
-        window.styleMask = identityReady
+        let managedFullScreen = window.styleMask.intersection(.fullScreen)
+        let presentation: NSWindow.StyleMask = identityReady
             ? [.titled, .closable, .miniaturizable, .resizable]
             : [.titled, .closable, .fullSizeContentView]
+        window.styleMask = presentation.union(managedFullScreen)
+        // Networks is a utility browser. Keep ordinary zoom/resizing without
+        // creating a full-screen Space that channel handoff would abandon.
+        window.collectionBehavior.insert(.fullScreenNone)
         window.title = identityReady ? "Networks — \(ALOAppFlavor.displayName)" : ALOAppFlavor.displayName
         window.titlebarAppearsTransparent = !identityReady
         window.titleVisibility = identityReady ? .visible : .hidden
@@ -464,6 +469,14 @@ enum NetworkSetupWindowPresentation {
         for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
             window.standardWindowButton(button)?.isHidden = !identityReady
         }
+    }
+
+    static func enterBrowserPreservingCenter(_ window: NSWindow) {
+        let center = NSPoint(x: window.frame.midX, y: window.frame.midY)
+        configure(window, identityReady: true)
+        window.setContentSize(initialContentSize)
+        window.setFrameOrigin(NSPoint(x: center.x - window.frame.width / 2,
+                                      y: center.y - window.frame.height / 2))
     }
 }
 
@@ -628,10 +641,10 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
                           NetworkSetupWindowPresentation.shouldApplyIdentityUpdate(
                             ready, currentReady: self.model.account.identityReady) else { return }
                     self.setupTransitionGeneration &+= 1
-                    NetworkSetupWindowPresentation.configure(window, identityReady: ready)
                     if ready {
-                        window.setContentSize(NetworkSetupWindowPresentation.initialContentSize)
+                        NetworkSetupWindowPresentation.enterBrowserPreservingCenter(window)
                     } else {
+                        NetworkSetupWindowPresentation.configure(window, identityReady: false)
                         window.setContentSize(NSSize(width: SetupWindow.width, height: 640))
                     }
                     self.setupWindowFrame = window.frame

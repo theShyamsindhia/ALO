@@ -784,3 +784,52 @@ first-listener policy and delivery-gap controls. Log:
 `/tmp/alo-native-window.3Y1znX/combined-geometry-green.log`. Empty 640/760, owner
 and member empty, long-name, pending and error renders were visually inspected;
 the sidebar now meets the leading window edge without the empty-state strip.
+
+The subsequent complete optimized run exercised 1,197 Swift Testing tests and
+384 XCTest tests. It failed only four account-backed presentation cases: removing
+the original geometry constraint let NSHostingView grow 640-point content to 686
+points. The neutral GeometryReader constraint was restored for the native browser,
+without restoring the custom card/header. The original size assertion was not
+relaxed; account-backed tests additionally check native 640×440 and 760×520 sizes.
+Focused verification passed seven tests/four suites, including all ten account
+states and 28 public render/geometry combinations, in 6.282 seconds. Evidence:
+`/tmp/alo-native-window.3Y1znX/full-tests.log` (preserved failure) and
+`/tmp/alo-native-window.3Y1znX/account-sizing-green.log` (focused pass). This is
+not a claim that the entire corrected suite has passed yet.
+
+UI review follow-up keeps the browser a resizable/zoomable utility window rather
+than a full-screen Space. The first native identity transition preserves the
+current window center, including a user-moved center; asynchronous credential
+restoration is unchanged. A possible brief launch chrome transition was not
+established as a high-severity defect, and no synchronous credential reads or
+new loading delay were introduced.
+
+Production and public fixtures now use the same macOS column container and
+210–260-point sidebar constraints. Native fixtures share the existing serialized
+AppKit suite, initialize NSApplication, disable animations and settle before
+reading geometry. They use `ALO_NETWORKS_SNAPSHOT_DIR` and active control state;
+native frame chrome remains inactive. The existing 600×420 content render stays
+as additional below-minimum stress coverage, not a supported window size.
+
+The native SwiftUI Create Channel sheet was tested at the minimum parent size:
+parent content stayed 640×440 while its attached sheet and complete content were
+600×520. All content bounds fit the sheet, so the review's assumption that a sheet
+must fit inside its parent did not reproduce clipping. Form dimensions were not
+shrunk. This proves that native presentation case, not every form's interactions.
+
+After adding settled rendering, visual inspection found public-fixture intrinsic
+height growth that x/width geometry alone missed. The neutral window-size proposal
+now lives in the shared column container as well, and tests assert exact hosting
+and content-layout width/height after settling. The insufficient earlier assertion
+run is retained at `/tmp/alo-native-window.3Y1znX/ui-review-green.log`; it is not
+treated as final visual validation.
+
+Final focused follow-up passed 11 tests across five suites (167.77-second build,
+28.927-second runtime), including exact settled sizes, shared-column geometry,
+native sheet bounds, center/utility-window policy, account-backed onboarding and
+browser states, and unchanged DJ recording assertions. Populated 760, long-name
+640 and empty 760 light/dark renders were re-inspected at the correct dimensions.
+Log: `/tmp/alo-native-window.3Y1znX/shared-sizing-green.log`; final images:
+`/tmp/alo-native-window.3Y1znX/review-fixed`. Full-suite and external follow-up
+review remain subsequent gates; no installation or physical listening pass is
+implied by this focused result.

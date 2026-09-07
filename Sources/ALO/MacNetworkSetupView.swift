@@ -67,19 +67,14 @@ struct MacNetworkSetupView: View {
         VStack(spacing: 0) {
             HStack {
                 Text("ALO").font(.title3.weight(.bold))
-                Text(account.identityReady ? "Networks" : "Set up ALO").foregroundStyle(.secondary)
+                Text("Set up ALO").foregroundStyle(.secondary)
                 Spacer()
-                if account.identityReady {
-                    Button { exportRecovery() } label: { Image(systemName: "key").frame(width: 40, height: 40) }
-                        .help("Export your identity recovery file").accessibilityLabel("Export identity recovery file")
-                }
                 Button { NSApp.keyWindow?.close() } label: { Image(systemName: "xmark").frame(width: 40, height: 40) }
                     .help("Hide this window").accessibilityLabel("Hide this window")
-            }.buttonStyle(.borderless).controlSize(account.identityReady ? .regular : .large)
-                .padding(account.identityReady ? 8 : 18)
+            }.buttonStyle(.borderless).controlSize(.large)
+                .padding(18)
             Divider()
-            if !account.identityReady { identitySetup }
-            else { networkBrowser }
+            identitySetup
         }
         .frame(width: geometry.size.width, height: geometry.size.height)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24))
@@ -147,7 +142,7 @@ struct MacNetworkSetupView: View {
     }
 
     private var networkBrowser: some View {
-        HStack(spacing: 0) {
+        ALONativeNetworkColumns {
             ALONetworkSidebar(networks: account.networks.map(summary), selectedNetworkID: $account.selectedNetworkID,
                 identityName: account.displayName, identityFingerprint: account.identity?.publicIdentity.userID ?? "",
                 onCreateNetwork: { present(.createNetwork) }, onImportNetwork: { present(.importNetwork) },
@@ -175,8 +170,7 @@ struct MacNetworkSetupView: View {
                 onRetryNearby: { Task { @MainActor in account.stopNearbyNetworking(); await account.startNearbyNetworking() } },
                 onCancelJoin: { id in nearbyJoinFeedback.cancel(); account.cancelJoinRequest(networkID: id) },
                 onExportRecovery: exportRecovery)
-                .frame(minWidth: 210, idealWidth: 230, maxWidth: 260)
-            Divider()
+        } detail: {
             VStack(spacing: 0) {
                 if let network = account.selectedNetwork {
                     ALOChannelList(network: summary(network), channels: account.channels.map {
@@ -206,9 +200,7 @@ struct MacNetworkSetupView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .safeAreaInset(edge: .bottom) {
             if account.selectedNetwork == nil, let message = nearbyJoinFeedback.errorMessage ?? error ?? account.errorMessage ?? model.errorMessage {
                 Label(message, systemImage: "exclamationmark.triangle")
