@@ -101,6 +101,12 @@ final class SynchronizedPlayer {
     private let playbackActivityChanged: ((Bool) -> Void)?
     private var latestLatenessNanos: UInt64 = 0
     private var latestDriftMeasurement: (magnitude: UInt64, time: UInt64)?
+    private var renderObservationRecorder = RenderObservationRecorder()
+    private var outputBufferMilliseconds: Double?
+    private var outputSafetyMilliseconds: Double?
+    var renderObservation: RenderObservation? {
+        renderObservationRecorder.snapshot(at: MonotonicClock.nowNanos())
+    }
     private var latePacketCount: UInt64 = 0
     private var resyncCount: UInt64 = 0
     private var lastPacketReceivedNanos: UInt64?
@@ -214,7 +220,9 @@ final class SynchronizedPlayer {
         // An unavailable render clock is unknown, not a fresh zero-error sample.
         latestDriftMeasurement = nil
         let now = MonotonicClock.nowNanos()
+        var observation = RenderObservationSample(observedAtNanos: now)
         defer {
+            renderObservationRecorder.record(observation)
             if latestDriftMeasurement == nil {
                 automaticSyncPolicy.resetEvidence()
                 if hasStarted {
@@ -225,6 +233,7 @@ final class SynchronizedPlayer {
             }
         }
         guard nodesAreAttached else { return }
+        observation.reason = .paused
         guard roomPlaybackIsPlaying else {
             setPlaybackActive(false)
             return
@@ -233,6 +242,7 @@ final class SynchronizedPlayer {
         refreshOutputTimingIfNeeded(nowNanos: now)
         drain()
         updatePlaybackActivity(nowNanos: now)
+        observation.reason = .notStarted
         guard hasStarted else {
             playbackWatchdog.reset()
             return
@@ -240,6 +250,17 @@ final class SynchronizedPlayer {
 
         let renderTime = player.lastRenderTime
         let playerTime = renderTime.flatMap { player.playerTime(forNodeTime: $0) }
+        observation.observedAtNanos = MonotonicClock.nowNanos()
+        observation.outputBufferMilliseconds = outputBufferMilliseconds
+        observation.outputSafetyMilliseconds = outputSafetyMilliseconds
+        if let lastPacketReceivedNanos {
+            observation.packetAgeMilliseconds = RenderObservationSample.signedAgeMilliseconds(now: now, sample: lastPacketReceivedNanos)
+        }
+        if let playerTime, playerTime.isSampleTimeValid {
+            observation.sampleTime = playerTime.sampleTime
+            observation.sampleRate = playerTime.sampleRate.isFinite ? playerTime.sampleRate : nil
+        }
+        observation.reason = .recovery
         if playbackWatchdog.shouldResynchronize(
             sampleTime: playerTime?.sampleTime,
             nowNanos: now,
@@ -250,22 +271,33 @@ final class SynchronizedPlayer {
             return
         }
 
-        guard let offset = clockOffsetNanos,
-              anchorFrameIndex != nil,
-              let anchorCaptureNanos,
-              let renderTime,
-              renderTime.isHostTimeValid,
-              let playerTime
-        else { return }
+        observation.reason = .missingClock
+        guard let offset = clockOffsetNanos else { return }
+        observation.reason = .missingAnchor
+        guard anchorFrameIndex != nil, let anchorCaptureNanos else { return }
+        observation.reason = .missingRenderTime
+        guard let renderTime else { return }
+        observation.reason = .invalidHostTime
+        guard renderTime.isHostTimeValid else { return }
+        observation.reason = .missingPlayerTime
+        guard let playerTime else { return }
 
         let renderLocalNanos = MonotonicClock.ticksToNanos(renderTime.hostTime)
+        observation.renderAgeAtPollMilliseconds = RenderObservationSample.signedAgeMilliseconds(now: now, sample: renderLocalNanos)
+        observation.renderAgeAtObservationMilliseconds = RenderObservationSample.signedAgeMilliseconds(now: observation.observedAtNanos, sample: renderLocalNanos)
+        observation.reason = .clockRange
         guard let renderHostNanos = RoomTiming.hostTimeNanos(clientTimeNanos: renderLocalNanos,
                                                            clockOffsetNanos: offset) else { return }
-        guard playerTime.isSampleTimeValid,
-              let lastPacketReceivedNanos,
+        observation.anchorMarginMilliseconds = (Double(renderHostNanos) - Double(anchorCaptureNanos)
+            + Double(outputLatencyNanos) - Double(targetLatencyNanos)) / 1_000_000
+        observation.reason = .invalidSampleTime
+        guard playerTime.isSampleTimeValid else { return }
+        observation.reason = .stalePacket
+        guard let lastPacketReceivedNanos,
               now >= lastPacketReceivedNanos,
-              now - lastPacketReceivedNanos <= 500_000_000,
-              let estimate = RenderDriftEstimate(
+              now - lastPacketReceivedNanos <= 500_000_000 else { return }
+        observation.reason = RenderObservationSample.clockGate(pollNanos: now, renderNanos: renderLocalNanos) ?? .invalidTimeline
+        guard let estimate = RenderDriftEstimate(
                 nowNanos: now, renderLocalNanos: renderLocalNanos,
                 renderHostNanos: renderHostNanos, outputLatencyNanos: outputLatencyNanos,
                 captureAnchorNanos: anchorCaptureNanos, playoutDelayNanos: targetLatencyNanos,
@@ -273,9 +305,11 @@ final class SynchronizedPlayer {
                 captureOffsetNanos: captureTimeline.offsetNanos
               ) else { return }
         let absoluteErrorNanos = estimate.magnitudeNanos
+        observation.reason = .measured
         // Age belongs to the audio render sample, not the polling timer.
         latestDriftMeasurement = (absoluteErrorNanos, renderLocalNanos)
         if automaticSyncPolicy.shouldRealign(driftNanos: absoluteErrorNanos, now: now) {
+            observation.reason = .recovery
             latestLatenessNanos = absoluteErrorNanos
             hardResynchronize()
             return
@@ -699,19 +733,17 @@ final class SynchronizedPlayer {
         deviceID: AudioDeviceID?,
         hardwareFormat: AudioOutputHardwareFormat?
     ) -> UInt64 {
-        guard let deviceID else { return RoomTiming.renderSchedulingHeadroomNanos }
+        guard let deviceID else {
+            outputBufferMilliseconds = nil; outputSafetyMilliseconds = nil
+            return RoomTiming.renderSchedulingHeadroomNanos
+        }
+        let bufferFrames = Self.audioDeviceUInt32Property(deviceID: deviceID, selector: kAudioDevicePropertyBufferFrameSize)
+        let safetyFrames = Self.audioDeviceUInt32Property(deviceID: deviceID, selector: kAudioDevicePropertySafetyOffset)
+        let sampleRate = Self.audioDeviceNominalSampleRate(deviceID) ?? hardwareFormat?.sampleRate ?? Double(AudioPacket.sampleRate)
+        outputBufferMilliseconds = sampleRate > 0 ? bufferFrames.map { Double($0) * 1000 / sampleRate } : nil
+        outputSafetyMilliseconds = sampleRate > 0 ? safetyFrames.map { Double($0) * 1000 / sampleRate } : nil
         return AudioOutputRenderBudget.schedulingHeadroomNanos(
-            bufferFrames: Self.audioDeviceUInt32Property(
-                deviceID: deviceID,
-                selector: kAudioDevicePropertyBufferFrameSize
-            ),
-            safetyOffsetFrames: Self.audioDeviceUInt32Property(
-                deviceID: deviceID,
-                selector: kAudioDevicePropertySafetyOffset
-            ),
-            sampleRate: Self.audioDeviceNominalSampleRate(deviceID)
-                ?? hardwareFormat?.sampleRate
-                ?? Double(AudioPacket.sampleRate)
+            bufferFrames: bufferFrames, safetyOffsetFrames: safetyFrames, sampleRate: sampleRate
         )
     }
 

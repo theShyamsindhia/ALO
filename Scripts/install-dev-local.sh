@@ -19,6 +19,7 @@ fi
 build_dir="$(swift build -c release --show-bin-path)"
 test -x "$build_dir/alo"
 stage_dir="$(mktemp -d /tmp/alo-dev-install.XXXXXX)"
+backup_dir=""
 report_install_exit() {
     local install_status=$?
     if [[ $install_status -ne 0 ]]; then

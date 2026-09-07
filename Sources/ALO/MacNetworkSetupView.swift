@@ -283,6 +283,8 @@ struct MacNetworkSetupView: View {
 
     private func present(_ next: Sheet) {
         guard !busy else { return }
+        // Retire screen feedback only; the account's join request is untouched.
+        nearbyJoinFeedback.cancel()
         error = nil; name = ""; packageText = ""; invitation = nil; privateChannel = false; allowed = []; sheet = next
     }
 

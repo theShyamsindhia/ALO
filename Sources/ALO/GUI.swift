@@ -3576,9 +3576,7 @@ final class ALOViewModel: ObservableObject {
             hasBroadcaster: hasBroadcaster,
             timing: timing,
             recovery: liveSyncHealth.recovery,
-            peerPlaybackTiming: Dictionary(participants.compactMap { participant in
-                participant.playbackTiming.map { (participant.id, $0) }
-            }, uniquingKeysWith: { _, newest in newest })
+            peerPlaybackTiming: DiagnosticRoomContext.uniquePeerPlaybackTiming(participants)
         )
     }
 

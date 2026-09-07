@@ -223,6 +223,7 @@ final class HostServer {
                         reportAgeMilliseconds: client.lastSyncReportNanos.map { Double(now >= $0 ? now - $0 : 0) / 1_000_000 },
                         recommendedBufferMilliseconds: Double(client.recommendedPlayoutDelayNanos) / 1_000_000,
                         hardwareFloorMilliseconds: Double(client.outputLatencyPlayoutFloorNanos) / 1_000_000,
+                        audioSendCountersAvailable: true,
                         audioEnqueued: client.audioEnqueued, audioSent: client.audioSent,
                         audioExpiredWait: client.audioExpiredWait, audioExpiredAge: client.audioExpiredAge,
                         audioAdmissionRejected: client.audioAdmissionRejected,

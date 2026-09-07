@@ -2,6 +2,18 @@ import ALONetworkUI
 import Testing
 
 struct NearbyJoinFeedbackTests {
+    @Test func openingUnrelatedFormRetiresOldTextAndPendingCompletion() {
+        var feedback = ALONearbyJoinFeedback()
+        let failed = feedback.begin()
+        feedback.finish(failed, errorMessage: "Previous join failed")
+        feedback.cancel() // Same screen-local operation used when opening a form.
+        #expect(feedback.errorMessage == nil)
+        let pending = feedback.begin()
+        feedback.cancel()
+        feedback.finish(pending, errorMessage: "Late join failure must not mask the form")
+        #expect(feedback.errorMessage == nil)
+    }
+
     @Test func retryClearsFailureAndOldCompletionCannotRestoreIt() {
         var feedback = ALONearbyJoinFeedback()
         let failed = feedback.begin()

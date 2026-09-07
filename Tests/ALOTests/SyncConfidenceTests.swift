@@ -6,6 +6,62 @@ import ALOCore
 
 @Suite("Synchronization confidence under asymmetric paths")
 struct SyncConfidenceTests {
+    @Test("A legacy peer name cannot clear the local renderer's recovery latch")
+    func localAndRemoteKeysCannotCollide() {
+        var first = hostContext(idsAndDrifts: [("local-renderer", 2)], localDrift: 70)
+        let initial = first.result
+        #expect(initial.outcome == .warning)
+        first = hostContext(idsAndDrifts: [("local-renderer", 2)], localDrift: 30)
+        first.recovery = initial.syncRecovery ?? .init()
+        #expect(first.result.outcome == .warning,
+            "A healthy peer must not clear local drift hysteresis through its chosen ID")
+    }
+
+    @Test("Duplicate listener IDs cannot replace an unhealthy verdict with a healthy one")
+    func duplicateListenerIDsFailClosed() {
+        #expect(hostContext(idsAndDrifts: [("duplicate", 70), ("duplicate", 2)]).result.outcome == .warning)
+        let prior = hostContext(idsAndDrifts: [("duplicate", 70)]).result
+        var duplicated = hostContext(idsAndDrifts: [("duplicate", 2), ("duplicate", 2)])
+        duplicated.recovery = prior.syncRecovery ?? .init()
+        let ambiguous = duplicated.result
+        #expect(ambiguous.outcome == .warning)
+        var next = hostContext(idsAndDrifts: [("duplicate", 30)])
+        next.recovery = ambiguous.syncRecovery ?? .init()
+        #expect(next.result.outcome == .warning, "Ambiguous peers must not clear the original warning")
+        var one = RoomParticipant(id: "duplicate", name: "One")
+        one.playbackTiming = .init(roundTripMilliseconds: 2, driftMilliseconds: 2)
+        #expect(DiagnosticRoomContext.uniquePeerPlaybackTiming([one])["duplicate"] != nil)
+        #expect(DiagnosticRoomContext.uniquePeerPlaybackTiming([one, one]).isEmpty)
+    }
+
+    @Test("Becoming a listener discards old remote participant recovery state")
+    func roleTransitionPrunesRemoteRecovery() {
+        let host = hostContext(idsAndDrifts: [("peer", 70)]).result
+        var listener = listenerContext(drift: 2, rtt: 2)
+        listener.recovery = host.syncRecovery ?? .init()
+        #expect(listener.result.syncRecovery?.driftParticipants.isEmpty == true)
+    }
+
+    private func hostContext(idsAndDrifts: [(String, Double)], localDrift: Double = 2) -> DiagnosticRoomContext {
+        let listeners = idsAndDrifts.map { id, drift in
+            HostListenerTimingDiagnostics(peerID: id, isTimingEligible: true,
+                reportAgeMilliseconds: 10, recommendedBufferMilliseconds: 250,
+                hardwareFloorMilliseconds: 50, driftMilliseconds: drift,
+                driftSampleAgeMilliseconds: 10, playbackReportAgeMilliseconds: 10)
+        }
+        let host = HostTimingDiagnostics(listenerCount: listeners.count,
+            reportingListenerCount: listeners.count, groupBufferMilliseconds: 250,
+            maximumLatenessMilliseconds: 0, totalResyncCount: 0, listeners: listeners)
+        let local = listenerContext(drift: localDrift, rtt: 2).timing?.receiver
+        return DiagnosticRoomContext(isActive: true, role: .broadcaster,
+            participantCount: listeners.count + 1, remotePeerCount: listeners.count,
+            syncLabel: "Broadcasting", audioIsRendering: true, hasBroadcaster: true,
+            timing: SessionTimingDiagnostics(receiver: local, host: host),
+            peerPlaybackTiming: Dictionary(idsAndDrifts.map {
+                ($0.0, PeerPlaybackTiming(roundTripMilliseconds: 2, driftMilliseconds: $0.1))
+            }, uniquingKeysWith: { _, new in new }))
+    }
+
     @Test("Chart evidence is unknown before samples and after they expire")
     func chartEvidenceNeverManufacturesGreen() {
         var health = LiveSyncHealth()
@@ -45,21 +101,21 @@ struct SyncConfidenceTests {
     @Test("Recovery state follows only the participant that exceeded the threshold")
     func recoveryIsParticipantSpecific() {
         var state = SyncRecoveryState()
-        let outside = state.observeDrift(70, age: 1, participant: "a")
+        let outside = state.observeDrift(70, age: 1, participant: .peer("a"))
         #expect(!outside)
-        let other = state.observeDrift(30, age: 1, participant: "b")
+        let other = state.observeDrift(30, age: 1, participant: .peer("b"))
         #expect(other)
-        let missing = state.observeDrift(nil, age: nil, participant: "a")
+        let missing = state.observeDrift(nil, age: nil, participant: .peer("a"))
         #expect(!missing)
-        let intermediate = state.observeDrift(30, age: 1, participant: "a")
+        let intermediate = state.observeDrift(30, age: 1, participant: .peer("a"))
         #expect(!intermediate)
-        let recovered = state.observeDrift(20, age: 1, participant: "a")
+        let recovered = state.observeDrift(20, age: 1, participant: .peer("a"))
         #expect(recovered)
-        let clockOutside = state.observeClockRTT(82, participant: "a")
+        let clockOutside = state.observeClockRTT(82, participant: .peer("a"))
         #expect(!clockOutside)
-        let otherClock = state.observeClockRTT(35, participant: "b")
+        let otherClock = state.observeClockRTT(35, participant: .peer("b"))
         #expect(otherClock)
-        state.retainParticipants(["b"])
+        state.retainParticipants([.peer("b")])
         #expect(state.clockParticipants.isEmpty)
     }
 

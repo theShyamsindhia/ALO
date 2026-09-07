@@ -5,6 +5,24 @@ import ALORooms
 @testable import ALONetworking
 
 final class NearbyNetworkJoinTests: XCTestCase {
+    func testInvalidLoopbackTimeoutIsConfigurationNotIdentityFailure() async throws {
+        let owner = UserIdentity.ephemeral()
+        let manifest = try NetworkManifest.create(name: "Fixture", owner: owner)
+        let server = try NearbyNetworkService(user: owner, displayName: "Owner", changed: { _ in },
+            requestsChanged: { _ in }, failed: { _ in })
+        defer { server.stop() }
+        for invalid in [0.0, -1, .nan, .infinity, 121] {
+            do {
+                _ = try await server.listenOnLoopback(network: manifest, approvalTimeout: invalid)
+                XCTFail("Invalid fixture configuration must be rejected")
+            } catch {
+                guard case NearbyNetworkService.LoopbackConfigurationError.invalidApprovalTimeout = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+            }
+        }
+    }
+
     func testOwnerApprovalExpiryDoesNotClaimIdentityVerificationFailed() async throws {
         let owner = UserIdentity.ephemeral(), requester = UserIdentity.ephemeral()
         let manifest = try NetworkManifest.create(name: "Expiring approval", owner: owner)

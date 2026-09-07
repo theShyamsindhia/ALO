@@ -14,17 +14,22 @@ enum SyncHealthTolerance {
 
 /// Hysteresis belongs to the measured signal and participant that crossed a
 /// threshold. Missing data or a video warning must not latch unrelated signals.
-struct SyncRecoveryState: Equatable, Sendable {
-    static let localParticipant = "local-renderer"
-    private(set) var driftParticipants: Set<String> = []
-    private(set) var clockParticipants: Set<String> = []
+enum SyncParticipant: Hashable, Sendable {
+    case localRenderer
+    case peer(String)
+}
 
-    mutating func retainParticipants(_ participants: Set<String>) {
+struct SyncRecoveryState: Equatable, Sendable {
+    static let localParticipant = SyncParticipant.localRenderer
+    private(set) var driftParticipants: Set<SyncParticipant> = []
+    private(set) var clockParticipants: Set<SyncParticipant> = []
+
+    mutating func retainParticipants(_ participants: Set<SyncParticipant>) {
         driftParticipants.formIntersection(participants)
         clockParticipants.formIntersection(participants)
     }
 
-    mutating func observeDrift(_ drift: Double?, age: Double?, participant: String) -> Bool {
+    mutating func observeDrift(_ drift: Double?, age: Double?, participant: SyncParticipant) -> Bool {
         guard let drift, let age, drift.isFinite, drift >= 0,
               age.isFinite, age >= 0, age <= 500 else { return false }
         if drift >= SyncHealthTolerance.driftWarningMilliseconds { driftParticipants.insert(participant) }
@@ -32,7 +37,7 @@ struct SyncRecoveryState: Equatable, Sendable {
         return !driftParticipants.contains(participant)
     }
 
-    mutating func observeClockRTT(_ roundTrip: Double?, participant: String) -> Bool {
+    mutating func observeClockRTT(_ roundTrip: Double?, participant: SyncParticipant) -> Bool {
         guard let roundTrip, roundTrip.isFinite, roundTrip >= 0 else { return false }
         if roundTrip >= SyncHealthTolerance.clockRTTWarningMilliseconds { clockParticipants.insert(participant) }
         else if roundTrip <= SyncHealthTolerance.clockRTTRecoveryMilliseconds { clockParticipants.remove(participant) }

@@ -82,7 +82,6 @@ public final class NearbyNetworkService: @unchecked Sendable {
     private var endpoints = [UUID: (NearbyNetwork, NWEndpoint)]()
     private var sessions = [UUID: Session]()
     private var pending = [UUID: NearbyNetworkJoinRequest]()
-    private var ownerApprovalTimeout: TimeInterval = 120
 
     struct Message: Codable {
         var version = 1
@@ -258,7 +257,7 @@ public final class NearbyNetworkService: @unchecked Sendable {
         })
     }
 
-    private func accept(_ connection: NWConnection, networkID: UUID) {
+    private func accept(_ connection: NWConnection, networkID: UUID, approvalTimeout: TimeInterval = 120) {
         guard hasSessionCapacity(outbound: false) else { connection.cancel(); return }
         guard case .hostPort(let host, _) = connection.endpoint else { connection.cancel(); return }
         let remoteHost = String(describing: host)
@@ -291,7 +290,7 @@ public final class NearbyNetworkService: @unchecked Sendable {
                     }
                     self.pending[id] = NearbyNetworkJoinRequest(id: id, networkID: networkID,
                         displayName: remote.deviceName, identity: remote.userIdentity)
-                    self.armTimeout(id, seconds: self.ownerApprovalTimeout); self.publishRequests()
+                    self.armTimeout(id, seconds: approvalTimeout); self.publishRequests()
                     // Keep a read outstanding while the owner decides. EOF must
                     // retire Cancel/disconnect promptly; extra bytes are invalid
                     // because this protocol accepts exactly one join request.
@@ -380,14 +379,15 @@ public final class NearbyNetworkService: @unchecked Sendable {
         return try await request(networkID: network.id)
     }
 
+    enum LoopbackConfigurationError: Error { case invalidApprovalTimeout }
+
     func listenOnLoopback(network: NetworkManifest, approvalTimeout: TimeInterval = 120) async throws -> NWEndpoint {
         try await withCheckedThrowingContinuation { continuation in
             queue.async { [self] in
                 do {
                     guard approvalTimeout.isFinite, approvalTimeout > 0, approvalTimeout <= 120 else {
-                        throw NearbyNetworkError.invalidMessage
+                        throw LoopbackConfigurationError.invalidApprovalTimeout
                     }
-                    self.ownerApprovalTimeout = approvalTimeout
                     try network.validateSignature()
                     guard network.owner == binding.userIdentity else { throw NetworkAuthorityError.ownerRequired }
                     let profile = try parameters()
@@ -395,7 +395,9 @@ public final class NearbyNetworkService: @unchecked Sendable {
                     let listener = try NWListener(using: profile)
                     listeners[network.id] = listener
                     var returned = false
-                    listener.newConnectionHandler = { [weak self] connection in self?.accept(connection, networkID: network.id) }
+                    listener.newConnectionHandler = { [weak self] connection in
+                        self?.accept(connection, networkID: network.id, approvalTimeout: approvalTimeout)
+                    }
                     listener.stateUpdateHandler = { state in
                         guard !returned else { return }
                         if case .ready = state, let port = listener.port {

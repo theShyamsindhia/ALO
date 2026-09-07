@@ -151,7 +151,7 @@ struct MobileNetworkSetupView: View {
                 if id != nil { path = [.channels] }
             }), identityName: account.displayName,
             identityFingerprint: account.identity?.publicIdentity.userID ?? "",
-            onCreateNetwork: { networkName = ""; errorMessage = nil; path.append(.createNetwork) },
+            onCreateNetwork: { nearbyJoinFeedback.cancel(); networkName = ""; errorMessage = nil; path.append(.createNetwork) },
             onImportNetwork: openInvitationImport,
             onExportPublicIdentity: { prepareExport(recovery: false, filename: "ALO public identity.txt") {
                 try account.publicIdentityData()
@@ -191,9 +191,11 @@ struct MobileNetworkSetupView: View {
                     perform { _ = await model.joinChannel(request) }
                 }), isBusy: busy,
                 onCreateChannel: {
+                    nearbyJoinFeedback.cancel()
                     channelName = ""; privateChannel = false; selectedMemberIDs = []
                     errorMessage = nil; path.append(.createChannel(network.id))
                 }, onAddMember: {
+                    nearbyJoinFeedback.cancel()
                     publicIdentityText = ""; preparedInvitation = nil; preparedInvitationText = nil
                     errorMessage = nil; path.append(.addMember(network.id))
                 }, onImportInvitation: openInvitationImport)
@@ -276,6 +278,8 @@ struct MobileNetworkSetupView: View {
     }
 
     private func openInvitationImport() {
+        // Retire screen feedback only, not the network request itself.
+        nearbyJoinFeedback.cancel()
         invitationText = ""; errorMessage = nil; path.append(.importInvitation)
     }
 

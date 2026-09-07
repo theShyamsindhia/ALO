@@ -165,7 +165,8 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
 
     func diagnosticsSnapshot() -> ReceiverTimingDiagnostics {
         queue.sync {
-            let report = player.syncReport()
+            let local = player.localDiagnosticReport()
+            let report = local.playback
             let format = player.outputHardwareFormatForDiagnostics
             let now = MonotonicClock.nowNanos()
             let fresh = clock.flatMap { now >= $0.sampledAtLocalNanos && now - $0.sampledAtLocalNanos <= 5_000_000_000 ? $0 : nil }
@@ -187,7 +188,8 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
                 video: screenTiming.presentationSnapshot(videoDecoder.presentationTimingSnapshot),
                 videoEnabled: screenTiming.videoEnabled,
                 activePlayoutBufferMilliseconds: Double(player.activePlayoutDelayNanos) / 1_000_000,
-                automaticSyncState: player.automaticSyncState)
+                automaticSyncState: player.automaticSyncState,
+                renderObservation: local.observation)
         }
     }
 

@@ -91,6 +91,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Verify app icon packaging and transparency
         run: bash Scripts/test-app-icon.sh
+      - name: Verify dev installer preserves existing backups
+        run: bash Scripts/test-dev-backup-cleanup.sh
       - uses: ./.github/actions/swift-build-cache
         with:
           flavor: app

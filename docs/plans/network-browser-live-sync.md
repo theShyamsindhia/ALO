@@ -101,6 +101,58 @@ use a structured Shyam mention. Never expose local API credentials.
   player fixture entering an unrelated late-packet reset on a slow runner, and a
   download-monitor XCTest callback overfulfilling after the test ended. These are
   release blockers, not waived checks. Strict live-timing thresholds remain unchanged.
+- `1a2a07a`: all three required verification jobs passed (run 34139725578).
+  The combined local checkpoint passed 83 Swift Testing cases and 18 XCTest
+  cases, including strict live fan-out timing and the previously failing fixtures.
+  Review follow-ups and physical validation remain open; this is not a release.
+
+## First paired baseline and hardware-clock investigation
+
+Both installed apps still used matching `ce6cb97` code. Shyam's process changed
+before the confirmed broadcast; its earlier no-broadcaster state is superseded,
+not evidence of a continuing discovery failure. The receiver subsequently saw
+incoming packets and the app reported active playback. Its recorded drift was
+unavailable, capture-to-receive transit variation was approximately 106–248 ms,
+and the trace showed 20 late packets and two realignments without further growth.
+Control RTT was approximately 4 ms. Transit variation includes sender queues and
+capture scheduling, so it is not by itself a measurement of Wi-Fi delay.
+
+The sender and receiver overlapped for approximately 114 seconds beginning at
+15:40:23 UTC. Both logged an explicit paused state at approximately 15:42:18 UTC;
+the cause of the pause is not established. The planned ten-minute uninterrupted
+test therefore did not complete. A ten-minute log process is not ten minutes of
+validated playback. Neither the started/recent-packets flag nor these reports
+prove nonzero PCM, audible output, or acoustic alignment.
+
+The secure host did not populate submission counters, so its displayed `0/0`
+was unavailable instrumentation, not proof of zero delivery. Similarly, the
+receiver's displayed 550 ms buffer was a recommendation rather than the actual
+scheduled channel delay. These distinctions must be explicit in diagnostics.
+
+After that baseline, a separate silence-only native output probe on Raj's Mac
+observed 150 valid, advancing player timestamps. Every host timestamp was ahead
+of the observation taken after reading it, by 11.59–22.25 ms. Output was 48 kHz,
+512 frames per buffer, with 48 safety-offset frames. No microphone, capture,
+route, volume, network, or installed-app changes were made. The existing drift
+estimator rejects all future host timestamps. This establishes a real hardware
+timestamp behavior requiring a regression, but the app's exact rejection gate
+must still be confirmed with bounded local observations before changing policy.
+
+Apple's [AudioDeviceIOProc contract](https://developer.apple.com/documentation/coreaudio/audiodeviceioproc)
+distinguishes the current I/O-cycle timestamp from the time output will reach
+the hardware. Do not equate a render timestamp with callback receipt time or
+accept arbitrary future timestamps: any policy allowance needs a measured,
+bounded scheduling basis and future/stale/invalid control tests.
+
+The next instrumented candidate passed 114 Swift Testing cases and 19 XCTest
+cases locally (`typed-confidence-telemetry-green.log`). Its fixed-cardinality,
+local-only observations distinguish invalid timestamps, future render times,
+stale packets and missing anchors; they do not alter estimator acceptance.
+Three additional recovery regressions failed first and now pass: peer IDs cannot
+collide with the local renderer's identity, duplicate IDs cannot overwrite an
+unhealthy verdict, and changing to listener clears old remote recovery state.
+This is a test checkpoint, not completed two-Mac validation. The old Raj Dev app
+was normally quit before installing this candidate; production ALO stays closed.
 
 ## Timing evidence must have an independent reference
 

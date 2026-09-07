@@ -88,6 +88,7 @@ struct ReceiverTimingDiagnostics: Sendable, Equatable {
     var videoEnabled = false
     var activePlayoutBufferMilliseconds: Double? = nil
     var automaticSyncState: String? = nil
+    var renderObservation: RenderObservation? = nil
 }
 
 struct HostListenerTimingDiagnostics: Sendable, Equatable {
@@ -96,6 +97,7 @@ struct HostListenerTimingDiagnostics: Sendable, Equatable {
     let reportAgeMilliseconds: Double?
     let recommendedBufferMilliseconds: Double
     let hardwareFloorMilliseconds: Double
+    var audioSendCountersAvailable = false
     var audioEnqueued: UInt64 = 0
     var audioSent: UInt64 = 0
     var audioExpiredWait: UInt64 = 0
@@ -149,6 +151,13 @@ struct DiagnosticRoomContext: Sendable, Equatable {
     /// entries must stay unknown; another participant's RTT is never a proxy.
     var peerPlaybackTiming: [String: PeerPlaybackTiming] = [:]
 
+    static func uniquePeerPlaybackTiming(_ participants: [RoomParticipant]) -> [String: PeerPlaybackTiming] {
+        Dictionary(grouping: participants, by: \.id).compactMapValues { matches in
+            guard matches.count == 1, let timing = matches[0].playbackTiming, timing.isValid else { return nil }
+            return timing
+        }
+    }
+
     var result: DiagnosticCheckResult {
         guard isActive else {
             return DiagnosticCheckResult(
@@ -159,11 +168,13 @@ struct DiagnosticRoomContext: Sendable, Equatable {
         }
         var parts = ["\(role.rawValue.capitalized), \(remotePeerCount) remote peer\(remotePeerCount == 1 ? "" : "s")", syncLabel]
         var nextRecovery = recovery
-        if let host = timing?.host {
-            nextRecovery.retainParticipants(Set(host.listeners.map(\.peerID)).union([SyncRecoveryState.localParticipant]))
+        if role != .broadcaster {
+            nextRecovery.retainParticipants([.localRenderer])
+        } else if let host = timing?.host {
+            nextRecovery.retainParticipants(Set(host.listeners.map { SyncParticipant.peer($0.peerID) }).union([.localRenderer]))
         }
         var receiverSignalsReady = false
-        var listenerSignalsReady: [String: Bool] = [:]
+        var allListenerSignalsReady = true
         parts.append("Estimated software timing, not measured acoustic alignment; low RTT does not prove clock accuracy")
         if let receiver = timing?.receiver {
             let clockReady = nextRecovery.observeClockRTT(receiver.roundTripMilliseconds, participant: SyncRecoveryState.localParticipant)
@@ -179,7 +190,10 @@ struct DiagnosticRoomContext: Sendable, Equatable {
             if !clockReady {
                 parts.append("Clock confidence is limited: round-trip timing is missing or elevated")
             }
-            parts.append("buffer \(Self.milliseconds(receiver.recommendedBufferMilliseconds))")
+            parts.append("recommended buffer \(Self.milliseconds(receiver.recommendedBufferMilliseconds))")
+            if let active = receiver.activePlayoutBufferMilliseconds {
+                parts.append("active playout buffer \(Self.milliseconds(active))")
+            }
             parts.append("jitter \(Self.milliseconds(receiver.jitterMilliseconds))")
             parts.append(
                 "output \(Self.milliseconds(receiver.outputLatencyMilliseconds)) + \(Self.milliseconds(receiver.renderHeadroomMilliseconds)) render"
@@ -196,6 +210,7 @@ struct DiagnosticRoomContext: Sendable, Equatable {
             } else {
                 parts.append("render drift not currently measured")
             }
+            if let observation = receiver.renderObservation { parts.append(observation.detail) }
             if let video = receiver.video, video.presentedCount > 0 || video.pendingCount > 0 {
                 let miss = video.latestDeadlineMissNanos.map { Self.milliseconds(Double($0) / 1_000_000) } ?? "not measured"
                 parts.append("screen deadline miss at UI handoff \(miss), peak \(Self.milliseconds(Double(video.maximumDeadlineMissNanos) / 1_000_000)), \(video.pendingCount) pending")
@@ -205,7 +220,11 @@ struct DiagnosticRoomContext: Sendable, Equatable {
                 parts.append("Screen sharing is enabled, but no screen frame has reached the UI yet")
             }
         }
-        if let host = timing?.host {
+        if let host = timing?.host, role == .broadcaster {
+            let listenerIDCounts = Dictionary(grouping: host.listeners, by: \.peerID).mapValues(\.count)
+            if listenerIDCounts.values.contains(where: { $0 != 1 }) {
+                parts.append("Listener identifiers are duplicated; their timing cannot be verified")
+            }
             parts.append("channel buffer \(Self.milliseconds(host.groupBufferMilliseconds))")
             parts.append("\(host.reportingListenerCount)/\(host.listenerCount) listeners reporting")
             parts.append("max lateness \(Self.milliseconds(host.maximumLatenessMilliseconds))")
@@ -213,13 +232,16 @@ struct DiagnosticRoomContext: Sendable, Equatable {
             parts.append("channel timing changes \(host.roomTimingChangeCount)")
             for (index, listener) in host.listeners.enumerated() {
                 let peerRTT = peerPlaybackTiming[listener.peerID]?.roundTripMilliseconds
-                let clockReady = nextRecovery.observeClockRTT(peerRTT, participant: listener.peerID)
+                // Duplicate IDs are ambiguous: neither copy may clear a prior
+                // warning or replace the other's verdict with a healthy value.
+                let unique = listenerIDCounts[listener.peerID] == 1
+                let clockReady = unique && nextRecovery.observeClockRTT(peerRTT, participant: .peer(listener.peerID))
                 let reportIsFresh = listener.playbackReportAgeMilliseconds.map {
                     $0.isFinite && $0 >= 0 && $0 <= 2_500
                 } ?? false
-                let driftReady = nextRecovery.observeDrift(reportIsFresh ? listener.driftMilliseconds : nil,
-                    age: listener.driftSampleAgeMilliseconds, participant: listener.peerID)
-                listenerSignalsReady[listener.peerID] = clockReady && driftReady
+                let driftReady = unique && nextRecovery.observeDrift(reportIsFresh ? listener.driftMilliseconds : nil,
+                    age: listener.driftSampleAgeMilliseconds, participant: .peer(listener.peerID))
+                allListenerSignalsReady = clockReady && driftReady && allListenerSignalsReady
                 if let peerRTT, clockReady {
                     parts.append("listener \(index + 1) clock RTT \(Self.milliseconds(peerRTT))")
                 } else {
@@ -227,7 +249,11 @@ struct DiagnosticRoomContext: Sendable, Equatable {
                 }
                 let age = listener.reportAgeMilliseconds.map(Self.milliseconds) ?? "not reported"
                 parts.append("listener \(index + 1): network \(Self.milliseconds(listener.recommendedBufferMilliseconds)), hardware floor \(Self.milliseconds(listener.hardwareFloorMilliseconds)), network vote \(listener.isTimingEligible ? "eligible" : "late join"), report age \(age)")
-                parts.append("audio packets: \(listener.audioSent)/\(listener.audioEnqueued) submitted, wait expired \(listener.audioExpiredWait), capture expired \(listener.audioExpiredAge), local-send budget rejected \(listener.audioAdmissionRejected), congestion replaced \(listener.audioReplaced), transition discarded \(listener.audioDiscardedBoundary)")
+                if listener.audioSendCountersAvailable {
+                    parts.append("audio packets: \(listener.audioSent)/\(listener.audioEnqueued) submitted, wait expired \(listener.audioExpiredWait), capture expired \(listener.audioExpiredAge), local-send budget rejected \(listener.audioAdmissionRejected), congestion replaced \(listener.audioReplaced), transition discarded \(listener.audioDiscardedBoundary)")
+                } else {
+                    parts.append("audio send counters unavailable on this transport")
+                }
                 if let drift = listener.driftMilliseconds {
                     let sampleAge = listener.driftSampleAgeMilliseconds.map(Self.milliseconds) ?? "unknown"
                     let reportAge = listener.playbackReportAgeMilliseconds.map(Self.milliseconds) ?? "unknown"
@@ -266,13 +292,13 @@ struct DiagnosticRoomContext: Sendable, Equatable {
                 ready = ready && host.listenerCount > 0
                     && host.reportingListenerCount == host.listenerCount
                     && host.listeners.count == host.listenerCount
+                    && allListenerSignalsReady
                     && host.maximumLatenessMilliseconds < Self.driftWarningMilliseconds
                     && host.listeners.allSatisfy { listener in
                         guard let reportAge = listener.playbackReportAgeMilliseconds,
                               reportAge.isFinite, reportAge >= 0, reportAge <= 2_500 else { return false }
-                        return listenerSignalsReady[listener.peerID] == true
-                            && (!host.videoEnabled || Self.remoteScreenIsVerified(listener.screenTiming,
-                                reportAgeNanos: UInt64(reportAge * 1_000_000)))
+                        return !host.videoEnabled || Self.remoteScreenIsVerified(listener.screenTiming,
+                                reportAgeNanos: UInt64(reportAge * 1_000_000))
                     }
             } else { ready = false }
         }

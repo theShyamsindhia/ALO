@@ -14,6 +14,7 @@ protocol SecureMacPlaybackTrack: AnyObject {
     var pendingPlaybackPacketCount: Int { get }
     var activePlayoutDelayNanos: UInt64 { get }
     var automaticSyncState: String { get }
+    var renderObservation: RenderObservation? { get }
     func accept(_ packet: AudioPacket)
     func maintainSync()
     func forceResync(atOrAfterCaptureNanos: UInt64?)
@@ -27,6 +28,9 @@ protocol SecureMacPlaybackTrack: AnyObject {
 }
 
 extension SynchronizedPlayer: SecureMacPlaybackTrack {}
+extension SecureMacPlaybackTrack {
+    var renderObservation: RenderObservation? { nil }
+}
 
 /// One selected broadcaster's output timeline, independent of transport ticket
 /// UUIDs/generations. Like MediaPlaybackTransition, prepare is reversible and
@@ -345,6 +349,11 @@ final class SecureMacPlaybackTimeline {
 
     func syncReport() -> PlaybackSyncReport {
         reportingPlayer.syncReport()
+    }
+
+    func localDiagnosticReport() -> (playback: PlaybackSyncReport, observation: RenderObservation?) {
+        let player = reportingPlayer
+        return (player.syncReport(), player.renderObservation)
     }
 
     func stop() {
