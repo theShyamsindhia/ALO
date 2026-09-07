@@ -31,7 +31,12 @@ struct MacNetworkSetupView: View {
     var body: some View {
         Group {
             if account.identityReady {
-                networkBrowser
+                // The native window owns its dimensions. Keep the original
+                // geometry proposal without the old card/header: otherwise
+                // List's intrinsic size can enlarge NSHostingView's window.
+                GeometryReader { geometry in
+                    networkBrowser.frame(width: geometry.size.width, height: geometry.size.height)
+                }
             } else {
                 onboardingContainer
             }

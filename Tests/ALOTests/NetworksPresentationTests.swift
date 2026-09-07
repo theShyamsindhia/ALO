@@ -46,6 +46,10 @@ extension NativePresentationTests {
             let hosting = NSHostingView(rootView: ALOView(model: model)
                 .environment(\.colorScheme, dark ? .dark : .light))
             window.contentView = hosting
+            if account.identityReady {
+                NetworkSetupWindowPresentation.configure(window, identityReady: true)
+                window.setContentSize(NSSize(width: 800, height: 640))
+            }
             defer { window.close() }
             window.orderBack(nil)
             try await Task.sleep(for: .milliseconds(150))
@@ -68,6 +72,20 @@ extension NativePresentationTests {
                 // Recovery is never revealed. These screenshots contain public
                 // test identities only, not raw credentials or installed data.
                 try png.write(to: folder.appendingPathComponent("\(state)-\(dark ? "dark" : "light").png"))
+            }
+            if account.identityReady {
+                // Exercise the actual account-backed browser at both supported
+                // native sizes, not only the public-value content fixture.
+                for size in [NSSize(width: 640, height: 440), NSSize(width: 760, height: 520)] {
+                    window.setContentSize(size)
+                    try await Task.sleep(for: .milliseconds(150))
+                    hosting.layoutSubtreeIfNeeded()
+                    #expect(hosting.bounds.size == size)
+                    #expect(window.styleMask.contains(.resizable))
+                }
+                #expect(storage.insertCount == insertCount)
+                #expect(account.networks.count == networkCount)
+                #expect(model.phase == .idle)
             }
         }
     }
