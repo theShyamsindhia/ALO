@@ -323,8 +323,13 @@ public final class NearbyNetworkService: @unchecked Sendable {
     public func respond(id: UUID, invitation: NetworkInvitation?) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             queue.async { [self] in
+                // A repeated owner action must not cancel the response already
+                // being sent, or resume its first caller with a false failure.
+                guard sessions[id]?.deliveryCompletion == nil else {
+                    continuation.resume(throwing: NearbyNetworkError.busy); return
+                }
                 do {
-                    guard let request = pending[id], let session = sessions[id], session.deliveryCompletion == nil else {
+                    guard let request = pending[id], let session = sessions[id] else {
                         throw NearbyNetworkError.unavailable
                     }
                     if let invitation {

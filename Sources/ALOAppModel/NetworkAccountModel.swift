@@ -328,12 +328,9 @@ public final class NetworkAccountModel: ObservableObject {
         catch { throw NearbyNetworkApprovalDeliveryError(underlyingDescription: Self.describe(error)) }
     }
 
-    public func rejectJoinRequest(id: UUID) {
-        guard let service = nearbyService else { return }
-        Task { @MainActor in
-            do { try await service.respond(id: id, invitation: nil) }
-            catch { if nearbyService === service { nearbyNetworkError = Self.describe(error) } }
-        }
+    public func rejectJoinRequest(id: UUID) async throws {
+        guard let service = nearbyService else { throw NearbyNetworkError.unavailable }
+        try await service.respond(id: id, invitation: nil)
     }
 
     public func addMember(data: Data, networkID: UUID) async throws -> NetworkInvitation {

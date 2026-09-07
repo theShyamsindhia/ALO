@@ -65,15 +65,22 @@ public struct ALONetworkSidebar: View {
                 if !joinRequests.isEmpty {
                     Section("Requests to join") {
                         ForEach(joinRequests) { request in
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text(request.name).fontWeight(.medium)
-                                Text("Wants to join \(request.networkName). Approve only if you recognize this person.")
-                                    .font(.callout).foregroundStyle(.secondary)
+                            Group {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text(request.name).fontWeight(.medium)
+                                    Text("Wants to join \(request.networkName). Approve only if you recognize this person.")
+                                        .font(.callout).foregroundStyle(.secondary)
+                                        .lineLimit(nil)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
                                 DisclosureGroup("Verify identity") {
                                     Text("Compare this fingerprint with the person through a trusted conversation.")
                                         .font(.callout).foregroundStyle(.secondary)
+                                        .lineLimit(nil)
+                                        .fixedSize(horizontal: false, vertical: true)
                                     ALOFingerprint(value: request.fingerprint)
                                 }
+                                .buttonStyle(.borderless)
                                 HStack {
                                     Button("Approve") { onApprove(request.id) }.buttonStyle(.borderedProminent)
                                     Button("Decline") { onDecline(request.id) }.buttonStyle(.bordered)
@@ -106,12 +113,16 @@ public struct ALONetworkSidebar: View {
                             Text("Find your people.").fontWeight(.medium)
                             Text("Join a nearby network, or create one for your group.")
                                 .foregroundStyle(.secondary)
+                                .lineLimit(nil)
+                                .fixedSize(horizontal: false, vertical: true)
                         }.padding(.vertical, 6)
                     }
                 }
                 Section("Nearby networks") {
                     if let nearbyNotice {
                         Text(nearbyNotice).font(.callout).foregroundStyle(.secondary)
+                            .lineLimit(nil)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     if let nearbyError {
                         ALOInlineError(message: nearbyError)
@@ -123,6 +134,8 @@ public struct ALONetworkSidebar: View {
                             Text(network.name).fontWeight(.medium)
                             if let status = network.status {
                                 Text(status.message).font(.callout).foregroundStyle(.secondary)
+                                    .lineLimit(nil)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
                             if network.status == .waitingForApproval {
                                 Button("Cancel request") { onCancelJoin(network.id) }
@@ -141,9 +154,13 @@ public struct ALONetworkSidebar: View {
                     if nearbyNetworks.isEmpty {
                         Text("Nearby networks appear here while their owner has ALO open. Connect to the same local network.")
                             .font(.callout).foregroundStyle(.secondary)
+                            .lineLimit(nil)
+                            .fixedSize(horizontal: false, vertical: true)
                     } else {
                         Text("The owner approves your request before you can enter.")
                             .font(.caption).foregroundStyle(.secondary)
+                            .lineLimit(nil)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 Section {
@@ -163,7 +180,8 @@ public struct ALONetworkSidebar: View {
                     }
                 }
             }
-            .listStyle(.sidebar)
+            .listStyle(.inset)
+            .lineLimit(nil)
             .frame(minHeight: 0, maxHeight: .infinity)
 
             Divider()

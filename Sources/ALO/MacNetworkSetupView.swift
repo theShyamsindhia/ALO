@@ -147,7 +147,7 @@ struct MacNetworkSetupView: View {
                     catch { self.error = NetworkAccountModel.describe(error) }
                 } },
                 onApprove: { id in performAsync { try await account.approveJoinRequest(id: id) } },
-                onDecline: { id in account.rejectJoinRequest(id: id) },
+                onDecline: { id in performAsync { try await account.rejectJoinRequest(id: id) } },
                 nearbyError: account.nearbyNetworkError,
                 nearbyNotice: account.nearbyNetworkNotice,
                 onRetryNearby: { Task { @MainActor in account.stopNearbyNetworking(); await account.startNearbyNetworking() } },

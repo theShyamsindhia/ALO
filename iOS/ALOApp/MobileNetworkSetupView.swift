@@ -167,7 +167,7 @@ struct MobileNetworkSetupView: View {
                 catch { errorMessage = NetworkAccountModel.describe(error) }
             } },
             onApprove: { id in perform { try await account.approveJoinRequest(id: id) } },
-            onDecline: { id in account.rejectJoinRequest(id: id) },
+            onDecline: { id in perform { try await account.rejectJoinRequest(id: id) } },
             nearbyError: account.nearbyNetworkError,
             nearbyNotice: account.nearbyNetworkNotice,
             onRetryNearby: { Task { @MainActor in account.stopNearbyNetworking(); await account.startNearbyNetworking() } },

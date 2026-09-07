@@ -616,14 +616,6 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !model.account.pendingJoinRequests.isEmpty, let window {
-            setupTransitionGeneration &+= 1
-            restoreSetupWindow()
-            window.setContentSize(NSSize(width: SetupWindow.width, height: 640))
-            setupWindowFrame = window.frame
-            window.makeKeyAndOrderFront(nil)
-            return true
-        }
         if model.phase == .live {
             if model.videoFullscreen {
                 fullScreenVideoController?.show()
@@ -634,6 +626,15 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
             }
         } else {
             window?.makeKeyAndOrderFront(nil)
+        }
+        // A nearby request cannot replace the user's normal playback restore,
+        // especially fullscreen video. Approvals are an additional non-key UI.
+        if !model.videoFullscreen, !model.account.pendingJoinRequests.isEmpty, let window {
+            setupTransitionGeneration &+= 1
+            restoreSetupWindow()
+            window.setContentSize(NSSize(width: SetupWindow.width, height: 640))
+            setupWindowFrame = window.frame
+            window.orderFront(nil)
         }
         return true
     }
