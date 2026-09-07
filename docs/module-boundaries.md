@@ -47,14 +47,22 @@ verification alone cannot establish that an unseen event predates revocation.
 - `RoomStateSnapshot.events`, `.chatEvents` and `.queue` contain only the
   projection. `.retainedEvents` is raw signed storage for archive/replication,
   not UI, queue actions or Lamport advancement.
-- Retention, queue tombstones and order changes must use the projection too.
-  An inert revoked record cannot evict or remove an authorized record.
-- Authorized retention with a projector is per signing author (up to
-  500 chats, 5,000 queue records and the latest order per author), still subject
-  to the global 5 MiB document budget. It cannot erase another author's records.
-  The visible UI remains capped at 500 chats. Otherwise two peers with different
-  historical receipts can disagree about a legitimate retention deletion and
-  permanently reject subsequent sync.
+- Queue tombstones, ordering and queue retention use the authorized projection.
+  Inert records cannot remove another user's history or affect their queue.
+- Retention scopes come from the verified **root user**, not freely generated
+  installation IDs (up to 500 chats, 5,000 queue records and the latest order per
+  root). Chat retention and validation count the same root's retained provenance,
+  including inert records. Otherwise peers with partial historical receipts can
+  disagree about legitimate deletions and permanently reject subsequent sync.
+  This is a bounded cache, not an immutable moderation/audit archive: same-root
+  chat eviction can retire older accepted entries even when newer entries are
+  not displayed. It cannot authorize those newer entries or erase another root.
+  The visible UI remains capped at 500 chats.
+- All network retention additionally fits 8,192 records / 2 MiB of encoded data,
+  below the 16,384-receipt and 5 MiB serialized-document limits. Budget checks run
+  after legitimate same-root pruning; overflow rejects the candidate atomically
+  instead of evicting another user's history. Both canonical and original stored
+  JSON bytes count, so padding an equivalent encoding cannot bypass the budget.
 - Inert records have a separate limit of 1,024 events / 1 MiB encoded bytes.
   Exceeding it rejects the whole candidate without mutating committed history
   or receipts. A candidate adding inert bytes must also stay below the global
@@ -70,8 +78,18 @@ verification alone cannot establish that an unseen event predates revocation.
   Pin/check the authority revision across the transaction; discard a candidate
   if it changes. Production commit and receipt recording share a stable policy
   guard that never holds the fast media-authorization snapshot lock.
+- Retained records carry immutable canonical/source bytes and verified scope.
+  Reuse them only on an exact source-byte match; do not re-encode every retained
+  event for each edit, snapshot, or compaction. The 8,192-record regression checks
+  encoding counts, not a machine-dependent microbenchmark threshold.
 - `rememberAccepted` runs only after the entire transaction commits, and only
   on projected events. Failed candidates and inert storage never create receipts.
+- Local network edits and relayed durable events commit on the bounded worker
+  before replica/UI publication or gossip. Reserve local counters independently
+  while commits are pending, and never reuse a rejected counter. Capacity errors
+  report an unsent edit without disabling media or future durable work; only local
+  failures carry `RoomStateOperationRejection` and may restore composer drafts.
+  Generation/access fences reject late completions after leave or revocation.
 - Receipts cover exact bytes and are saved in an installation-signed,
   network/channel-bound archive. A snapshot from one worker must not erase a
   newly committed replica receipt awaiting ingestion on another worker.

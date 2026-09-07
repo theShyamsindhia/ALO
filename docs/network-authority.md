@@ -85,6 +85,27 @@ member loses access, and keep using verified owner/generation anchors. Offline
 devices cannot learn revocations until they receive newer signed policy; this
 model does not claim globally instantaneous revocation or global consensus.
 
+## Execution boundaries
+
+Repository reads/mutations and policy reloads can wait for a cross-process file
+lock or an in-flight durable transaction. `NetworkAccountModel` runs those
+operations on its serialized repository worker, not MainActor. Its synchronous
+`room(channelID:)` lookup is cached presentation data, **not admission**. Joining
+must await `authorization`, which reloads the pinned policy and checks current
+identity/access again when the result returns to the UI actor.
+
+Mac and iOS prepare `MeshControlPlane` off MainActor: restoring a signed archive,
+loading Automerge, projecting retained history and recording receipts are not
+UI work. Construction does not start a listener. Before starting the prepared
+session, the adapter rechecks the join generation, cancellation, identity and
+current policy. Leaving or losing access while preparation is pending must not
+start an obsolete session later. Never fix a UI stall by removing these access
+checks or treating cached channel visibility as authorization.
+
+Unreadable-policy diagnostics do not replace an access-loss warning for the
+selected network. Show the actionable revocation/quarantine warning first and
+retain the unrelated storage diagnostics separately or underneath it.
+
 ## Tests
 
 `NetworkAuthorityTests` covers canonical round trips, signature tampering,

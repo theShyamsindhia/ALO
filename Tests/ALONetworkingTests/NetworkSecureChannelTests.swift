@@ -9,6 +9,40 @@ import ALORooms
 /// Actual loopback TLS and generation-4 claim exchange. This does not establish physical audio accuracy.
 @Suite("Network-authorized live TLS channels", .serialized)
 struct NetworkSecureChannelTests {
+    @Test func blockedCompletionQueueDoesNotExhaustVerificationWorkersForOtherTLSChannels() async throws {
+        let fixture = try NetworkTLSFixture()
+        let pair = try fixture.pair()
+        let blockedCompletionQueue = DispatchQueue(label: "alo.tests.blocked-verification-completion")
+        let completionGate = DispatchSemaphore(value: 0)
+        let callbacks = VerificationCompletionCounter()
+        defer { completionGate.signal(); pair.cancel() }
+        await withCheckedContinuation { continuation in
+            blockedCompletionQueue.async {
+                continuation.resume()
+                _ = completionGate.wait(timeout: .now() + 5)
+            }
+        }
+        // Each job has finished its actual verification work. Only delivery to
+        // this unrelated blocked queue remains; it must not own a worker slot.
+        var submitted = 0
+        for _ in 0..<64 {
+            let queued = await withCheckedContinuation { continuation in
+                if !SecureVerificationWorkPool.submit(completionQueue: blockedCompletionQueue,
+                    work: { continuation.resume(returning: true) }, completion: { _ in callbacks.record() }) {
+                    continuation.resume(returning: false)
+                }
+            }
+            guard queued else { break }
+            submitted += 1
+        }
+        #expect(callbacks.count == 0)
+        let outcome = try await pair.run()
+        if case .delivered = outcome { /* The independent real TLS connection completed. */ }
+        else { Issue.record("Finished work awaiting unrelated callbacks exhausted the global TLS verification pool") }
+        completionGate.signal()
+        try await networkTLSEventually { callbacks.count == submitted }
+    }
+
     @Test(arguments: BlockingPeerPinStore.Phase.allCases)
     fileprivate func blockedPinStoreDoesNotBlockSharedExecutorAndAdmissionResumes(phase: BlockingPeerPinStore.Phase) async throws {
         let fixture = try NetworkTLSFixture()
@@ -212,6 +246,13 @@ struct NetworkSecureChannelTests {
         #expect(state.clientFailure == nil && state.serverFailure == nil)
         #expect(state.clientCredentials?.isActive == true && state.serverCredentials?.isActive == true)
     }
+}
+
+private final class VerificationCompletionCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    var count: Int { lock.withLock { value } }
+    func record() { lock.withLock { value += 1 } }
 }
 
 private final class NetworkTLSFixture {

@@ -91,7 +91,9 @@ public enum SecureNetworkParameters {
     }
 }
 
-/// Bounds both blocked pin lookups and pending TLS completions across channels.
+/// Bounds queued/running pin lookup and verification work across channels.
+/// Finished work releases its slot before scheduling its completion, so one
+/// stalled media executor cannot exhaust verification capacity for other peers.
 /// Network.framework owns cancellation of the TLS verify operation; completion
 /// is delivered exactly once on the requested queue even if the connection was
 /// cancelled meanwhile. SecurePeerChannel generation fences reject late state.
@@ -113,9 +115,9 @@ enum SecureVerificationWorkPool {
         lock.unlock()
         worker.async {
             let result = work()
+            lock.lock(); pending -= 1; lock.unlock()
             completionQueue.async {
                 completion(result)
-                lock.lock(); pending -= 1; lock.unlock()
             }
         }
         return true

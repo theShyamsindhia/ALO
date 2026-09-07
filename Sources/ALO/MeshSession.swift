@@ -231,6 +231,7 @@ final class MeshSession {
         networkAuthorization: NetworkChannelAuthorization? = nil,
         initialEvents: [MeshRoomEvent] = [],
         initialRoomStateDocument: Data? = nil,
+        roomStateSyncOverride: (any RoomStateSync)? = nil,
         statusHandler: @escaping (String) -> Void,
         identityHandler: @escaping (String, String) -> Void,
         participantsHandler: @escaping ([RoomParticipant]) -> Void,
@@ -251,8 +252,9 @@ final class MeshSession {
         incomingOpenLineInvitationHandler: @escaping (OpenLineInvitation) -> Void = { _ in },
         openLineStateHandler: @escaping (OpenLineState) -> Void = { _ in },
         replicaPersistenceHandler: @escaping (MeshRoomReplica) -> Void = { _ in },
-        roomStatePersistenceHandler: @escaping (Data) -> Void = { _ in }
-    ) {
+        roomStatePersistenceHandler: @escaping (Data) -> Void = { _ in },
+        roomStateOperationRejectedHandler: @escaping (Error) -> Void = { _ in }
+    ) async {
         let relay = CallbackRelay()
         let mediaRelay = MediaActionRelay()
         let secureMediaAdmission = SecureMediaAdmissionRelay()
@@ -269,7 +271,8 @@ final class MeshSession {
         )
         self.deviceIcon = appearance.icon
         self.deviceColorHex = appearance.colorHex
-        self.profileImageData = DeviceAppearance.sanitizedProfileImageData(profileImageData)
+        let sanitizedProfileImageData = DeviceAppearance.sanitizedProfileImageData(profileImageData)
+        self.profileImageData = sanitizedProfileImageData
         self.callbackRelay = relay
         self.mediaActionRelay = mediaRelay
         self.statusHandler = statusHandler
@@ -300,13 +303,15 @@ final class MeshSession {
             failure: { relay.voiceFailure($0) })
         self.secureVoice = secureVoice
         self.replicaPersistenceHandler = replicaPersistenceHandler
-        self.control = MeshControlPlane(
+        // Signature checks, Automerge archive restoration and policy commit
+        // locks must not run on the UI actor. No listener starts until start().
+        self.control = await Task.detached(priority: .userInitiated) { MeshControlPlane(
             room: room,
             nodeID: nodeID,
             displayName: displayName,
             deviceIcon: appearance.icon,
             deviceColorHex: appearance.colorHex,
-            profileImageData: self.profileImageData,
+            profileImageData: sanitizedProfileImageData,
             initialEvents: initialEvents,
             initialRoomStateDocument: initialRoomStateDocument,
             replicaHandler: { replica in
@@ -344,6 +349,10 @@ final class MeshSession {
                 DispatchQueue.main.async { roomTrayFileRequestHandler(sender, request) }
             },
             roomStatePersistenceHandler: roomStatePersistenceHandler,
+            roomStateOperationRejectedHandler: { error in
+                DispatchQueue.main.async { roomStateOperationRejectedHandler(error) }
+            },
+            roomStateSyncOverride: roomStateSyncOverride,
             installationIdentity: installationIdentity,
             peerPins: peerPins,
             networkAuthorization: networkAuthorization,
@@ -357,7 +366,7 @@ final class MeshSession {
                     statusHandler("Incompatible device: update all devices to the current ALO channel system.")
                 }
             }
-        )
+        ) }.value
         relay.replica = { [weak self] in self?.apply($0) }
         fileSharing.names = { [weak self] in
             Dictionary((self?.currentParticipants ?? []).map { ($0.id, $0.name) }, uniquingKeysWith: { _, new in new })

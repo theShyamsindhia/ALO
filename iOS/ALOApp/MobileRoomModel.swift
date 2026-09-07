@@ -32,6 +32,8 @@ import ALOAppModel
     private var store: MobileRoomStore?
     private var mesh: MeshControlPlane?
     private var generation: UInt64 = 0
+    private var activationGeneration: UInt64 = 0
+    private var joinIntent: UInt64 = 0
     private var foreground = false
     private var accountAccessObservation: AnyCancellable?
     private let lastChannelKey = "alo.networks-v1.ios.last-channel"
@@ -192,10 +194,16 @@ import ALOAppModel
     }
 
     func activate() {
+        Task { [weak self] in await self?.activateAccount() }
+    }
+
+    private func activateAccount(reconnect: Bool = true) async {
+        activationGeneration &+= 1
+        let activation = activationGeneration
         foreground = true
         backgroundPlayback = false; backgroundMonitor?.cancel(); backgroundMonitor = nil
-        account.resume()
-        guard account.identityReady else { return }
+        await account.resume()
+        guard foreground, activationGeneration == activation, account.identityReady else { return }
         if !started {
             started = true
             do {
@@ -235,29 +243,35 @@ import ALOAppModel
                 return
             }
         }
-        if let room, mesh == nil { connect(room) }
+        if reconnect, let room, mesh == nil { connect(room) }
         if mesh != nil { synchronizeVideo() }
         // Browsing is explicit: opening the app does not trigger Local Network permission.
     }
 
     @discardableResult
-    func joinChannel(_ channelID: String) -> Bool {
+    func joinChannel(_ channelID: String) async -> Bool {
+        joinIntent &+= 1
+        let intent = joinIntent
         guard account.identityReady else {
             errorMessage = "Complete identity setup before joining a channel."
             return false
         }
-        if !started { activate() }
+        if !started { await activateAccount(reconnect: false) }
         guard foreground, let identity, let choice = account.room(channelID: channelID) else {
             errorMessage = "This identity does not have access to that channel. Import an updated invitation from the network owner."
             return false
         }
+        let token = generation, userID = account.identity?.publicIdentity.userID
         do {
-            _ = try account.authorization(channelID: channelID,
+            _ = try await account.authorization(channelID: channelID,
                 installationHash: identity.publicIdentity.publicKeyHash, deviceName: UIDevice.current.name)
         } catch {
+            guard foreground, generation == token, joinIntent == intent else { return false }
             errorMessage = "Channel access could not be verified. Import an updated invitation and try again."
             return false
         }
+        guard foreground, generation == token, joinIntent == intent, account.identityReady,
+              account.identity?.publicIdentity.userID == userID, account.room(channelID: channelID) != nil else { return false }
         disconnectRuntime()
         errorMessage = nil
         room = choice
@@ -360,6 +374,7 @@ import ALOAppModel
         }
         generation &+= 1
         let token = generation
+        let intent = joinIntent
         connected = false; participants = []; status = "Connecting securely…"
         chatDocument = RoomChatDocument(); seenChatEvents.removeAll(); chatMessages = []
         let pendingShutdown = shutdownTask
@@ -368,26 +383,33 @@ import ALOAppModel
             // Await it before loading a replacement replica, including a quick
             // background/foreground transition, not only an explicit retry.
             await pendingShutdown?.value
-            guard let self, self.foreground, self.generation == token else { return }
-            self.startRuntime(authorizedChoice, token: token)
+            guard let self, self.foreground, self.generation == token, self.joinIntent == intent else { return }
+            await self.startRuntime(authorizedChoice, token: token, intent: intent)
         }
     }
 
-    private func startRuntime(_ choice: RoomConfiguration, token: UInt64) {
+    private func startRuntime(_ choice: RoomConfiguration, token: UInt64, intent: UInt64) async {
         guard account.identityReady, let identity, let pins, let store else { return }
+        let userID = account.identity?.publicIdentity.userID
         let authorization: NetworkChannelAuthorization
         do {
-            authorization = try account.authorization(channelID: choice.id,
+            authorization = try await account.authorization(channelID: choice.id,
                 installationHash: identity.publicIdentity.publicKeyHash, deviceName: UIDevice.current.name)
         } catch {
+            guard foreground, generation == token, joinIntent == intent else { return }
             leave()
             errorMessage = "Channel access could not be verified. Import an updated invitation and try again."
             return
         }
+        guard foreground, generation == token, joinIntent == intent, account.identityReady,
+              account.identity?.publicIdentity.userID == userID, room?.id == choice.id else { return }
         let voiceToken = UUID(), voiceRelay = voice.relay
+        let localID = localID, displayName = displayName
+        let constructed = await Task.detached(priority: .userInitiated) { [weak self] in
         let document: Data?
+        var historyReadFailed = false
         do { document = try store.document(roomID: choice.id) }
-        catch { errorMessage = "Saved channel history could not be read. It will resynchronize from peers."; document = nil }
+        catch { historyReadFailed = true; document = nil }
         let runtime = MeshControlPlane(room: choice, nodeID: localID, displayName: displayName,
             deviceIcon: "iphone", initialRoomStateDocument: document,
             replicaHandler: { [weak self] value in
@@ -420,6 +442,11 @@ import ALOAppModel
                         self.errorMessage = "Channel history could not be saved on this device."
                     }
                 }
+            }, roomStateOperationRejectedHandler: { [weak self] error in
+                Task { @MainActor in
+                    guard let self, self.generation == token else { return }
+                    self.errorMessage = error.localizedDescription
+                }
             }, installationIdentity: identity, peerPins: pins, secureCapabilities: [.chat, .receiveAudio, .receiveVideo, .voice],
             networkAuthorization: authorization,
             incomingMediaChannelHandler: { channel, peer in
@@ -450,6 +477,22 @@ import ALOAppModel
                     }
                 }
             })
+        return (runtime, historyReadFailed)
+        }.value
+        let runtime = constructed.0
+        guard foreground, generation == token, joinIntent == intent, account.identityReady,
+              account.identity?.publicIdentity.userID == userID, room?.id == choice.id else {
+            runtime.stop()
+            return
+        }
+        do { _ = try authorization.policy.snapshot().authorize(authorization.localDevice.userIdentity, channelID: authorization.channelID) }
+        catch {
+            runtime.stop()
+            leave()
+            errorMessage = "Your access to this channel is no longer available."
+            return
+        }
+        if constructed.1 { errorMessage = "Saved channel history could not be read. It will resynchronize from peers." }
         mesh = runtime
         do {
             try runtime.start()

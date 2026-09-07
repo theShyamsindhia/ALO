@@ -5,6 +5,20 @@ import ALOIdentity
 import ALORooms
 @testable import ALONetworking
 
+// Synchronous fixture convenience only. Production SecurePeerChannel performs
+// proof verification and policy persistence on bounded background executors;
+// NetworkSecureChannelTests exercise that actual asynchronous TLS path.
+private extension NetworkChannelAuthorization {
+    @discardableResult
+    func validate(_ remote: NetworkPeerClaim, installationKeyHash: Data) throws -> PublicUserIdentity {
+        guard remote.channelID == channelID else { throw SecureTransportError.wrongContext }
+        try remote.device.verify(expectedInstallationPublicKeyHash: installationKeyHash)
+        try policy.receive(remote.manifest)
+        try validateCurrentAccess(remote.device.userIdentity)
+        return remote.device.userIdentity
+    }
+}
+
 final class NetworkAuthorizationTests: XCTestCase {
     private var directory: URL!
 

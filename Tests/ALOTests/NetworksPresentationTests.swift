@@ -27,12 +27,12 @@ extension NativePresentationTests {
                 repository: NetworkRepository(directoryURL: directory), identityStore: UserIdentityStore(storage: storage))
             account.displayName = "Test user"
             if state != "identity" { try account.createIdentity() }
-            if state != "identity" && state != "recovery" { try account.completeIdentitySetup() }
+            if state != "identity" && state != "recovery" { try await account.completeIdentitySetup() }
             if state == "main" || state == "channels" {
-                let network = try account.createNetwork(name: "Studio network")
+                let network = try await account.createNetwork(name: "Studio network")
                 if state == "channels" {
-                    try account.createChannel(name: "Music", networkID: network.id, isPrivate: false, allowedUserIDs: [])
-                    try account.createChannel(name: "Private conversation", networkID: network.id, isPrivate: true, allowedUserIDs: [])
+                    try await account.createChannel(name: "Music", networkID: network.id, isPrivate: false, allowedUserIDs: [])
+                    try await account.createChannel(name: "Private conversation", networkID: network.id, isPrivate: true, allowedUserIDs: [])
                 }
             }
             let model = ALOViewModel(discoverRooms: false, account: account)

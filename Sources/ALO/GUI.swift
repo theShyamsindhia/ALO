@@ -1686,6 +1686,8 @@ final class ALOViewModel: ObservableObject {
     @Published private(set) var localAudioTiming: ReceiverTimingDiagnostics?
     @Published private(set) var automaticAudioSync = UserDefaults.standard.object(forKey: "automaticAudioSync") as? Bool ?? true
     private var meshSession: MeshSession?
+    private var channelOpenTask: Task<Void, Never>?
+    private var channelOpenGeneration: UInt64 = 0
     func sendFile(to participantID: String) {
         meshSession?.fileSharing.chooseFile(to: participantID)
     }
@@ -1815,11 +1817,14 @@ final class ALOViewModel: ObservableObject {
                 DispatchQueue.main.async { self?.completedRoomScans.insert(.secureV2) }
             })
         if discoverRooms {
-            self.account.resume()
-            refreshNetworkChannels()
-            secureRoomBrowser.start()
-            if let channel = lastJoinedRoomStore.roomToRestore(from: savedRooms) {
-                Task { @MainActor [weak self] in self?.joinChannel(channel.id) }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.account.resume()
+                self.refreshNetworkChannels()
+                self.secureRoomBrowser.start()
+                if let channel = self.lastJoinedRoomStore.roomToRestore(from: self.savedRooms), self.phase == .idle {
+                    self.joinChannel(channel.id)
+                }
             }
         }
         accountObserver = self.account.objectWillChange.sink { [weak self] in
@@ -1977,16 +1982,33 @@ final class ALOViewModel: ObservableObject {
 
 
     private func open(_ savedRoom: RoomConfiguration, broadcastInitially: Bool) {
+        channelOpenTask?.cancel()
+        channelOpenGeneration &+= 1
+        let generation = channelOpenGeneration
+        phase = .starting
+        statusText = "Opening \(savedRoom.name)"
+        activeRoom = savedRoom.name
+        activeRoomConfiguration = savedRoom
+        channelOpenTask = Task { [weak self] in
+            await self?.openChannel(savedRoom, broadcastInitially: broadcastInitially, generation: generation)
+        }
+    }
+
+    private func openChannel(_ savedRoom: RoomConfiguration, broadcastInitially: Bool, generation: UInt64) async {
+        defer { if channelOpenGeneration == generation { channelOpenTask = nil } }
         let room: RoomConfiguration
         let authorization: NetworkChannelAuthorization
         do {
             guard let authorized = account.room(channelID: savedRoom.id) else { throw NetworkAccountError.channelUnavailable }
             room = authorized
             let secure = try requireSecureRoomIdentity()
-            authorization = try account.authorization(channelID: room.id,
+            authorization = try await account.authorization(channelID: room.id,
                 installationHash: secure.identity.publicIdentity.publicKeyHash, deviceName: currentUserName)
+            guard !Task.isCancelled, channelOpenGeneration == generation, !isLeavingRoom else { return }
             try roomStore.save(room)
         } catch {
+            guard !Task.isCancelled, channelOpenGeneration == generation else { return }
+            phase = .failed
             errorMessage = NetworkAccountModel.describe(error)
             return
         }
@@ -1996,10 +2018,13 @@ final class ALOViewModel: ObservableObject {
             try room.validateForJoining()
             secure = room.transportPolicy == .secureV2 ? try requireSecureRoomIdentity() : nil
         } catch {
+            phase = .failed
             errorMessage = "Could not open this channel securely: \(error.localizedDescription)"
             return
         }
-        let session = MeshSession(
+        let history = await roomStore.loadChannelState(roomID: room.id)
+        guard !Task.isCancelled, channelOpenGeneration == generation, !isLeavingRoom else { return }
+        let session = await MeshSession(
             room: room,
             nodeID: secure?.identity.publicIdentity.nodeID.uuidString ?? nodeID,
             displayName: currentUserName,
@@ -2010,11 +2035,11 @@ final class ALOViewModel: ObservableObject {
             installationIdentity: secure?.identity,
             peerPins: secure?.pins,
             networkAuthorization: authorization,
-            initialEvents: roomStore.loadEvents(roomID: room.id),
-            initialRoomStateDocument: roomStore.loadRoomStateDocument(roomID: room.id),
+            initialEvents: history.events,
+            initialRoomStateDocument: history.document,
             statusHandler: { [weak self] status in
                 DispatchQueue.main.async {
-                    guard let self else { return }
+                    guard let self, self.channelOpenGeneration == generation else { return }
                     self.statusText = status
                     if let rendering = Self.renderingState(for: status) {
                         self.audioIsRendering = rendering
@@ -2050,7 +2075,7 @@ final class ALOViewModel: ObservableObject {
             },
             arenaHandler: { [weak self] sender, data in self?.arena.receive(from: sender, data: data) },
             errorHandler: { [weak self] error in
-                guard let self else { return }
+                guard let self, self.channelOpenGeneration == generation else { return }
                 let permissionRelated = self.isPermissionError(error)
                 self.errorIsPermissionRelated = permissionRelated
                 self.phase = .live
@@ -2120,8 +2145,27 @@ final class ALOViewModel: ObservableObject {
             },
             roomStatePersistenceHandler: { [weak self] document in
                 self?.roomStore.saveRoomStateDocument(document, roomID: room.id)
+            },
+            roomStateOperationRejectedHandler: { [weak self] error in
+                guard let self, self.channelOpenGeneration == generation else { return }
+                let rejected = RejectedRoomEditPresentation(error: error, chatDraft: self.draftMessage, queueDraft: self.queueURL)
+                self.draftMessage = rejected.chatDraft
+                self.queueURL = rejected.queueDraft
+                self.errorMessage = rejected.notice
+                if rejected.isQueueEdit { self.queueNotice = rejected.notice }
             }
         )
+        // Leaving, changing identity, or receiving a revocation while history
+        // loads must never start a stale listener/capture session on completion.
+        guard !Task.isCancelled, channelOpenGeneration == generation, !isLeavingRoom,
+              account.identityReady, account.identity?.publicIdentity == authorization.localDevice.userIdentity else { return }
+        do { _ = try authorization.policy.snapshot().authorize(authorization.localDevice.userIdentity,
+                                                               channelID: authorization.channelID) }
+        catch {
+            phase = .failed
+            errorMessage = NetworkAccountModel.describe(error)
+            return
+        }
         activeRoom = room.name
         activeRoomConfiguration = room
         phase = .starting
@@ -3330,6 +3374,9 @@ final class ALOViewModel: ObservableObject {
     }
 
     private func stop(preservingNotice notice: String?) {
+        channelOpenGeneration &+= 1
+        channelOpenTask?.cancel()
+        channelOpenTask = nil
         DJStudio.stopIfCreated()
         arena.disconnect()
         isLeavingRoom = true
@@ -3346,6 +3393,9 @@ final class ALOViewModel: ObservableObject {
     }
 
     func tryAgain() {
+        channelOpenGeneration &+= 1
+        channelOpenTask?.cancel()
+        channelOpenTask = nil
         errorMessage = nil
         errorIsPermissionRelated = false
         phase = .idle
@@ -3355,8 +3405,17 @@ final class ALOViewModel: ObservableObject {
 
     func refreshRooms() {
         guard discoveryEnabled, phase == .idle, !roomsRefreshing else { return }
-        account.refresh()
-        refreshNetworkChannels()
+        roomsRefreshing = true
+        Task { [weak self] in
+            guard let self else { return }
+            await self.account.refresh()
+            self.refreshNetworkChannels()
+            guard self.phase == .idle else { self.roomsRefreshing = false; return }
+            self.beginNearbyChannelScan()
+        }
+    }
+
+    private func beginNearbyChannelScan() {
         nearbyRooms = []
         legacyNearbyRooms = []
         secureNearbyRooms = []
@@ -3404,6 +3463,9 @@ final class ALOViewModel: ObservableObject {
     }
 
     func stopImmediately() {
+        channelOpenGeneration &+= 1
+        channelOpenTask?.cancel()
+        channelOpenTask = nil
         DJStudio.stopIfCreated()
         arena.disconnect()
         isLeavingRoom = true

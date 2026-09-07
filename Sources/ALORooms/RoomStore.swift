@@ -157,9 +157,29 @@ public final class RoomStore {
     public func loadEvents(roomID: String) -> [MeshRoomEvent] {
         roomStateIOQueue.sync {
             drainPendingWrites()
-            guard let data = try? Data(contentsOf: eventsURL(roomID: roomID)) else { return [] }
-            return (try? JSONDecoder().decode([MeshRoomEvent].self, from: data)) ?? []
+            return readEvents(roomID: roomID)
         }
+    }
+
+    /// Startup reads wait for pending writes without blocking the UI actor.
+    /// Capture legacy events and the durable document in one I/O-queue turn so
+    /// callers cannot accidentally mix two different persistence generations.
+    public func loadChannelState(roomID: String) async -> (events: [MeshRoomEvent], document: Data?) {
+        await withCheckedContinuation { continuation in
+            // Confine the legacy store to its existing I/O queue; do not claim
+            // that its synchronous metadata/secret APIs are globally Sendable.
+            let read = DispatchWorkItem { [self] in
+                drainPendingWrites()
+                continuation.resume(returning: (readEvents(roomID: roomID),
+                    try? Data(contentsOf: roomStateURL(roomID: roomID))))
+            }
+            roomStateIOQueue.async(execute: read)
+        }
+    }
+
+    private func readEvents(roomID: String) -> [MeshRoomEvent] {
+        guard let data = try? Data(contentsOf: eventsURL(roomID: roomID)) else { return [] }
+        return (try? JSONDecoder().decode([MeshRoomEvent].self, from: data)) ?? []
     }
 
     public func saveEvents(_ events: [MeshRoomEvent], roomID: String) {

@@ -254,8 +254,12 @@ ALO separates channel coordination from the high-rate media stream:
   replicas settle on the same source. A later take-over supersedes the prior claim.
 - Queue removals are replicated as tombstones, so an old add event cannot resurrect a
   removed item after a temporarily disconnected peer returns.
-- Each Mac retains durable queue state and up to 500 chat events, including edits
-  and reactions. This count-based cache is not a permanent archive. Transient broadcaster ownership is deliberately not restored after relaunch.
+- The chat view shows up to 500 events, including edits and reactions. Durable
+  history is a bounded cache, not a permanent archive: network channels retain
+  at most 8,192 records / 2 MiB, with per-user chat retention shared across that
+  user's devices. An edit exceeding the budget is rejected visibly without
+  stopping media; it is not displayed or sent as if it succeeded. Transient
+  broadcaster ownership is deliberately not restored after relaunch.
 
 Every connection role uses `NetworkChannelAuthorization`: signed network policy →
 user membership → channel access → signed device binding → actual TLS key. The

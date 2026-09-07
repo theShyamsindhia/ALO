@@ -137,7 +137,7 @@ enum ALOCommand {
         takeOverAfterJoining: Bool
     ) async throws {
         let account = NetworkAccountModel()
-        account.resume()
+        await account.resume()
         guard account.identityReady else { throw NetworkAccountError.setupRequired }
         let store = RoomStore(fileURL: NetworkChannelStorage.fileURL)
         let rooms = account.networks.flatMap { $0.channels }.compactMap { account.room(channelID: $0.id.uuidString) }
@@ -157,7 +157,7 @@ enum ALOCommand {
         let installation = try MacSecureRoomIdentity()
         let nodeID = installation.identity.publicIdentity.nodeID.uuidString
         let displayName = account.displayName
-        let authorization = try account.authorization(channelID: room.id,
+        let authorization = try await account.authorization(channelID: room.id,
             installationHash: installation.identity.publicIdentity.publicKeyHash, deviceName: displayName)
         let generatedAppearance = DeviceAppearance.generated(from: nodeID)
         let appearance = DeviceAppearance(
@@ -175,7 +175,8 @@ enum ALOCommand {
         }
         var broadcastReady = false
         var broadcastFailure: Error?
-        let session = MeshSession(
+        let history = await store.loadChannelState(roomID: room.id)
+        let session = await MeshSession(
             room: room,
             nodeID: nodeID,
             displayName: displayName,
@@ -185,8 +186,8 @@ enum ALOCommand {
             installationIdentity: installation.identity,
             peerPins: installation.pins,
             networkAuthorization: authorization,
-            initialEvents: store.loadEvents(roomID: room.id),
-            initialRoomStateDocument: store.loadRoomStateDocument(roomID: room.id),
+            initialEvents: history.events,
+            initialRoomStateDocument: history.document,
             statusHandler: report,
             identityHandler: { id, name in report("identity \(name) \(id)") },
             participantsHandler: { report("participants \($0.count)") },

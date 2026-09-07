@@ -43,23 +43,26 @@ struct DurableByteIdentityTests {
     }
 
     @Test func projectionCacheSeparatesEquivalentStringsWithinOneIngest() throws {
-        let allowed = event(text: composed)
-        let inert = event(text: decomposed)
+        let allowed = MeshRoomEvent(id: "same", roomID: room, version: .init(counter: 1, nodeID: "author"),
+            kind: .queueAdd, queueItem: .init(id: "track", title: composed, url: "https://example.com/track"))
+        let inert = MeshRoomEvent(id: "same", roomID: room, version: .init(counter: 1, nodeID: "author"),
+            kind: .queueAdd, queueItem: .init(id: "track", title: decomposed, url: "https://example.com/track"))
+        #expect(allowed == inert)
         let allowedBytes = Data(composed.utf8)
-        let retained = (1...AutomergeRoomStateSync.maximumChatEvents).map {
-            event(id: "newer-\($0)", counter: UInt64($0 + 10), text: "Authorized retained history")
-        }
+        let remove = MeshRoomEvent(id: "newer-remove", roomID: room, version: .init(counter: 2, nodeID: "author"),
+            kind: .queueRemove, queueItemID: "track")
         for variants in [[allowed, inert], [inert, allowed]] {
-            let sync = try AutomergeRoomStateSync(roomID: room, legacyEvents: retained, eventValidator: { _ in true },
-                eventProjector: { event in event.id != "same" || Data((event.text ?? "").utf8) == allowedBytes })
-            // The old authorized variant is beyond chat retention. The other
-            // exact body is inert and must use the independent inert budget.
+            let sync = try AutomergeRoomStateSync(roomID: room, legacyEvents: [remove], eventValidator: { _ in true },
+                eventProjector: { event in event.id != "same" || Data((event.queueItem?.title ?? "").utf8) == allowedBytes })
+            // The old authorized add is superseded by the removal. The other
+            // exact body is inert and must not participate in queue semantics.
             let inserted = try sync.ingest(variants)
             #expect(inserted.count == 1)
             #expect(try inserted.map(encoded) == [encoded(inert)])
             let snapshot = try sync.snapshot()
-            #expect(snapshot.chatEvents.count == AutomergeRoomStateSync.maximumChatEvents)
-            #expect(snapshot.retainedEvents.count == AutomergeRoomStateSync.maximumChatEvents + 1)
+            #expect(snapshot.events == [remove])
+            #expect(snapshot.queue.isEmpty)
+            #expect(snapshot.retainedEvents.count == 2)
         }
     }
 

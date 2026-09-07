@@ -43,8 +43,10 @@ public final class NetworkPolicyCenter: @unchecked Sendable {
         return try body()
     }
 
-    /// A stale peer may learn the latest policy, but cannot replace it with an
-    /// older one. Unknown owners and network generations are never admitted.
+    /// Synchronous storage operation for explicit local policy changes. Never
+    /// call on a media/channel executor; remote admission uses the bounded
+    /// receiveAsynchronously path. A stale policy cannot replace a newer one,
+    /// and unknown owners or network generations are never admitted.
     public func receive(_ incoming: NetworkManifest) throws {
         if try alreadyPublished(incoming) { return }
         updateLock.lock()
@@ -175,17 +177,6 @@ public struct NetworkChannelAuthorization: Sendable {
         let manifest = try policy.snapshot()
         try manifest.authorize(localDevice.userIdentity, channelID: channelID)
         return NetworkPeerClaim(manifest: manifest, channelID: channelID, device: localDevice)
-    }
-
-    @discardableResult
-    func validate(_ remote: NetworkPeerClaim, installationKeyHash: Data) throws -> PublicUserIdentity {
-        guard remote.channelID == channelID else { throw SecureTransportError.wrongContext }
-        try remote.device.verify(expectedInstallationPublicKeyHash: installationKeyHash)
-        // A signed update can revoke our access. Persist it before denying, so
-        // restarting cannot resurrect authorization from an old invitation.
-        try policy.receive(remote.manifest)
-        try validateCurrentAccess(remote.device.userIdentity)
-        return remote.device.userIdentity
     }
 
     func validateCurrentAccess(_ remote: PublicUserIdentity) throws {

@@ -8,6 +8,36 @@ import ALORooms
 
 @Suite("Network authorization for relayed signed events")
 struct NetworkEventAuthorizationTests {
+    @Test func verifiedRootOwnsOneRetentionScopeAcrossInstallationsAndRevocation() throws {
+        let fixture = try NetworkEventFixture()
+        defer { fixture.cleanup() }
+        let first = try fixture.remoteEvent(counter: 1, text: "First device")
+        let installation = try InstallationIdentity.ephemeral()
+        let device = try DeviceIdentityBinding(user: fixture.remoteUser, deviceName: "Second device", generation: 1,
+            installationPublicKeyHash: installation.publicIdentity.publicKeyHash)
+        let authorization = try NetworkChannelAuthorization(policy: fixture.remoteAuthorization.policy,
+            channelID: fixture.authorization.channelID, localDevice: device)
+        let signer = SecureRoomEventPolicy(roomID: first.roomID, identity: installation, capabilities: .desktop,
+                                          networkAuthorization: authorization)
+        let second = try #require(signer.sign(MeshRoomEvent(roomID: first.roomID,
+            version: .init(counter: 2, nodeID: installation.publicIdentity.nodeID.uuidString), kind: .chat, text: "Second device")))
+        #expect(first.version.nodeID != second.version.nodeID)
+        #expect(fixture.receiver.retentionScope(first) == fixture.remoteUser.publicIdentity.userID)
+        #expect(fixture.receiver.retentionScope(second) == fixture.receiver.retentionScope(first))
+        #expect(fixture.receiver.retentionScope(try fixture.localEvent(counter: 3, text: "Other root")) != fixture.receiver.retentionScope(first))
+        try fixture.revokeRemote()
+        #expect(!fixture.receiver.accepts(first) && !fixture.receiver.accepts(second))
+        #expect(fixture.receiver.retentionScope(first) == fixture.remoteUser.publicIdentity.userID)
+        #expect(fixture.receiver.retentionScope(second) == fixture.remoteUser.publicIdentity.userID)
+
+        var proof = try JSONDecoder().decode(EventProofFixture.self, from: #require(first.authorization))
+        proof.context.authority.networkID = UUID()
+        #expect(fixture.receiver.retentionScope(try proof.resign(first, with: fixture.remoteInstallation)) == nil)
+        #expect(fixture.receiver.retentionScope(first.authorized(with: Data("forged".utf8))) == nil)
+        let legacy = SecureRoomEventPolicy(roomID: first.roomID, identity: fixture.remoteInstallation, capabilities: .desktop)
+        #expect(fixture.receiver.retentionScope(try #require(legacy.sign(first))) == nil)
+    }
+
     @Test func liveMobileGrantCannotPublishDesktopOnlyEvents() throws {
         let fixture = try NetworkEventFixture()
         defer { fixture.cleanup() }
@@ -57,7 +87,7 @@ struct NetworkEventAuthorizationTests {
             version: MeshVersion(counter: 502, nodeID: offlineAuthorID), kind: .queueAdd, queueItem: offlineTrack))))
         let existing = try AutomergeRoomStateSync(roomID: roomID,
             eventValidator: { fixture.receiver.allowsDurableStorage($0) },
-            eventProjector: { fixture.receiver.accepts($0) })
+            eventProjector: { fixture.receiver.accepts($0) }, eventScope: { fixture.receiver.retentionScope($0) })
         let initialCommit = try existing.ingest(history)
         #expect(fixture.receiver.rememberAccepted(initialCommit, retainingHistory: try existing.snapshot().retainedEvents))
         let established = try existing.snapshot()
@@ -76,7 +106,8 @@ struct NetworkEventAuthorizationTests {
         let latePolicy = SecureRoomEventPolicy(roomID: roomID, identity: lateInstallation, capabilities: .desktop,
             networkAuthorization: lateAuthorization)
         let late = try AutomergeRoomStateSync(roomID: roomID,
-            eventValidator: { latePolicy.allowsDurableStorage($0) }, eventProjector: { latePolicy.accepts($0) })
+            eventValidator: { latePolicy.allowsDurableStorage($0) }, eventProjector: { latePolicy.accepts($0) },
+            eventScope: { latePolicy.retentionScope($0) })
         #expect(!latePolicy.permits(author: ownerID, capability: .chat))
         #expect(!latePolicy.permits(author: offlineAuthorID, capability: .chat))
         try converge(existing, late, policy: latePolicy, sourcePolicy: fixture.receiver)

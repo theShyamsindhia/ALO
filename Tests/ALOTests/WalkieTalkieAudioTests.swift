@@ -4,6 +4,21 @@ import Testing
 @testable import ALO
 import ALOCore
 
+private final class HistoryConstructionThreadProbe: RoomStateSync, @unchecked Sendable {
+    private let lock = NSLock()
+    private var threads = [Bool]()
+    var snapshotThreads: [Bool] { lock.withLock { threads } }
+    func snapshot() throws -> RoomStateSnapshot {
+        lock.withLock { threads.append(Thread.isMainThread) }
+        return RoomStateSnapshot(events: [])
+    }
+    func ingest(_ events: [MeshRoomEvent]) throws -> [MeshRoomEvent] { [] }
+    func makeSession() -> RoomStateSyncSession { RoomStateSyncSession() }
+    func generateSyncMessage(for session: RoomStateSyncSession) -> Data? { nil }
+    func receiveSyncMessage(_ message: Data, from session: RoomStateSyncSession) throws -> [MeshRoomEvent] { [] }
+    func save() -> Data { Data() }
+}
+
 // These lifecycle tests acquire real Core Audio graphs. Do not race their
 // hardware starts/stops and configuration notifications within this suite.
 @Suite(.serialized)
@@ -33,8 +48,8 @@ struct WalkieTalkieAudioTests {
 
     @Test("A room can be constructed without configuring walkie-talkie audio")
     @MainActor
-    func roomConstructionDoesNotStartAudioPlayback() {
-        let session = MeshSession(
+    func roomConstructionDoesNotStartAudioPlayback() async {
+        let session = await MeshSession(
             room: RoomConfiguration(name: "Construction test"),
             nodeID: "local",
             displayName: "Local Mac",
@@ -48,6 +63,22 @@ struct WalkieTalkieAudioTests {
             videoHandler: { _ in }
         )
 
+        withExtendedLifetime(session) {}
+    }
+
+    @Test("Opening a channel restores its durable history off the main thread")
+    @MainActor
+    func roomHistoryConstructionDoesNotBlockMainThread() async {
+        let state = HistoryConstructionThreadProbe()
+        let session = await MeshSession(
+            room: RoomConfiguration(name: "History construction test"),
+            nodeID: "local", displayName: "Local Mac", roomStateSyncOverride: state,
+            statusHandler: { _ in }, identityHandler: { _, _ in },
+            participantsHandler: { _ in }, mediaStateHandler: { _ in },
+            nowPlayingHandler: { _ in }, chatHandler: { _, _, _, _, _ in },
+            queueHandler: { _ in }, videoHandler: { _ in }
+        )
+        #expect(state.snapshotThreads == [false])
         withExtendedLifetime(session) {}
     }
 

@@ -145,7 +145,7 @@ struct MobileNetworkSetupView: View {
                 recoveryText = String(decoding: try account.recoveryData(), as: UTF8.self)
             } },
             onExportRecovery: { prepareExport(recovery: true) { try account.recoveryData() } },
-            onContinue: { perform { try account.completeIdentitySetup() } })
+            onContinue: { perform { try await account.completeIdentitySetup() } })
     }
 
     private var networkSidebar: some View {
@@ -169,7 +169,7 @@ struct MobileNetworkSetupView: View {
                 ALOChannelList(network: summary(network), channels: account.channels.map {
                     ALOChannelSummary(id: $0.id.uuidString, name: $0.name, isPrivate: $0.isPrivate, isMain: $0.isMain)
                 }, selectedChannelID: Binding(get: { model.room?.id }, set: { id in
-                    if let id { model.joinChannel(id) }
+                    if let id { perform { _ = await model.joinChannel(id) } }
                 }), isBusy: busy,
                 onCreateChannel: {
                     channelName = ""; privateChannel = false; selectedMemberIDs = []
@@ -189,7 +189,7 @@ struct MobileNetworkSetupView: View {
         case .createNetwork:
             ALOCreateNetworkView(name: $networkName, isBusy: busy, errorMessage: errorMessage,
                 onCreate: { perform {
-                    try account.createNetwork(name: networkName)
+                    try await account.createNetwork(name: networkName)
                     path = [.channels]
                 } }, onCancel: goBack)
         case .importInvitation:
@@ -227,7 +227,7 @@ struct MobileNetworkSetupView: View {
                     members: network.members.map { memberSummary($0.identity) },
                     isBusy: busy, errorMessage: errorMessage,
                     onCreate: { perform {
-                        try account.createChannel(name: channelName, networkID: networkID,
+                        try await account.createChannel(name: channelName, networkID: networkID,
                             isPrivate: privateChannel, allowedUserIDs: Array(selectedMemberIDs))
                         goBack()
                     } }, onCancel: goBack)
@@ -256,10 +256,10 @@ struct MobileNetworkSetupView: View {
         perform {
             switch confirmation {
             case .invitation(let invitation):
-                try account.importInvitation(data: invitation.encoded())
+                try await account.importInvitation(data: invitation.encoded())
                 invitationText = ""; path = [.channels]
             case .member(let request, let networkID, _):
-                let invitation = try account.addMember(data: request.encoded(), networkID: networkID)
+                let invitation = try await account.addMember(data: request.encoded(), networkID: networkID)
                 preparedInvitation = invitation
                 preparedInvitationText = String(decoding: try invitation.encoded(), as: UTF8.self)
             }
@@ -272,13 +272,13 @@ struct MobileNetworkSetupView: View {
         path.removeLast()
     }
 
-    private func perform(_ action: @escaping @MainActor () throws -> Void) {
+    private func perform(_ action: @escaping @MainActor () async throws -> Void) {
         guard !busy else { return }
         busy = true; errorMessage = nil
         Task { @MainActor in
             await Task.yield()
             defer { busy = false }
-            do { try action() }
+            do { try await action() }
             catch { errorMessage = NetworkAccountModel.describe(error) }
         }
     }

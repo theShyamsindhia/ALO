@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import Network
 import Testing
 import ALOCore
@@ -6,6 +7,67 @@ import ALOCore
 
 @Suite("Actual secure mesh runtime", .serialized)
 struct SecureMeshTests {
+    @Test func rejectedNetworkDurableOperationHasNoProjectionGossipOrReceiptAndNextEditSucceeds() async throws {
+        let room = RoomConfiguration.secure(name: "Atomic local operation rejection")
+        let rejecting = try RejectOnceRoomStateSync(roomID: room.id)
+        let a = try SecureMeshNode(room: room, identity: .ephemeral(), roomStateSyncOverride: rejecting)
+        let b = try SecureMeshNode(room: room)
+        defer { a.stop(); b.stop() }
+        try a.start(); try b.start()
+        let port = try await a.readyPort()
+        b.control.connectForTesting(to: .hostPort(host: "127.0.0.1", port: port), expectedNodeID: a.id)
+        try await meshEventually { a.state.read { $0.participants.count == 2 } }
+        a.control.publishChat("Rejected allocation")
+        try await meshEventually { a.state.read { !$0.rejectedOperations.isEmpty } }
+        #expect(a.state.read { $0.rejectedOperations == [RoomStateSyncError.retentionCapacity] })
+        #expect(a.control.acceptedEventReceiptCountForTesting == 0, "A rejected operation cannot acquire a live historical receipt")
+        #expect(!a.state.read { $0.replica.chatEvents.contains { $0.text == "Rejected allocation" } })
+        #expect(!b.state.read { $0.replica.chatEvents.contains { $0.text == "Rejected allocation" } })
+        await withCheckedContinuation { continuation in a.control.performMediaWork { continuation.resume() } }
+        a.control.publishChat("Next operation succeeds")
+        try await meshEventually {
+            a.state.read { $0.replica.chatEvents.contains { $0.text == "Next operation succeeds" } }
+                && b.state.read { $0.replica.chatEvents.contains { $0.text == "Next operation succeeds" } }
+        }
+        let rejected = try #require(rejecting.attempts.first(where: { $0.text == "Rejected allocation" }))
+        let accepted = try #require(rejecting.attempts.first(where: { $0.text == "Next operation succeeds" }))
+        #expect(accepted.version.counter > rejected.version.counter, "Failed reservations must not reuse a Lamport counter")
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let rejectedDigest = Data(SHA256.hash(data: Data("alo.network.accepted-event.v1\0".utf8) + (try encoder.encode(rejected))))
+        let acceptedDigest = Data(SHA256.hash(data: Data("alo.network.accepted-event.v1\0".utf8) + (try encoder.encode(accepted))))
+        try await meshEventually {
+            guard let archive = a.state.read({ $0.savedArchive }), let digests = try? archiveReceiptDigests(archive) else { return false }
+            return digests.contains(acceptedDigest)
+        }
+        let archive = try #require(a.state.read { $0.savedArchive })
+        #expect(try !archiveReceiptDigests(archive).contains(rejectedDigest))
+        #expect(!a.state.read { $0.replica.chatEvents.contains { $0.id == rejected.id } })
+        #expect(!b.state.read { $0.replica.chatEvents.contains { $0.id == rejected.id } })
+    }
+
+    @Test func pendingDurableWorkDoesNotBlockLiveControlOrPublishAfterStop() async throws {
+        let room = RoomConfiguration.secure(name: "Pending durable edit")
+        let blocked = try RejectOnceRoomStateSync(roomID: room.id, blockFirstChat: true)
+        let node = try SecureMeshNode(room: room, identity: .ephemeral(), roomStateSyncOverride: blocked)
+        defer { blocked.release(); node.stop() }
+        try node.start()
+        node.control.publishChat("Pending edit that is cancelled")
+        try await meshEventually { blocked.isBlocked }
+        #expect(node.control.acceptedEventReceiptCountForTesting == 0)
+        #expect(node.state.read { $0.replica.chatEvents.isEmpty })
+        node.control.publishBroadcaster(active: true, mediaServiceName: "Live control stays responsive")
+        try await meshEventually { node.state.read { $0.replica.broadcaster?.nodeID == node.id } }
+        let observation = node.state
+        node.control.stop { observation.update { $0.stopCompleted = true } }
+        // This work is ordered after stop's lifecycle fence, but does not wait
+        // for the blocked durable worker or the final archive write.
+        await withCheckedContinuation { continuation in node.control.performMediaWork { continuation.resume() } }
+        blocked.release()
+        try await meshEventually { node.state.read { $0.stopCompleted } }
+        #expect(node.state.read { $0.replica.chatEvents.isEmpty && $0.rejectedOperations.isEmpty })
+        #expect(node.control.acceptedEventReceiptCountForTesting == 0)
+    }
+
     @Test func largeSignedSnapshotIsPacedWithoutDisconnecting() async throws {
         let room = RoomConfiguration.secure(name: "Large signed snapshot")
         let identity = try InstallationIdentity.ephemeral()
@@ -15,10 +77,12 @@ struct SecureMeshTests {
         var events = [MeshRoomEvent]()
         for index in 1...500 {
             let event = MeshRoomEvent(roomID: room.id, version: .init(counter: UInt64(index), nodeID: identity.publicIdentity.nodeID.uuidString),
-                                      kind: .chat, text: String(repeating: "x", count: 4_000))
+                                      kind: .chat, text: String(repeating: "x", count: 1_500))
             events.append(try #require(signer.sign(event)))
         }
-        #expect(try JSONEncoder().encode(events).count > 1_024 * 1_024)
+        let encodedHistoryBytes = try JSONEncoder().encode(events).count
+        #expect(encodedHistoryBytes > 1_024 * 1_024)
+        #expect(encodedHistoryBytes < AutomergeRoomStateSync.maximumRetainedEventBytes)
         let a = try SecureMeshNode(room: room, identity: identity, initialEvents: events, disableStateSync: true)
         let b = try SecureMeshNode(room: room, identity: .ephemeral(), disableStateSync: true)
         defer { a.stop(); b.stop() }
@@ -184,6 +248,67 @@ struct SecureMeshTests {
         #expect(throws: SecureTransportError.invalidCredentials) { try secure.start(advertise: false) }
     }
 
+    @Test(arguments: [false, true], [false, true])
+    func mismatchedNetworkContextDoesNotReadOrOverwriteArchive(wrongChannel: Bool, injectState: Bool) async throws {
+        let authorizedRoom = RoomConfiguration.secure(name: "Authorized archive")
+        let identity = try InstallationIdentity.ephemeral()
+        let network = try NetworkTestRoomFixture.shared(for: authorizedRoom)
+        let authorization = try network.authorization(for: identity)
+        let signer = SecureRoomEventPolicy(roomID: authorizedRoom.id, identity: identity, capabilities: .desktop,
+                                          networkAuthorization: authorization)
+        let event = try #require(signer.sign(MeshRoomEvent(roomID: authorizedRoom.id,
+            version: .init(counter: 1, nodeID: identity.publicIdentity.nodeID.uuidString), kind: .chat, text: "Keep saved history")))
+        let document = try AutomergeRoomStateSync(roomID: authorizedRoom.id, legacyEvents: [event])
+        let archive = try signer.archive(document: document.save(), retainedEvents: [event])
+        let source = UntouchedRoomStateSync(events: [event])
+        let observation = MeshInitializationObservation(archive: archive)
+        let invalidRoom = wrongChannel
+            ? RoomConfiguration.secure(name: "Different channel")
+            : RoomConfiguration(id: authorizedRoom.id, name: "Legacy transport", transportPolicy: .legacyOnly)
+        let control = MeshControlPlane(room: invalidRoom, nodeID: identity.publicIdentity.nodeID.uuidString,
+            displayName: "Invalid context", initialEvents: [event], initialRoomStateDocument: archive,
+            listenerReadyHandler: { _ in observation.recordCallback() },
+            replicaHandler: { _ in observation.recordCallback() },
+            participantsHandler: { _ in observation.recordCallback() },
+            roomStatePersistenceHandler: { observation.persist($0) },
+            roomStateSyncOverride: injectState ? source : nil,
+            installationIdentity: identity, peerPins: MemoryPeerPinStore(), networkAuthorization: authorization)
+
+        #expect(throws: SecureTransportError.wrongContext) { try control.start(advertise: false) }
+        await withCheckedContinuation { continuation in control.stop { continuation.resume() } }
+        #expect(source.calls == 0, "Invalid configuration must be rejected before accessing saved state")
+        #expect(observation.callbacks == 0, "Invalid configuration must not publish UI or listener state")
+        #expect(observation.persisted.elementsEqual(archive), "Failed initialization must preserve the original archive byte-for-byte")
+        #expect(observation.writes == 0)
+    }
+
+    @Test(arguments: [RoomStateSyncError.untrustedHistoryLimit, .authorizationChanged])
+    func failedStateInitializationPreservesErrorAndArchive(failure: RoomStateSyncError) async throws {
+        let room = RoomConfiguration.secure(name: "Unavailable saved history")
+        let identity = try InstallationIdentity.ephemeral()
+        let network = try NetworkTestRoomFixture.shared(for: room)
+        let authorization = try network.authorization(for: identity)
+        let policy = SecureRoomEventPolicy(roomID: room.id, identity: identity, capabilities: .desktop,
+                                          networkAuthorization: authorization)
+        let archive = try policy.archive(document: AutomergeRoomStateSync(roomID: room.id).save())
+        let observation = MeshInitializationObservation(archive: archive)
+        let source = UntouchedRoomStateSync(events: [], failure: failure)
+        let control = MeshControlPlane(room: room, nodeID: identity.publicIdentity.nodeID.uuidString,
+            displayName: "Unavailable state", initialRoomStateDocument: archive,
+            listenerReadyHandler: { _ in observation.recordCallback() },
+            replicaHandler: { _ in observation.recordCallback() },
+            participantsHandler: { _ in observation.recordCallback() },
+            roomStatePersistenceHandler: { observation.persist($0) }, roomStateSyncOverride: source,
+            installationIdentity: identity, peerPins: MemoryPeerPinStore(), networkAuthorization: authorization)
+
+        #expect(throws: failure) { try control.start(advertise: false) }
+        await withCheckedContinuation { continuation in control.stop { continuation.resume() } }
+        #expect(source.calls == 1, "Stop must not compact or save a failed initial state")
+        #expect(observation.callbacks == 0)
+        #expect(observation.writes == 0)
+        #expect(observation.persisted.elementsEqual(archive))
+    }
+
     @Test(arguments: [true, false]) func mediaAdmissionEnforcesCurrentGeneration(currentGeneration: Bool) async throws {
         let room = RoomConfiguration.secure(name: "Role routing", isPrivate: false)
         let routed = MeshTestState()
@@ -318,6 +443,87 @@ struct SecureMeshTests {
     }
 }
 
+private final class MeshInitializationObservation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var archive: Data
+    private var callbackCount = 0
+    private var writeCount = 0
+    init(archive: Data) { self.archive = archive }
+    var callbacks: Int { lock.withLock { callbackCount } }
+    var writes: Int { lock.withLock { writeCount } }
+    var persisted: Data { lock.withLock { archive } }
+    func recordCallback() { lock.withLock { callbackCount += 1 } }
+    func persist(_ data: Data) { lock.withLock { archive = data; writeCount += 1 } }
+}
+
+private func archiveReceiptDigests(_ archive: Data) throws -> Set<Data> {
+    let outer = try #require(PropertyListSerialization.propertyList(from: archive.dropFirst(8), format: nil) as? [String: Any])
+    let body = try #require(outer["body"] as? Data)
+    let saved = try #require(PropertyListSerialization.propertyList(from: body, format: nil) as? [String: Any])
+    return Set(try #require(saved["acceptedHistory"] as? [Data]))
+}
+
+private final class RejectOnceRoomStateSync: RoomStateSync, @unchecked Sendable {
+    private let backing: AutomergeRoomStateSync
+    private let lock = NSLock()
+    private var rejected = false
+    private var observed = [MeshRoomEvent]()
+    private let blockFirstChat: Bool
+    private let gate = DispatchSemaphore(value: 0)
+    private var enteredGate = false
+    init(roomID: String, blockFirstChat: Bool = false) throws {
+        backing = try AutomergeRoomStateSync(roomID: roomID)
+        self.blockFirstChat = blockFirstChat
+    }
+    var attempts: [MeshRoomEvent] { lock.withLock { observed } }
+    var isBlocked: Bool { lock.withLock { enteredGate } }
+    func release() { gate.signal() }
+    func snapshot() throws -> RoomStateSnapshot { try backing.snapshot() }
+    func ingest(_ events: [MeshRoomEvent]) throws -> [MeshRoomEvent] {
+        let reject = lock.withLock {
+            observed.append(contentsOf: events)
+            guard !rejected, events.contains(where: { $0.kind == .chat }) else { return false }
+            rejected = true
+            return true
+        }
+        if reject {
+            if blockFirstChat {
+                lock.withLock { enteredGate = true }
+                guard gate.wait(timeout: .now() + 5) == .success else { throw RoomStateSyncError.processingTimedOut }
+            }
+            throw RoomStateSyncError.retentionCapacity
+        }
+        return try backing.ingest(events)
+    }
+    func makeSession() -> RoomStateSyncSession { backing.makeSession() }
+    func generateSyncMessage(for session: RoomStateSyncSession) -> Data? { backing.generateSyncMessage(for: session) }
+    func receiveSyncMessage(_ message: Data, from session: RoomStateSyncSession) throws -> [MeshRoomEvent] {
+        try backing.receiveSyncMessage(message, from: session)
+    }
+    func compactIfNeeded() throws -> Bool { try backing.compactIfNeeded() }
+    func save() -> Data { backing.save() }
+}
+
+private final class UntouchedRoomStateSync: RoomStateSync, @unchecked Sendable {
+    private let lock = NSLock()
+    private var callCount = 0
+    private let events: [MeshRoomEvent]
+    private let failure: RoomStateSyncError?
+    init(events: [MeshRoomEvent], failure: RoomStateSyncError? = nil) { self.events = events; self.failure = failure }
+    var calls: Int { lock.withLock { callCount } }
+    private func called() { lock.withLock { callCount += 1 } }
+    func snapshot() throws -> RoomStateSnapshot {
+        called()
+        if let failure { throw failure }
+        return RoomStateSnapshot(events: events)
+    }
+    func ingest(_ events: [MeshRoomEvent]) -> [MeshRoomEvent] { called(); return [] }
+    func makeSession() -> RoomStateSyncSession { called(); return RoomStateSyncSession() }
+    func generateSyncMessage(for session: RoomStateSyncSession) -> Data? { called(); return nil }
+    func receiveSyncMessage(_ message: Data, from session: RoomStateSyncSession) -> [MeshRoomEvent] { called(); return [] }
+    func save() -> Data { called(); return Data() }
+}
+
 private final class MeshTestState: @unchecked Sendable {
     struct Value {
         var port: NWEndpoint.Port?
@@ -330,6 +536,9 @@ private final class MeshTestState: @unchecked Sendable {
         var chatAttachments = [String: RoomChatAttachmentPayload]()
         var roomTrayRequests = [String: RoomTrayFileRequest]()
         var connectionAttempts = 0
+        var savedArchive: Data?
+        var rejectedOperations = [RoomStateSyncError]()
+        var stopCompleted = false
     }
     private let lock = NSLock()
     private var value = Value()
@@ -348,6 +557,7 @@ private final class SecureMeshNode {
     }
     init(room: RoomConfiguration, identity: InstallationIdentity, capabilities: PeerCapabilities = .desktop,
          initialEvents: [MeshRoomEvent] = [], disableStateSync: Bool = false,
+         roomStateSyncOverride: (any RoomStateSync)? = nil,
          incomingMediaChannelHandler: ((SecurePeerChannel, AuthenticatedPeer) -> Void)? = nil) throws {
         self.identity = identity
         networkFixture = try NetworkTestRoomFixture.shared(for: room)
@@ -363,6 +573,12 @@ private final class SecureMeshNode {
             roomTrayFileRequestHandler: { sender, request in
                 observation.update { $0.roomTrayRequests[sender] = request }
             },
+            roomStatePersistenceHandler: { archive in observation.update { $0.savedArchive = archive } },
+            roomStateOperationRejectedHandler: { error in
+                let underlying = (error as? RoomStateOperationRejection)?.underlyingError ?? error
+                if let underlying = underlying as? RoomStateSyncError { observation.update { $0.rejectedOperations.append(underlying) } }
+            },
+            roomStateSyncOverride: roomStateSyncOverride,
             disableRoomStateSyncDuringAuthenticationForTesting: disableStateSync,
             connectionAttemptHandler: { observation.update { $0.connectionAttempts += 1 } },
             installationIdentity: identity, peerPins: MemoryPeerPinStore(), secureCapabilities: capabilities,

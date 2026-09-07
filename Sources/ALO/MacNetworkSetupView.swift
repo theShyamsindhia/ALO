@@ -16,6 +16,7 @@ struct MacNetworkSetupView: View {
     @State private var recoveryImport = ""
     @State private var recoveryText: String?
     @State private var recoveryExported = false
+    @State private var busy = false
     @State private var error: String?
     @State private var selectedChannelID: String?
     @State private var privateChannel = false
@@ -52,6 +53,7 @@ struct MacNetworkSetupView: View {
         .padding(10)
         .sheet(item: $sheet) { selection in
             sheetView(selection).frame(width: 600, height: 520)
+                .interactiveDismissDisabled(busy)
                 .alert(confirmationTitle, isPresented: Binding(
                     get: { pendingImport != nil || pendingMember != nil || removingMember != nil },
                     set: { if !$0 { clearConfirmation() } })) {
@@ -93,24 +95,26 @@ struct MacNetworkSetupView: View {
     }
 
     private func confirmAction() {
-        perform {
+        let pendingImport = pendingImport, pendingMember = pendingMember
+        let removingMember = removingMember, confirmationNetworkID = confirmationNetworkID
+        clearConfirmation()
+        performAsync {
             if let pendingImport {
-                _ = try account.importInvitation(data: pendingImport.encoded())
+                _ = try await account.importInvitation(data: pendingImport.encoded())
                 sheet = nil; selectedChannelID = account.channels.first?.id.uuidString
             } else if let pendingMember, let confirmationNetworkID {
-                invitation = try account.addMember(data: pendingMember.encoded(), networkID: confirmationNetworkID)
+                invitation = try await account.addMember(data: pendingMember.encoded(), networkID: confirmationNetworkID)
             } else if let removingMember, let confirmationNetworkID {
-                try account.removeMember(userID: removingMember.userID, networkID: confirmationNetworkID)
+                try await account.removeMember(userID: removingMember.userID, networkID: confirmationNetworkID)
             }
         }
-        clearConfirmation()
     }
 
     private var identitySetup: some View {
         ALOIdentitySetupView(stage: account.identity == nil ? .identity : .recovery,
             displayName: $account.displayName, recoveryImportText: $recoveryImport,
             fingerprint: account.identity?.publicIdentity.userID, recoveryText: recoveryText,
-            recoveryExported: recoveryExported, errorMessage: error ?? account.errorMessage,
+            recoveryExported: recoveryExported, isBusy: busy, errorMessage: error ?? account.errorMessage,
             onCreateIdentity: { perform { try account.createIdentity() } },
             onRestoreIdentity: { perform { try account.restoreIdentity(data: Data(recoveryImport.utf8)); recoveryImport = "" } },
             onImportRecoveryFile: {
@@ -122,7 +126,7 @@ struct MacNetworkSetupView: View {
             },
             onRevealRecovery: { perform { recoveryText = String(decoding: try account.recoveryData(), as: UTF8.self) } },
             onExportRecovery: exportRecovery,
-            onContinue: { perform { try account.completeIdentitySetup(); recoveryText = nil; recoveryImport = "" } })
+            onContinue: { performAsync { try await account.completeIdentitySetup(); recoveryText = nil; recoveryImport = "" } })
     }
 
     private var networkBrowser: some View {
@@ -169,18 +173,18 @@ struct MacNetworkSetupView: View {
     @ViewBuilder private func sheetView(_ selection: Sheet) -> some View {
         switch selection {
         case .createNetwork:
-            ALOCreateNetworkView(name: $name, errorMessage: error, onCreate: {
-                perform { _ = try account.createNetwork(name: name); sheet = nil; selectedChannelID = account.channels.first?.id.uuidString }
+            ALOCreateNetworkView(name: $name, isBusy: busy, errorMessage: error, onCreate: {
+                performAsync { _ = try await account.createNetwork(name: name); sheet = nil; selectedChannelID = account.channels.first?.id.uuidString }
             }, onCancel: { sheet = nil })
         case .importNetwork:
-            ALOImportInvitationView(invitationText: $packageText, errorMessage: error,
+            ALOImportInvitationView(invitationText: $packageText, isBusy: busy, errorMessage: error,
                 onImport: { perform { pendingImport = try NetworkInvitation.decode(Data(packageText.utf8)) } },
                 onImportFile: { openFile { url in packageText = String(decoding: try boundedRead(url, maximum: NetworkManifest.maximumEncodedBytes + 4096), as: UTF8.self) } },
                 onCancel: { sheet = nil })
         case .addMember:
             ALOAddMemberView(networkName: account.selectedNetwork?.name ?? "", publicIdentityText: $packageText,
                 recipient: invitation.map { ALOMemberSummary(id: $0.recipient.userID, name: "Invited member", fingerprint: $0.recipient.userID) },
-                invitationText: invitation.flatMap { try? String(decoding: $0.encoded(), as: UTF8.self) }, errorMessage: error,
+                invitationText: invitation.flatMap { try? String(decoding: $0.encoded(), as: UTF8.self) }, isBusy: busy, errorMessage: error,
                 onCreateInvitation: { perform {
                     guard let network = account.selectedNetwork else { throw NetworkAccountError.channelUnavailable }
                     pendingMember = try NetworkMembershipRequest.decode(Data(packageText.utf8))
@@ -191,10 +195,14 @@ struct MacNetworkSetupView: View {
                 onCancel: { sheet = nil })
         case .createChannel:
             ALOCreateChannelView(networkName: account.selectedNetwork?.name ?? "", name: $name, isPrivate: $privateChannel,
-                selectedMemberIDs: $allowed, members: memberSummaries, errorMessage: error, onCreate: {
-                    perform {
-                        guard let network = account.selectedNetwork else { throw NetworkAccountError.channelUnavailable }
-                        try account.createChannel(name: name, networkID: network.id, isPrivate: privateChannel, allowedUserIDs: Array(allowed))
+                selectedMemberIDs: $allowed, members: memberSummaries, isBusy: busy, errorMessage: error, onCreate: {
+                    guard let networkID = account.selectedNetwork?.id else {
+                        error = NetworkAccountModel.describe(NetworkAccountError.channelUnavailable)
+                        return
+                    }
+                    let channelName = name, visibility = privateChannel, allowedIDs = Array(allowed)
+                    performAsync {
+                        try await account.createChannel(name: channelName, networkID: networkID, isPrivate: visibility, allowedUserIDs: allowedIDs)
                         sheet = nil
                     }
                 }, onCancel: { sheet = nil })
@@ -239,7 +247,17 @@ struct MacNetworkSetupView: View {
     }
 
     private func perform(_ action: () throws -> Void) {
+        guard !busy else { return }
         do { error = nil; try action() } catch { self.error = NetworkAccountModel.describe(error) }
+    }
+
+    private func performAsync(_ action: @escaping @MainActor () async throws -> Void) {
+        guard !busy else { return }
+        busy = true; error = nil
+        Task { @MainActor in
+            defer { busy = false }
+            do { try await action() } catch { self.error = NetworkAccountModel.describe(error) }
+        }
     }
 
     private func exportRecovery() {

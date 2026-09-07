@@ -219,10 +219,18 @@ final class SecureRoomEventPolicy: @unchecked Sendable {
     /// through accepts(); storage alone never creates a historical receipt.
     func allowsDurableStorage(_ event: MeshRoomEvent) -> Bool {
         guard networkAuthorization != nil else { return accepts(event) }
+        return retentionScope(event) != nil
+    }
+
+    /// A root user gets one immutable retention scope across all of its TLS
+    /// installations. Revocation can hide provenance without changing its scope;
+    /// a receipt or a freely minted installation ID never creates a new quota.
+    func retentionScope(_ event: MeshRoomEvent) -> String? {
+        guard networkAuthorization != nil else { return nil }
         guard Self.isDurable(event), event.roomID == roomID, Self.hasValidAuthorFields(event),
               let verified = cachedVerifiedEvent(event), let context = verified.context,
-              let expected = try? archiveAuthority(), context.authority == expected else { return false }
-        return true
+              let expected = try? archiveAuthority(), context.authority == expected else { return nil }
+        return context.device.userIdentity.userID
     }
 
     /// Receipt for a SUCCESSFULLY COMMITTED replica/Automerge transaction only.
@@ -324,6 +332,8 @@ final class SecureRoomEventPolicy: @unchecked Sendable {
     var verificationCacheState: (count: Int, encodedBytes: Int, verificationCount: UInt64) {
         verificationLock.withLock { (verifiedEvents.count, verifiedEventBytes, verificationCount) }
     }
+
+    var acceptedHistoryCountForTesting: Int { lock.withLock { acceptedHistory.count } }
 
     private func cachedVerifiedEvent(_ event: MeshRoomEvent) -> VerifiedEvent? {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
