@@ -10,10 +10,10 @@ import ALONetworking
         #expect(ALOViewModel.renderingState(for: "Media transport ready") == nil)
         #expect(ALOViewModel.renderingState(for: "Listening in sync") == true)
         #expect(ALOViewModel.renderingState(for: "Connected · waiting for audio") == false)
-        #expect(ALOViewModel.renderingState(for: "Recovering room audio") == false)
-        #expect(ALOViewModel.renderingState(for: "Synchronizing room audio") == false)
+        #expect(ALOViewModel.renderingState(for: "Recovering channel audio") == false)
+        #expect(ALOViewModel.renderingState(for: "Synchronizing channel audio") == false)
     }
-    @Test func discoveredSecureRoomKeepsItsPolicyWhenSelected() {
+    @Test func discoveredSecureChannelDoesNotGrantMembership() {
         _ = NSApplication.shared
         let model = ALOViewModel(discoverRooms: false)
         let id = UUID().uuidString
@@ -21,9 +21,8 @@ import ALONetworking
         model.nearbyRooms = [NearbyRoom(id: id, name: "Secure room", isPrivate: false,
             peerCount: 2, accessProof: nil, transportPolicy: .secureV2, icon: icon)]
         model.selectedRoomID = id
-        #expect(model.selectedRoomConfiguration?.transportPolicy == .secureV2)
-        #expect(model.selectedRoomConfiguration?.icon == icon)
-        #expect(model.roomChoices.first { $0.id == id }?.transportPolicy == .secureV2)
+        #expect(model.selectedRoomConfiguration == nil)
+        #expect(model.roomChoices.first { $0.id == id } == nil)
         #expect(model.phase == .idle)
     }
 
@@ -34,7 +33,7 @@ import ALONetworking
         model.nearbyRooms = [NearbyRoom(id: id, name: "Existing room", isPrivate: false,
             peerCount: 1, accessProof: nil, transportPolicy: .legacyOnly)]
         model.selectedRoomID = id
-        #expect(model.selectedRoomConfiguration?.transportPolicy == .legacyOnly)
-        #expect(model.roomChoices.first { $0.id == id }?.transportPolicy == .legacyOnly)
+        #expect(model.selectedRoomConfiguration == nil)
+        #expect(model.roomChoices.first { $0.id == id } == nil)
     }
 }

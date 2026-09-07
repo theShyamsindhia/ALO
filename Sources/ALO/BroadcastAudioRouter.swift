@@ -54,7 +54,7 @@ final class BroadcastAudioRouter {
               let systemOutput = try hardware.defaultSystemOutputUID
         else { throw ALOError("ALO could not identify the current physical audio output.") }
         guard output != virtualUID, systemOutput != virtualUID else {
-            throw ALOError("ALO Room is already the default output. Reopen ALO to restore the previous device first.")
+            throw ALOError("ALO Channel is already the default output. Reopen ALO to restore the previous device first.")
         }
         let journal = BroadcastRouteJournal(
             virtualUID: virtualUID,

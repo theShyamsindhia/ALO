@@ -78,6 +78,7 @@ public final class MediaHostSession: @unchecked Sendable {
         let bytes: Data
         let deadline: TimeInterval
         let completion: ((Result<Void, Error>) -> Void)?
+        var clockReply: (id: UInt64, client: UInt64, received: UInt64)? = nil
     }
     private final class Peer {
         let credentials: AuthenticatedChannelCredentials
@@ -319,7 +320,9 @@ public final class MediaHostSession: @unchecked Sendable {
     }
 
     func receive(_ bytes: Data, connectionID: UUID) {
-        assertQueue(); tick()
+        assertQueue()
+        let receivedAt = nowNanos()
+        tick()
         guard let peer = peers[connectionID] else { return }
         guard peer.rawTraffic.accept(bytes.count, now: nowNanos()) else { detach(connectionID: connectionID); return }
         let message: MediaControlWireMessage
@@ -337,7 +340,7 @@ public final class MediaHostSession: @unchecked Sendable {
         }
         if case let .clockPing(id, clientTime) = message {
             guard budget(&peer.pingTimes, maximum: 8) else { return }
-            send(.clockPong(id: id, clientTimeNanos: clientTime, hostTimeNanos: nowNanos()), to: peer)
+            send(.clockPong(id: id, clientTimeNanos: clientTime, hostTimeNanos: nowNanos(), hostReceivedNanos: receivedAt), to: peer)
             return
         }
         if case let .timingReport(stream, report) = message {
@@ -658,19 +661,34 @@ public final class MediaHostSession: @unchecked Sendable {
         send(.rejected(requestID: id, reason: reason), to: peer)
     }
     private func send(_ message: MediaControlWireMessage, to peer: Peer) {
-        guard let bytes = try? message.encoded() else { return }; enqueue(bytes, peer: peer)
+        guard let bytes = try? message.encoded() else { return }
+        if case let .clockPong(id, client, _, received) = message {
+            enqueue(bytes, peer: peer, clockReply: (id, client, received))
+        } else { enqueue(bytes, peer: peer) }
     }
-    private func enqueue(_ bytes: Data, peer: Peer, completion: ((Result<Void, Error>) -> Void)? = nil) {
+    private func enqueue(_ bytes: Data, peer: Peer, completion: ((Result<Void, Error>) -> Void)? = nil,
+                         clockReply: (id: UInt64, client: UInt64, received: UInt64)? = nil) {
         guard peers[peer.credentials.connectionID] === peer else { completion?(.failure(SecurePeerChannelError.cancelled)); return }
         guard peer.outputs.count < 8, peer.outputs.reduce(0, { $0 + $1.bytes.count }) + bytes.count <= 262_144 else {
             completion?(.failure(SecureTransportError.capacity)); detach(connectionID: peer.credentials.connectionID); return
         }
-        peer.outputs.append(Output(bytes: bytes, deadline: now + 2, completion: completion)); drain(peer)
+        peer.outputs.append(Output(bytes: bytes, deadline: now + 2, completion: completion, clockReply: clockReply)); drain(peer)
     }
     private func drain(_ peer: Peer) {
         guard !peer.sending, let output = peer.outputs.first else { return }
+        var bytes = output.bytes
+        if let reply = output.clockReply {
+            // Stamp at dequeue, not enqueue: annotations/control backpressure
+            // can keep this reply in our own queue for hundreds of milliseconds.
+            guard let stamped = try? MediaControlWireMessage.clockPong(id: reply.id,
+                clientTimeNanos: reply.client, hostTimeNanos: nowNanos(),
+                hostReceivedNanos: reply.received).encoded() else {
+                detach(connectionID: peer.credentials.connectionID); return
+            }
+            bytes = stamped
+        }
         peer.sending = true
-        peer.send(output.bytes) { [weak self, weak peer] result in
+        peer.send(bytes) { [weak self, weak peer] result in
             guard let self, let peer else { return }; self.assertQueue()
             guard self.peers[peer.credentials.connectionID] === peer, peer.outputs.first?.id == output.id else { return }
             if case .failure(let error) = result {

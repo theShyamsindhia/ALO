@@ -3,6 +3,44 @@ import Foundation
 import Network
 import ALOCore
 
+/// A local edit that was not published. The UI may retain its chat text as a
+/// retry draft; remote candidate failures never use this local-edit wrapper.
+public struct RoomStateOperationRejection: LocalizedError, @unchecked Sendable {
+    public let event: MeshRoomEvent
+    public let underlyingError: Error
+    public init(event: MeshRoomEvent, underlyingError: Error) {
+        self.event = event; self.underlyingError = underlyingError
+    }
+    public var errorDescription: String? { Self.description(for: underlyingError) }
+    fileprivate static func description(for error: Error) -> String {
+        if (error as? RoomStateSyncError) == .retentionCapacity
+            || (error as? RoomStateSyncError) == .untrustedHistoryLimit
+            || (error as? SecureTransportError) == .capacity {
+            return "The channel's saved history is full or busy. This edit was not sent. Try a smaller edit or remove old queue items, then retry."
+        }
+        if (error as? RoomStateSyncError) == .authorizationChanged {
+            return "Channel access changed before this edit could be sent. Reopen the channel and retry."
+        }
+        return "This edit could not be saved and sent. Please reopen the channel and retry."
+    }
+}
+
+private enum DurableCommitFailure: Error { case missingReceipt }
+
+/// An initialization failure is not an empty replacement document. This inert
+/// placeholder retains the original error and can never serialize over a user's
+/// archive; both start and stop persistence gate on the initialization error.
+private final class FailedRoomStateSync: RoomStateSync, @unchecked Sendable {
+    private let error: Error
+    init(error: Error) { self.error = error }
+    func snapshot() throws -> RoomStateSnapshot { throw error }
+    func ingest(_ events: [MeshRoomEvent]) throws -> [MeshRoomEvent] { throw error }
+    func makeSession() -> RoomStateSyncSession { RoomStateSyncSession() }
+    func generateSyncMessage(for session: RoomStateSyncSession) -> Data? { nil }
+    func receiveSyncMessage(_ message: Data, from session: RoomStateSyncSession) throws -> [MeshRoomEvent] { throw error }
+    func save() -> Data { Data() }
+}
+
 struct ChatAttachmentReceiveAdmission {
     static let windowNanos: UInt64 = 60_000_000_000
     static let maximumBytes = 32 * 1_024 * 1_024
@@ -234,6 +272,7 @@ public final class MeshControlPlane: @unchecked Sendable {
     private let incomingMediaChannelHandler: ((SecurePeerChannel, AuthenticatedPeer) -> Void)?
     private let eventPolicy: SecureRoomEventPolicy?
     private let secureCapabilities: PeerCapabilities
+    private let networkAuthorization: NetworkChannelAuthorization?
     private let incarnationID = UUID()
     private var advertises = false
     private var scanDeadline: DispatchWorkItem?
@@ -253,7 +292,9 @@ public final class MeshControlPlane: @unchecked Sendable {
     private let listenerStateHandler: (NWListener.State) -> Void
     private var replica: MeshRoomReplica
     private let roomStateSync: any RoomStateSync
+    private let roomStateInitializationError: Error?
     private let roomStatePersistenceHandler: (Data) -> Void
+    private let roomStateOperationRejectedHandler: (Error) -> Void
     private let roomStateReceiveCompletedHandler: ([MeshRoomEvent]) -> Void
     private let arenaHandler: (String, Data) -> Void
     private let chatAttachmentHandler: (String, RoomChatAttachmentPayload) -> Void
@@ -263,6 +304,14 @@ public final class MeshControlPlane: @unchecked Sendable {
     private let disableRoomStateSyncDuringAuthenticationForTesting: Bool
     private var roomStatePersistenceWorkItem: DispatchWorkItem?
     private var roomStateSyncDisabled = false
+    private var networkDurableCommitFailed = false
+    private var pendingNetworkDurableCommits = 0
+    private var pendingNetworkDurableBytes = 0
+    // Exact canonical bytes, not just IDs or Unicode-folding event equality.
+    // Entries share the same 128-job / 8 MiB admission and completion lifetime.
+    private var pendingNetworkDurableEvents = Set<Data>()
+    private var lastReservedLocalCounter: UInt64 = 0
+    private var lifecycleGeneration: UInt64 = 0
     private var listener: NWListener?
     private var browser: NWBrowser?
     private var links = [ObjectIdentifier: Link]()
@@ -327,6 +376,7 @@ public final class MeshControlPlane: @unchecked Sendable {
         chatAttachmentHandler: @escaping (String, RoomChatAttachmentPayload) -> Void = { _, _ in },
         roomTrayFileRequestHandler: @escaping (String, RoomTrayFileRequest) -> Void = { _, _ in },
         roomStatePersistenceHandler: @escaping (Data) -> Void = { _ in },
+        roomStateOperationRejectedHandler: @escaping (Error) -> Void = { _ in },
         roomStateSyncOverride: (any RoomStateSync)? = nil,
         roomStateReceiveCompletedHandler: @escaping ([MeshRoomEvent]) -> Void = { _ in },
         roomStateDowngradeHandler: @escaping (String?) -> Void = { _ in },
@@ -335,6 +385,7 @@ public final class MeshControlPlane: @unchecked Sendable {
         installationIdentity: InstallationIdentity? = nil,
         peerPins: (any PeerPinStore)? = nil,
         secureCapabilities: PeerCapabilities = .desktop,
+        networkAuthorization: NetworkChannelAuthorization? = nil,
         incomingMediaChannelHandler: ((SecurePeerChannel, AuthenticatedPeer) -> Void)? = nil,
         secureStateHandler: @escaping (String?, SecurePeerChannelState) -> Void = { _, _ in },
         listenerStateHandler: @escaping (NWListener.State) -> Void = { _ in }
@@ -359,23 +410,53 @@ public final class MeshControlPlane: @unchecked Sendable {
         self.walkieTalkieHandler = walkieTalkieHandler
         self.openLineHandler = openLineHandler
         let eventPolicy = room.transportPolicy == .secureV2
-            ? SecureRoomEventPolicy(roomID: room.id, identity: installationIdentity, capabilities: secureCapabilities) : nil
+            ? SecureRoomEventPolicy(roomID: room.id, identity: installationIdentity, capabilities: secureCapabilities,
+                networkAuthorization: networkAuthorization) : nil
         self.eventPolicy = eventPolicy
         self.arenaHandler = arenaHandler
         self.chatAttachmentHandler = chatAttachmentHandler
         self.roomTrayFileRequestHandler = roomTrayFileRequestHandler
-        let durableState: any RoomStateSync = roomStateSyncOverride
-            ?? AutomergeRoomStateSync.recovering(
-                roomID: room.id,
-                savedDocument: initialRoomStateDocument.flatMap { eventPolicy?.restoreArchive($0) ?? $0 },
-                legacyEvents: initialEvents,
-                eventValidator: { eventPolicy?.accepts($0) ?? true }
-            )
-        self.roomStateSync = durableState
-        self.roomStateSyncDisabled = false
-        let durableEvents = (try? durableState.snapshot().events) ?? []
-        self.replica = MeshRoomReplica(events: (initialEvents + durableEvents).filter { eventPolicy?.accepts($0) ?? true })
+        let projector: (@Sendable (MeshRoomEvent) -> Bool)?
+        let scope: (@Sendable (MeshRoomEvent) -> String?)?
+        let revision: (@Sendable () -> UInt64?)?
+        if networkAuthorization != nil {
+            projector = { eventPolicy?.accepts($0) ?? false }
+            scope = { eventPolicy?.retentionScope($0) }
+            revision = { eventPolicy?.projectionRevision }
+        } else { projector = nil; scope = nil; revision = nil }
+        let initialized = Self.withStablePolicy(authorization: networkAuthorization) {
+            () -> (state: any RoomStateSync, events: [MeshRoomEvent], error: Error?) in
+            do {
+                // A network channel never falls back to legacy transport or a
+                // different channel. Reject before restoring receipts, reading
+                // a saved document, or asking an injected state for a snapshot.
+                if let networkAuthorization {
+                    guard room.transportPolicy == .secureV2,
+                          UUID(uuidString: room.id) == networkAuthorization.channelID else {
+                        throw SecureTransportError.wrongContext
+                    }
+                }
+                let state: any RoomStateSync = try roomStateSyncOverride ?? AutomergeRoomStateSync.recovering(
+                    roomID: room.id,
+                    savedDocument: initialRoomStateDocument.flatMap { eventPolicy?.restoreArchive($0) ?? $0 },
+                    legacyEvents: initialEvents,
+                    eventValidator: { eventPolicy?.allowsDurableStorage($0) ?? true },
+                    eventProjector: projector, projectionRevision: revision, eventScope: scope
+                )
+                let snapshot = try state.snapshot()
+                guard eventPolicy?.rememberAccepted(snapshot.events, retainingHistory: snapshot.retainedEvents) ?? true else {
+                    throw RoomStateSyncError.authorizationChanged
+                }
+                let events = (initialEvents + snapshot.events).filter { eventPolicy?.accepts($0) ?? true }
+                return (state: state, events: events, error: nil)
+            } catch { return (state: FailedRoomStateSync(error: error), events: [], error: error) }
+        }
+        self.roomStateSync = initialized.state
+        self.roomStateInitializationError = initialized.error
+        self.roomStateSyncDisabled = initialized.error != nil
+        self.replica = MeshRoomReplica(events: initialized.events)
         self.roomStatePersistenceHandler = roomStatePersistenceHandler
+        self.roomStateOperationRejectedHandler = roomStateOperationRejectedHandler
         self.roomStateReceiveCompletedHandler = roomStateReceiveCompletedHandler
         self.roomStateDowngradeHandler = roomStateDowngradeHandler
         self.disableRoomStateSyncDuringAuthenticationForTesting =
@@ -385,6 +466,7 @@ public final class MeshControlPlane: @unchecked Sendable {
         self.installationIdentity = installationIdentity
         self.peerPins = peerPins
         self.secureCapabilities = secureCapabilities
+        self.networkAuthorization = networkAuthorization
         self.incomingMediaChannelHandler = incomingMediaChannelHandler
         self.secureStateHandler = secureStateHandler
         self.listenerStateHandler = listenerStateHandler
@@ -401,15 +483,19 @@ public final class MeshControlPlane: @unchecked Sendable {
     }
 
     public func start(advertise: Bool = true) throws {
+        if let roomStateInitializationError { throw roomStateInitializationError }
         try room.validateForJoining()
         if room.transportPolicy == .secureV2 {
             guard let installationIdentity, peerPins != nil,
                   UUID(uuidString: nodeID) == installationIdentity.publicIdentity.nodeID,
                   nodeID == installationIdentity.publicIdentity.nodeID.uuidString,
-                  UUID(uuidString: room.id) != nil else { throw SecureTransportError.invalidCredentials }
+                  let channelID = UUID(uuidString: room.id),
+                  let networkAuthorization, networkAuthorization.channelID == channelID else { throw SecureTransportError.invalidCredentials }
+            _ = try networkAuthorization.claim(installationKeyHash: installationIdentity.publicIdentity.publicKeyHash)
         }
         let parameters = try transportParameters(expectedPeerID: nil)
         let listener = try NWListener(using: parameters, on: .any)
+        lifecycleGeneration &+= 1
         isStopped = false
         advertises = advertise
         if room.transportPolicy == .secureV2 { scanWindowExpiresAtNanos = MonotonicClock.nowNanos() + 15_000_000_000 }
@@ -464,7 +550,7 @@ public final class MeshControlPlane: @unchecked Sendable {
     /// direct peer's authenticated listener, never its inbound ephemeral port.
     /// Completion runs on the mesh queue. On success the caller owns the channel,
     /// must install payload/state handlers immediately, and cancel it on leaving.
-    public func openMediaChannel(to peerID: UUID, role: ReliableChannelRole,
+    public func openPeerChannel(to peerID: UUID, role: ReliableChannelRole,
         completion: @escaping (Result<(SecurePeerChannel, AuthenticatedPeer), Error>) -> Void) {
         queue.async { [weak self] in
             guard let self, !self.isStopped, self.room.transportPolicy == .secureV2,
@@ -487,7 +573,7 @@ public final class MeshControlPlane: @unchecked Sendable {
                     ? .privateRoom(secret: self.room.secureJoinSecret ?? Data()) : .publicRoom
                 let configuration = try SecurePeerConfiguration(roomID: roomID, incarnationID: self.incarnationID,
                     admission: admission, offer: ProtocolOffer.current(capabilities: self.secureCapabilities),
-                    direction: .initiator(role))
+                    direction: .initiator(role), networkAuthorization: self.networkAuthorization)
                 let channel = SecurePeerChannel(connection: connection, identity: identity, configuration: configuration,
                     pins: pins, queue: self.queue)
                 let operation = UUID()
@@ -549,7 +635,7 @@ public final class MeshControlPlane: @unchecked Sendable {
                 let session = try DirectedVoiceSession(roomID: roomID, localPeerID: peerID, queue: ownerQueue,
                     callbacks: callbacks, open: { [weak self] remoteID, reply in
                         guard let self else { reply(.failure(SecureTransportError.invalidState)); return }
-                        self.openMediaChannel(to: remoteID, role: .voiceControl) { result in
+                        self.openPeerChannel(to: remoteID, role: .voiceControl) { result in
                             switch result {
                             case .success(let value): VoiceControlConnection.attach(value.0, queue: ownerQueue, completion: reply)
                             case .failure(let error): reply(.failure(error))
@@ -569,6 +655,28 @@ public final class MeshControlPlane: @unchecked Sendable {
         }
     }
 
+    var acceptedEventReceiptCountForTesting: Int { eventPolicy?.acceptedHistoryCountForTesting ?? 0 }
+
+    func hasVerifiedEventForTesting(_ event: MeshRoomEvent) -> Bool {
+        eventPolicy?.hasVerifiedEventForTesting(event) ?? false
+    }
+
+    func pendingDurableCommitsForTesting() async -> Int {
+        await withCheckedContinuation { continuation in
+            queue.async { continuation.resume(returning: self.pendingNetworkDurableCommits) }
+        }
+    }
+
+    func waitForDurableWorkForTesting() async {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                self.roomStateWorkerQueue.async {
+                    self.queue.async { continuation.resume() }
+                }
+            }
+        }
+    }
+
     public func updateRoomIcon(_ icon: RoomIcon) {
         queue.async { [weak self] in self?.mergeRoomIcon(icon) }
     }
@@ -584,7 +692,8 @@ public final class MeshControlPlane: @unchecked Sendable {
         let record = RoomDiscovery.record(
             room: room, nodeID: nodeID, displayName: displayName,
             appVersion: appVersion, accessProof: accessProof, icon: roomIcon,
-            media: replica.broadcaster?.nodeID == nodeID ? replica.nowPlaying : nil
+            media: replica.broadcaster?.nodeID == nodeID ? replica.nowPlaying : nil,
+            networkChannel: networkAuthorization != nil
         )
         guard record != advertisedRecord else { return }
         advertisedRecord = record
@@ -638,6 +747,7 @@ public final class MeshControlPlane: @unchecked Sendable {
     public func stop(completion: @escaping @Sendable () -> Void = {}) {
         queue.async { [self] in
             isStopped = true
+            lifecycleGeneration &+= 1
             for channel in Array(pendingMediaChannels.values) { channel.cancel() }
             browser?.cancel()
             scanDeadline?.cancel(); scanDeadline = nil
@@ -652,10 +762,12 @@ public final class MeshControlPlane: @unchecked Sendable {
             let persist = roomStatePersistenceHandler
             let policy = eventPolicy
             roomStateWorkerQueue.async {
+                guard self.roomStateInitializationError == nil else { completion(); return }
                 _ = try? durableState.compactIfNeeded()
                 let document = durableState.save()
                 if let policy {
-                    if let archive = try? policy.archive(document: document) { persist(archive) }
+                    if let retained = try? durableState.snapshot().retainedEvents,
+                       let archive = try? policy.archive(document: document, retainedEvents: retained) { persist(archive) }
                 } else { persist(document) }
                 completion()
             }
@@ -1016,7 +1128,8 @@ public final class MeshControlPlane: @unchecked Sendable {
     ) {
         queue.async { [weak self] in
             guard let self, !isStopped else { return }
-            guard localPermits(SecureRoomEventPolicy.capability(for: kind)) else { return }
+            let permitted = localPermits(SecureRoomEventPolicy.capability(for: kind))
+            guard permitted || (networkAuthorization != nil && Self.isDurableKind(kind)) else { return }
             if kind == .queueReorder {
                 guard replica.broadcaster?.nodeID == nodeID,
                       let queueOrder, queueOrder.count <= 2_000,
@@ -1025,7 +1138,7 @@ public final class MeshControlPlane: @unchecked Sendable {
             }
             var event = MeshRoomEvent(
                 roomID: room.id,
-                version: replica.nextVersion(nodeID: nodeID),
+                version: reserveLocalVersion(),
                 kind: kind,
                 senderID: senderID,
                 sender: sender,
@@ -1042,11 +1155,25 @@ public final class MeshControlPlane: @unchecked Sendable {
                 videoEnabled: videoEnabled
             )
             guard MeshRoomReplica.hasValidQueueOrder(event) else { return }
+            guard permitted else {
+                reportOperationRejection(RoomStateSyncError.authorizationChanged, localEvent: event)
+                return
+            }
             if let eventPolicy {
-                guard let signed = eventPolicy.sign(event) else { return }
+                guard let signed = eventPolicy.sign(event) else {
+                    if networkAuthorization != nil, Self.isDurableEvent(event) {
+                        reportOperationRejection(RoomStateSyncError.authorizationChanged, localEvent: event)
+                    }
+                    return
+                }
                 event = signed
             }
-            _ = replica.merge([event])
+            if networkAuthorization != nil, Self.isDurableEvent(event) {
+                commitNetworkDurableEvents([event], excluding: nil, localEvent: event)
+                return
+            }
+            do { guard !(try commitReplicaEvents([event])).isEmpty else { return } }
+            catch { handleRoomStateSyncFailure(error, from: nil); return }
             ingestDurableRoomState([event], excluding: nil)
             replicaHandler(replica)
             broadcast(MeshEnvelope(type: "event", event: event))
@@ -1152,7 +1279,8 @@ public final class MeshControlPlane: @unchecked Sendable {
             let roles: Set<ReliableChannelRole> = incomingMediaChannelHandler == nil ? [.roomControl] : [.roomControl, .mediaControl, .video, .voiceControl, .fileTransfer]
             let configuration = try SecurePeerConfiguration(roomID: roomID, incarnationID: incarnationID, admission: admission,
                 offer: ProtocolOffer.current(capabilities: secureCapabilities),
-                direction: link.initiated ? .initiator(.roomControl) : .responder(allowedChannelRoles: roles))
+                direction: link.initiated ? .initiator(.roomControl) : .responder(allowedChannelRoles: roles),
+                networkAuthorization: networkAuthorization)
             let channel = SecurePeerChannel(connection: link.connection, identity: installationIdentity,
                                              configuration: configuration, pins: peerPins, queue: queue)
             link.secureChannel = channel
@@ -1177,7 +1305,8 @@ public final class MeshControlPlane: @unchecked Sendable {
                     return
                 }
                 guard self.eventPolicy?.admit(peer, initiated: link.initiated) ?? true else { self.cancel(link); return }
-                // Saved or relayed events wait for independent admission of their author.
+                // Re-evaluate projected history after admission/policy refresh.
+                // Root-bound durable authors need not currently be online.
                 self.roomStateWorkerQueue.async { [weak self] in
                     guard let self, let events = try? self.roomStateSync.snapshot().events else { return }
                     self.queue.async {
@@ -1803,8 +1932,17 @@ public final class MeshControlPlane: @unchecked Sendable {
     }
 
     private func merge(_ events: [MeshRoomEvent], excluding source: Link) {
-        let valid = validRoomEvents(Array(events.prefix(maximumSyncEvents)))
-        let inserted = replica.merge(valid)
+        var candidates = Array(events.prefix(maximumSyncEvents))
+        if networkAuthorization != nil {
+            // Durable proof verification belongs to the bounded worker. The
+            // live path below retains its immediate authorization checks.
+            let durable = candidates.filter(Self.isDurableEvent)
+            if !durable.isEmpty { commitNetworkDurableEvents(durable, excluding: source, localEvent: nil) }
+            candidates.removeAll(where: Self.isDurableEvent)
+        }
+        let inserted: [MeshRoomEvent]
+        do { inserted = try commitReplicaEvents(candidates) }
+        catch { cancel(source); return }
         guard !inserted.isEmpty else { return }
         if source.roomStateSyncVersion == nil {
             ingestDurableRoomState(inserted, excluding: source)
@@ -1818,7 +1956,8 @@ public final class MeshControlPlane: @unchecked Sendable {
     }
 
     private func localPermits(_ capability: PeerCapabilities) -> Bool {
-        room.transportPolicy != .secureV2 || secureCapabilities.contains(capability)
+        room.transportPolicy != .secureV2 || (secureCapabilities.contains(capability)
+            && eventPolicy?.permits(author: nodeID, capability: capability) == true)
     }
 
     private func permitsTransient(_ envelope: MeshEnvelope, from link: Link, capability: PeerCapabilities) -> Bool {
@@ -1835,6 +1974,149 @@ public final class MeshControlPlane: @unchecked Sendable {
                 (try? MeshEnvelope(type: "event", event: $0).encodedLine().count).map {
                     $0 <= MeshEnvelopeDecoder.maximumLineBytes
                 } == true
+        }
+    }
+
+    /// Lock order is policy update -> Core/receipt state. Fast policy snapshots
+    /// never wait on the update lock, and no callbacks run inside this scope.
+    private static func withStablePolicy<T>(authorization: NetworkChannelAuthorization?,
+                                            _ body: () throws -> T) rethrows -> T {
+        if let authorization { return try authorization.policy.withStablePolicy(body) }
+        return try body()
+    }
+
+    /// Validate and receipt a copy before publishing it. Receipt authorization
+    /// is the linearization point: failure leaves the replica untouched. Never
+    /// wait here on the policy update lock; this executor also serves live media.
+    private func commitReplicaEvents(_ events: [MeshRoomEvent]) throws -> [MeshRoomEvent] {
+        var candidate = replica
+        let inserted = candidate.merge(validRoomEvents(events))
+        guard eventPolicy?.rememberAccepted(inserted) ?? true else { throw SecureTransportError.capacity }
+        replica = candidate
+        return inserted
+    }
+
+    private static func isDurableEvent(_ event: MeshRoomEvent) -> Bool {
+        isDurableKind(event.kind)
+    }
+
+    private static func isDurableKind(_ kind: MeshRoomEventKind) -> Bool {
+        kind == .chat || kind == .queueAdd || kind == .queueRemove || kind == .queueReorder
+    }
+
+    /// Reservations occur only on the media executor. Rejected edits leave a
+    /// gap, never reuse a counter; later observed remote versions take priority.
+    private func reserveLocalVersion() -> MeshVersion {
+        lastReservedLocalCounter = max(lastReservedLocalCounter, replica.logicalClock) + 1
+        return MeshVersion(counter: lastReservedLocalCounter, nodeID: nodeID,
+                           wallTimeMillis: UInt64(Date().timeIntervalSince1970 * 1_000))
+    }
+
+    /// Network durable events earn a receipt only after Core accepts the entire
+    /// candidate. Live control/media remain on their immediate path. No caller
+    /// waits for the worker or policy update lock on the shared media executor.
+    private func commitNetworkDurableEvents(_ events: [MeshRoomEvent], excluding source: Link?, localEvent: MeshRoomEvent?) {
+        guard !events.isEmpty else { return }
+        guard roomStateInitializationError == nil, !networkDurableCommitFailed else {
+            reportOperationRejection(DurableCommitFailure.missingReceipt, localEvent: localEvent)
+            return
+        }
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        var candidates = [MeshRoomEvent](), pendingKeys = Set<Data>()
+        for event in events {
+            guard let bytes = try? encoder.encode(event) else { continue }
+            if let known = replica.eventsByID[event.id], (try? encoder.encode(known)) == bytes { continue }
+            guard !pendingNetworkDurableEvents.contains(bytes), pendingKeys.insert(bytes).inserted else { continue }
+            candidates.append(event)
+        }
+        guard !candidates.isEmpty else { return }
+        // Array brackets and separators are included without encoding again.
+        let bytes = pendingKeys.reduce(2, { $0 + $1.count + 1 })
+        guard pendingNetworkDurableCommits < 128,
+              bytes <= 8 * 1_024 * 1_024 - pendingNetworkDurableBytes else {
+            reportOperationRejection(SecureTransportError.capacity, localEvent: localEvent)
+            return
+        }
+        let generation = lifecycleGeneration
+        pendingNetworkDurableCommits += 1
+        pendingNetworkDurableBytes += bytes
+        pendingNetworkDurableEvents.formUnion(pendingKeys)
+        let admitted = candidates
+        let admittedKeys = pendingKeys
+        roomStateWorkerQueue.async { [weak self, weak source] in
+            guard let self else { return }
+            let result = Result<(committed: [MeshRoomEvent], stateChanged: Bool), Error> {
+                try Self.withStablePolicy(authorization: self.networkAuthorization) {
+                    let authorized = self.validRoomEvents(admitted)
+                    // Remote history historically drops invalid entries without
+                    // discarding valid neighbors. A local edit must instead
+                    // report failure explicitly so its draft can be retried.
+                    guard localEvent == nil || authorized.count == admitted.count else {
+                        throw RoomStateSyncError.authorizationChanged
+                    }
+                    guard !authorized.isEmpty else { return ([], false) }
+                    let previousState = self.roomStateSync.save()
+                    _ = try self.roomStateSync.ingest(authorized)
+                    let snapshot = try self.roomStateSync.snapshot()
+                    let proposedIDs = Set(authorized.map(\.id))
+                    // Read committed records, never publish an ID-colliding
+                    // candidate or a record discarded by agreed retention.
+                    let committed = snapshot.events.filter { proposedIDs.contains($0.id) }
+                    guard self.eventPolicy?.rememberAccepted(committed, retainingHistory: snapshot.retainedEvents) == true else {
+                        throw DurableCommitFailure.missingReceipt
+                    }
+                    return (committed, !self.roomStateSync.save().elementsEqual(previousState))
+                }
+            }
+            self.queue.async { [weak self, weak source] in
+                guard let self else { return }
+                self.pendingNetworkDurableCommits -= 1
+                self.pendingNetworkDurableBytes -= bytes
+                self.pendingNetworkDurableEvents.subtract(admittedKeys)
+                guard !self.isStopped, self.lifecycleGeneration == generation else { return }
+                switch result {
+                case .success(let outcome):
+                    // Invalid-only batches must not amplify disk or sync work.
+                    // A retention-only document change still needs persistence.
+                    guard outcome.stateChanged || !outcome.committed.isEmpty else { return }
+                    let inserted = self.replica.merge(self.validRoomEvents(outcome.committed))
+                    if !inserted.isEmpty {
+                        self.replicaHandler(self.replica)
+                        // Large commits must reuse the paced snapshot sender:
+                        // one frame per event overflows TLS and creates one
+                        // full-history worker transaction per relayed event.
+                        for peer in self.peers.values where peer !== source {
+                            self.sendSync(events: inserted, versionVector: nil, to: peer)
+                        }
+                    }
+                    self.scheduleRoomStatePersistence()
+                    for peer in self.peers.values where peer !== source && peer.roomStateSyncVersion == 1 {
+                        self.sendRoomStateSync(to: peer)
+                    }
+                case .failure(let error):
+                    if error is DurableCommitFailure {
+                        // A post-commit receipt failure is different from an
+                        // atomic quota rejection. Halt durable publication until
+                        // repair, while leaving media/control available.
+                        self.networkDurableCommitFailed = true
+                        self.roomStateSyncDisabled = true
+                    }
+                    self.reportOperationRejection(error, localEvent: localEvent)
+                }
+            }
+        }
+    }
+
+    private func reportOperationRejection(_ error: Error, localEvent: MeshRoomEvent?) {
+        if let localEvent {
+            roomStateOperationRejectedHandler(RoomStateOperationRejection(event: localEvent, underlyingError: error))
+        } else {
+            // Remote admission pressure is not an unsent composer edit. A
+            // post-commit receipt failure still needs a neutral repair notice.
+            if error is DurableCommitFailure {
+                roomStateOperationRejectedHandler(NSError(domain: "ALONetworking.RoomStateOperation", code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Received channel history could not be saved safely. Reopen the channel to repair durable synchronization."]))
+            } else { fputs("Remote durable candidate rejected: \(error)\n", stderr) }
         }
     }
 
@@ -2146,7 +2428,7 @@ public final class MeshControlPlane: @unchecked Sendable {
         guard localPermits(.broadcast) else { return }
         var event = MeshRoomEvent(
             roomID: room.id,
-            version: replica.nextVersion(nodeID: nodeID),
+            version: reserveLocalVersion(),
             kind: .broadcaster,
             broadcasterID: broadcasterID,
             broadcasterEpoch: epoch,
@@ -2157,7 +2439,8 @@ public final class MeshControlPlane: @unchecked Sendable {
             guard let signed = eventPolicy.sign(event) else { return }
             event = signed
         }
-        _ = replica.merge([event])
+        do { guard !(try commitReplicaEvents([event])).isEmpty else { return } }
+        catch { handleRoomStateSyncFailure(error, from: nil); return }
         replicaHandler(replica)
         broadcast(MeshEnvelope(type: "event", event: event))
     }
@@ -2574,14 +2857,22 @@ public final class MeshControlPlane: @unchecked Sendable {
             $0.kind == .chat || $0.kind == .queueAdd || $0.kind == .queueRemove || $0.kind == .queueReorder
         }
         guard !roomStateSyncDisabled, !durable.isEmpty else { return }
+        let generation = lifecycleGeneration
         roomStateWorkerQueue.async { [weak self] in
             guard let self else { return }
             do {
-                let inserted = try roomStateSync.ingest(durable)
+                let inserted = try Self.withStablePolicy(authorization: networkAuthorization) {
+                    let inserted = try self.roomStateSync.ingest(durable)
+                    let authorized = inserted.filter { self.eventPolicy?.accepts($0) ?? true }
+                    guard self.eventPolicy?.rememberAccepted(authorized, retainingHistory: try self.roomStateSync.snapshot().retainedEvents) ?? true else {
+                        throw DurableCommitFailure.missingReceipt
+                    }
+                    return inserted
+                }
                 guard !inserted.isEmpty else { return }
                 let shouldFallback = roomStateSync.requiresLifecycleCompaction()
                 queue.async { [weak self] in
-                    guard let self, !isStopped, !roomStateSyncDisabled else { return }
+                    guard let self, !isStopped, lifecycleGeneration == generation, !roomStateSyncDisabled else { return }
                     scheduleRoomStatePersistence()
                     if shouldFallback {
                         handleRoomStateSyncFailure(RoomStateSyncError.documentTooLarge, from: nil)
@@ -2593,7 +2884,7 @@ public final class MeshControlPlane: @unchecked Sendable {
                 }
             } catch {
                 queue.async { [weak self] in
-                    guard let self, !isStopped else { return }
+                    guard let self, !isStopped, lifecycleGeneration == generation else { return }
                     handleRoomStateSyncFailure(error, from: nil)
                 }
             }
@@ -2659,26 +2950,35 @@ public final class MeshControlPlane: @unchecked Sendable {
     }
 
     private func processRoomStateSyncMessage(_ message: Data, from link: Link) {
+        let generation = lifecycleGeneration
         roomStateWorkerQueue.async { [weak self, weak link] in
             guard let self, let link else { return }
             do {
-                let inserted = try roomStateSync.receiveSyncMessage(
-                    message,
-                    from: link.roomStateSyncSession
-                )
+                let (inserted, authorized) = try Self.withStablePolicy(authorization: networkAuthorization) {
+                    let inserted = try self.roomStateSync.receiveSyncMessage(
+                        message,
+                        from: link.roomStateSyncSession
+                    )
+                    let authorized = inserted.filter { self.eventPolicy?.accepts($0) ?? true }
+                    guard self.eventPolicy?.rememberAccepted(authorized, retainingHistory: try self.roomStateSync.snapshot().retainedEvents) ?? true else {
+                        throw DurableCommitFailure.missingReceipt
+                    }
+                    return (inserted, authorized)
+                }
                 let shouldFallback = roomStateSync.requiresLifecycleCompaction()
-                roomStateReceiveCompletedHandler(inserted)
+                roomStateReceiveCompletedHandler(validRoomEvents(authorized))
                 queue.async { [weak self] in
-                    guard let self, !isStopped else { return }
+                    guard let self, !isStopped, lifecycleGeneration == generation else { return }
                     let linkIsLive = links[ObjectIdentifier(link.connection)] === link
                         && link.authenticated
                     if !inserted.isEmpty {
                         let merged = replica.merge(validRoomEvents(inserted))
                         if !merged.isEmpty {
                             replicaHandler(replica)
-                            // Legacy peers still converge during the rolling upgrade.
-                            for event in merged {
-                                broadcast(MeshEnvelope(type: "event", event: event), excluding: link)
+                            // Direct event gossip shares the same current-generation
+                            // authorization as durable document synchronization.
+                            for peer in peers.values where peer !== link {
+                                sendSync(events: merged, versionVector: nil, to: peer)
                             }
                         }
                         scheduleRoomStatePersistence()
@@ -2695,7 +2995,7 @@ public final class MeshControlPlane: @unchecked Sendable {
                 }
             } catch {
                 queue.async { [weak self] in
-                    guard let self, !isStopped else { return }
+                    guard let self, !isStopped, lifecycleGeneration == generation else { return }
                     handleRoomStateSyncFailure(error, from: link)
                     finishRoomStateSyncReceive(from: link)
                 }
@@ -2749,7 +3049,8 @@ public final class MeshControlPlane: @unchecked Sendable {
                 guard let self else { return }
                 let document: Data
                 if let eventPolicy {
-                    guard let archive = try? eventPolicy.archive(document: roomStateSync.save()) else { return }
+                    guard let retained = try? roomStateSync.snapshot().retainedEvents,
+                          let archive = try? eventPolicy.archive(document: roomStateSync.save(), retainedEvents: retained) else { return }
                     document = archive
                 } else { document = roomStateSync.save() }
                 queue.async { [weak self] in
@@ -2770,6 +3071,21 @@ public final class MeshControlPlane: @unchecked Sendable {
     }
 
     private func handleRoomStateSyncFailure(_ error: Error, from link: Link?) {
+        if error is DurableCommitFailure {
+            networkDurableCommitFailed = true
+            roomStateSyncDisabled = true
+            reportOperationRejection(error, localEvent: nil)
+            return
+        }
+        if (error as? RoomStateSyncError) == .retentionCapacity
+            || (error as? RoomStateSyncError) == .untrustedHistoryLimit
+            || (error as? SecureTransportError) == .capacity {
+            // An atomic candidate rejection leaves the existing document and
+            // media session usable. Do not turn a full quota into a permanent
+            // durable-sync downgrade, including for later smaller operations.
+            reportOperationRejection(error, localEvent: nil)
+            return
+        }
         if let link {
             disableRoomStateSync(
                 for: link,

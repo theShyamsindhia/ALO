@@ -22,7 +22,7 @@ public enum RoomAdmissionKind: UInt8, Codable, Sendable { case publicRoom = 1, p
 public struct ProtocolOffer: Equatable, Sendable {
     /// Bump for incompatible room-system changes. Production advertises only
     /// this generation; admission never negotiates an older feature contract.
-    public static let currentRoomGeneration: UInt16 = 2
+    public static let currentRoomGeneration: UInt16 = 4
     public static func current(capabilities: PeerCapabilities) throws -> Self {
         try Self(wireVersions: [2], stateSyncVersions: [currentRoomGeneration], capabilities: capabilities)
     }
@@ -89,7 +89,8 @@ public struct AdmissionTranscript: Sendable {
                 initiatorKeyHash: Data, responderKeyHash: Data, initiatorNonce: Data, responderNonce: Data,
                 initiatorOffer: ProtocolOffer, responderOffer: ProtocolOffer, policy: RoomTransportPolicy,
                 channelRole: ReliableChannelRole = .roomControl, admissionKind: RoomAdmissionKind = .privateRoom,
-                initiatorIncarnationID: UUID? = nil, responderIncarnationID: UUID? = nil) throws {
+                initiatorIncarnationID: UUID? = nil, responderIncarnationID: UUID? = nil,
+                initiatorNetworkClaim: Data? = nil, responderNetworkClaim: Data? = nil) throws {
         guard policy == .secureV2 else { throw SecureTransportError.downgradeForbidden }
         guard initiatorID != responderID, initiatorKeyHash.count == 32, responderKeyHash.count == 32,
               initiatorNonce.count == 32, responderNonce.count == 32 else { throw SecureTransportError.malformed }
@@ -105,6 +106,13 @@ public struct AdmissionTranscript: Sendable {
         wire.append(initiatorIncarnationID ?? initiatorID); wire.append(responderIncarnationID ?? responderID)
         wire.field(initiatorOffer.binding); wire.field(responderOffer.binding)
         wire.append(negotiated.wireVersion); wire.append(negotiated.stateSyncVersion)
+        if negotiated.stateSyncVersion >= ProtocolOffer.currentRoomGeneration {
+            guard let initiatorNetworkClaim, let responderNetworkClaim,
+                  initiatorNetworkClaim.count == 32, responderNetworkClaim.count == 32 else {
+                throw SecureTransportError.invalidCredentials
+            }
+            wire.field(initiatorNetworkClaim); wire.field(responderNetworkClaim)
+        }
         binding = wire.data
     }
 }

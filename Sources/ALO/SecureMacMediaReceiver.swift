@@ -7,7 +7,7 @@ import ALONetworking
 /// A failed media connection is redialed; it is never translated into a durable
 /// broadcaster stop, and it cannot restart another participant's output graph.
 final class SecureMacMediaReceiver: @unchecked Sendable {
-    private let mesh: MeshControlPlane
+    private let mesh: any RoomPeerConnecting
     private let selection: MediaReceiverSession.Selection
     private let queue = DispatchQueue(label: "alo.secure-media.playback", qos: .userInteractive)
     private let player: SecureMacPlaybackTimeline
@@ -68,7 +68,7 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
         }
     }
 
-    init(mesh: MeshControlPlane, selection: MediaReceiverSession.Selection,
+    init(mesh: any RoomPeerConnecting, selection: MediaReceiverSession.Selection,
          audioOutput: RoomAudioOutputEngine,
          status: @escaping (MediaReceiverSession.State) -> Void,
          playbackActivity: @escaping (Bool) -> Void = { _ in },
@@ -145,7 +145,7 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
         let mesh = self.mesh, peerID = selection.broadcasterPeerID
         let gate = videoGate, decoder = videoDecoder
         receiver.startVideo(openChannel: { completion in
-            mesh.openMediaChannel(to: peerID, role: .video) { result in completion(result.map { $0.0 }) }
+            mesh.openPeerChannel(to: peerID, role: .video) { result in completion(result.map { $0.0 }) }
         }, callbacks: .init(frame: { frame, _, _ in
             guard gate.accepts(token) else { return }
             // VideoDecoder owns bounded decode + presentation admission itself.
@@ -174,8 +174,8 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
                 outputSampleRate: format?.sampleRate, outputChannelCount: format?.channelCount,
                 latenessMilliseconds: Double(report.latenessNanos) / 1_000_000,
                 latePacketCount: report.latePacketCount, resyncCount: report.resyncCount,
-                currentDriftMilliseconds: report.driftNanos.map { Double($0) / 1_000_000 },
-                driftMeasurementAgeMilliseconds: report.driftSampleAgeNanos.map { Double($0) / 1_000_000 },
+                currentDriftMilliseconds: fresh == nil ? nil : report.driftNanos.map { Double($0) / 1_000_000 },
+                driftMeasurementAgeMilliseconds: fresh == nil ? nil : report.driftSampleAgeNanos.map { Double($0) / 1_000_000 },
                 video: screenTiming.presentationSnapshot(videoDecoder.presentationTimingSnapshot),
                 videoEnabled: screenTiming.videoEnabled,
                 activePlayoutBufferMilliseconds: Double(player.activePlayoutDelayNanos) / 1_000_000,
@@ -216,7 +216,7 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
         guard !stopped else { return }
         token = attempt
         attachmentGate.set(attempt)
-        mesh.openMediaChannel(to: selection.broadcasterPeerID, role: .mediaControl) { [weak self] result in
+        mesh.openPeerChannel(to: selection.broadcasterPeerID, role: .mediaControl) { [weak self] result in
             guard let self, self.attachmentGate.accepts(attempt) else {
                 if case .success(let (channel, _)) = result { channel.cancel() }
                 return
@@ -350,7 +350,8 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
         let rendered = player.syncReport()
         let playback = PlaybackSyncReport(measuredAtNanos: 0, latenessNanos: rendered.latenessNanos,
             latePacketCount: rendered.latePacketCount, resyncCount: rendered.resyncCount,
-            driftNanos: rendered.driftNanos, driftSampleAgeNanos: rendered.driftSampleAgeNanos,
+            driftNanos: freshClock == nil ? nil : rendered.driftNanos,
+            driftSampleAgeNanos: freshClock == nil ? nil : rendered.driftSampleAgeNanos,
             screenTiming: screenTiming.presentationSnapshot(videoDecoder.presentationTimingSnapshot).relativeTimingReport)
         guard let report = try? MediaReceiverTimingReport(hardwareOutputFloorNanos: floor,
             networkRecommendedDelayNanos: max(floor, network), roundTripNanos: freshClock?.roundTripNanos,

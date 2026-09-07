@@ -99,7 +99,7 @@ public enum MediaControlWireMessage: Sendable {
     case cancel(stream: MediaStreamIdentifier)
     case subscribed(requestID: UUID, ticket: MediaSubscriptionTicket, udpPort: UInt16)
     case clockPing(id: UInt64, clientTimeNanos: UInt64)
-    case clockPong(id: UInt64, clientTimeNanos: UInt64, hostTimeNanos: UInt64)
+    case clockPong(id: UInt64, clientTimeNanos: UInt64, hostTimeNanos: UInt64, hostReceivedNanos: UInt64)
     case anchor(MediaStreamAnchor)
     case anchorReady(stream: MediaStreamIdentifier, frameIndex: UInt64,
                      captureTimeNanos: UInt64, hostPlaybackTimeNanos: UInt64)
@@ -113,7 +113,7 @@ public enum MediaControlWireMessage: Sendable {
         case unsupported, unavailable, staleSession, denied, busy
     }
     public static let protocolName = "alo.media-control"
-    public static let version: UInt16 = 2
+    public static let version: UInt16 = 3
     public static let maximumWireBytes = 4_096
     public static let maximumAnchorLeadNanos: UInt64 = 2_000_000_000
     public static let maximumAnchorAgeNanos: UInt64 = 1_000_000_000
@@ -131,7 +131,7 @@ public enum MediaControlWireMessage: Sendable {
         case cancel(stream: MediaStreamIdentifier)
         case subscribed(requestID: UUID, ticket: Data, udpPort: UInt16)
         case clockPing(id: UInt64, clientTimeNanos: UInt64)
-        case clockPong(id: UInt64, clientTimeNanos: UInt64, hostTimeNanos: UInt64)
+        case clockPong(id: UInt64, clientTimeNanos: UInt64, hostTimeNanos: UInt64, hostReceivedNanos: UInt64)
         case anchor(MediaStreamAnchor)
         case anchorReady(stream: MediaStreamIdentifier, frameIndex: UInt64,
                          captureTimeNanos: UInt64, hostPlaybackTimeNanos: UInt64)
@@ -163,10 +163,10 @@ public enum MediaControlWireMessage: Sendable {
         case let .clockPing(id, time):
             guard id < .max else { throw SecureTransportError.malformed }
             try Self.validateTime(time); payload = .clockPing(id: id, clientTimeNanos: time)
-        case let .clockPong(id, client, host):
-            guard id < .max else { throw SecureTransportError.malformed }
-            try Self.validateTime(client); try Self.validateTime(host)
-            payload = .clockPong(id: id, clientTimeNanos: client, hostTimeNanos: host)
+        case let .clockPong(id, client, host, received):
+            guard id < .max, host >= received else { throw SecureTransportError.malformed }
+            try Self.validateTime(client); try Self.validateTime(host); try Self.validateTime(received)
+            payload = .clockPong(id: id, clientTimeNanos: client, hostTimeNanos: host, hostReceivedNanos: received)
         case .anchor(let anchor): try anchor.validate(); payload = .anchor(anchor)
         case let .anchorReady(stream, frame, capture, playback):
             try stream.validate(); try Self.validateTime(capture); try Self.validateTime(playback)
@@ -218,7 +218,7 @@ public enum MediaControlWireMessage: Sendable {
             catch { throw SecureTransportError.malformed }
             self = .subscribed(requestID: id, ticket: ticket, udpPort: port)
         case let .clockPing(id, time): self = .clockPing(id: id, clientTimeNanos: time)
-        case let .clockPong(id, client, host): self = .clockPong(id: id, clientTimeNanos: client, hostTimeNanos: host)
+        case let .clockPong(id, client, host, received): self = .clockPong(id: id, clientTimeNanos: client, hostTimeNanos: host, hostReceivedNanos: received)
         case .anchor(let anchor): self = .anchor(anchor)
         case let .anchorReady(stream, frame, capture, playback):
             self = .anchorReady(stream: stream, frameIndex: frame,
@@ -237,7 +237,7 @@ public enum MediaControlWireMessage: Sendable {
     public var clockControlMessage: ControlMessage? {
         switch self {
         case let .clockPing(id, client): return ControlMessage(type: "ping", id: id, clientNanos: client)
-        case let .clockPong(id, client, host): return ControlMessage(type: "pong", id: id, clientNanos: client, hostNanos: host)
+        case .clockPong: return nil // Never discard the fourth timestamp through the old wire adapter.
         default: return nil
         }
     }

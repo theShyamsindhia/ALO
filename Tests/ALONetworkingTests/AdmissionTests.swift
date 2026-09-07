@@ -5,6 +5,12 @@ import Testing
 
 @Suite("TLS-bound v2 admission")
 struct AdmissionTests {
+    @Test func currentGenerationCannotBeConfiguredWithoutNetworkAuthorization() throws {
+        #expect(throws: SecureTransportError.invalidCredentials) {
+            try SecurePeerConfiguration(roomID: UUID(), incarnationID: UUID(), admission: .publicRoom,
+                offer: ProtocolOffer.current(capabilities: .desktop), direction: .initiator(.roomControl))
+        }
+    }
     @Test func currentRoomGenerationRejectsOldClientsInBothDirections() throws {
         let current = try ProtocolOffer.current(capabilities: .desktop)
         let old = try ProtocolOffer(wireVersions: [2], stateSyncVersions: [1], capabilities: .desktop)

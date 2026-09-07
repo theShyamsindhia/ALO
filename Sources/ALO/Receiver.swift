@@ -222,7 +222,7 @@ final class Receiver {
         timer.resume()
         maintenanceTimer = timer
 
-        print("Looking for ALO rooms…")
+        print("Looking for ALO channels…")
         statusHandler?(.searching)
     }
 
@@ -407,7 +407,7 @@ final class Receiver {
         }
         browser.stateUpdateHandler = { state in
             if case .failed(let error) = state {
-                fputs("Room discovery failed: \(error)\n", stderr)
+                fputs("Channel discovery failed: \(error)\n", stderr)
             }
         }
         browser.start(queue: queue)
@@ -442,7 +442,7 @@ final class Receiver {
                 self.sendJoin()
                 self.startPinging()
             case .failed(let error):
-                fputs("Room connection failed: \(error)\n", stderr)
+                fputs("Channel connection failed: \(error)\n", stderr)
                 self.statusHandler?(.failed(error.localizedDescription))
                 self.handleControlDisconnect(expectedEpoch: connectionEpoch)
             default:

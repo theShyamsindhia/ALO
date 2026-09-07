@@ -14,14 +14,17 @@ public final class AuthenticatedChannelCredentials: @unchecked Sendable {
     public let localRole: AdmissionProofRole
     private let lock = NSLock()
     private var active = true
-    var isActive: Bool { lock.lock(); defer { lock.unlock() }; return active }
+    private let stillAuthorized: () -> Bool
+    var isActive: Bool { lock.lock(); defer { lock.unlock() }; return active && stillAuthorized() }
     let rootSecret: SymmetricKey
     private var issuedSequence: UInt64 = 0
     private var highestReceivedSequence: UInt64?
     private var deadlines: [UUID: TimeInterval] = [:]
     private var openers: [UUID: [DatagramChannel: DatagramOpener]] = [:]
 
-    init(transcript: AdmissionTranscript, localRole: AdmissionProofRole, rootSecret: SymmetricKey) {
+    init(transcript: AdmissionTranscript, localRole: AdmissionProofRole, rootSecret: SymmetricKey,
+         stillAuthorized: @escaping () -> Bool = { true }) {
+        self.stillAuthorized = stillAuthorized
         self.roomID = transcript.roomID; self.localRole = localRole; self.rootSecret = rootSecret
         localPeerID = localRole == .initiator ? transcript.initiatorID : transcript.responderID
         remotePeerID = localRole == .initiator ? transcript.responderID : transcript.initiatorID
@@ -31,7 +34,7 @@ public final class AuthenticatedChannelCredentials: @unchecked Sendable {
 
     func nextSubscriptionSequence() throws -> UInt64 {
         lock.lock(); defer { lock.unlock() }
-        guard active, issuedSequence < UInt64.max else { throw SecureTransportError.invalidCredentials }
+        guard active, stillAuthorized(), issuedSequence < UInt64.max else { throw SecureTransportError.invalidCredentials }
         issuedSequence += 1
         return issuedSequence
     }
@@ -48,7 +51,7 @@ public final class AuthenticatedChannelCredentials: @unchecked Sendable {
 
     private func isLive(sessionID: UUID) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        return active && deadlines[sessionID].map { $0 > ProcessInfo.processInfo.systemUptime } == true
+        return active && stillAuthorized() && deadlines[sessionID].map { $0 > ProcessInfo.processInfo.systemUptime } == true
     }
 
     func validate(ticket: MediaSubscriptionTicket, subscriber: Bool) throws {
@@ -57,7 +60,7 @@ public final class AuthenticatedChannelCredentials: @unchecked Sendable {
     }
     private func validateLocked(ticket: MediaSubscriptionTicket, subscriber: Bool) throws {
         let validRole = channelRole == .mediaControl || (channelRole == .voiceControl && ticket.channels == [.voice])
-        guard active, validRole, ticket.roomID == roomID,
+        guard active, stillAuthorized(), validRole, ticket.roomID == roomID,
               ticket.senderID == (subscriber ? remotePeerID : localPeerID),
               ticket.receiverID == (subscriber ? localPeerID : remotePeerID) else { throw SecureTransportError.wrongContext }
         if subscriber, let highestReceivedSequence, ticket.subscriptionSequence <= highestReceivedSequence {

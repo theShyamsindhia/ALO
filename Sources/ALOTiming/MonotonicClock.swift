@@ -22,6 +22,9 @@ public enum MonotonicClock {
 }
 
 public final class ClockSynchronizer {
+    /// Media clock observations cannot survive sleep, a blocked executor or a
+    /// disconnected path. Reacquire four samples instead of blending epochs.
+    public static let maximumSampleGapNanos: UInt64 = 5_000_000_000
     private static let maximumPendingProbes = 64
     private static let probeLifetimeNanos: UInt64 = 30_000_000_000
     private struct Sample {
@@ -36,6 +39,7 @@ public final class ClockSynchronizer {
     private var modelReferenceNanos: UInt64?
     private var modelOffsetNanos: Double?
     private var modelDriftNanosPerSecond: Double = 0
+    private var lastObservationNanos: UInt64?
 
     public private(set) var offsetNanos: Int64?
     public private(set) var driftPartsPerMillion: Double = 0
@@ -50,16 +54,26 @@ public final class ClockSynchronizer {
     public func reset() {
         sentAt.removeAll()
         samples.removeAll()
-        nextID = 0
+        // Never reuse a probe ID after reset: delayed replies may still arrive.
         modelReferenceNanos = nil
         modelOffsetNanos = nil
         modelDriftNanosPerSecond = 0
         offsetNanos = nil
         driftPartsPerMillion = 0
         bestRoundTripNanos = nil
+        lastObservationNanos = nil
     }
 
-    public func makePing(at clientNanos: UInt64) -> ControlMessage {
+    public struct Probe: Sendable {
+        public let id: UInt64
+        public let sentAtNanos: UInt64
+    }
+
+    public func makeProbe(at clientNanos: UInt64) -> Probe {
+        if let lastObservationNanos,
+           clientNanos < lastObservationNanos || clientNanos - lastObservationNanos > Self.maximumSampleGapNanos {
+            reset()
+        }
         sentAt = sentAt.filter { _, started in
             clientNanos >= started && clientNanos - started <= Self.probeLifetimeNanos
         }
@@ -72,22 +86,40 @@ public final class ClockSynchronizer {
         let id = nextID
         nextID &+= 1
         sentAt[id] = clientNanos
-        return ControlMessage(type: "ping", id: id, clientNanos: clientNanos)
+        return Probe(id: id, sentAtNanos: clientNanos)
     }
 
     @discardableResult
-    public func acceptPong(_ message: ControlMessage, receivedAt: UInt64) -> Bool {
-        guard message.type == "pong",
-              let id = message.id,
-              let hostNanos = message.hostNanos,
+    public func acceptReply(id: UInt64, echoedSendNanos: UInt64,
+                            hostNanos: UInt64, receivedAt: UInt64,
+                            hostReceivedNanos: UInt64? = nil) -> Bool {
+        guard
               let startedAt = sentAt.removeValue(forKey: id),
+              echoedSendNanos == startedAt,
               receivedAt >= startedAt,
               receivedAt - startedAt <= Self.probeLifetimeNanos
         else { return false }
 
-        let roundTrip = receivedAt - startedAt
-        let midpoint = startedAt + roundTrip / 2
-        let offset = Int64(clamping: hostNanos) - Int64(clamping: midpoint)
+        let hostReceived = hostReceivedNanos ?? hostNanos
+        guard hostNanos >= hostReceived,
+              hostNanos - hostReceived <= receivedAt - startedAt else { return false }
+
+        // Also protect callers that made a probe immediately before a stall.
+        if let lastObservationNanos,
+           receivedAt < lastObservationNanos || receivedAt - lastObservationNanos > Self.maximumSampleGapNanos {
+            reset()
+        }
+        lastObservationNanos = receivedAt
+
+        // RFC 5905's four timestamps: subtract server residence time from RTT
+        // and compare interval midpoints. Processing load is NOT oscillator
+        // drift. Legacy callers without t2 are adapted as zero residence time.
+        let elapsed = receivedAt - startedAt
+        let residence = hostNanos - hostReceived
+        let roundTrip = elapsed - residence
+        let midpoint = startedAt + elapsed / 2
+        let hostMidpoint = hostReceived + residence / 2
+        let offset = Int64(clamping: hostMidpoint) - Int64(clamping: midpoint)
         samples.append(Sample(
             clientMidpointNanos: midpoint,
             roundTripNanos: roundTrip,

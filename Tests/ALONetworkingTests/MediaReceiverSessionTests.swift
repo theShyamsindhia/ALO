@@ -5,6 +5,91 @@ import Testing
 
 @Suite("Media receiver bootstrap and replacement")
 struct MediaReceiverSessionTests {
+    @Test func sustainedQueuedAnnotationsKeepClockFreshAndRenewTheLease() throws {
+        let h = try MediaReceiverHarness()
+        try h.queue.sync { try h.activate(); h.holdAnnotationCompletions = true }
+        let bytes = try AnnotationWireMessage.hello(capabilities: [AnnotationWireMessage.capability]).encoded()
+        for _ in 0..<35 {
+            h.receiver.sendAnnotation(bytes)
+            h.receiver.sendAnnotation(bytes)
+            try h.queue.sync {
+                h.time += 1_000_000_000
+                // Every timer tick observes an annotation in flight and another queued.
+                h.receiver.tick()
+                h.completeAnnotations()
+                try h.pump()
+                if let preparation = h.preparations.last {
+                    h.receiver.completePreparationOnQueue(id: preparation.id, ready: true)
+                }
+                try h.publishPackets(4)
+                h.host.tick(); try h.pump()
+            }
+        }
+        h.queue.sync {
+            #expect(h.states.last == .active)
+            #expect(h.subscriptions.count >= 2)
+            #expect(h.clockSnapshots.last?.sampledAtLocalNanos == h.time)
+            #expect(h.audio.count == 4 * 36)
+        }
+    }
+
+    @Test func queuedClockProbeUsesActualSendTimeForItsNTPObservation() throws {
+        let h = try MediaReceiverHarness()
+        h.queue.sync { h.holdAnnotationCompletions = true }
+        let bytes = try AnnotationWireMessage.hello(capabilities: [AnnotationWireMessage.capability]).encoded()
+        for _ in 0..<4 {
+            h.receiver.sendAnnotation(bytes)
+            h.receiver.sendAnnotation(bytes)
+            try h.queue.sync {
+                let count = h.sentPings.count
+                h.receiver.tick()
+                #expect(h.sentPings.count == count)
+                h.time += 120_000_000
+                h.completeAnnotations()
+                #expect(h.sentPings.count == count + 1)
+                #expect(h.sentPings.last?.clientTime == h.time)
+                try h.pump()
+                h.time += 250_000_000
+            }
+        }
+        h.queue.sync {
+            #expect(h.clockSnapshots.last?.roundTripNanos == 0)
+            #expect(h.clockSnapshots.last?.offsetNanos == 0)
+            #expect(h.preparations.count == 1)
+        }
+    }
+
+    @Test func clockProbeHasOneReservedQueueSlotAndRepeatedTicksCoalesce() throws {
+        let h = try MediaReceiverHarness()
+        h.queue.sync { h.holdAnnotationCompletions = true }
+        let bytes = try AnnotationWireMessage.hello(capabilities: [AnnotationWireMessage.capability]).encoded()
+        var completed = 0
+        for _ in 0..<8 { h.receiver.sendAnnotation(bytes) { if case .success = $0 { completed += 1 } } }
+        h.queue.sync {
+            for _ in 0..<6 { h.receiver.tick(); h.time += 250_000_000 }
+            #expect(h.sentPings.isEmpty)
+            h.completeAnnotations()
+            #expect(completed == 8)
+            #expect(h.sentPings.count == 1)
+            #expect(h.sentPings.last?.clientTime == h.time)
+            #expect(h.states.last != .failed)
+        }
+    }
+
+    @Test func anchorRefreshDoesNotRefreshClockObservationAge() throws {
+        let h = try MediaReceiverHarness()
+        try h.queue.sync {
+            try h.activate()
+            let observed = try #require(h.committed.last).clock.sampledAtLocalNanos
+            h.time += 2_000_000_000
+            h.host.refreshTimeline(); try h.pump()
+            let refreshed = try #require(h.preparations.last)
+            let committed = try #require(h.committed.last)
+            #expect(refreshed.id != committed.id)
+            #expect(refreshed.clock.sampledAtLocalNanos == observed)
+        }
+    }
+
     @Test func firstHardwareFloorPrecedesRejectedPreparationAndSurvivesTicketCancel() throws {
         let h = try MediaReceiverHarness()
         try h.queue.sync {
@@ -270,6 +355,10 @@ private final class MediaReceiverHarness {
     var timingReports: [(MediaStreamIdentifier, MediaReceiverTimingReport, UInt64)] = []
     var rejectPreparations = false
     var preparationSawTimingQueued = false
+    var holdAnnotationCompletions = false
+    var annotationCompletions: [(Result<Void, Error>) -> Void] = []
+    var sentPings: [(id: UInt64, clientTime: UInt64)] = []
+    var clockSnapshots: [MediaReceiverSession.ClockSnapshot] = []
 
     init() throws {
         let offer = try ProtocolOffer(wireVersions: [2], stateSyncVersions: [1], capabilities: .desktop)
@@ -286,7 +375,7 @@ private final class MediaReceiverHarness {
                     guard let self else { return nil }
                     return .init(stream: stream, captureTimeNanos: now, frameIndex: self.nextFrame,
                         hostPlaybackTimeNanos: now + 200_000_000, issuedAtHostNanos: now, state: self.anchorState)
-                }, timingReport: { [weak self] _, stream, report, time in
+                }, annotation: { _, _ in true }, timingReport: { [weak self] _, stream, report, time in
                     self?.timingReports.append((stream, report, time))
                 }), registry: registry, nowNanos: { [weak self] in self?.time ?? 0 },
             sendDatagram: { [weak self] data, session, done in
@@ -308,9 +397,19 @@ private final class MediaReceiverHarness {
             },
                 anchorCommitted: { [weak self] in self?.committed.append($0) },
                 audio: { [weak self] packet, _, _ in self?.audio.append(packet) },
-                state: { [weak self] in self?.states.append($0) }),
+                state: { [weak self] in self?.states.append($0) },
+                clock: { [weak self] in self?.clockSnapshots.append($0) }),
             nowNanos: { [weak self] in self?.time ?? 0 },
-            sendControl: { [weak self] data, done in self?.toHost.append(data); done(.success(())) },
+            sendControl: { [weak self] data, done in
+                guard let self else { return }
+                self.toHost.append(data)
+                if case let .clockPing(id, clientTime) = try? MediaControlWireMessage(encoded: data) {
+                    self.sentPings.append((id, clientTime))
+                }
+                if self.holdAnnotationCompletions, (try? AnnotationWireMessage(encoded: data)) != nil {
+                    self.annotationCompletions.append(done)
+                } else { done(.success(())) }
+            },
             resolveEndpoint: { [weak self] port, reply in
                 if self?.deferEndpoint == true { self?.endpointReplies.append(reply) }
                 else { reply(.success(.hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: port)!))) }
@@ -337,6 +436,9 @@ private final class MediaReceiverHarness {
     func synchronize() throws {
         for _ in 0..<4 { receiver.tick(); try pump(); time += 250_000_000 }
     }
+    func completeAnnotations() {
+        while !annotationCompletions.isEmpty { annotationCompletions.removeFirst()(.success(())) }
+    }
     func activate() throws {
         try synchronize()
         let preparation = try #require(preparations.last)
@@ -358,7 +460,7 @@ private final class MediaReceiverHarness {
             guard iterations <= 1_000 else { throw SecureTransportError.capacity }
             if !toHost.isEmpty {
                 let data = toHost.removeFirst()
-                if case .anchorReady = try MediaControlWireMessage(encoded: data) {
+                if case .anchorReady = try? MediaControlWireMessage(encoded: data) {
                     readiness.append(try MediaControlWireMessage(encoded: data))
                 }
                 host.receive(data, connectionID: publisher.connectionID)

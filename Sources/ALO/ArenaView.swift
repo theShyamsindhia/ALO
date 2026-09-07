@@ -17,7 +17,7 @@ struct ArenaPanel: View {
                     Image(systemName: "macwindow").font(.system(size: 24)).foregroundStyle(accent)
                     Text("Playing in another window").font(.system(size: 12, weight: .medium))
                     Button("Show game") { session.openExpanded() }.buttonStyle(.borderedProminent)
-                    Button("Return to room") { session.closeExpanded() }.buttonStyle(.bordered)
+                    Button("Return to channel") { session.closeExpanded() }.buttonStyle(.bordered)
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if session.selectedGameID == nil {
                 GameLibraryView(store: session.library, stickFight: session.stickFight, breach: session.breach, onPlayStickFight: session.openStickFight, lobbies: session.lobbies, names: session.names,
@@ -179,7 +179,7 @@ struct ArenaPanel: View {
                     Text("4 player slots · 8 spectators. Late joiners can use an open slot or take over a live bot; a full match opens in spectate mode.")
                         .font(.system(size: 10)).foregroundStyle(.secondary)
                     if !session.lobbies.isEmpty {
-                        Label("Live arenas in this room", systemImage: "dot.radiowaves.left.and.right")
+                        Label("Live arenas in this channel", systemImage: "dot.radiowaves.left.and.right")
                             .font(.system(size: 12, weight: .semibold)).foregroundStyle(accent)
                     }
                     ForEach(session.lobbies) { lobby in
@@ -231,11 +231,11 @@ struct ArenaPanel: View {
                         }
                         Spacer(minLength: 0)
                         Button { session.host(botCount: configuredBots) } label: {
-                            Label(configuredBots == 0 ? "Open empty arena" : "Create room match", systemImage: "person.2.fill")
+                            Label(configuredBots == 0 ? "Open empty arena" : "Create channel match", systemImage: "person.2.fill")
                         }.buttonStyle(.borderedProminent).disabled(session.send == nil)
-                            .help(configuredBots == 0 ? "Open a waiting lobby so room members can join before anyone readies up." : "Invites your room. Everyone readies up, then late joiners can replace bots.")
+                            .help(configuredBots == 0 ? "Open a waiting lobby so channel members can join before anyone readies up." : "Invites your channel. Everyone readies up, then late joiners can replace bots.")
                     }
-                    if session.send == nil { Text("Join a live room to create a match.").font(.system(size: 10)).foregroundStyle(.secondary) }
+                    if session.send == nil { Text("Join a live channel to create a match.").font(.system(size: 10)).foregroundStyle(.secondary) }
                 } else if session.mode == .hosting || session.mode == .readyHost || session.mode == .readyGuest {
                     HStack(spacing: 6) {
                         ForEach(session.playerSlots, id: \.index) { slot in

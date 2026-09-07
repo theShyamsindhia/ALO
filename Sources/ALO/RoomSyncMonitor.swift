@@ -239,7 +239,7 @@ struct RoomSyncMonitor {
             ?? timing.receiver?.recommendedBufferMilliseconds
         if let previous = roomState.bufferMilliseconds, let buffer,
            abs(buffer - previous) >= 20 {
-            appendEvent(.notice, title: "Room playback buffer changed",
+            appendEvent(.notice, title: "Channel playback buffer changed",
                         detail: "ALO adjusted the buffer from \(milliseconds(previous)) to \(milliseconds(buffer)).",
                         at: occurredAt)
         }
@@ -265,7 +265,7 @@ struct RoomSyncMonitor {
 
         let timingChanges = timing.host?.roomTimingChangeCount
         if let previous = roomState.roomTimingChangeCount, let timingChanges, timingChanges > previous {
-            appendEvent(.correction, title: "Room timing was recalculated",
+            appendEvent(.correction, title: "Channel timing was recalculated",
                         detail: countDetail(timingChanges - previous, singular: "timing adjustment ran", plural: "timing adjustments ran"),
                         at: occurredAt)
         }

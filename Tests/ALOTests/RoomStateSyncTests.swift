@@ -373,7 +373,7 @@ struct RoomStateSyncTests {
         let roomID = "room-corrupt"
         let legacy = chat(roomID: roomID, id: "legacy", counter: 1, text: "legacy")
 
-        let recovered = AutomergeRoomStateSync.recovering(
+        let recovered = try AutomergeRoomStateSync.recovering(
             roomID: roomID,
             savedDocument: Data("not-an-automerge-document".utf8),
             legacyEvents: [legacy]
@@ -423,6 +423,27 @@ struct RoomStateSyncTests {
         try store.save(room)
         store.saveRoomStateDocument(document, roomID: room.id)
         #expect(store.loadRoomStateDocument(roomID: room.id) == document)
+    }
+
+    @Test("Async channel startup captures pending history and its document together")
+    @MainActor
+    func roomStoreLoadsPendingChannelStateAsynchronously() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("alo-async-history-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = RoomStore(fileURL: directory.appendingPathComponent("rooms.json"))
+        let event = MeshRoomEvent(roomID: "fixture", version: MeshVersion(counter: 1, nodeID: "test"),
+                                  kind: .chat, text: "Pending history")
+        let document = Data([1, 2, 3])
+        store.saveEvents([event], roomID: "fixture")
+        store.saveRoomStateDocument(document, roomID: "fixture")
+        let loaded = await store.loadChannelState(roomID: "fixture")
+        #expect(loaded.events == [event])
+        #expect(loaded.document == document)
+        let empty = await store.loadChannelState(roomID: "missing")
+        #expect(empty.events.isEmpty)
+        #expect(empty.document == nil)
     }
 
     @Test("Mesh transport delivers durable history beyond the legacy cap")

@@ -188,7 +188,7 @@ struct ArenaMenuOverlay: View {
                 }
             }.font(.system(size: 10)).controlSize(.small)
             if detached {
-                Button("Return game to room", systemImage: "rectangle.inset.filled") { onResume(); session.closeExpanded() }
+                Button("Return game to channel", systemImage: "rectangle.inset.filled") { onResume(); session.closeExpanded() }
                     .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(ArenaAppearance.accent)
             }
             if session.networked {
@@ -245,7 +245,7 @@ struct ArenaMenuOverlay: View {
             }.font(.system(size: 12, weight: .medium))
             Slider(value: $session.gameVolume, in: 0...1).tint(ArenaAppearance.accent)
                 .accessibilityLabel("Game volume")
-            Text("Music and voice keep their separate room audio controls.")
+            Text("Music and voice keep their separate channel audio controls.")
                 .font(.system(size: 10)).foregroundStyle(ArenaAppearance.secondary)
             Divider().opacity(0.3)
             Toggle("Impact effects", isOn: $effectsEnabled).toggleStyle(.switch).controlSize(.small)

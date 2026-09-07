@@ -59,8 +59,8 @@ final class RoomTouchBarController: NSObject, NSTouchBarDelegate {
         if identifier == Self.moreID {
             let item = NSPopoverTouchBarItem(identifier: identifier)
             item.collapsedRepresentationLabel = "More"
-            item.collapsedRepresentationImage = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: "More room controls")
-            item.customizationLabel = "More room controls"
+            item.collapsedRepresentationImage = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: "More channel controls")
+            item.customizationLabel = "More channel controls"
             let navigation = NSTouchBar()
             navigation.delegate = self
             navigation.defaultItemIdentifiers = [Action.chat, .people, .games].map(Self.identifier)
@@ -96,7 +96,7 @@ final class RoomTouchBarController: NSObject, NSTouchBarDelegate {
     private func label(for action: Action, snapshot: Snapshot) -> String {
         switch action {
         case .playback: return snapshot.playing ? "Pause" : "Play"
-        case .mute: return snapshot.muted ? "Unmute room" : "Mute room"
+        case .mute: return snapshot.muted ? "Unmute channel" : "Mute channel"
         case .syncThisMac: return "Sync this Mac"
         case .chat: return "Chat"
         case .people: return "People"
@@ -110,14 +110,14 @@ final class RoomTouchBarController: NSObject, NSTouchBarDelegate {
         switch action {
         case .playback:
             icon = snapshot.playing ? "pause.fill" : "play.fill"
-            accessibility = snapshot.playing ? "Pause room playback" : "Play room playback"
+            accessibility = snapshot.playing ? "Pause channel playback" : "Play channel playback"
         case .mute:
             icon = snapshot.muted ? "speaker.wave.2.fill" : "speaker.slash.fill"
-            accessibility = snapshot.muted ? "Unmute incoming room audio on this Mac" : "Mute incoming room audio on this Mac"
+            accessibility = snapshot.muted ? "Unmute incoming channel audio on this Mac" : "Mute incoming channel audio on this Mac"
         case .syncThisMac:
             icon = "arrow.triangle.2.circlepath"; accessibility = "Sync this Mac only"
-        case .chat: icon = "bubble.left"; accessibility = "Open room chat"
-        case .people: icon = "person.2"; accessibility = "Open room people"
+        case .chat: icon = "bubble.left"; accessibility = "Open channel chat"
+        case .people: icon = "person.2"; accessibility = "Open channel people"
         case .games: icon = "gamecontroller"; accessibility = "Open games library"
         }
         button.title = title

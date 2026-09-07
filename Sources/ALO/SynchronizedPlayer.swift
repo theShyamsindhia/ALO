@@ -360,7 +360,7 @@ final class SynchronizedPlayer {
                 player.play(at: AVAudioTime(hostTime: MonotonicClock.nanosToTicks(desiredRenderNanos)))
                 hasStarted = true
                 latestLatenessNanos = 0
-                print("Playback synchronized (\(targetLatencyNanos / 1_000_000) ms room buffer).")
+                print("Playback synchronized (\(targetLatencyNanos / 1_000_000) ms channel buffer).")
                 updatePlaybackActivity(nowNanos: now)
             }
             expectedSequence = sequence &+ 1

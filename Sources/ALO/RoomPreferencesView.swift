@@ -19,7 +19,7 @@ struct RoomPreferencesView: View {
         var summary: String {
             switch self {
             case .audio: "Choose what you share and hear"
-            case .playback: "Keep this Mac aligned with the room"
+            case .playback: "Keep this Mac aligned with the channel"
             case .interface: "Choose which controls stay visible"
             }
         }
@@ -133,15 +133,15 @@ struct RoomPreferencesView: View {
 
             preferenceSection("What you hear", systemImage: "speaker.wave.2") {
                 Toggle("Incoming voice", isOn: incomingVoiceEnabled)
-                Toggle("Room media", isOn: incomingMediaEnabled)
+                Toggle("Channel media", isOn: incomingMediaEnabled)
             }
 
             Divider()
 
             preferenceSection("Voice", systemImage: "mic") {
                 Toggle(isOn: Binding(get: { model.musicDuckingEnabled }, set: model.setMusicDuckingEnabled)) {
-                    settingLabel("Lower room music while people speak",
-                                 help: "Reduces incoming room music while someone is speaking.")
+                    settingLabel("Lower channel music while people speak",
+                                 help: "Reduces incoming channel music while someone is speaking.")
                 }
 
                 statusLine(model.microphoneAudienceSummary, color: microphoneStatusColor)
@@ -181,7 +181,7 @@ struct RoomPreferencesView: View {
                     VStack(alignment: .leading, spacing: 7) {
                         if let timing = model.localAudioTiming {
                             metric("Network round trip", timing.roundTripMilliseconds)
-                            metric("Room playback delay", timing.activePlayoutBufferMilliseconds)
+                            metric("Channel playback delay", timing.activePlayoutBufferMilliseconds)
                             metric("Output delay", timing.outputLatencyMilliseconds)
                             if let age = timing.driftMeasurementAgeMilliseconds, age <= 250 {
                                 metric("Estimated playback drift", timing.currentDriftMilliseconds)
@@ -198,7 +198,7 @@ struct RoomPreferencesView: View {
                     .padding(.top, 8)
                 } label: {
                     settingLabel("Timing details",
-                                 help: "Playback drift compares this Mac’s render clock with the room timeline, including the output delay reported by macOS. It cannot measure sound leaving speakers or unreported Bluetooth delay. A near-zero estimate does not prove every speaker is audibly aligned.")
+                                 help: "Playback drift compares this Mac’s render clock with the channel timeline, including the output delay reported by macOS. It cannot measure sound leaving speakers or unreported Bluetooth delay. A near-zero estimate does not prove every speaker is audibly aligned.")
                 }
             }
 
@@ -214,7 +214,7 @@ struct RoomPreferencesView: View {
 
     private var interfaceSettings: some View {
         VStack(alignment: .leading, spacing: 16) {
-            preferenceSection("Room controls", systemImage: "rectangle.on.rectangle") {
+            preferenceSection("Channel controls", systemImage: "rectangle.on.rectangle") {
                 Toggle("Show Talk bar", isOn: talkBarVisible)
                 Toggle("Show media bar", isOn: mediaBarVisible)
                 Toggle("Enable Notch", isOn: $notch.enabled)
@@ -248,9 +248,7 @@ struct RoomPreferencesView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             Spacer(minLength: 8)
-            infoIcon(model.activePrivateInviteKey == nil
-                     ? "Public room · discoverable nearby"
-                     : "Private room · invite key required")
+            infoIcon(model.channelAccessSummary)
         }
         .font(.caption)
     }

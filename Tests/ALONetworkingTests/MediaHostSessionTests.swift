@@ -338,11 +338,31 @@ struct MediaHostSessionTests {
         h.queue.sync {
             for id in UInt64(0)..<20 { h.send(.clockPing(id: id, clientTimeNanos: 12)) }
             let pongs = h.messages.compactMap { message -> UInt64? in
-                guard case let .clockPong(_, echoed, hostTime) = message else { return nil }
-                #expect(echoed == 12); return hostTime
+                guard case let .clockPong(_, echoed, hostTime, received) = message else { return nil }
+                #expect(echoed == 12 && received <= hostTime); return hostTime
             }
             #expect(pongs.count == 8 && pongs.allSatisfy { $0 == h.time })
             #expect(h.closed.isEmpty)
+        }
+    }
+
+    @Test func queuedPongIncludesReliableSendQueueResidenceTime() throws {
+        let h = try MediaHostHarness()
+        try h.queue.sync {
+            h.holdAnnotationCompletions = true
+            h.host.sendAnnotation(try AnnotationWireMessage.hello(capabilities: [AnnotationWireMessage.capability]).encoded(),
+                                 connectionID: h.publisher.connectionID)
+            let received = h.time
+            h.send(.clockPing(id: 44, clientTimeNanos: 10))
+            h.time += 120_000_000
+            let completion = try #require(h.annotationCompletions.first)
+            completion(.success(()))
+            guard case let .clockPong(_, _, sent, ingress) = try #require(h.messages.last) else {
+                Issue.record("Expected queued pong"); return
+            }
+            #expect(ingress == received)
+            #expect(sent == h.time)
+            #expect(sent - ingress == 120_000_000)
         }
     }
 
@@ -367,7 +387,7 @@ struct MediaHostSessionTests {
             h.time += 2_100_000_000; h.host.tick()
             h.send(.clockPing(id: 2, clientTimeNanos: 2))
             #expect(h.closed == [slow.host.connectionID])
-            #expect(h.messages.contains { if case .clockPong(id: 2, clientTimeNanos: 2, hostTimeNanos: h.time) = $0 { return true }; return false })
+            #expect(h.messages.contains { if case .clockPong(id: 2, clientTimeNanos: 2, hostTimeNanos: h.time, hostReceivedNanos: h.time) = $0 { return true }; return false })
         }
     }
 

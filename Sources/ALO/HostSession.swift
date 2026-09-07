@@ -94,7 +94,7 @@ final class HostSession {
         do {
             self.videoStoppedHandler = videoStoppedHandler
             try Task.checkCancellation()
-            statusHandler("Opening your room")
+            statusHandler("Opening your channel")
             statusHandler("Preparing system audio capture")
             let playbackController = audioSourceSelection.usesGlobalPlaybackControls
                 ? SystemPlaybackController()
