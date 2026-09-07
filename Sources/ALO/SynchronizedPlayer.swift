@@ -439,9 +439,9 @@ final class SynchronizedPlayer {
             }
 
             // A player clock can advance through an empty native queue. A
-            // source-contiguous packet is not safe to append after its sample
-            // position has already passed, even below the 100ms late threshold.
-            if hasStarted, nativeRenderHasPassedSourceFrame(packet.frameIndex) {
+            // source-contiguous packet is not safe to append once its sample
+            // position is reached, even below the 100ms late threshold.
+            if hasStarted, nativeRenderHasReachedSourceFrame(packet.frameIndex) {
                 hardResynchronize(reason: .nativeSourcePositionPassed)
             }
 
@@ -1026,13 +1026,18 @@ final class SynchronizedPlayer {
         player.stop()
     }
 
-    private func nativeRenderHasPassedSourceFrame(_ frame: UInt64) -> Bool {
+    private func nativeRenderHasReachedSourceFrame(_ frame: UInt64, strictlyPast: Bool = false) -> Bool {
         guard let anchorFrameIndex, frame >= anchorFrameIndex,
               let render = player.lastRenderTime,
               render.isSampleTimeValid || render.isHostTimeValid,
               let sample = player.playerTime(forNodeTime: render), sample.isSampleTimeValid,
               sample.sampleTime >= 0, sample.sampleRate == Double(AudioPacket.sampleRate) else { return false }
-        return UInt64(sample.sampleTime) > frame - anchorFrameIndex
+        let position = UInt64(sample.sampleTime)
+        let sourcePosition = frame - anchorFrameIndex
+        // An empty queue at exact equality has no append-placement guarantee:
+        // native nil scheduling can choose a later quantum. Retain positive
+        // queued lead; the separate post-enqueue whole-window check stays strict.
+        return position > sourcePosition || (!strictlyPast && position == sourcePosition)
     }
 
     private func hardResynchronize(reason: PlaybackContentRecoveryReason? = nil) {
@@ -1065,13 +1070,13 @@ final class SynchronizedPlayer {
         // headroom from the FIRST missing frame; large-output routes trade a
         // shorter reorder wait for timely native admission.
         let missingRender = scheduledContentEnd?.render
-        let nativePassed = scheduledContentEnd.map { nativeRenderHasPassedSourceFrame($0.frame) } ?? false
+        let nativePassed = scheduledContentEnd.map { nativeRenderHasReachedSourceFrame($0.frame) } ?? false
         let admissionWindow = max(50_000_000, renderSchedulingHeadroomNanos)
         if !windowAdmitted, !nativePassed, let missingRender, missingRender > now, missingRender - now > admissionWindow { return false }
         guard !nativePassed, budget > 0, PlaybackConcealmentPolicy.canFill(expectedSequence: sequence, nextSequence: next.sequence,
             sourceEndFrame: scheduledContentEnd?.frame, nextFrame: next.frameIndex,
             missingRenderNanos: missingRender, nowNanos: now) else {
-            hardResynchronize(reason: nativePassed ? .nativeSourcePositionPassed : .concealmentDiscontinuity)
+            hardResynchronize(reason: nativePassed ? .nativeSourcePositionPassed : .concealmentUnavailable)
             expectedSequence = next.sequence
             return true
         }
@@ -1096,7 +1101,7 @@ final class SynchronizedPlayer {
                 scheduledContentEnd = frame.overflow || render.overflow ? nil : (frame.partialValue, render.partialValue)
             }
         } else {
-            hardResynchronize(reason: .concealmentDiscontinuity)
+            hardResynchronize(reason: .contentAdmissionDropped)
             expectedSequence = next.sequence
             return true
         }
@@ -1142,7 +1147,7 @@ final class SynchronizedPlayer {
         let duration = UInt64(buffer.frameLength) * 1_000_000_000 / UInt64(AudioPacket.sampleRate)
         if let sourceFrame, ended >= admittedAtNanos, ended - admittedAtNanos >= duration {
             let end = sourceFrame.addingReportingOverflow(UInt64(buffer.frameLength))
-            if end.overflow || nativeRenderHasPassedSourceFrame(end.partialValue) {
+            if end.overflow || nativeRenderHasReachedSourceFrame(end.partialValue, strictlyPast: true) {
                 hardResynchronize(reason: .enqueueWindowPassed)
                 return false
             }

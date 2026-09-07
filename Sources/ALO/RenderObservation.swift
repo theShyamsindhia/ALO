@@ -2,7 +2,7 @@ import Foundation
 import ALOCore
 
 enum PlaybackContentRecoveryReason: String, Sendable {
-    case concealmentDiscontinuity = "concealment-discontinuity"
+    case concealmentUnavailable = "concealment-unavailable"
     case nativeSourcePositionPassed = "native-source-position-passed"
     case enqueueWindowPassed = "enqueue-window-passed"
     case contentAdmissionDropped = "content-admission-dropped"
@@ -17,7 +17,7 @@ struct PlaybackContentRecoveryDiagnostics: Equatable, Sendable {
     mutating func record(_ reason: PlaybackContentRecoveryReason) {
         lastReason = reason
         switch reason {
-        case .concealmentDiscontinuity: if concealment < .max { concealment += 1 }
+        case .concealmentUnavailable: if concealment < .max { concealment += 1 }
         case .nativeSourcePositionPassed: if nativePosition < .max { nativePosition += 1 }
         case .enqueueWindowPassed: if enqueueWindow < .max { enqueueWindow += 1 }
         case .contentAdmissionDropped: if admissionDropped < .max { admissionDropped += 1 }

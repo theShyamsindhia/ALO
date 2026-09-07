@@ -84,15 +84,17 @@ struct ContentAdmissionRecoveryTests {
         #expect(player.renderObservation?.sample.contentRecovery?.admissionDropped == 1)
     }
 
-    @Test
-    func largeOutputHeadroomAdmitsConcealmentBeforeHardwareLead() async throws {
+    @Test(arguments: [false, true])
+    func largeOutputHeadroomAdmitsConcealmentBeforeHardwareLead(failConcealmentAllocation: Bool) async throws {
         var fixtureNow = MonotonicClock.nowNanos()
+        var allocationFails = false
         let output = RoomAudioOutputEngine()
         let format = try #require(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2))
         try output.engine.enableManualRenderingMode(.offline, format: format, maximumFrameCount: 240)
         let player = try SynchronizedPlayer(audioOutput: output, liveDJAudio: DJLiveAudio(),
             outputTimingMeasurement: { .init(latencyNanos: 1_000_000,
-                bufferFrames: 4_096, safetyFrames: 48, sampleRate: 48_000) }, nowNanos: { fixtureNow })
+                bufferFrames: 4_096, safetyFrames: 48, sampleRate: 48_000) },
+            failBufferAllocation: { allocationFails }, nowNanos: { fixtureNow })
         defer { player.stop(); output.engine.stop() }
         let node = try #require(output.engine.attachedNodes.compactMap { $0 as? AVAudioPlayerNode }.first)
         player.clockOffsetNanos = 0
@@ -119,9 +121,18 @@ struct ContentAdmissionRecoveryTests {
         let lead = deadline - fixtureNow
         try #require(lead > 50_000_000 && lead < player.renderSchedulingHeadroomForTimingNanos,
             "Fixture must exercise admission outside old 50ms window but inside measured hardware lead")
+        allocationFails = failConcealmentAllocation
         player.accept(AudioPacket(sequence: 3, frameIndex: 720, captureTimeNanos: capture + 15_000_000,
             samples: [Int16](repeating: 24_000, count: 480)))
         #expect(player.expectedSequenceForTesting == 4, "High-headroom route must not defer timely concealment")
+        if failConcealmentAllocation {
+            #expect(player.syncReport().resyncCount == 1)
+            allocationFails = false
+            player.accept(AudioPacket(sequence: 4, frameIndex: 960, captureTimeNanos: fixtureNow,
+                samples: [Int16](repeating: 24_000, count: 480)))
+            #expect(player.expectedSequenceForTesting == 5)
+            node.play()
+        }
         var marker: Int?
         for block in 0..<6 {
             try #require(try output.engine.renderOffline(240, to: scratch) == .success)
@@ -129,8 +140,13 @@ struct ContentAdmissionRecoveryTests {
                 marker = block * 240 + index
             }
         }
-        #expect(marker.map { (480...576).contains($0) } == true,
+        let expected = failConcealmentAllocation ? 0 : 480
+        #expect(marker.map { (expected...expected + 96).contains($0) } == true,
             "Known remaining seed and one missing packet of silence precede the real marker")
-        #expect(player.syncReport().resyncCount == 0)
+        #expect(player.syncReport().resyncCount == (failConcealmentAllocation ? 1 : 0))
+        player.maintainSync()
+        let recovery = try #require(player.renderObservation?.sample.contentRecovery)
+        #expect(recovery.admissionDropped == (failConcealmentAllocation ? 1 : 0))
+        #expect(recovery.concealment == 0)
     }
 }

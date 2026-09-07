@@ -190,3 +190,113 @@ gap was 4.325 seconds; retain the earlier wall-clock caveat. Listener reports
 remained resync36/drift0.5ms. This establishes repeated sender timing disruption
 during the audible incident, not its exact acoustic cause. The remote history
 was preserved; a new remote live capture was not started.
+
+### Silent live-output callback comparison
+
+A separate native-engine ABBA probe compared `.dataPlayedBack` and
+`.dataRendered` while the installed app and existing activity remained running.
+This was **live default-device output with all-zero PCM**, not offline rendering,
+microphone capture, or an acoustic alignment measurement. It used 48 kHz stereo,
+rate 1, 250 ms initial queued audio, 5 ms arrivals and the same 140-buffer cap.
+Each approximately 12-second run comprised 2 seconds warmup, 8 seconds measurement
+and 2 seconds drain, with a three-second stack sample at the same point.
+
+Verified artifacts: `/tmp/alo-callback-abba.BZEN5z/RESULTS.md`, `run-5-played.log`,
+`run-6-rendered.log`, `run-7-rendered.log`, `run-8-played.log`, and matching stacks.
+All four runs exited successfully and drained their outstanding completions
+before stop. An earlier run with failed JSON serialization was excluded; the
+complete ABBA sequence was rerun after fixing only summary serialization.
+
+| Mode / run | scheduleBuffer p95 | maximum | CPU time over ~12 s | cap drops |
+| --- | ---: | ---: | ---: | ---: |
+| Played-back / 5 | 6.281 ms | 23.105 ms | 0.775 s | 0 |
+| Rendered / 6 | 0.033 ms | 2.463 ms | 0.278 s | 0 |
+| Rendered / 7 | 0.030 ms | 2.969 ms | 0.270 s | 0 |
+| Played-back / 8 | 6.278 ms | 13.256 ms | 0.761 s | 0 |
+
+Played-back stacks contained 62/46 samples under output-presentation-latency
+queries and 75/66 under the engine lock; neither named hotspot appeared in the
+rendered stacks. Stack counts are not durations; the table separately measures
+the native schedule call. Zero cap drops does not establish that all timer
+deadlines were met. Callback elapsed time includes intentionally queued PCM and
+must not be treated as an audio-quality score.
+
+This supports callback-mode-dependent native property/lock churn on this route,
+not a complete causal explanation of the user's delay. The extra silent engine
+and sampling are observer interference. No route, volume, capture, installed-app
+or production callback changes were made for the probe. Rendered completion is
+not semantically equivalent to played-back completion: existing accounting also
+protects audible predecessor retirement. A direct callback swap would therefore
+need a separate retirement contract and tests. Coalescing several small buffers
+is a possible way to reduce per-buffer work, but requires regression tests first
+for exact source-frame mapping, bounded latency/capacity, loss, reset, rate and
+cutover/retirement behavior, followed by real-device measurements.
+
+### Local c92 development checkpoint
+
+The local c92 candidate was installed with executable SHA-256
+`c36a4aefb2548ee4b86d6a74ab09708f3b72aeefb7e79ce0854f84d37b952642` and
+launched as PID 1978. At this checkpoint it was awaiting the user's normal
+Keychain approval; this is not a successful paired-playback validation.
+The previous app was retained at
+`/Users/raj/Library/Application Support/ALO Dev Backups/backup.0zDaE7/ALO Dev.app`.
+No callback-policy change is included in this deployment checkpoint.
+
+CI run `34157629270` subsequently passed both app builds but failed two assertions
+in 1,151 tests across 186 suites. The complete log is preserved at
+`/tmp/alo-dev-candidate.IXAFvw/ci-failed.log`:
+
+- Exact empty-queue control (`gapNanos=0`, target-delay mutation) rendered its
+  marker at frame 1488, beyond the existing frame-1200 limit. Other empty-boundary
+  controls rendered at 288, 528 and 1008; the actual underrun recovery cases
+  rendered fresh markers at 48. Controlled admission time rules out the previous
+  wake-overshoot prerequisite failure. Native nil-scheduling and empty-queue
+  behavior require isolation before classifying this as fixture or production.
+- Eight-client live bounded fan-out received a minimum 45 packets, below the
+  required 50, with zero injected scheduler oversleep. This remains a failed live
+  gate, not an automatically accepted runner artifact.
+
+No tolerance was relaxed, no failing observation removed, and no release was
+approved. The c92 deployment is a bounded development experiment only.
+Apple's [player scheduling semantics](https://developer.apple.com/documentation/avfaudio/avaudioplayernode)
+distinguish appending to queued commands from scheduling on an already-playing
+empty node; the latter has no exact immediate-start promise for `at: nil`.
+
+A follow-up native-only offline probe isolated that distinction without ALO's
+player wrapper or stop/reseed adapter. All 48 cases verified native sample 240:
+12 empty-boundary nil enqueues produced a marker at 528 rather than the expected
+240 plus 48 graph frames; 12 explicit sample-240 enqueues produced no marker
+within 100 ms. With 240 frames genuinely still queued, both methods produced the
+expected marker at 528 (source 480 plus 48) in all 24 cases. Evidence lives at
+`/tmp/alo-native-boundary.sd57OG/results.log`. This establishes native empty-boundary
+content displacement, not its contribution to the user's full acoustic delay.
+Explicit scheduling at the consumed boundary is not a safe substitute. The next
+wrapper regression must require retirement at an exhausted boundary and preserve
+continuity with positive queued-frame lead, before changing the production guard.
+
+### Paired c92 diagnostic run: 20:23–20:26 UTC
+
+Both Macs installed the identical c92 signed executable above. Raj used PID1978;
+Shyam reported PID47540, matching archive/executable hashes and strict signature
+verification, production quit, old Dev backed up and identity/network data kept.
+The original 660-second proposal was intentionally shortened to 180 seconds once
+counter increments established failure. Neither device changed source, route,
+volume or reset playback during that window. No compilation ran in the window;
+an earlier local single-thread compile was canceled at approximately 20:20:47.
+
+Raj reported intermittent blanking followed by periods of stability. The local
+capture at `/tmp/alo-c92-live.JDTCVq/paired-live.ndjson` contains 179 complete
+measured snapshots over 179.25 seconds. Maximum reported drift was 0.2 ms, render
+sample age 24 ms, RTT 4 ms and sample gap 1.025 seconds. The existing checker
+returned exit 2 for increasing late/resync counters, unverified telemetry and
+insufficient standard observation duration. Small drift did not produce a pass.
+
+Shyam's tagged coordination response reported 179 complete three-part sender
+snapshots and no incomplete snapshots, all Broadcasting in PID47540, with maximum
+gap 1.157185 seconds. Own late/resync/native-position counters rose from
+239/11/9 at 20:23:00.022893 to 475/17/14 at 20:25:59.560143. Reported listener
+resyncs rose from 100 to 154. The remote original startup/live files were retained;
+this paragraph attributes their results to the remote agent, not a local raw-file
+analysis. This is a failed paired diagnostic run, not acoustic validation or a
+successful 660-second test. Post-20:26 local samples may include resumed compiler
+load and are excluded from this assessment.

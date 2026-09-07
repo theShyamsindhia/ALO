@@ -559,6 +559,41 @@ reachability was identified by arithmetic inspection, not yet an isolated runtim
 RED; this pass deliberately does not claim to fix or test that separate path.
 No paired acoustic or live crackling success follows from these offline results.
 
+### Empty native boundary follow-up after c92
+
+The c92 full-CI empty-boundary marker failure must not be dismissed as a timer
+fixture failure. A standalone native AVAudioEngine offline-output probe at
+`/tmp/alo-native-boundary.sd57OG/results.log` ran 48 native cases: after consuming
+exactly source frame 240 with no queued prefix, nil scheduling produced marker
+528 versus source 240 in all twelve runs; explicit scheduling at the consumed
+sample 240 produced no marker within 100 ms. With a known queued 240-frame prefix,
+both scheduling modes produced marker 528 versus source 480 in all twelve runs
+each. Explicit scheduling at an expired target is therefore not a drop-in fix.
+
+The wrapper contract now treats reaching the next source boundary as uncertain
+continuity, while preserving strictly positive queued lead. The runtime
+`wrapper-boundary-red-2.log` reproduced eight missing-retirement/count assertions
+at exact equality across timing mutations; its queued-prefix control passed the
+exact 480...576-frame marker oracle with no reset. Two allocation-attribution
+assertions and one cause-neutral label assertion also failed as intended. The
+earlier `wrapper-boundary-red.log` was canceled before tests at approximately
+20:20:47 UTC during live capture, and is not RED evidence.
+
+The narrow fix uses reached (`>=`) for admission and concealment only. The
+post-enqueue whole-packet-end comparison remains strict (`>`), with its original
+elapsed-time AND gate. Recovery fixtures render the first newly queued packet
+when it was accepted after retirement; only a dropped first packet requires a
+fresh successor. This avoids introducing a second, artificial capture-timeline
+discontinuity in the test. Generic concealment refusal is named
+`concealment-unavailable`, while failed silence allocation records
+`content-admission-dropped`. The final `wrapper-boundary-green.log` run passed
+all 59 tests in 11 suites, including the prior 57-test coverage, new exact-prefix
+control, boundary retirement and both diagnostic regressions. Tests took 0.721 s
+after the single-thread nice-19 build. Every boundary recovery rendered the real
+marker at frame 48 relative to its new anchor; queued-prefix control retained
+marker 528 relative to source 480 without a reset. This is a targeted native
+offline result, not a clean full-CI run or successful paired acoustic test.
+
 ### Deferred native-window implementation notes
 
 Deployment update: Raj completed normal Keychain approval; the installed `6f`

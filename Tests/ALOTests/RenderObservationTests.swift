@@ -4,9 +4,12 @@ import Testing
 @testable import ALO
 
 struct RenderObservationTests {
+    @Test func concealmentReasonDoesNotClaimAnUnprovenDiscontinuity() {
+        #expect(PlaybackContentRecoveryReason.concealmentUnavailable.rawValue == "concealment-unavailable")
+    }
     @Test func contentRecoveryReasonsAreDistinctCumulativeAndExplicitlyUnavailable() throws {
         var counts = PlaybackContentRecoveryDiagnostics()
-        counts.record(.concealmentDiscontinuity)
+        counts.record(.concealmentUnavailable)
         counts.record(.nativeSourcePositionPassed)
         counts.record(.enqueueWindowPassed)
         counts.record(.contentAdmissionDropped)
