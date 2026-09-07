@@ -3574,7 +3574,11 @@ final class ALOViewModel: ObservableObject {
             syncLabel: roomSyncLabel,
             audioIsRendering: audioIsRendering,
             hasBroadcaster: hasBroadcaster,
-            timing: timing
+            timing: timing,
+            requiresRecovery: liveSyncHealth.requiresRecovery,
+            peerPlaybackTiming: Dictionary(participants.compactMap { participant in
+                participant.playbackTiming.map { (participant.id, $0) }
+            }, uniquingKeysWith: { _, newest in newest })
         )
     }
 

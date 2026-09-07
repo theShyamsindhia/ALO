@@ -23,7 +23,7 @@ report_install_exit() {
     local install_status=$?
     if [[ $install_status -ne 0 ]]; then
         echo "Dev installation failed (exit $install_status)." >&2
-        if [[ -n "${backup_dir:-}" ]]; then
+        if [[ -n "${backup_dir:-}" && -d "$backup_dir/ALO Dev.app" ]]; then
             echo "Previous dev app is recoverable at: $backup_dir/ALO Dev.app" >&2
         fi
     fi
@@ -73,7 +73,23 @@ if [[ -e "$destination" ]]; then
     echo "Previous dev app preserved at: $backup_dir/ALO Dev.app"
 fi
 mv "$staged_app" "$destination"
-codesign --verify --deep --strict "$destination"
+if ! codesign --verify --deep --strict "$destination"; then
+    echo "Installed dev app failed verification: $destination. Do not launch it." >&2
+    rejected_app="$stage_dir/Rejected ALO Dev.app"
+    if mv "$destination" "$rejected_app"; then
+        echo "Rejected dev app preserved at: $rejected_app" >&2
+        if [[ -n "${backup_dir:-}" && -d "$backup_dir/ALO Dev.app" ]]; then
+            if mv "$backup_dir/ALO Dev.app" "$destination"; then
+                echo "Previous dev app restored at: $destination" >&2
+            else
+                echo "Could not restore the previous dev app; use the recovery path below." >&2
+            fi
+        fi
+    else
+        echo "Could not move the rejected app aside; it remains at: $destination" >&2
+    fi
+    exit 1
+fi
 echo "Installed: $destination"
 echo "Source: $(git rev-parse HEAD)"
 echo "Ad-hoc signed without a certificate. macOS may request dev-app permissions or first-open approval."

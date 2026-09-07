@@ -56,8 +56,8 @@ struct RoomSyncEvent: Identifiable, Equatable {
 /// A bounded, in-memory flight recorder for the active room. Participant names
 /// are used only by the live UI and are never added to exported diagnostics.
 struct RoomSyncMonitor {
-    static let correctionThresholdMilliseconds = 40.0
-    static let recoveryThresholdMilliseconds = 20.0
+    static let correctionThresholdMilliseconds = SyncHealthTolerance.driftWarningMilliseconds
+    static let recoveryThresholdMilliseconds = SyncHealthTolerance.driftRecoveryMilliseconds
     static let maximumSamplesPerParticipant = 90
     static let maximumEvents = 48
     static let maximumParticipants = 32

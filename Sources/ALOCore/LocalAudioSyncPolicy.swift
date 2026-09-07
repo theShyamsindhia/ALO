@@ -106,3 +106,42 @@ public enum PlaybackRateCorrection {
         return abs(smoothed) < 0.000_005 ? 0 : smoothed
     }
 }
+
+/// Holds a learned correction through brief missing render measurements, then
+/// returns to neutral at the next maintenance call once the sample is 500ms
+/// old. At the existing 1% rate limit this budgets about 5ms of unobserved
+/// correction while maintenance runs; a blocked queue can exceed that budget.
+/// Indefinite holdover would add up to 10ms/second of unobserved correction.
+public struct PlaybackRateController: Sendable {
+    public static let maximumHoldoverNanos: UInt64 = 500_000_000
+    private var correction = 0.0
+    private var lastFreshNanos: UInt64?
+    private var missingSinceNanos: UInt64?
+    public init() {}
+    public var rate: Float { Float(1 + correction) }
+
+    public mutating func updateFresh(errorSeconds: Double, sampledAtNanos: UInt64) -> Float {
+        if let lastFreshNanos,
+           sampledAtNanos < lastFreshNanos || sampledAtNanos - lastFreshNanos >= Self.maximumHoldoverNanos {
+            // A blocked maintenance queue may return directly with a fresh
+            // sample, without having delivered any intermediate missing tick.
+            correction = 0
+        }
+        correction = PlaybackRateCorrection.next(previous: correction, errorSeconds: errorSeconds)
+        lastFreshNanos = sampledAtNanos
+        missingSinceNanos = nil
+        return rate
+    }
+
+    /// True means the audio unit must also be returned to rate 1. Clearing the
+    /// smoothed state prevents an old correction being replayed on recovery.
+    public mutating func handleMissing(at now: UInt64) -> Bool {
+        if missingSinceNanos == nil { missingSinceNanos = now }
+        let reference = lastFreshNanos ?? missingSinceNanos ?? now
+        guard now < reference || now - reference >= Self.maximumHoldoverNanos else { return false }
+        correction = 0
+        return true
+    }
+
+    public mutating func reset() { self = Self() }
+}

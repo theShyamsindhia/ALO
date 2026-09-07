@@ -85,5 +85,59 @@ a fallback, not an event subscription. Never expose local API credentials.
   the cause of the reported audible drift or claim a playback fix.
 - The original transferred ce6cb97 bundle failed strict resource-seal validation.
   Re-sealing that exact bundle with certificate-free ad-hoc signing passes strict
-  validation and launches locally. Shyam has instructions to apply the same seal
-  to his checksum-verified archive and compare signed executable hashes.
+  validation and launches on both Macs. The installed signed executable hashes
+  match. Shyam confirmed identity setup; joining the existing test network and
+  paired playback remain unconfirmed.
+
+## Timing evidence must have an independent reference
+
+The combined six-minute simulation separates host monotonic time, capture sample
+time, each receiver's monotonic and output-sample clocks, network arrival events,
+and reported output latency. It uses the production estimator and rate-controller
+math but is not a hardware or acoustic measurement. With bounded small path
+asymmetry, the initial run stayed within 1.54 ms of inter-output content separation.
+An intentionally adverse additional 80 ms in one direction produced 56.82 ms
+separation while the maximum reported render residual was only 14.01 ms.
+This is a diagnostic blind spot, not evidence that the users' Wi-Fi has that delay.
+
+Do not "fix" that adversarial case by teaching an estimator the simulation's
+hidden reference clock. Round-trip timestamp exchanges cannot uniquely identify
+the one-way delay. [RFC 5905](https://www.rfc-editor.org/rfc/rfc5905.html) separates
+offset, delay, dispersion and jitter; a small residual relative to an uncertain
+clock is not proof of aligned outputs. Tests must distinguish estimated health
+from the independent reference and avoid claiming an unconditional sync guarantee.
+
+The offline Apple audio graph probe also invalidated the assumption of zero
+downstream processing delay: player → varispeed → mixer produced approximately
+0.99–1.35 ms of impulse delay at rates 0.99/1/1.01 and outputs 48/44.1 kHz.
+Inter-impulse intervals followed the requested rate. That small constant offset
+alone does not explain the larger reported drift. Apple's
+[hardware presentation latency](https://developer.apple.com/documentation/avfaudio/avaudioionode/presentationlatency)
+and [downstream pipeline latency](https://developer.apple.com/documentation/avfaudio/avaudionode/outputpresentationlatency)
+are distinct measurements; neither an offline graph nor a simulated route proves
+the acoustic latency of Bluetooth earphones.
+
+## Reproduced recovery and health defects
+
+- A production `SynchronizedPlayer` in an offline native graph kept an injected
+  prior 1.01 rate for approximately 1.5 seconds while PCM and player sample time
+  advanced but the render host timestamp was unavailable. The new controller
+  retains correction through brief gaps, then clears it on the next maintenance
+  call after 500 ms without usable timing. At the 1% correction limit, that grace
+  represents about 5 ms of extra correction if maintenance keeps running; it is
+  not a hard bound when the maintenance queue itself stalls. A fresh sample after
+  a long stall must not replay the old smoothed correction. The test seeds the
+  prior audio-unit rate; it does not establish how often real hardware enters
+  this condition.
+- Fresh 70 ms render drift incorrectly passed diagnostics because they used the
+  player's emergency reset threshold instead of the monitor's 40 ms warning /
+  20 ms recovery thresholds. Both views must use the same health tolerances.
+- An 82 ms RTT with a small inferred residual also passed. Elevated or missing
+  RTT now withholds confidence, including on the broadcaster using the exact
+  listener's existing fresh, authenticated telemetry. The best-RTT window can
+  retain older low samples: this conservative warning is not a complete clock
+  uncertainty model and does not eliminate every path-transition blind spot.
+
+These failures were reproduced before production fixes. Regression passes,
+independent review and physical playback validation remain release gates; do not
+treat the implementation or this document as proof that those gates have passed.

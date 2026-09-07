@@ -234,7 +234,8 @@ struct DiagnosticsTests {
             return DiagnosticRoomContext(isActive: true, role: .broadcaster,
                 participantCount: count + 1, remotePeerCount: count, syncLabel: "Broadcasting",
                 audioIsRendering: rendering, hasBroadcaster: true,
-                timing: SessionTimingDiagnostics(receiver: local, host: host))
+                timing: SessionTimingDiagnostics(receiver: local, host: host),
+                peerPlaybackTiming: ["private-peer": .init(roundTripMilliseconds: 2, driftMilliseconds: drift)])
         }
         #expect(context().result.outcome == .passed)
         #expect(context(drift: 150).result.outcome == .warning)

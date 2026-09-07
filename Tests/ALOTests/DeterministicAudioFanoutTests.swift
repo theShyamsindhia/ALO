@@ -10,7 +10,7 @@ import ALOCore
 @Suite("Deterministic real-host audio fan-out", .serialized)
 struct DeterministicAudioFanoutTests {
     @Test(arguments: [UInt64(1), 7, 23, 41])
-    func mixedControlTrafficAndIrregularDispatchPreserveListenerFloor(seed: UInt64) throws {
+    func irregularAudioDispatchWithPongBandwidthReservationPreservesListenerFloor(seed: UInt64) throws {
         // CI 34127177462 observed 23ms shaper dispatch lateness and one peer
         // receiving 46/200 despite complete delivery of every submitted packet.
         // This seeded stress is not an exact replay: CI retained distributions,
@@ -20,7 +20,25 @@ struct DeterministicAudioFanoutTests {
             irregularDispatchSeed: seed, includesControlTraffic: true)
         #expect(room.maximumAge < SynchronizedPlayer.targetLatencyNanos)
         #expect(room.minimumPackets >= 50,
-            "Mixed control traffic and irregular dispatch must preserve the live per-listener floor")
+            "Irregular audio dispatch with reserved pong bandwidth must preserve the live per-listener floor")
+    }
+
+    @Test func pongBandwidthReservationConsumesSpecifiedWireTime() throws {
+        let baseline = SimulatedAudioWire(bitsPerSecond: 4_000_000)
+        let reserved = SimulatedAudioWire(bitsPerSecond: 4_000_000)
+        let origin: UInt64 = 1_000_000_000
+        baseline.setNow(origin); reserved.setNow(origin)
+        for _ in 0..<8 { reserved.reserveControlBytes(90) }
+        let packet = AudioPacket(sequence: 0, frameIndex: 0, captureTimeNanos: origin, samples: [1, -1])
+        for wire in [baseline, reserved] {
+            wire.submit(packet: packet, byteCount: 100,
+                endpoint: .hostPort(host: "127.0.0.1", port: 12345), completion: { _ in })
+        }
+        let direct = try #require(baseline.takeNext(through: origin + 10_000_000))
+        let delayed = try #require(reserved.takeNext(through: origin + 10_000_000))
+        // 8×90B×8 /4Mb/s =1.44ms, not1.44 microseconds. This verifies
+        // serialization only; no control-delivery/completion events are modeled.
+        #expect(delayed.time - direct.time == 1_440_000)
     }
 
     @Test func batchedSharedLinkCompletionsDoNotStarveOneListener() throws {
@@ -150,7 +168,8 @@ struct DeterministicAudioFanoutTests {
             if includesControlTraffic && callback.isMultiple(of: 5) {
                 // The live fixture pings every peer on this cadence. Reserve
                 // the actual encoded pong bytes on the same aggregate link;
-                // these are explicit traffic fixtures, not synthetic audio.
+                // these are explicit bandwidth reservations, not synthetic
+                // audio or a model of control dispatch/completion scheduling.
                 for peer in 0..<count {
                     let pong = ControlMessage(type: "pong", id: UInt64(callback * count + peer),
                         clientNanos: nominalDeadline, hostNanos: nominalDeadline)

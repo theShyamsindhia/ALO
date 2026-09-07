@@ -97,7 +97,7 @@ final class SynchronizedPlayer {
     private var activeOutputDeviceID: AudioDeviceID?
     private var activeOutputHardwareFormat: AudioOutputHardwareFormat?
     private var targetLatencyNanos = RoomTiming.defaultPlayoutDelayNanos
-    private var smoothedCorrection = 0.0
+    private var rateController = PlaybackRateController()
     private let playbackActivityChanged: ((Bool) -> Void)?
     private var latestLatenessNanos: UInt64 = 0
     private var latestDriftMeasurement: (magnitude: UInt64, time: UInt64)?
@@ -213,9 +213,18 @@ final class SynchronizedPlayer {
     func maintainSync() {
         // An unavailable render clock is unknown, not a fresh zero-error sample.
         latestDriftMeasurement = nil
-        defer { if latestDriftMeasurement == nil { automaticSyncPolicy.resetEvidence() } }
-        guard nodesAreAttached else { return }
         let now = MonotonicClock.nowNanos()
+        defer {
+            if latestDriftMeasurement == nil {
+                automaticSyncPolicy.resetEvidence()
+                if hasStarted {
+                    if rateController.handleMissing(at: now), varispeed.rate != 1 { varispeed.rate = 1 }
+                } else {
+                    rateController.reset()
+                }
+            }
+        }
+        guard nodesAreAttached else { return }
         guard roomPlaybackIsPlaying else {
             setPlaybackActive(false)
             return
@@ -271,9 +280,8 @@ final class SynchronizedPlayer {
             hardResynchronize()
             return
         }
-        smoothedCorrection = PlaybackRateCorrection.next(previous: smoothedCorrection,
-                                                          errorSeconds: estimate.errorSeconds)
-        let rate = Float(1 + smoothedCorrection)
+        let rate = rateController.updateFresh(errorSeconds: estimate.errorSeconds,
+                                              sampledAtNanos: renderLocalNanos)
         if abs(varispeed.rate - rate) > 0.000_005 {
             varispeed.rate = rate
         }
@@ -373,7 +381,7 @@ final class SynchronizedPlayer {
         pending.removeAll()
         expectedSequence = nil
         hasStarted = false
-        smoothedCorrection = 0
+        rateController.reset()
         varispeed.rate = 1
         latestLatenessNanos = 0
         lastPacketReceivedNanos = nil
@@ -431,7 +439,7 @@ final class SynchronizedPlayer {
         anchorCaptureNanos = nil
         captureTimeline.reset()
         hasStarted = false
-        smoothedCorrection = 0
+        rateController.reset()
         varispeed.rate = 1
         latestLatenessNanos = 0
         resyncCutoverCaptureNanos = nil
@@ -494,7 +502,7 @@ final class SynchronizedPlayer {
         anchorCaptureNanos = nil
         captureTimeline.reset()
         hasStarted = false
-        smoothedCorrection = 0
+        rateController.reset()
         varispeed.rate = 1
         latestLatenessNanos = 0
         lastPacketReceivedNanos = nil
@@ -520,7 +528,7 @@ final class SynchronizedPlayer {
         anchorCaptureNanos = nil
         captureTimeline.reset()
         hasStarted = false
-        smoothedCorrection = 0
+        rateController.reset()
         varispeed.rate = 1
         latestLatenessNanos = 0
         lastPacketReceivedNanos = nil
@@ -882,7 +890,7 @@ final class SynchronizedPlayer {
     private func hardResynchronize() {
         scheduledCompletions.invalidate()
         player.stop()
-        smoothedCorrection = 0
+        rateController.reset()
         varispeed.rate = 1
         anchorFrameIndex = nil
         anchorCaptureNanos = nil

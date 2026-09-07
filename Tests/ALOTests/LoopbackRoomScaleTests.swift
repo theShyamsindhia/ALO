@@ -9,8 +9,8 @@ import Testing
 struct LoopbackRoomScaleTests {
     @Test func schedulingEvidenceIsBoundedNumericAndKeepsOrdering() {
         let evidence = LoopbackSchedulingEvidence(capacity: 3)
-        evidence.register(port: 61_234, peer: 2)
-        let send = LoopbackSchedulingEvidence.Send(id: 7, port: 61_234, sequence: 42, byteCount: 992)
+        evidence.register(port: 61_234, transport: .udp, peer: 2)
+        let send = LoopbackSchedulingEvidence.Send(id: 7, endpoint: .init(transport: .udp, port: 61_234), sequence: 42, byteCount: 992)
         evidence.record(send: send, phase: .admitted, at: 1_000)
         evidence.record(send: send, phase: .scheduled, at: 1_100, detail: 1_400)
         evidence.record(send: send, phase: .completed, at: 1_500)
@@ -18,10 +18,28 @@ struct LoopbackRoomScaleTests {
         let lines = evidence.lines()
         #expect(lines.count == 4)
         #expect(lines[0].contains("retained=3 dropped=1"))
-        #expect(lines[1] == "0,0,2,7,42,audio,992,admitted,0")
-        #expect(lines[2] == "1,100,2,7,42,audio,992,scheduled,400")
-        #expect(lines[3] == "2,500,2,7,42,audio,992,completed,0")
+        #expect(lines[1] == "1,100,2,7,42,-1,audio,992,scheduled,400")
+        #expect(lines[2] == "2,500,2,7,42,-1,audio,992,completed,0")
+        #expect(lines[3] == "3,600,2,7,42,-1,audio,992,completed,0")
         #expect(!lines.joined().contains("61234"), "Network endpoints must never be emitted")
+        #expect(evidence.takeDump(label: "first") != nil)
+        #expect(evidence.takeDump(label: "second") == nil, "Only one dump is permitted per run")
+    }
+
+    @Test func schedulingEvidenceSeparatesTransportsAndRetainsCaptureIndex() {
+        let evidence = LoopbackSchedulingEvidence()
+        evidence.register(port: 61_234, transport: .udp, peer: 2)
+        evidence.register(port: 61_234, transport: .tcp, peer: 6)
+        let udp = NWConnection(host: "127.0.0.1", port: 61_234, using: .udp)
+        let tcp = NWConnection(host: "127.0.0.1", port: 61_234, using: .tcp)
+        let audio = evidence.admitted(connection: udp, audioSequence: 42, byteCount: 992)
+        let control = evidence.admitted(connection: tcp, audioSequence: nil, byteCount: 90)
+        evidence.capture(index: 19, deadline: 0, wokeAt: MonotonicClock.nowNanos())
+        let lines = evidence.lines()
+        #expect(audio.endpoint?.transport == .udp && control.endpoint?.transport == .tcp)
+        #expect(lines[1].contains(",2,0,42,-1,audio,992,admitted,0"))
+        #expect(lines[2].contains(",6,1,-,-1,control,90,admitted,0"))
+        #expect(lines[3].hasSuffix(",-1,-1,-,19,capture,0,capture,0"))
     }
 
     @Test("Broadcaster diagnostics detect remote screen lateness received over the control connection")
@@ -1530,8 +1548,8 @@ struct LoopbackRoomScaleTests {
                 throw LoopbackTestError.peerDidNotJoin
             }
             for (index, peer) in peers.enumerated() {
-                if let port = peer.audioPort { schedulingEvidence.register(port: port, peer: index) }
-                if let port = peer.controlLocalPort { schedulingEvidence.register(port: port, peer: index) }
+                if let port = peer.audioPort { schedulingEvidence.register(port: port, transport: .udp, peer: index) }
+                if let port = peer.controlLocalPort { schedulingEvidence.register(port: port, transport: .tcp, peer: index) }
             }
 
             // Let the host's outbound UDP connections reach ready before capture starts.
@@ -2608,9 +2626,11 @@ private final class FluidLinkShaper: @unchecked Sendable {
 /// plus control traffic; overflow is explicit rather than silently losing data.
 private final class LoopbackSchedulingEvidence: @unchecked Sendable {
     enum Phase: String { case admitted, scheduled, dispatch, completed, capture }
+    enum Transport: Hashable { case tcp, udp, other }
+    struct Endpoint: Hashable { let transport: Transport; let port: UInt16 }
     struct Send {
         let id: Int
-        let port: UInt16?
+        let endpoint: Endpoint?
         let sequence: UInt32?
         let byteCount: Int
     }
@@ -2620,23 +2640,32 @@ private final class LoopbackSchedulingEvidence: @unchecked Sendable {
         let send: Send?
         let phase: Phase
         let detail: UInt64
+        let captureIndex: Int?
     }
     private let lock = NSLock()
     private let capacity: Int
     private var events: [Event] = []
     private var nextSend = 0
     private var totalEvents = 0
-    private var peers: [UInt16: Int] = [:]
+    private var origin: UInt64?
+    private var dumped = false
+    private var peers: [Endpoint: Int] = [:]
     init(capacity: Int = 12_000) {
-        self.capacity = capacity
-        events.reserveCapacity(capacity)
+        self.capacity = max(1, capacity)
+        events.reserveCapacity(self.capacity)
     }
-    func register(port: UInt16, peer: Int) { lock.withLock { peers[port] = peer } }
+    func register(port: UInt16, transport: Transport, peer: Int) {
+        lock.withLock { peers[Endpoint(transport: transport, port: port)] = peer }
+    }
     func admitted(connection: NWConnection, audioSequence: UInt32?, byteCount: Int) -> Send {
-        let port: UInt16?
-        if case .hostPort(_, let value) = connection.endpoint { port = value.rawValue } else { port = nil }
+        let transport: Transport = connection.parameters.defaultProtocolStack.transportProtocol is NWProtocolUDP.Options
+            ? .udp : (connection.parameters.defaultProtocolStack.transportProtocol is NWProtocolTCP.Options ? .tcp : .other)
+        let endpoint: Endpoint?
+        if case .hostPort(_, let value) = connection.endpoint {
+            endpoint = .init(transport: transport, port: value.rawValue)
+        } else { endpoint = nil }
         return lock.withLock {
-            let send = Send(id: nextSend, port: port, sequence: audioSequence, byteCount: byteCount)
+            let send = Send(id: nextSend, endpoint: endpoint, sequence: audioSequence, byteCount: byteCount)
             nextSend += 1
             append(send: send, phase: .admitted, at: MonotonicClock.nowNanos(), detail: 0)
             return send
@@ -2648,28 +2677,35 @@ private final class LoopbackSchedulingEvidence: @unchecked Sendable {
     func capture(index: Int, deadline: UInt64, wokeAt: UInt64) {
         lock.withLock {
             // Send id is deliberately absent: capture emits four audio packets.
-            append(send: nil, phase: .capture, at: wokeAt, detail: deadline)
+            append(send: nil, phase: .capture, at: wokeAt, detail: deadline, captureIndex: index)
         }
     }
-    private func append(send: Send?, phase: Phase, at: UInt64, detail: UInt64) {
+    private func append(send: Send?, phase: Phase, at: UInt64, detail: UInt64, captureIndex: Int? = nil) {
+        if origin == nil { origin = at }
         defer { totalEvents += 1 }
-        guard events.count < capacity else { return }
-        events.append(Event(ordinal: totalEvents, time: at, send: send, phase: phase, detail: detail))
+        let event = Event(ordinal: totalEvents, time: at, send: send, phase: phase, detail: detail,
+            captureIndex: captureIndex)
+        if events.count < capacity { events.append(event) }
+        else { events[totalEvents % capacity] = event }
     }
     func lines() -> [String] {
-        let (retained, total, registered) = lock.withLock { (events, totalEvents, peers) }
-        let origin = retained.map(\.time).min() ?? 0
+        let (snapshot, total, registered, snapshotOrigin) = lock.withLock { (events, totalEvents, peers, self.origin ?? 0) }
+        let retained = snapshot.sorted { $0.ordinal < $1.ordinal }
         return ["retained=\(retained.count) dropped=\(total - retained.count); relative ns; detail=scheduled/capture deadline, dispatch lateness, completion error(0/1)"] + retained.map { event in
             let detail = event.phase == .scheduled || event.phase == .capture
-                ? (event.detail >= origin ? event.detail - origin : 0) : event.detail
-            let peer = event.send?.port.flatMap { registered[$0] } ?? -1
-            return "\(event.ordinal),\(event.time - origin),\(peer),\(event.send?.id ?? -1),\(event.send?.sequence.map(String.init) ?? "-"),\(event.send.map { $0.sequence == nil ? "control" : "audio" } ?? "capture"),\(event.send?.byteCount ?? 0),\(event.phase.rawValue),\(detail)"
+                ? (event.detail >= snapshotOrigin ? event.detail - snapshotOrigin : 0) : event.detail
+            let peer = event.send?.endpoint.flatMap { registered[$0] } ?? -1
+            return "\(event.ordinal),\(event.time >= snapshotOrigin ? event.time - snapshotOrigin : 0),\(peer),\(event.send?.id ?? -1),\(event.send?.sequence.map(String.init) ?? "-"),\(event.captureIndex ?? -1),\(event.send.map { $0.sequence == nil ? "control" : "audio" } ?? "capture"),\(event.send?.byteCount ?? 0),\(event.phase.rawValue),\(detail)"
         }
     }
+    func takeDump(label: String) -> [String]? {
+        guard lock.withLock({ if dumped { return false }; dumped = true; return true }) else { return nil }
+        return ["BEGIN loopback scheduling evidence: \(label); ordinal,time,peer,send,sequence,callback,kind,bytes,phase,detail"]
+            + lines() + ["END loopback scheduling evidence"]
+    }
     func dump(label: String) {
-        print("BEGIN loopback scheduling evidence: \(label); ordinal,time,peer,send,sequence,kind,bytes,phase,detail")
-        for line in lines() { print(line) }
-        print("END loopback scheduling evidence")
+        guard let lines = takeDump(label: label) else { return }
+        for line in lines { print(line) }
     }
 }
 

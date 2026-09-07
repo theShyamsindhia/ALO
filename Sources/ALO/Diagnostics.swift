@@ -127,7 +127,7 @@ struct SessionTimingDiagnostics: Sendable, Equatable {
 }
 
 struct DiagnosticRoomContext: Sendable, Equatable {
-    private static let driftWarningMilliseconds = Double(SynchronizedPlayer.hardResyncThresholdNanos) / 1_000_000
+    private static let driftWarningMilliseconds = SyncHealthTolerance.driftWarningMilliseconds
     enum Role: String, Sendable {
         case none
         case broadcaster
@@ -142,6 +142,10 @@ struct DiagnosticRoomContext: Sendable, Equatable {
     let audioIsRendering: Bool
     let hasBroadcaster: Bool
     let timing: SessionTimingDiagnostics?
+    var requiresRecovery = false
+    /// Only current, epoch-scoped peer telemetry from the control plane. Missing
+    /// entries must stay unknown; another participant's RTT is never a proxy.
+    var peerPlaybackTiming: [String: PeerPlaybackTiming] = [:]
 
     var result: DiagnosticCheckResult {
         guard isActive else {
@@ -152,12 +156,16 @@ struct DiagnosticRoomContext: Sendable, Equatable {
             )
         }
         var parts = ["\(role.rawValue.capitalized), \(remotePeerCount) remote peer\(remotePeerCount == 1 ? "" : "s")", syncLabel]
+        parts.append("Estimated software timing, not measured acoustic alignment; low RTT does not prove clock accuracy")
         if let receiver = timing?.receiver {
             if let roundTrip = receiver.roundTripMilliseconds {
                 parts.append("RTT \(Self.milliseconds(roundTrip))")
             }
             if let clockOffset = receiver.clockOffsetMilliseconds {
                 parts.append("clock offset \(Self.signedMilliseconds(clockOffset))")
+            }
+            if !SyncHealthTolerance.acceptsClockRTT(receiver.roundTripMilliseconds, recovering: requiresRecovery) {
+                parts.append("Clock confidence is limited: round-trip timing is missing or elevated")
             }
             parts.append("buffer \(Self.milliseconds(receiver.recommendedBufferMilliseconds))")
             parts.append("jitter \(Self.milliseconds(receiver.jitterMilliseconds))")
@@ -192,6 +200,12 @@ struct DiagnosticRoomContext: Sendable, Equatable {
             parts.append("resyncs \(host.totalResyncCount)")
             parts.append("channel timing changes \(host.roomTimingChangeCount)")
             for (index, listener) in host.listeners.enumerated() {
+                let peerRTT = peerPlaybackTiming[listener.peerID]?.roundTripMilliseconds
+                if let peerRTT, SyncHealthTolerance.acceptsClockRTT(peerRTT, recovering: requiresRecovery) {
+                    parts.append("listener \(index + 1) clock RTT \(Self.milliseconds(peerRTT))")
+                } else {
+                    parts.append("listener \(index + 1) clock confidence is limited: round-trip timing is missing or elevated")
+                }
                 let age = listener.reportAgeMilliseconds.map(Self.milliseconds) ?? "not reported"
                 parts.append("listener \(index + 1): network \(Self.milliseconds(listener.recommendedBufferMilliseconds)), hardware floor \(Self.milliseconds(listener.hardwareFloorMilliseconds)), network vote \(listener.isTimingEligible ? "eligible" : "late join"), report age \(age)")
                 parts.append("audio packets: \(listener.audioSent)/\(listener.audioEnqueued) submitted, wait expired \(listener.audioExpiredWait), capture expired \(listener.audioExpiredAge), local-send budget rejected \(listener.audioAdmissionRejected), congestion replaced \(listener.audioReplaced), transition discarded \(listener.audioDiscardedBoundary)")
@@ -220,8 +234,9 @@ struct DiagnosticRoomContext: Sendable, Equatable {
         // a recovered stream, and a static screen is not inferred to be stalled.
         var ready = hasBroadcaster
         if let receiver = timing?.receiver {
-            ready = ready && audioIsRendering && receiver.roundTripMilliseconds != nil
-                && Self.isFreshDrift(receiver.currentDriftMilliseconds, age: receiver.driftMeasurementAgeMilliseconds)
+            ready = ready && audioIsRendering
+                && SyncHealthTolerance.acceptsClockRTT(receiver.roundTripMilliseconds, recovering: requiresRecovery)
+                && SyncHealthTolerance.acceptsDrift(receiver.currentDriftMilliseconds, age: receiver.driftMeasurementAgeMilliseconds, recovering: requiresRecovery)
                 && receiver.latenessMilliseconds < Self.driftWarningMilliseconds
             if let video = receiver.video, Self.videoIsCurrentlyLate(video) { ready = false }
             if receiver.videoEnabled, receiver.video?.latestHandoffAtNanos == nil { ready = false }
@@ -237,7 +252,8 @@ struct DiagnosticRoomContext: Sendable, Equatable {
                     && host.listeners.allSatisfy { listener in
                         guard let reportAge = listener.playbackReportAgeMilliseconds,
                               reportAge.isFinite, reportAge >= 0, reportAge <= 2_500 else { return false }
-                        return Self.isFreshDrift(listener.driftMilliseconds, age: listener.driftSampleAgeMilliseconds)
+                        return SyncHealthTolerance.acceptsDrift(listener.driftMilliseconds, age: listener.driftSampleAgeMilliseconds, recovering: requiresRecovery)
+                            && SyncHealthTolerance.acceptsClockRTT(peerPlaybackTiming[listener.peerID]?.roundTripMilliseconds, recovering: requiresRecovery)
                             && (!host.videoEnabled || Self.remoteScreenIsVerified(listener.screenTiming,
                                 reportAgeNanos: UInt64(reportAge * 1_000_000)))
                     }
@@ -249,12 +265,6 @@ struct DiagnosticRoomContext: Sendable, Equatable {
             detail: parts.joined(separator: " · "),
             checkedAt: Date()
         )
-    }
-
-    private static func isFreshDrift(_ drift: Double?, age: Double?) -> Bool {
-        guard let drift, let age else { return false }
-        return drift.isFinite && drift >= 0 && drift < driftWarningMilliseconds
-            && age.isFinite && age >= 0 && age <= 500
     }
 
     private static func videoIsCurrentlyLate(_ video: VideoPresentationTimingSnapshot) -> Bool {
