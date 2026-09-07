@@ -159,10 +159,12 @@ final class Receiver {
         self.player = try SynchronizedPlayer(
             audioOutput: audioOutput,
             outputDeviceUID: outputDeviceUID,
-            outputDeviceID: outputDeviceID
-        ) { active in
-            playbackActivityRelay.handler(active)
-        }
+            outputDeviceID: outputDeviceID,
+            playbackActivityChanged: { active in playbackActivityRelay.handler(active) },
+            // This legacy owner polls every 50 ms, too slowly to hold a 20 ms
+            // PCM tail safely. Secure playback owners declare faster cadences.
+            maintenanceIntervalNanos: nil
+        )
         self.videoDecoder = VideoDecoder(imageHandler: videoHandler ?? { _ in })
         playbackActivityRelay.handler = { [weak self] active in
             guard let self else { return }

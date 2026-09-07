@@ -30,6 +30,9 @@ struct ExpiredConcealmentTests {
         let seededPackets = missingPackets > 10 ? 1 : 2
         for index in 0..<seededPackets { player.accept(packet(startSequence &+ UInt32(index))) }
         try #require(player.expectedSequenceForTesting == startSequence &+ UInt32(seededPackets))
+        player.maintainSync()
+        try #require(player.pendingPlaybackPacketCount == 0)
+        try #require(player.outstandingPlaybackBufferCount == seededPackets)
         // Same offline start adaptation as ManualRenderTimingProbeTests: retain
         // the production anchor/admission state, replace only the unsupported
         // host-time native start with a real sample-time player start.
@@ -78,6 +81,7 @@ struct ExpiredConcealmentTests {
         }
         let beforeAccept = fixtureNow
         player.accept(packet(nextSequence, marker: true))
+        player.maintainSync()
         let afterAccept = fixtureNow
         try #require(player.expectedSequenceForTesting == nextSequence &+ 1)
         if missingPackets > 10 {

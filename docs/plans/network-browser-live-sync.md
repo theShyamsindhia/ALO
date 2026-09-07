@@ -594,6 +594,31 @@ marker at frame 48 relative to its new anchor; queued-prefix control retained
 marker 528 relative to source 480 without a reset. This is a targeted native
 offline result, not a clean full-CI run or successful paired acoustic test.
 
+This addition covers exact equality only; the previous strict comparison already
+retired positions beyond the boundary. Equality occurs frequently in the
+240-frame offline fixture, but its frequency in production depends on the route,
+native render cadence and playback rate. No universal IO-quantum or acoustic
+coverage claim follows from this test.
+
+The external review of 8b093f0 completed with CodeRabbit clean and Claude
+follow-ups. Its proposed holdover-fixture regression was not reproduced in one
+unchanged run of both 20/100 ms cases (`holdover-reproduction.log`): rate returned
+to 1, resync stayed zero, and strict assertions passed. This is not proof that
+every scheduler cadence is safe; the fixture was not changed without runtime RED.
+The actual incompatible-frame-gap refusal test passed before any production
+change, confirming `concealmentUnavailable` dispatch and fresh PCM recovery.
+The operator-facing `native-source-position-reached` label was regression-tested
+against the prior `passed` text, and all three comparison call sites now specify
+their strictness explicitly. Allocation/refusal test messages distinguish queued
+prefix playback from newly anchored recovery. A separate silence-allocation
+counter was rejected as optional granularity: generated silence is still
+admitted content and the generic admission-failure cause is deliberately neutral.
+The `continuity-boundary-combined-green.log` run passed 59 tests in 10 suites,
+including all requested boundary/label/refusal cases and the separately owned
+health-diagnostic changes. The known sustained-enqueue-cost RED was explicitly
+excluded; this targeted result is not a claim that the entire project or live
+playback is green.
+
 ### Deferred native-window implementation notes
 
 Deployment update: Raj completed normal Keychain approval; the installed `6f`
@@ -620,3 +645,53 @@ approval, members, identity-export and channel actions. Verify transitions betwe
 onboarding, browser, joining, failure and live playback, including reopen with a
 pending approval and a minimum-size/long-label render. No UI layout changes were
 made during this inspection; sync remains the prerequisite.
+
+### Bounded native PCM coalescing (validation in progress)
+
+The sustained enqueue-cost native PCM regression motivates a bounded four-packet,
+960-frame cohort after the immediate startup packet. Each packet still passes
+source/capture validation and DSP separately. Held PCM counts as pending original
+packets; one unique native completion ticket carries its original packet weight,
+and duplicate or retired-generation callbacks cannot release another ticket.
+The callback remains `.dataPlayedBack`, including audible predecessor retirement.
+
+Secure receiver and host declare their existing 20 ms and 5 ms maintenance
+cadences from the same constants as their timers. Real maintenance anticipates
+the next poll and flushes partial tails even after the source stops sending.
+The legacy 50 ms path explicitly disables holding; its timer is unchanged.
+Fresh flush time is read after possibly blocking native work. Headroom determines
+when holding must end; already-active positive-deadline PCM may be submitted
+immediately inside that headroom, while startup retains its stricter gate.
+Nonpositive deadlines and reached source positions retire the mapping. The
+post-enqueue elapsed window starts at actual flush admission, excluding deliberate
+holding, and retains the strict whole-buffer-end native check.
+
+Accepted per-packet timestamp jitter does not stretch the merged PCM duration:
+the cohort end deadline is its first deadline plus total source-frame duration.
+Native offline fixtures flush through actual maintenance before replacing a
+known startup prefix or asserting a held tail's result; they verify zero held
+packets and exact original-packet credits before prefix replacement. Their PCM
+marker tolerances are unchanged. These are controlled native-output tests, not
+proof of acoustic alignment, actual engine-lock latency, or a clean paired run.
+
+The first combined build exposed a separate runtime safety failure before the
+native batching oracles: offline startup returned a nonnil `AVAudioTime` with
+both validity flags false, and `maintainSync` passed it to native player-time
+conversion, which raised an uncaught AVFoundation exception. Preserved logs:
+`/tmp/alo-sustained-enqueue.eROFtT/cohort-combined-first.log` and isolated native
+runs alongside it. Conversion now checks for at least one valid clock flag;
+invalid clocks remain unavailable. This timestamp shape was observed in the
+offline tests, not the installed live app, and is not an established cause of
+the reported live audio interruptions. The pure cohort checks passed separately;
+the health suite produced its 11 expected review-regression assertions.
+
+Combined follow-up validation passed 69 tests in 15 suites (293.74 s build,
+2.338 s runtime), including the native batching workload, prior boundary/loss/
+enqueue-race controls, clock validity, tail retirement and health regressions.
+Log: `/tmp/alo-sustained-enqueue.eROFtT/cohort-combined-second.log`.
+With the unchanged simulated 7.5 ms per-enqueue cost, production submitted 160
+packets in 40 native calls, matching the reference's marker at frame 12048,
+38520 rendered frames and zero recovery; the old unbatched runtime RED remains
+preserved. Exact known-prefix and fresh-recovery marker bounds were not widened.
+This does not cover every native contention pattern or prove live acoustic sync;
+external review, CI and paired playback remain required before a release claim.

@@ -4,13 +4,20 @@ import Testing
 @testable import ALO
 
 struct RenderObservationTests {
+    @Test func nativeBoundaryReasonIncludesReachedEquality() throws {
+        var counts = PlaybackContentRecoveryDiagnostics()
+        counts.record(.nativeSourcePositionReached)
+        var recorder = RenderObservationRecorder()
+        recorder.record(.init(observedAtNanos: 1, contentRecovery: counts))
+        #expect(try #require(recorder.snapshot(at: 1)).detail.contains("last=native-source-position-reached"))
+    }
     @Test func concealmentReasonDoesNotClaimAnUnprovenDiscontinuity() {
         #expect(PlaybackContentRecoveryReason.concealmentUnavailable.rawValue == "concealment-unavailable")
     }
     @Test func contentRecoveryReasonsAreDistinctCumulativeAndExplicitlyUnavailable() throws {
         var counts = PlaybackContentRecoveryDiagnostics()
         counts.record(.concealmentUnavailable)
-        counts.record(.nativeSourcePositionPassed)
+        counts.record(.nativeSourcePositionReached)
         counts.record(.enqueueWindowPassed)
         counts.record(.contentAdmissionDropped)
         #expect(counts.concealment == 1 && counts.nativePosition == 1 && counts.enqueueWindow == 1)

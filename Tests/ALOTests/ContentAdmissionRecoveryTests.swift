@@ -57,6 +57,7 @@ struct ContentAdmissionRecoveryTests {
             samples: [Int16](repeating: 0, count: 480))
         try #require(AudioPacket(data: dropped.encoded()) == dropped)
         player.accept(dropped)
+        player.maintainSync()
         #expect(player.expectedSequenceForTesting == 2)
         #expect(player.syncReport().resyncCount == 1,
             "Dropping active PCM must retire its source/sample mapping, not compress the next append")
@@ -84,8 +85,11 @@ struct ContentAdmissionRecoveryTests {
         #expect(player.renderObservation?.sample.contentRecovery?.admissionDropped == 1)
     }
 
-    @Test(arguments: [false, true])
-    func largeOutputHeadroomAdmitsConcealmentBeforeHardwareLead(failConcealmentAllocation: Bool) async throws {
+    @Test(arguments: [0, 1, 2])
+    func largeOutputHeadroomAdmitsConcealmentBeforeHardwareLead(mode: Int) async throws {
+        let failConcealmentAllocation = mode == 1
+        let refuseFrameGap = mode == 2
+        let needsRecovery = mode != 0
         var fixtureNow = MonotonicClock.nowNanos()
         var allocationFails = false
         let output = RoomAudioOutputEngine()
@@ -104,6 +108,9 @@ struct ContentAdmissionRecoveryTests {
         player.accept(AudioPacket(sequence: 1, frameIndex: 240, captureTimeNanos: capture + 5_000_000,
             samples: [Int16](repeating: 0, count: 480)))
         try #require(player.expectedSequenceForTesting == 2)
+        player.maintainSync()
+        try #require(player.pendingPlaybackPacketCount == 0)
+        try #require(player.outstandingPlaybackBufferCount == 2)
         node.stop()
         let seed = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 480))
         seed.frameLength = 480
@@ -122,10 +129,13 @@ struct ContentAdmissionRecoveryTests {
         try #require(lead > 50_000_000 && lead < player.renderSchedulingHeadroomForTimingNanos,
             "Fixture must exercise admission outside old 50ms window but inside measured hardware lead")
         allocationFails = failConcealmentAllocation
-        player.accept(AudioPacket(sequence: 3, frameIndex: 720, captureTimeNanos: capture + 15_000_000,
+        player.accept(AudioPacket(sequence: 3, frameIndex: refuseFrameGap ? 721 : 720, captureTimeNanos: capture + 15_000_000,
             samples: [Int16](repeating: 24_000, count: 480)))
-        #expect(player.expectedSequenceForTesting == 4, "High-headroom route must not defer timely concealment")
-        if failConcealmentAllocation {
+        player.maintainSync()
+        #expect(player.expectedSequenceForTesting == 4, needsRecovery
+            ? "The rejected timeline must retire and consume the unusable successor"
+            : "High-headroom route must admit timely concealment")
+        if needsRecovery {
             #expect(player.syncReport().resyncCount == 1)
             allocationFails = false
             player.accept(AudioPacket(sequence: 4, frameIndex: 960, captureTimeNanos: fixtureNow,
@@ -140,13 +150,15 @@ struct ContentAdmissionRecoveryTests {
                 marker = block * 240 + index
             }
         }
-        let expected = failConcealmentAllocation ? 0 : 480
+        let expected = needsRecovery ? 0 : 480
         #expect(marker.map { (expected...expected + 96).contains($0) } == true,
-            "Known remaining seed and one missing packet of silence precede the real marker")
-        #expect(player.syncReport().resyncCount == (failConcealmentAllocation ? 1 : 0))
+            needsRecovery ? "Only fresh PCM follows retirement, at its new anchor"
+                : "Known remaining seed and one missing packet of silence precede the real marker")
+        #expect(player.syncReport().resyncCount == (needsRecovery ? 1 : 0))
         player.maintainSync()
         let recovery = try #require(player.renderObservation?.sample.contentRecovery)
         #expect(recovery.admissionDropped == (failConcealmentAllocation ? 1 : 0))
-        #expect(recovery.concealment == 0)
+        #expect(recovery.concealment == (refuseFrameGap ? 1 : 0))
+        if refuseFrameGap { #expect(recovery.lastReason == .concealmentUnavailable) }
     }
 }

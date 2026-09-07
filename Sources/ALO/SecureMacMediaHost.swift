@@ -507,6 +507,8 @@ final class SecureMacMediaHost {
     }
 
     final class LocalRenderer: @unchecked Sendable {
+        // Keep the actual timer and the player's tail-flush budget coupled.
+        private static let playbackMaintenanceMilliseconds = 5
         private let queue: DispatchQueue
         private let nowNanos: () -> UInt64
         private let lock = NSLock()
@@ -528,7 +530,8 @@ final class SecureMacMediaHost {
         }
         init(audioOutput: RoomAudioOutputEngine, timeline: CapturedMediaTimeline, epoch: UInt64,
              timing: @escaping (UInt64) -> Void) throws {
-            player = try SecureMacPlaybackTimeline(audioOutput: audioOutput)
+            player = try SecureMacPlaybackTimeline(audioOutput: audioOutput,
+                                                   maintenanceIntervalNanos: UInt64(Self.playbackMaintenanceMilliseconds) * 1_000_000)
             queue = DispatchQueue(label: "alo.secure-host.local-playback", qos: .userInteractive)
             nowNanos = MonotonicClock.nowNanos
             self.timeline = timeline
@@ -549,7 +552,7 @@ final class SecureMacMediaHost {
                 guard !self.lock.withLock({ self.stopped }) else { return }
                 self.player.clockOffsetNanos = 0
                 let timer = DispatchSource.makeTimerSource(queue: self.queue)
-                timer.schedule(deadline: .now(), repeating: .milliseconds(5))
+                timer.schedule(deadline: .now(), repeating: .milliseconds(Self.playbackMaintenanceMilliseconds))
                 timer.setEventHandler { [weak self] in self?.drain() }
                 self.timer = timer; timer.resume()
             }

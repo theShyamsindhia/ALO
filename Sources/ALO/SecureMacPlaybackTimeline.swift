@@ -97,9 +97,14 @@ final class SecureMacPlaybackTimeline {
         return Int((duration + packetDuration - 1) / packetDuration)
     }()
 
-    convenience init(audioOutput: RoomAudioOutputEngine, playbackActivity: @escaping (Bool) -> Void = { _ in }) throws {
+    /// The owner must service maintenance at this cadence; nil disables holding
+    /// PCM between calls when the owner cannot provide a bounded tail flush.
+    convenience init(audioOutput: RoomAudioOutputEngine,
+                     maintenanceIntervalNanos: UInt64? = 20_000_000,
+                     playbackActivity: @escaping (Bool) -> Void = { _ in }) throws {
         try self.init(makePlayer: { activity in
-            try SynchronizedPlayer(audioOutput: audioOutput, playbackActivityChanged: activity)
+            try SynchronizedPlayer(audioOutput: audioOutput, playbackActivityChanged: activity,
+                                   maintenanceIntervalNanos: maintenanceIntervalNanos)
         }, playbackActivity: playbackActivity)
     }
 

@@ -147,6 +147,7 @@ struct DiagnosticRoomContext: Sendable, Equatable {
     let hasBroadcaster: Bool
     let timing: SessionTimingDiagnostics?
     var recovery = SyncRecoveryState()
+    var observedAtNanos: UInt64 = MonotonicClock.nowNanos()
     /// Only current, epoch-scoped peer telemetry from the control plane. Missing
     /// entries must stay unknown; another participant's RTT is never a proxy.
     var peerPlaybackTiming: [String: PeerPlaybackTiming] = [:]
@@ -175,12 +176,37 @@ struct DiagnosticRoomContext: Sendable, Equatable {
         }
         var receiverSignalsReady = false
         var allListenerSignalsReady = true
+        if timing?.receiver == nil {
+            _ = nextRecovery.observeContinuity(late: nil, resync: nil, fresh: false,
+                participant: .localRenderer, at: observedAtNanos)
+            if nextRecovery.hasContinuityWarning(for: .localRenderer) {
+                parts.append("Local " + Self.continuityDetail(interrupted: true))
+            }
+        }
+        if role == .broadcaster, timing?.host == nil {
+            // An unavailable subset is not evidence that its peers departed.
+            // Preserve their incident/baseline but exclude this time from recovery.
+            nextRecovery.invalidateContinuityFreshness(excluding: [.localRenderer])
+            if nextRecovery.hasPeerContinuityWarning {
+                parts.append("A listener's " + Self.continuityDetail(interrupted: true))
+            }
+        }
         parts.append("Estimated software timing, not measured acoustic alignment; low RTT does not prove clock accuracy")
         if let receiver = timing?.receiver {
             let clockReady = nextRecovery.observeClockRTT(receiver.roundTripMilliseconds, participant: SyncRecoveryState.localParticipant)
             let driftReady = nextRecovery.observeDrift(receiver.currentDriftMilliseconds,
                 age: receiver.driftMeasurementAgeMilliseconds, participant: SyncRecoveryState.localParticipant)
-            receiverSignalsReady = clockReady && driftReady
+            // All receiver producers read counters on their playback queue,
+            // including direct diagnostic reads. Live monitoring separately
+            // rejects whole snapshots older than 500ms. A resync clears drift,
+            // not the freshness of the counters in that same snapshot.
+            let continuityReady = nextRecovery.observeContinuity(late: receiver.latePacketCount,
+                resync: receiver.resyncCount, fresh: true,
+                participant: .localRenderer, at: observedAtNanos)
+            receiverSignalsReady = clockReady && driftReady && continuityReady
+            if !continuityReady {
+                parts.append(Self.continuityDetail(interrupted: nextRecovery.hasContinuityWarning(for: .localRenderer)))
+            }
             if let roundTrip = receiver.roundTripMilliseconds {
                 parts.append("RTT \(Self.milliseconds(roundTrip))")
             }
@@ -242,7 +268,14 @@ struct DiagnosticRoomContext: Sendable, Equatable {
                 } ?? false
                 let driftReady = unique && nextRecovery.observeDrift(reportIsFresh ? listener.driftMilliseconds : nil,
                     age: listener.driftSampleAgeMilliseconds, participant: .peer(listener.peerID))
-                allListenerSignalsReady = clockReady && driftReady && allListenerSignalsReady
+                let continuityReady = nextRecovery.observeContinuity(late: listener.latePacketCount,
+                    resync: listener.resyncCount, fresh: unique && reportIsFresh,
+                    participant: .peer(listener.peerID), at: observedAtNanos)
+                allListenerSignalsReady = clockReady && driftReady && continuityReady && allListenerSignalsReady
+                if !continuityReady {
+                    parts.append("listener \(index + 1) " + Self.continuityDetail(
+                        interrupted: nextRecovery.hasContinuityWarning(for: .peer(listener.peerID))))
+                }
                 if let peerRTT, clockReady {
                     parts.append("listener \(index + 1) clock RTT \(Self.milliseconds(peerRTT))")
                 } else {
@@ -278,7 +311,11 @@ struct DiagnosticRoomContext: Sendable, Equatable {
         // A connected clock is not evidence of timely rendering. Unknown or
         // stale samples remain a warning; historical counters alone do not fail
         // a recovered stream, and a static screen is not inferred to be stalled.
-        var ready = hasBroadcaster
+        // No local telemetry has historically been allowed for broadcaster-only
+        // operation. But a known local incident cannot become healthy merely
+        // because its telemetry disappeared before recovery was observed.
+        var ready = hasBroadcaster && !(timing?.receiver == nil
+            && nextRecovery.hasContinuityWarning(for: .localRenderer))
         if let receiver = timing?.receiver {
             ready = ready && audioIsRendering
                 && receiverSignalsReady
@@ -310,6 +347,12 @@ struct DiagnosticRoomContext: Sendable, Equatable {
             checkedAt: Date(),
             syncRecovery: nextRecovery
         )
+    }
+
+    private static func continuityDetail(interrupted: Bool) -> String {
+        interrupted
+            ? "playback was recently interrupted; waiting for 10 seconds of fresh reports without new playback interruptions"
+            : "playback continuity is not currently verified"
     }
 
     private static func videoIsCurrentlyLate(_ video: VideoPresentationTimingSnapshot) -> Bool {

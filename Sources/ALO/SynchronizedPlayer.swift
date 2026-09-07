@@ -162,10 +162,15 @@ final class SynchronizedPlayer {
     private let beforeNativeSchedule: (() -> Void)?
     private let failBufferAllocation: (() -> Bool)?
     private let nowNanos: () -> UInt64
+    private let maintenanceIntervalNanos: UInt64?
+    private var heldCohort: PlaybackPCMCohort?
+    private var admittedContentEnd: (frame: UInt64, render: UInt64)? {
+        heldCohort.map { ($0.endFrame, $0.endRenderNanos) } ?? scheduledContentEnd
+    }
 
     /// Includes hardware-buffered PCM, not just the receive-side jitter queue.
     var outstandingPlaybackBufferCount: Int { scheduledCompletions.count }
-    var pendingPlaybackPacketCount: Int { pending.count }
+    var pendingPlaybackPacketCount: Int { pending.count + (heldCohort?.packetCount ?? 0) }
 
     var expectedSequenceForTesting: UInt32? { expectedSequence }
     var outputLatencyForTimingNanos: UInt64 { outputLatencyNanos }
@@ -185,12 +190,17 @@ final class SynchronizedPlayer {
         outputTimingMeasurement: (() -> OutputTimingMeasurement)? = nil,
         beforeNativeSchedule: (() -> Void)? = nil,
         failBufferAllocation: (() -> Bool)? = nil,
-        nowNanos: @escaping () -> UInt64 = MonotonicClock.nowNanos
+        nowNanos: @escaping () -> UInt64 = MonotonicClock.nowNanos,
+        maintenanceIntervalNanos: UInt64? = 20_000_000
     ) throws {
         self.audioOutput = audioOutput
         self.beforeNativeSchedule = beforeNativeSchedule
         self.failBufferAllocation = failBufferAllocation
         self.nowNanos = nowNanos
+        // A path without a <=20ms maintenance guarantee must not retain tails.
+        self.maintenanceIntervalNanos = maintenanceIntervalNanos.flatMap {
+            $0 > 0 && $0 <= PlaybackPCMCohort.maximumHoldNanos ? $0 : nil
+        }
         self.outputTimingMeasurement = outputTimingMeasurement
         self.liveDJAudio = liveDJAudio
         self.playbackActivityChanged = playbackActivityChanged
@@ -285,6 +295,9 @@ final class SynchronizedPlayer {
         applyPendingAudioEngineConfigurationChange()
         refreshOutputTimingIfNeeded(nowNanos: now)
         drain()
+        // Refresh/queue work can block. This helper reads a fresh clock rather
+        // than reusing the poll timestamp captured before that work.
+        flushCohortIfDue(anticipating: maintenanceIntervalNanos ?? 0)
         updatePlaybackActivity(nowNanos: now)
         observation.reason = .notStarted
         guard hasStarted else {
@@ -293,7 +306,9 @@ final class SynchronizedPlayer {
         }
 
         let renderTime = player.lastRenderTime
-        let playerTime = renderTime.flatMap { player.playerTime(forNodeTime: $0) }
+        let playerTime = renderTime.flatMap {
+            Self.hasUsableNodeClock($0) ? player.playerTime(forNodeTime: $0) : nil
+        }
         observation.observedAtNanos = nowNanos()
         observation.outputBufferMilliseconds = outputBufferMilliseconds
         observation.outputSafetyMilliseconds = outputSafetyMilliseconds
@@ -372,6 +387,7 @@ final class SynchronizedPlayer {
 
     private func drain() {
         guard let offset = clockOffsetNanos else { return }
+        flushCohortIfDue(anticipating: 0)
         var concealmentBudget = PlaybackConcealmentPolicy.maximumPacketsPerDrain
         var concealmentWindowAdmitted = false
 
@@ -396,7 +412,7 @@ final class SynchronizedPlayer {
                     // Covered duplicate PCM is harmless; an unqueued new tail
                     // cannot be skipped while retaining the source/sample map.
                     let end = packet.frameIndex.addingReportingOverflow(UInt64(packet.frameCount))
-                    if end.overflow || (scheduledContentEnd.map({ end.partialValue > $0.frame }) ?? true) {
+                    if end.overflow || (admittedContentEnd.map({ end.partialValue > $0.frame }) ?? true) {
                         hardResynchronize(reason: .contentAdmissionDropped)
                     }
                     expectedSequence = sequence &+ 1
@@ -441,8 +457,8 @@ final class SynchronizedPlayer {
             // A player clock can advance through an empty native queue. A
             // source-contiguous packet is not safe to append once its sample
             // position is reached, even below the 100ms late threshold.
-            if hasStarted, nativeRenderHasReachedSourceFrame(packet.frameIndex) {
-                hardResynchronize(reason: .nativeSourcePositionPassed)
+            if maintenanceIntervalNanos == nil, hasStarted, nativeRenderHasReachedSourceFrame(packet.frameIndex, strictlyPast: false) {
+                hardResynchronize(reason: .nativeSourcePositionReached)
             }
 
             if !hasStarted, desiredRenderNanos <= now + renderSchedulingHeadroomNanos {
@@ -458,6 +474,12 @@ final class SynchronizedPlayer {
             // timestamp guard also excludes a late predecessor from new history.
             let djSamples = liveDJAudio.process(packet.samples, stage: .listening,
                                                        captureTimeNanos: packet.captureTimeNanos)
+            if hasStarted, maintenanceIntervalNanos != nil {
+                _ = holdPCM(djSamples.count == packet.samples.count ? djSamples : packet.samples,
+                    sourceFrame: packet.frameIndex, renderNanos: desiredRenderNanos, offset: offset)
+                expectedSequence = sequence &+ 1
+                continue
+            }
             guard let buffer = makeBuffer(djSamples.count == packet.samples.count ? djSamples : packet.samples) else {
                 if hasStarted { hardResynchronize(reason: .contentAdmissionDropped) }
                 expectedSequence = sequence &+ 1
@@ -1021,15 +1043,23 @@ final class SynchronizedPlayer {
     }
 
     private func stopPlayerClock() {
+        heldCohort = nil
         scheduledContentEnd = nil
         renderObservationRecorder.resetSampleTimeContinuity()
         player.stop()
     }
 
-    private func nativeRenderHasReachedSourceFrame(_ frame: UInt64, strictlyPast: Bool = false) -> Bool {
+    static func hasUsableNodeClock(_ time: AVAudioTime) -> Bool {
+        // AVAudioPlayerNode throws an Objective-C exception for a nonnil time
+        // with neither validity flag. Offline startup can expose this shape;
+        // absence of a usable clock must remain unavailable, not terminate.
+        time.isSampleTimeValid || time.isHostTimeValid
+    }
+
+    private func nativeRenderHasReachedSourceFrame(_ frame: UInt64, strictlyPast: Bool) -> Bool {
         guard let anchorFrameIndex, frame >= anchorFrameIndex,
               let render = player.lastRenderTime,
-              render.isSampleTimeValid || render.isHostTimeValid,
+              Self.hasUsableNodeClock(render),
               let sample = player.playerTime(forNodeTime: render), sample.isSampleTimeValid,
               sample.sampleTime >= 0, sample.sampleRate == Double(AudioPacket.sampleRate) else { return false }
         let position = UInt64(sample.sampleTime)
@@ -1069,24 +1099,40 @@ final class SynchronizedPlayer {
         // revive an expired native interval. Reserve at least measured enqueue
         // headroom from the FIRST missing frame; large-output routes trade a
         // shorter reorder wait for timely native admission.
-        let missingRender = scheduledContentEnd?.render
-        let nativePassed = scheduledContentEnd.map { nativeRenderHasReachedSourceFrame($0.frame) } ?? false
+        let contentEnd = admittedContentEnd
+        let missingRender = contentEnd?.render
+        let nativePassed = maintenanceIntervalNanos == nil
+            && (contentEnd.map { nativeRenderHasReachedSourceFrame($0.frame, strictlyPast: false) } ?? false)
         let admissionWindow = max(50_000_000, renderSchedulingHeadroomNanos)
         if !windowAdmitted, !nativePassed, let missingRender, missingRender > now, missingRender - now > admissionWindow { return false }
         guard !nativePassed, budget > 0, PlaybackConcealmentPolicy.canFill(expectedSequence: sequence, nextSequence: next.sequence,
-            sourceEndFrame: scheduledContentEnd?.frame, nextFrame: next.frameIndex,
+            sourceEndFrame: contentEnd?.frame, nextFrame: next.frameIndex,
             missingRenderNanos: missingRender, nowNanos: now) else {
-            hardResynchronize(reason: nativePassed ? .nativeSourcePositionPassed : .concealmentUnavailable)
+            let firstUnscheduled = heldCohort?.sourceFrame ?? contentEnd?.frame
+            let reached = nativePassed || (firstUnscheduled.map {
+                nativeRenderHasReachedSourceFrame($0, strictlyPast: false)
+            } ?? false)
+            hardResynchronize(reason: reached ? .nativeSourcePositionReached : .concealmentUnavailable)
             expectedSequence = next.sequence
             return true
         }
         // Reserve one slot for the real successor as well as every silence.
-        guard scheduledCompletions.count < SecureMacPlaybackTimeline.maximumScheduledPackets - 1 else { return false }
+        guard scheduledCompletions.count + pendingPlaybackPacketCount < SecureMacPlaybackTimeline.maximumScheduledPackets else { return false }
 
         let silence = [Int16](
             repeating: 0,
             count: Int(AudioPacket.framesPerPacket) * Int(AudioPacket.channelCount)
         )
+        if maintenanceIntervalNanos != nil, let contentEnd, let offset = clockOffsetNanos {
+            guard holdPCM(silence, sourceFrame: contentEnd.frame, renderNanos: contentEnd.render, offset: offset) else {
+                expectedSequence = next.sequence
+                return true
+            }
+            budget -= 1
+            windowAdmitted = true
+            expectedSequence = sequence &+ 1
+            return true
+        }
         if let buffer = makeBuffer(silence) {
             guard scheduleTrackedBuffer(buffer, sourceFrame: scheduledContentEnd?.frame, admittedAtNanos: now) else {
                 expectedSequence = next.sequence
@@ -1115,6 +1161,77 @@ final class SynchronizedPlayer {
         return pending[sequence]
     }
 
+    /// Startup is handled immediately by drain. Only subsequent, individually
+    /// validated PCM enters this bounded hold; DSP is never run on merged data.
+    private func holdPCM(_ samples: [Int16], sourceFrame: UInt64, renderNanos: UInt64, offset: Int64) -> Bool {
+        guard let next = PlaybackPCMCohort(samples: samples, sourceFrame: sourceFrame,
+            renderNanos: renderNanos, heldAtNanos: nowNanos(),
+            context: .init(offset: offset, targetLatency: targetLatencyNanos, outputLatency: outputLatencyNanos)) else {
+            hardResynchronize(reason: .contentAdmissionDropped)
+            return false
+        }
+        if var held = heldCohort {
+            if held.append(next) {
+                heldCohort = held
+            } else {
+                guard flushHeldCohort() else { return false }
+                guard scheduledContentEnd?.frame == sourceFrame else {
+                    hardResynchronize(reason: .contentAdmissionDropped)
+                    return false
+                }
+                heldCohort = next
+            }
+        } else {
+            guard scheduledContentEnd?.frame == sourceFrame else {
+                hardResynchronize(reason: .contentAdmissionDropped)
+                return false
+            }
+            heldCohort = next
+        }
+        if heldCohort?.isFull == true { return flushHeldCohort() }
+        return flushCohortIfDue(anticipating: 0)
+    }
+
+    @discardableResult
+    private func flushCohortIfDue(anticipating interval: UInt64) -> Bool {
+        guard let held = heldCohort else { return true }
+        let now = nowNanos()
+        let horizon = now.addingReportingOverflow(interval)
+        if horizon.overflow || horizon.partialValue >= held.flushDeadline(headroomNanos: renderSchedulingHeadroomNanos) {
+            return flushHeldCohort()
+        }
+        return true
+    }
+
+    private func flushHeldCohort() -> Bool {
+        guard let held = heldCohort else { return true }
+        // Holding is intentional. The post-enqueue stall window starts at
+        // actual flush admission, including native query/allocation, not arrival.
+        let flushBegan = nowNanos()
+        if nativeRenderHasReachedSourceFrame(held.sourceFrame, strictlyPast: false) {
+            hardResynchronize(reason: .nativeSourcePositionReached)
+            return false
+        }
+        let now = nowNanos() // The native query may itself wait on the engine.
+        // Headroom decides when to stop holding, not whether already-active
+        // PCM may be submitted immediately. Preserve positive-deadline active
+        // admission; startup retains its stricter headroom gate.
+        guard held.firstRenderNanos > now else {
+            hardResynchronize(reason: .contentAdmissionDropped)
+            return false
+        }
+        guard let buffer = makeBuffer(held.samples) else {
+            hardResynchronize(reason: .contentAdmissionDropped)
+            return false
+        }
+        // Transfer held credits to one native ticket on the same executor.
+        heldCohort = nil
+        guard scheduleTrackedBuffer(buffer, sourceFrame: held.sourceFrame,
+            admittedAtNanos: flushBegan, packetCount: held.packetCount) else { return false }
+        scheduledContentEnd = (held.endFrame, held.endRenderNanos)
+        return true
+    }
+
     private func makeBuffer(_ samples: [Int16]) -> AVAudioPCMBuffer? {
         if failBufferAllocation?() == true { return nil }
         let frames = samples.count / Int(AudioPacket.channelCount)
@@ -1132,9 +1249,9 @@ final class SynchronizedPlayer {
         return buffer
     }
 
-    private func scheduleTrackedBuffer(_ buffer: AVAudioPCMBuffer, sourceFrame: UInt64?, admittedAtNanos: UInt64) -> Bool {
+    private func scheduleTrackedBuffer(_ buffer: AVAudioPCMBuffer, sourceFrame: UInt64?, admittedAtNanos: UInt64, packetCount: Int = 1) -> Bool {
         let completions = scheduledCompletions
-        let generation = completions.scheduled()
+        let generation = completions.scheduled(packetCount: packetCount)
         beforeNativeSchedule?()
         player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { _ in
             completions.completed(generation: generation)
@@ -1160,20 +1277,31 @@ final class SynchronizedPlayer {
 /// The native completion can run outside the playback executor. Resetting a
 /// player retires its generation before AVFoundation releases old callbacks.
 final class PlaybackBufferCompletions: @unchecked Sendable {
+    struct Ticket: Sendable {
+        fileprivate let generation: UUID
+        fileprivate let id: UUID
+    }
     private let lock = NSLock()
     private var generation = UUID()
     private var outstanding = 0
+    private var tickets: [UUID: Int] = [:]
     var count: Int { lock.withLock { outstanding } }
-    func scheduled() -> UUID {
-        lock.withLock { outstanding += 1; return generation }
-    }
-    func completed(generation: UUID) {
-        lock.withLock {
-            guard generation == self.generation, outstanding > 0 else { return }
-            outstanding -= 1
+    func scheduled(packetCount: Int = 1) -> Ticket {
+        precondition(packetCount > 0 && packetCount <= PlaybackPCMCohort.maximumPackets)
+        return lock.withLock {
+            let ticket = Ticket(generation: generation, id: UUID())
+            tickets[ticket.id] = packetCount
+            outstanding += packetCount
+            return ticket
         }
     }
-    func invalidate() { lock.withLock { generation = UUID(); outstanding = 0 } }
+    func completed(generation ticket: Ticket) {
+        lock.withLock {
+            guard ticket.generation == generation, let credits = tickets.removeValue(forKey: ticket.id) else { return }
+            outstanding -= credits
+        }
+    }
+    func invalidate() { lock.withLock { generation = UUID(); outstanding = 0; tickets.removeAll(keepingCapacity: true) } }
 }
 
 struct PlaybackDriftRecovery {

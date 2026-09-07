@@ -56,4 +56,43 @@ Settings → Audio timing separates measured network round-trip, the actual agre
 
 A call can change the output route, sample rate or Bluetooth microphone profile, or stop the render clock. Existing AVAudioEngine configuration-change and watchdog recovery rebuild or realign playback. A call on one receiver should not require every listener to resync. A call that interrupts the broadcaster's source can affect everyone because their source itself has stopped or changed. This implementation does not detect or inspect phone calls, and does not guarantee recovery timing on untested hardware.
 
-The user's rapid-drift report was not reproduced on their hardware. The overlapping receiver/host correction path was a concrete code risk fixed here. Physical acceptance still requires AirPods/Bluetooth profile changes, wired devices, FaceTime/phone interruptions, sleep/wake, network loss and several Macs playing together. Automated policy tests establish thresholds, fresh-evidence requirements, cooldown and report compatibility; they do not establish audible call recovery quality.
+The earlier correction-policy change did not reproduce the user's rapid drift on their hardware. The overlapping receiver/host correction path was a concrete code risk fixed at that stage. Physical acceptance still requires AirPods/Bluetooth profile changes, wired devices, FaceTime/phone interruptions, sleep/wake, network loss and several Macs playing together. Automated policy tests establish thresholds, fresh-evidence requirements, cooldown and report compatibility; they do not establish audible call recovery quality. The subsequent live investigation below records newer physical failures rather than treating that earlier limitation as the current status.
+
+## Native PCM admission and bounded grouping
+
+The subsequent [September 7 live investigation](sync-incident-2026-09-07.md)
+records audible delay and interruptions on two Dev Macs despite very small
+reported drift. Native sample-position and content-marker tests are separate
+from the clock estimator: a correct clock cannot repair PCM appended to an
+already exhausted native queue.
+
+The current coalescing implementation is under validation, not yet a physical
+acceptance result. Its contract is:
+
+- Enqueue the first packet immediately for its agreed playback target. Hold only later, source-contiguous,
+  individually validated and DSP-processed PCM, up to four packets/960 frames.
+- Flush partial tails through the real maintenance path even without new input.
+  One cadence constant configures both each secure owner's timer and its hold
+  budget. The legacy 50 ms owner disables holding. Executor stalls still prevent
+  a strict wall-clock guarantee; this is not an extra playout delay setting.
+- Use headroom to trigger an early flush, not to reject otherwise admissible
+  active PCM. Startup retains its stricter headroom gate. At flush, verify the
+  native source position and positive first render deadline; preserve the
+  post-enqueue whole-window exhaustion check.
+- Keep admitted/held source endpoints distinct from native-enqueued endpoints.
+  Cohort duration derives from its first render time and total source frames,
+  not the final packet's timestamp jitter. Capture discontinuities still retire
+  invalid mappings rather than compressing missing audio.
+- Count original packets, not native buffers, against admission limits. Held
+  packets count as pending. Unique generation-scoped completion tickets release
+  their exact packet weight once; old or duplicate callbacks release nothing.
+- Keep `.dataPlayedBack`: completion also protects audible predecessor
+  retirement. `.dataRendered` is not an interchangeable performance switch.
+  Stop, pause, forced resync and configuration recovery discard the correct held
+  generation; never append its tail into a replacement timeline.
+
+The sustained enqueue-cost test must exercise the actual player, preserve its
+native PCM marker prerequisite, and pass independently of the native batching
+reference. Tail, capacity, cutover and previous underrun/enqueue-race regressions
+remain required. Do not call a fixture's reseeded native queue equivalent to the
+player ledger while any PCM is still held outside that queue.

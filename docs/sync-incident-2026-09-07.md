@@ -300,3 +300,75 @@ this paragraph attributes their results to the remote agent, not a local raw-fil
 analysis. This is a failed paired diagnostic run, not acoustic validation or a
 successful 660-second test. Post-20:26 local samples may include resumed compiler
 load and are excluded from this assessment.
+
+### Played-back callback coalescing experiment
+
+The next fixed ABBA comparison retained `.dataPlayedBack` in both variants,
+changing only grouping from one 5 ms packet to up to four packets per native
+buffer. `/tmp/alo-callback-coalescing.XMkTct/RESULTS.md` and its original run logs
+preserve the measurements. A shared no-engine accounting preflight passed 126
+checks before native output ran. Those cover exact 1–3-packet tails, pending
+credits, capacity, deadline equality and duplicate/out-of-order/stale callbacks.
+
+All four approximately 12-second runs completed the prescribed workload without
+retry: 2,001 input ticks plus 50 priming packets, 2,051 completed packet credits,
+no cap drops and no pending/outstanding credits at stop. Single-packet runs used
+2,051 native buffers and 1.120/0.845 CPU seconds; grouped runs used 514 buffers and
+0.436/0.421 CPU seconds. Scheduling-call p95 was still 7.597/7.529 ms versus
+6.938/6.845 ms, respectively. Mean CPU fell about 56% in this small comparison;
+that is not proof the stalls or acoustic delay are eliminated.
+
+This used zero PCM on the unchanged default output, with no microphone, route,
+volume or installed-app changes. The CPU window includes priming; scheduling
+latency is measured during seconds 2–10. Actual partial batches reflect priming,
+source-end and deadline flushes and were not padded. Production adoption still
+requires source/capture-ledger, recovery, capacity and cutover integration tests.
+Maintenance cadence must be accounted for: merely checking a 20 ms age at a
+20 ms polling interval can hold a partial batch much longer than 20 ms. A blocked
+executor cannot provide a strict wall-clock flush guarantee.
+
+### Sustained scheduling-cost regression and adoption contract
+
+`SustainedEnqueueCostTests` reproduced queue exhaustion in the actual player,
+not just a model: each enqueue consumed a synthetic 7.5 ms of controlled time
+and 360 real offline-rendered frames while input packets represented 5 ms each.
+Its verified 250 ms prefix exhausted after 100 costly enqueues and triggered a
+recovery. The original incoming marker remained at frame 12,048, inside the
+unchanged 12,000–12,096 prerequisite. An independent four-packet native reference
+processed all 160 inputs without recovery under the identical cost. The recorded
+RED is `/tmp/alo-native-boundary.sd57OG/continuity-invalidation-combined-red.log`.
+The synthetic cost was motivated by measured scheduling latency; it does not
+prove every real enqueue costs 7.5 ms or explain every physical desync.
+
+Production coalescing must retain played-back completion semantics and weighted
+packet credits, include held packets in the existing admission/retirement count,
+and clear them on generation reset. The first packet remains immediate; later
+contiguous cohorts are bounded to four packets/960 frames. Real maintenance must
+flush partial tails even if no further source packets arrive, accounting for its
+declared cadence and the first render deadline/headroom. Packet capture and DSP
+validation cannot be skipped, and actual native source position must be checked
+when flushing. Legacy 50 ms maintenance is outside this bounded batching contract
+unless separately changed and validated. A native reference passing is not a
+production fix passing; the actual-player regression must become green.
+
+Raj subsequently described intermittent blanking followed by stabilization as
+acceptable for now. This records a temporary user tolerance, not a clean paired
+sync result, waiver of required CI, or permission to report acoustic alignment
+from software clock measurements alone.
+
+The implemented grouping passed the actual-player workload: 160 input packets,
+40 native enqueues, marker frame 12,048, and no recovery, matching the native
+reference without changing the 7.5 ms synthetic cost. The 69-test integration run
+passed; the following full run passed 384 XCTest cases and reported one issue
+among 1,174 Swift Testing tests: an old DSP fixture expected held packets to be
+already native-enqueued. Its correction uses real maintenance and retains all
+DSP-once/replay assertions, plus explicit held/native packet-credit checks.
+
+Subsequent focused validation passed 52 tests, including 5 ms/20 ms maintenance,
+disabled batching on unsupported cadences, the explicit 40-enqueue oracle, and
+continuity regressions. Those regressions record recovery even without a drift
+sample, preserve known incidents across missing telemetry subsets, and prevent a
+known local interruption from becoming a passed verdict merely because its
+receiver report disappears. Unknown telemetry remains distinct from a recent
+reported interruption. The full suite and CI must be rerun for this final state;
+none of these results replaces the next two-Mac physical validation.

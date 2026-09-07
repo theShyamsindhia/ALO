@@ -30,6 +30,9 @@ struct ContiguousUnderrunTests {
                                       samples: [Int16](repeating: 0, count: 480)))
         }
         try #require(player.expectedSequenceForTesting == UInt32(seededPackets))
+        player.maintainSync()
+        try #require(player.pendingPlaybackPacketCount == 0)
+        try #require(player.outstandingPlaybackBufferCount == seededPackets)
         // AVAudioPlayerNode ignores host scheduling offline. Keep the real
         // wrapper's anchor/sequence state, adapting only its native start as in
         // ManualRenderTimingProbeTests and ExpiredConcealmentTests.
@@ -85,6 +88,7 @@ struct ContiguousUnderrunTests {
         }
         player.accept(AudioPacket(sequence: UInt32(seededPackets), frameIndex: UInt64(seededPackets * 240), captureTimeNanos: nextCapture,
                                   samples: [Int16](repeating: 24_000, count: 480)))
+        player.maintainSync() // Real maintenance admits the held tail before the native oracle.
         try #require(player.expectedSequenceForTesting == UInt32(seededPackets + 1))
         let needsRecovery = seededPackets == 1
         if needsRecovery {

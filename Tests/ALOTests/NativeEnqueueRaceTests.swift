@@ -68,6 +68,7 @@ struct NativeEnqueueRaceTests {
         armed = true
         player.accept(AudioPacket(sequence: 1, frameIndex: 240, captureTimeNanos: capture + 5_000_000,
                                   samples: [Int16](repeating: 24_000, count: 480)))
+        player.maintainSync()
         if let hookError { throw hookError }
         try #require(!armed, "The real native enqueue must reach the delay seam")
         try #require(player.expectedSequenceForTesting == 2)

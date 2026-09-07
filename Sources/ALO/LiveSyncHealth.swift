@@ -20,13 +20,82 @@ enum SyncParticipant: Hashable, Sendable {
 }
 
 struct SyncRecoveryState: Equatable, Sendable {
+    static let continuityRecoveryNanos: UInt64 = 10_000_000_000
+    static let continuityFreshnessNanos: UInt64 = 2_500_000_000
+    private struct Continuity: Equatable, Sendable {
+        var late: UInt64
+        var resync: UInt64
+        var lastFreshAt: UInt64?
+        var stableSince: UInt64?
+        var warning = false
+    }
     static let localParticipant = SyncParticipant.localRenderer
     private(set) var driftParticipants: Set<SyncParticipant> = []
     private(set) var clockParticipants: Set<SyncParticipant> = []
+    private var continuity: [SyncParticipant: Continuity] = [:]
 
     mutating func retainParticipants(_ participants: Set<SyncParticipant>) {
         driftParticipants.formIntersection(participants)
         clockParticipants.formIntersection(participants)
+        continuity = continuity.filter { participants.contains($0.key) }
+    }
+
+    mutating func invalidateContinuityFreshness(excluding preserved: Set<SyncParticipant> = []) {
+        // Keep incident/baseline state across pauses and unavailable reads, but
+        // never count their elapsed time toward fresh-report recovery.
+        for participant in Array(continuity.keys) where !preserved.contains(participant) {
+            continuity[participant]?.lastFreshAt = nil
+            continuity[participant]?.stableSince = nil
+        }
+    }
+
+    func hasContinuityWarning(for participant: SyncParticipant) -> Bool {
+        continuity[participant]?.warning == true
+    }
+
+    var hasPeerContinuityWarning: Bool {
+        continuity.contains { participant, state in
+            if case .peer = participant { return state.warning }
+            return false
+        }
+    }
+
+    /// Historical totals establish a baseline, not a permanent warning. Once
+    /// an interruption is observed, only ten seconds of fresh counter reports
+    /// without new reported interruptions clear it. Missing telemetry does not
+    /// count toward recovery; this is not evidence of acoustic alignment.
+    mutating func observeContinuity(late: UInt64?, resync: UInt64?, fresh: Bool,
+                                   participant: SyncParticipant, at now: UInt64) -> Bool {
+        guard fresh, let late, let resync else {
+            if var state = continuity[participant] {
+                state.lastFreshAt = nil
+                state.stableSince = nil
+                continuity[participant] = state
+            }
+            return false
+        }
+        guard var state = continuity[participant] else {
+            continuity[participant] = Continuity(late: late, resync: resync, lastFreshAt: now)
+            return true
+        }
+        let increased = late > state.late || resync > state.resync
+        let reset = late < state.late || resync < state.resync
+        let continuous = state.lastFreshAt.map {
+            now >= $0 && now - $0 < Self.continuityFreshnessNanos
+        } ?? false
+        if increased {
+            state.warning = true
+            state.stableSince = now
+        } else if state.warning {
+            if reset || !continuous || state.stableSince == nil { state.stableSince = now }
+            if let began = state.stableSince, now >= began,
+               now - began >= Self.continuityRecoveryNanos { state.warning = false }
+        }
+        state.late = late
+        state.resync = resync
+        state.lastFreshAt = now
+        continuity[participant] = state
+        return !state.warning
     }
 
     mutating func observeDrift(_ drift: Double?, age: Double?, participant: SyncParticipant) -> Bool {
@@ -78,6 +147,7 @@ struct LiveSyncHealth {
     }
 
     mutating func invalidateCurrentSample() {
+        recovery.invalidateContinuityFreshness()
         result = nil
         sampledAtNanos = nil
     }

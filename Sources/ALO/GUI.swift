@@ -3563,7 +3563,8 @@ final class ALOViewModel: ObservableObject {
         diagnosticRoomContext(timing: meshSession?.diagnosticsSnapshot())
     }
 
-    private func diagnosticRoomContext(timing: SessionTimingDiagnostics?) -> DiagnosticRoomContext {
+    private func diagnosticRoomContext(timing: SessionTimingDiagnostics?,
+                                       observedAtNanos: UInt64 = MonotonicClock.nowNanos()) -> DiagnosticRoomContext {
         let active = phase == .live && meshSession != nil
         let remotePeerCount = participants.filter { $0.id != currentParticipantID }.count
         return DiagnosticRoomContext(
@@ -3576,6 +3577,7 @@ final class ALOViewModel: ObservableObject {
             hasBroadcaster: hasBroadcaster,
             timing: timing,
             recovery: liveSyncHealth.recovery,
+            observedAtNanos: observedAtNanos,
             peerPlaybackTiming: DiagnosticRoomContext.uniquePeerPlaybackTiming(participants)
         )
     }
@@ -3629,7 +3631,7 @@ final class ALOViewModel: ObservableObject {
                                 currentParticipantID: currentParticipantID,
                                 timing: freshTiming,
                                 sampledAtNanos: sampledAt)
-        let result = diagnosticRoomContext(timing: freshTiming).result
+        let result = diagnosticRoomContext(timing: freshTiming, observedAtNanos: sampledAt).result
         if ALOAppFlavor.isDevelopment {
             // Per-sample evidence for paired dev runs; production remains
             // transition-only. Unified logging supplies the wall timestamp,

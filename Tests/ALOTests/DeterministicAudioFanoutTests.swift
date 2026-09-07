@@ -9,6 +9,41 @@ import ALOCore
 /// its queue policy, and the TCP join/report/resync path are production code.
 @Suite("Deterministic real-host audio fan-out", .serialized)
 struct DeterministicAudioFanoutTests {
+    @Test func recordedTimingKeepsArrivalSeparateFromCompletion() throws {
+        let wire = SimulatedAudioWire(bitsPerSecond: 4_000_000, recordedTiming: true)
+        let origin: UInt64 = 1_000_000_000
+        wire.setNow(origin)
+        let packet = AudioPacket(sequence: 0, frameIndex: 0,
+            captureTimeNanos: origin, samples: [1, -1])
+        wire.submit(packet: packet, byteCount: 100,
+            endpoint: .hostPort(host: "127.0.0.1", port: 12345), completion: { _ in })
+        let event = try #require(wire.takeNext(through: origin + 100_000_000))
+        #expect(event.arrivalTime - origin == 200_000 + 1_000_000
+            + RecordedFanoutTiming.dispatchLatenessNanos[0])
+        #expect(event.time - event.arrivalTime == RecordedFanoutTiming.completionDelayNanos[0])
+        wire.deliver(event)
+        #expect(wire.snapshot.arrivals[12345]?[0]?.arrivedAt == event.arrivalTime)
+    }
+
+    @Test func recordedUnevenDispatchPreservesListenerFloor() throws {
+        #expect(RecordedFanoutTiming.captureWakeNanos.count == 50)
+        #expect(RecordedFanoutTiming.dispatchLatenessNanos.count == 542)
+        #expect(RecordedFanoutTiming.completionDelayNanos.count == 542)
+        // Replay observed timing, not observed sender decisions. The real host
+        // still determines which packets enter the link and which expire.
+        let baseline = try simulate(peers: 8, rate: 4_000_000,
+            policy: .boundedLatest(maxInFlight: 8), oversleep: 0,
+            includesControlTraffic: true)
+        let replay = try simulate(peers: 8, rate: 4_000_000,
+            policy: .boundedLatest(maxInFlight: 8), oversleep: 0,
+            includesControlTraffic: true, recordedTiming: true)
+        #expect(baseline.minimumPackets >= 50)
+        #expect(baseline.maximumAge < SynchronizedPlayer.targetLatencyNanos)
+        #expect(replay.minimumPackets >= 50,
+            "The unchanged live listener floor must survive recorded uneven dispatch")
+        #expect(replay.maximumAge < SynchronizedPlayer.targetLatencyNanos)
+    }
+
     @Test(arguments: [UInt64(1), 7, 23, 41])
     func irregularAudioDispatchWithPongBandwidthReservationPreservesListenerFloor(seed: UInt64) throws {
         // CI 34127177462 observed 23ms shaper dispatch lateness and one peer
@@ -128,9 +163,10 @@ struct DeterministicAudioFanoutTests {
     private func simulate(peers count: Int, rate: UInt64?, policy: HostServer.AudioBackpressurePolicy,
                           oversleep: UInt64, callbackQuantumNanos: UInt64? = nil,
                           lateJoinAtCallback: Int? = nil, irregularDispatchSeed: UInt64? = nil,
-                          includesControlTraffic: Bool = false) throws -> SimulatedRoomResult {
+                          includesControlTraffic: Bool = false,
+                          recordedTiming: Bool = false) throws -> SimulatedRoomResult {
         let wire = SimulatedAudioWire(bitsPerSecond: rate, callbackQuantumNanos: callbackQuantumNanos,
-            irregularDispatchSeed: irregularDispatchSeed)
+            irregularDispatchSeed: irregularDispatchSeed, recordedTiming: recordedTiming)
         let controls = SimulationControlPeers()
         let hostReady = DispatchSemaphore(value: 0)
         let host = HostServer(roomName: "Virtual-time real host", advertise: false,
@@ -162,6 +198,9 @@ struct DeterministicAudioFanoutTests {
             // Match the positive-wait oversleep/catch-up model: callbacks whose
             // deadlines were missed run together, without another injected wait.
             if captureWake < nominalDeadline { captureWake = nominalDeadline + oversleep }
+            if recordedTiming {
+                captureWake = nominalDeadline + RecordedFanoutTiming.captureWakeNanos[callback]
+            }
             advance(wire, through: captureWake, host: host)
             host.acceptAudio(samples: samples, captureTimeNanos: nominalDeadline - 20_000_000)
             _ = host.audioSenderSnapshot() // Completes real packetization/enqueue at this event time.
@@ -264,7 +303,7 @@ struct DeterministicAudioFanoutTests {
             maximumDeadlineMiss: deadlineMisses.max() ?? 0, minimumPackets: counts.min() ?? 0,
             maximumPackets: counts.max() ?? 0, maximumSkew: skew, resyncs: reportedPeers.count,
             packetCountsByParticipant: packetCountsByParticipant)
-        print("Virtual real-host peers=\(count) rate=\(rate.map(String.init) ?? "direct") policy=\(policy) wake=\(oversleep / 1_000_000)ms dispatchSeed=\(irregularDispatchSeed.map(String.init) ?? "none") mixedControl=\(includesControlTraffic): \(result)")
+        print("Virtual real-host peers=\(count) rate=\(rate.map(String.init) ?? "direct") policy=\(policy) wake=\(oversleep / 1_000_000)ms dispatchSeed=\(irregularDispatchSeed.map(String.init) ?? "none") mixedControl=\(includesControlTraffic) recordedTiming=\(recordedTiming): \(result); senderAccounting=\(senders)")
         return result
     }
 
@@ -298,6 +337,7 @@ private final class SimulatedAudioWire: @unchecked Sendable {
     struct Arrival { let packet: AudioPacket; let admittedAt: UInt64; let arrivedAt: UInt64 }
     struct Event {
         let time: UInt64
+        let arrivalTime: UInt64
         let order: Int
         let port: UInt16
         let packet: AudioPacket
@@ -323,11 +363,14 @@ private final class SimulatedAudioWire: @unchecked Sendable {
     private var invalidEndpoints = 0
     private var dispatchRandomState: UInt64?
     private var lastDispatch: UInt64 = 0
+    private let recordedTiming: Bool
+    private var lastCompletionByPort: [UInt16: UInt64] = [:]
     init(bitsPerSecond: UInt64?, callbackQuantumNanos: UInt64? = nil,
-         irregularDispatchSeed: UInt64? = nil) {
+         irregularDispatchSeed: UInt64? = nil, recordedTiming: Bool = false) {
         self.bitsPerSecond = bitsPerSecond
         self.callbackQuantumNanos = callbackQuantumNanos
         self.dispatchRandomState = irregularDispatchSeed
+        self.recordedTiming = recordedTiming
     }
     var now: UInt64 { lock.withLock { current } }
     func setNow(_ value: UInt64) { lock.withLock {
@@ -373,8 +416,22 @@ private final class SimulatedAudioWire: @unchecked Sendable {
                 delivery = max(lastDispatch, delivery + lateness)
                 lastDispatch = delivery
             }
+            if recordedTiming {
+                // Repeat the complete trace if changed admission produces more
+                // sends. A serial dispatch queue cannot reverse wire order.
+                let index = nextOrder % RecordedFanoutTiming.dispatchLatenessNanos.count
+                delivery = max(lastDispatch, delivery + RecordedFanoutTiming.dispatchLatenessNanos[index])
+                lastDispatch = delivery
+            }
+            let arrivalTime = delivery
+            if recordedTiming {
+                let index = nextOrder % RecordedFanoutTiming.completionDelayNanos.count
+                delivery += RecordedFanoutTiming.completionDelayNanos[index]
+                delivery = max(delivery, lastCompletionByPort[port.rawValue] ?? 0)
+                lastCompletionByPort[port.rawValue] = delivery
+            }
             submitted[port.rawValue, default: []].append(packet.sequence)
-            events.append(Event(time: delivery, order: nextOrder, port: port.rawValue,
+            events.append(Event(time: delivery, arrivalTime: arrivalTime, order: nextOrder, port: port.rawValue,
                 packet: packet, admittedAt: current, completion: completion))
             nextOrder += 1
         }
@@ -400,7 +457,7 @@ private final class SimulatedAudioWire: @unchecked Sendable {
     }
     func deliver(_ event: Event) { lock.withLock {
         arrivals[event.port, default: [:]][event.packet.sequence] = Arrival(packet: event.packet,
-            admittedAt: event.admittedAt, arrivedAt: event.time)
+            admittedAt: event.admittedAt, arrivedAt: event.arrivalTime)
     } }
 }
 

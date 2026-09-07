@@ -7,6 +7,8 @@ import ALONetworking
 /// A failed media connection is redialed; it is never translated into a durable
 /// broadcaster stop, and it cannot restart another participant's output graph.
 final class SecureMacMediaReceiver: @unchecked Sendable {
+    // One value drives both the timer and the player's partial-PCM deadline.
+    private static let playbackMaintenanceMilliseconds = 20
     private let mesh: any RoomPeerConnecting
     private let selection: MediaReceiverSession.Selection
     private let queue = DispatchQueue(label: "alo.secure-media.playback", qos: .userInteractive)
@@ -78,7 +80,9 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
         self.mesh = mesh; self.selection = selection; self.status = status
         self.annotations = annotations
         videoDecoder = VideoDecoder(imageHandler: videoHandler)
-        player = try SecureMacPlaybackTimeline(audioOutput: audioOutput, playbackActivity: playbackActivity)
+        player = try SecureMacPlaybackTimeline(audioOutput: audioOutput,
+                                               maintenanceIntervalNanos: UInt64(Self.playbackMaintenanceMilliseconds) * 1_000_000,
+                                               playbackActivity: playbackActivity)
     }
 
     private var now: TimeInterval { Double(MonotonicClock.nowNanos()) / 1_000_000_000 }
@@ -89,7 +93,7 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
             self.started = true
             self.stopped = false
             let timer = DispatchSource.makeTimerSource(queue: self.queue)
-            timer.schedule(deadline: .now(), repeating: .milliseconds(20))
+            timer.schedule(deadline: .now(), repeating: .milliseconds(Self.playbackMaintenanceMilliseconds))
             timer.setEventHandler { [weak self] in
                 guard let self, !self.stopped else { return }
                 self.player.maintainSync()
