@@ -7,6 +7,51 @@ import Testing
 
 @Suite("Single-Mac room integration", .serialized)
 struct LoopbackRoomScaleTests {
+    @Test func boundedControlConnectionLifecycleEvidence() throws {
+        // Fixed-count diagnosis, not retry-until-green. No audio is produced.
+        for iteration in 0..<32 {
+            let ready = DispatchSemaphore(value: 0)
+            let state = PortState()
+            let host = HostServer(roomName: "Lifecycle evidence", advertise: false,
+                listenerReadyHandler: { state.set($0); ready.signal() })
+            try host.start()
+            defer { host.stop() }
+            try #require(ready.wait(timeout: .now() + 3) == .success)
+            let port = try #require(state.port)
+            let peer = HeadlessLoopbackPeer(index: 500 + iteration)
+            defer { peer.stop() }
+            try peer.start(hostPort: port)
+            try #require(peer.waitUntilJoined(timeout: 3))
+            print("CONTROL_LIFECYCLE iteration=\(iteration) \(peer.controlSetupEvidence)")
+        }
+    }
+
+    @Test func occupiedSourceEndpointIsAControlSetupFailure() throws {
+        let ready = DispatchSemaphore(value: 0)
+        let state = PortState()
+        let host = HostServer(roomName: "Occupied source evidence", advertise: false,
+            listenerReadyHandler: { state.set($0); ready.signal() })
+        try host.start()
+        defer { host.stop() }
+        try #require(ready.wait(timeout: .now() + 3) == .success)
+        let port = try #require(state.port)
+        let parameters = NWParameters.tcp
+        // The source endpoint is deliberately the occupied listener. This
+        // classifies bind failure; it does not prove automatic selection chose
+        // the same endpoint in the earlier full-suite failures.
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: port)
+        let peer = HeadlessLoopbackPeer(index: 600)
+        defer { peer.stop() }
+        do {
+            try peer.start(hostPort: port, controlParameters: parameters)
+            Issue.record("An explicitly occupied source endpoint must not join")
+        } catch LoopbackTestError.peerDidNotJoin {
+            #expect(peer.controlSetupEvidence.contains("errno=48"))
+            #expect(peer.packetCount == 0)
+            print("CONTROL_OCCUPIED_SOURCE \(peer.controlSetupEvidence)")
+        }
+    }
+
     @Test func schedulingEvidenceIsBoundedNumericAndKeepsOrdering() {
         let evidence = LoopbackSchedulingEvidence(capacity: 3)
         evidence.register(port: 61_234, transport: .udp, peer: 2)
@@ -1817,6 +1862,8 @@ private final class HeadlessLoopbackPeer {
     private var receivedLevels = [(volume: Double, muted: Bool)]()
     private var corruptedPackets = 0
     private var stopping = false
+    private var setupEvents = [String]()
+    var controlSetupEvidence: String { queue.sync { setupEvents.joined(separator: " | ") } }
 
     init(index: Int, participantID: String? = nil, expectedSample: Int16? = nil, deferredPCM: Bool = false) {
         self.index = index
@@ -1846,16 +1893,27 @@ private final class HeadlessLoopbackPeer {
     /// same queue that is still receiving the packets being timed.
     func receivedSequencesForDrain() -> Set<UInt32> { queue.sync { Set(arrivals.keys) } }
 
-    func start(hostPort: NWEndpoint.Port) throws {
+    func start(hostPort: NWEndpoint.Port, controlParameters: NWParameters = .tcp) throws {
         // Reserve the outbound control endpoint before opening either media
         // listener. Network.framework can otherwise select a just-opened local
         // listener port for this loopback flow and leave it in EADDRINUSE.
         let controlReady = DispatchSemaphore(value: 0)
-        let control = NWConnection(host: "127.0.0.1", port: hostPort, using: .tcp)
+        let setupBegan = MonotonicClock.nowNanos()
+        let control = NWConnection(host: "127.0.0.1", port: hostPort, using: controlParameters)
         self.control = control
         receiveControl(from: control)
         control.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
+            let elapsed = MonotonicClock.nowNanos() - setupBegan
+            let local = self.control?.currentPath?.localEndpoint.map(String.init(describing:)) ?? "unavailable"
+            let code: Int32?
+            switch state {
+            case .waiting(.posix(let error)), .failed(.posix(let error)): code = error.rawValue
+            default: code = nil
+            }
+            if self.setupEvents.count < 8 {
+                self.setupEvents.append("ns=\(elapsed),state=\(state),errno=\(code.map(String.init) ?? "none"),source=\(local),destination=\(hostPort)")
+            }
             switch state {
             case .waiting(let error):
                 print("Loopback peer \(self.index) control \(state): host=127.0.0.1:\(hostPort), error=\(error)")
@@ -1873,6 +1931,7 @@ private final class HeadlessLoopbackPeer {
               case .ready = control.state
         else {
             control.cancel()
+            print("CONTROL_SETUP_FAILURE \(controlSetupEvidence)")
             throw LoopbackTestError.peerDidNotJoin
         }
 

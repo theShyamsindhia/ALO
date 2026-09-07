@@ -372,3 +372,22 @@ known local interruption from becoming a passed verdict merely because its
 receiver report disappears. Unknown telemetry remains distinct from a recent
 reported interruption. The full suite and CI must be rerun for this final state;
 none of these results replaces the next two-Mac physical validation.
+
+The final local full-suite run at revision `f1c72fd` passed 384 XCTest cases,
+then ran 1,177 Swift Testing tests in 192 suites with four failures. All four
+failed before peer admission with TCP `EADDRINUSE` (`peerDidNotJoin`), not an
+audio timing assertion. The failed eight-peer room recorded zero capture,
+outbound-admission, or shaper samples. The affected destinations were loopback
+ports 65519, 65534, 49193, and 49194. Port selection or cancellation lifecycle
+is a hypothesis, not an established cause. The complete failed run is retained
+at `/tmp/alo-cohort-full.c0bHv3/final-tests.log`; it is not a green release gate
+and must not be replaced by retries or relaxed join/timing thresholds.
+
+CI run `34164789098` passed all three jobs at that exact revision, including
+required live timing and repeatable room scenarios. A separate fixed-count
+diagnostic probe passed 32 ordinary loopback join/cancel lifecycles. Explicitly
+binding a peer's source to the occupied host listener reproduced `EADDRINUSE`
+before audio began; this classifies the error but does not establish why
+automatic port selection failed in the full local run. No production networking
+change was made on that evidence. Probe log:
+`/tmp/alo-cohort-full.c0bHv3/control-lifecycle-evidence.log`.
