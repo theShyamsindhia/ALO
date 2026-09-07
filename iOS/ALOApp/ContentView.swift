@@ -1,113 +1,58 @@
 import SwiftUI
 import ALONetworking
 import ALOCore
+import ALOAppModel
 
 struct ContentView: View {
     @ObservedObject var model: MobileRoomModel
-    @State private var joining: NearbyPeerHint?
+    @ObservedObject var account: NetworkAccountModel
     @State private var showLeaveConfirmation = false
 
     var body: some View {
-        NavigationStack {
-            Group {
-                if model.room != nil { roomContent } else { nearbyContent }
-            }
-            .navigationTitle(model.room?.name ?? "Nearby")
-            .safeAreaInset(edge: .bottom) {
-                if model.isTemporarySimulatorSession {
-                    Label("Simulator test · identity and room data disappear on quit", systemImage: "hammer")
-                        .font(.caption).padding().frame(maxWidth: .infinity)
-                        .background(.regularMaterial)
-                        .accessibilityIdentifier("temporarySimulatorSession")
-                }
-            }
-            .toolbar {
-                if model.room != nil {
+        Group {
+            if account.identityReady, model.room != nil {
+                NavigationStack {
+                    roomContent
+                    .navigationTitle(model.room?.name ?? "Channel")
+                    .toolbar {
                     ToolbarItem(placement: .topBarTrailing) {
-                        Button("Leave", role: .destructive) { showLeaveConfirmation = true }
-                            .frame(minHeight: 44)
+                            Button { showLeaveConfirmation = true } label: {
+                                Text("Leave").frame(minHeight: 44)
+                            }
+                        }
                     }
                 }
-            }
-            .confirmationDialog("Leave this room?", isPresented: $showLeaveConfirmation,
-                                titleVisibility: .visible) {
-                Button("Leave and forget automatic rejoin", role: .destructive) { model.leave() }
-            } message: {
-                Text(model.isTemporarySimulatorSession
-                     ? "The invite secret is removed from this test session. Temporary history and device keys are discarded when you quit."
-                     : "The invite secret is removed from this device. Your local room history and remembered device keys stay saved.")
-            }
-            .sheet(item: $joining) { hint in
-                JoinRoomView(model: model, hint: hint)
+            } else {
+                MobileNetworkSetupView(account: account, model: model)
             }
         }
-    }
-
-    private var nearbyContent: some View {
-        List {
-            Section {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("A room, together.").font(.title2.weight(.semibold))
-                    Text("Join people on your local network. Your phone can participate in the room without becoming the broadcaster.")
-                        .foregroundStyle(.secondary)
-                }.padding(.vertical, 8)
-                Button(action: model.scan) {
-                    Label(model.discoveryState == .browsing ? "Refresh nearby rooms" : "Find nearby rooms",
-                          systemImage: "antenna.radiowaves.left.and.right")
-                        .frame(minHeight: 44)
-                }
-            } footer: {
-                Text("Finding rooms asks for Local Network access. No microphone access is requested.")
+        .safeAreaInset(edge: .bottom) {
+            if model.isTemporarySimulatorSession {
+                Label("Simulator test · temporary test identity; not restored next launch", systemImage: "hammer")
+                    .font(.caption).padding().frame(maxWidth: .infinity)
+                    .background(.regularMaterial)
+                    .accessibilityIdentifier("temporarySimulatorSession")
             }
-            if model.discoveryState == .permissionRequired {
-                Section {
-                    Label("Local Network access is off", systemImage: "network.slash")
-                    Text("Enable ALO in Settings → Privacy & Security → Local Network, then return and refresh.")
-                    Button("Open Settings") {
-                        if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
-                    }.frame(minHeight: 44)
-                }
-            }
-            Section("Rooms") {
-                ForEach(model.nearbyRooms) { room in
-                    Button { joining = room; model.errorMessage = nil } label: {
-                        HStack(spacing: 12) {
-                            Image(systemName: room.isPrivate ? "lock" : "person.2")
-                                .accessibilityHidden(true)
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(room.displayName).foregroundStyle(.primary)
-                                Text(room.isPrivate ? "Private · invite secret required" : "Public · nearby room")
-                                    .font(.subheadline).foregroundStyle(.secondary)
-                            }
-                            Spacer(minLength: 0)
-                            Image(systemName: "chevron.right").foregroundStyle(.secondary).accessibilityHidden(true)
-                        }.frame(minHeight: 44)
-                    }.accessibilityHint("Review privacy and join this room")
-                }
-                if model.nearbyRooms.isEmpty {
-                    if model.discoveryState == .browsing {
-                        HStack { ProgressView(); Text("Looking for nearby rooms…") }
-                    } else {
-                        Text(model.discoveryState == .waiting ? "Network unavailable. The scan will retry briefly." : "No rooms in this scan. Find rooms to refresh the list.")
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-            errorSection
-        }.listStyle(.insetGrouped)
+        }
+        .confirmationDialog("Leave this channel?", isPresented: $showLeaveConfirmation,
+                                titleVisibility: .visible) {
+                Button("Leave and forget automatic rejoin", role: .destructive) { model.leave() }
+        } message: {
+            Text("Your network membership stays saved. You can join this channel again from Networks. Your microphone stops when you leave.")
+        }
     }
 
     private var roomContent: some View {
         List {
             Section {
                 Label(model.status, systemImage: model.connected ? "lock.shield" : "network")
-                    .accessibilityIdentifier("roomConnectionStatus")
+                    .accessibilityIdentifier("channelConnectionStatus")
                 if !model.connected {
                     Button("Retry connection", action: model.retry).frame(minHeight: 44)
                 }
             }
             errorSection
-            Section("In the room") {
+            Section("In the channel") {
                 if model.participants.isEmpty { Text("Waiting for authenticated participants…").foregroundStyle(.secondary) }
                 ForEach(model.participants) { participant in
                     Label(participant.name + (participant.id == model.localID ? " (you)" : ""),
@@ -116,7 +61,7 @@ struct ContentView: View {
             }
             Section {
                 NavigationLink { ChatView(model: model) } label: {
-                    Label("Room chat", systemImage: "bubble.left.and.bubble.right").frame(minHeight: 44)
+                    Label("Channel chat", systemImage: "bubble.left.and.bubble.right").frame(minHeight: 44)
                 }
                 NavigationLink { QueueView(model: model) } label: {
                     Label("Shared queue", systemImage: "music.note.list").frame(minHeight: 44)
@@ -173,58 +118,6 @@ private struct AudioLevelControl: View {
                 .accessibilityValue("\(Int(volume * 100)) percent")
                 .disabled(muted)
         }.padding(.vertical, 4)
-    }
-}
-
-private struct JoinRoomView: View {
-    @ObservedObject var model: MobileRoomModel
-    let hint: NearbyPeerHint
-    @State private var secret = ""
-    @Environment(\.dismiss) private var dismiss
-    @FocusState private var focusedField: Field?
-    private enum Field { case name, secret }
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Your name in the room") {
-                    TextField("Display name", text: $model.displayName)
-                        .textContentType(.nickname).focused($focusedField, equals: .name)
-                        .accessibilityLabel("Display name")
-                }
-                if hint.isPrivate {
-                    Section {
-                        SecureField("Invite secret", text: $secret)
-                            .textInputAutocapitalization(.never).autocorrectionDisabled()
-                            .focused($focusedField, equals: .secret)
-                    } header: {
-                        Text("Private room invite")
-                    } footer: {
-                        Text(model.isTemporarySimulatorSession
-                             ? "Paste the full base64 secret. This simulator test keeps it only in memory until quit."
-                             : "Paste the full base64 secret shared by a room member. It is stored in Keychain only after admission succeeds.")
-                    }
-                }
-                Section("Before you join") {
-                    Label("Encrypted connection", systemImage: "lock.shield")
-                    Text("Nearby room and device names are unverified. Joining establishes an encrypted connection and remembers admitted device keys; it does not verify the person behind a device.")
-                    Text("Other room members can see your display name and messages. Once connected, this device advertises the room nearby. A public room is open to nearby people; a private room requires its invite secret.")
-                    Text(model.isTemporarySimulatorSession
-                         ? "Use isolated test peers and a throwaway room. Other members can retain this device’s key, participant record, and messages, even after you quit. ALO reconnects only within this running test session; quitting forgets its local room and identity. Your microphone never starts automatically."
-                         : "After a successful join, ALO reconnects to this room when you return to the app. It never starts your microphone automatically.")
-                }
-                if let error = model.errorMessage {
-                    Section { Label(error, systemImage: "exclamationmark.triangle") }
-                }
-                Section {
-                    Button("Join room") {
-                        if model.join(hint, secret: secret) { secret = ""; dismiss() }
-                        else { focusedField = model.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .name : .secret }
-                    }.frame(minHeight: 44).accessibilityIdentifier("joinRoomButton")
-                }
-            }
-            .navigationTitle(hint.displayName).navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { secret = ""; dismiss() } } }
-        }
     }
 }
 
@@ -287,7 +180,7 @@ private struct ChatView: View {
             } footer: {
                 Text("Showing up to 500 messages with shared edits, replies and reactions.")
             }
-            Section("Message the room") {
+            Section("Message the channel") {
                 if editing != nil {
                     HStack { Text("Editing your message"); Spacer(); Button("Cancel") { self.editing = nil; message = "" } }
                 } else if let replyingTo {
@@ -304,7 +197,7 @@ private struct ChatView: View {
                 }.disabled(!model.connected).frame(minHeight: 44)
                 if !model.connected { Text("Reconnect to send messages.").foregroundStyle(.secondary) }
             }
-        }.navigationTitle("Room chat").navigationBarTitleDisplayMode(.inline)
+        }.navigationTitle("Channel chat").navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -355,7 +248,7 @@ private struct MobileVoiceControls: View {
         } header: {
             Text("Talk and Open Line")
         } footer: {
-            Text("Choose up to eight people. Invite turns your microphone on for that person; Pick up starts voice back. Rejoining, interruptions and route changes turn it off. New room members are never added to an active microphone session.")
+            Text("Choose up to eight people. Invite turns your microphone on for that person; Pick up starts voice back. Rejoining, interruptions and route changes turn it off. New channel members are never added to an active microphone session.")
         }
     }
 }

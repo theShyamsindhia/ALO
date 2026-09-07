@@ -151,7 +151,7 @@ final class ArenaSession: ObservableObject {
            remotePlayerNames.count == simulation.fighters.count { return remotePlayerNames }
         return simulation.fighters.indices.map { slot in
             if slot == 0 { return localName }
-            if let peer = members.first(where: { $0.value.slot == slot })?.key { return names[peer] ?? "Room player" }
+            if let peer = members.first(where: { $0.value.slot == slot })?.key { return names[peer] ?? "Channel player" }
             return "Bot \(slot)"
         }
     }
@@ -241,8 +241,8 @@ final class ArenaSession: ObservableObject {
         botSlots = Set(1..<simulation.fighters.count)
         mode = count > 0 ? .readyHost : .hosting
         notice = count == 0
-            ? "Arena open. Waiting for another room member to join."
-            : "Room arena open. Invite people or ready up with your bots."
+            ? "Arena open. Waiting for another channel member to join."
+            : "Channel arena open. Invite people or ready up with your bots."
         refreshSlots(); activate(); advertise()
     }
     func addBot() {
@@ -440,7 +440,7 @@ final class ArenaSession: ObservableObject {
         if isActivityHost { receiveAsHost(sender: sender, packet: packet, now: now); return }
         guard sender == peerID, packet.sequence > remoteSequence else { return }
         if packet.kind == .leave, packet.round >= round {
-            leave(message: "The activity host left. Your room and chat are still open."); return
+            leave(message: "The activity host left. Your channel and chat are still open."); return
         }
         let advancedRound = packet.round != round
         if advancedRound {
@@ -473,7 +473,7 @@ final class ArenaSession: ObservableObject {
             else { realtime.clearPrediction() }
             lastRemote = now; notice = mode == .spectator ? "Spectating · four fighter slots; join a live bot slot when available." : ""
             revision += 1; playImpacts(); reportResultIfNeeded()
-        case .leave: leave(message: "The activity host left. Your room and chat are still open.")
+        case .leave: leave(message: "The activity host left. Your channel and chat are still open.")
         case .busy: leave(message: "This arena has no spectator space available.")
         default: break
         }
@@ -501,8 +501,8 @@ final class ArenaSession: ObservableObject {
             spectatorCount = spectators.count
             if mode == .hosting { mode = .readyHost }
             notice = mode == .host
-                ? (replacement == nil ? "A room member joined an open live slot." : "A room member took over a bot's live fighter.")
-                : "Room member joined. Ready up when everyone is here."
+                ? (replacement == nil ? "A channel member joined an open live slot." : "A channel member took over a bot's live fighter.")
+                : "Channel member joined. Ready up when everyone is here."
             refreshSlots(); sendRoster(); advertise(); startIfReady(); return
         }
         if packet.kind == .spectate { admitSpectator(sender, packet: packet, now: now); return }
@@ -564,7 +564,7 @@ final class ArenaSession: ObservableObject {
             if mode == .joining { transmit(.join, fighter: selected) }
         }
         if [.joining, .guest, .readyGuest, .spectator].contains(mode) && now - lastRemote > GameRealtimePolicy.connectionTimeout {
-            leave(message: "Activity connection lost. Your room and chat are still open."); return
+            leave(message: "Activity connection lost. Your channel and chat are still open."); return
         }
         if [.guest, .readyGuest, .spectator].contains(mode), now - lastRemote > GameRealtimePolicy.reconnectAfter {
             notice = "Reconnecting to activity host…"

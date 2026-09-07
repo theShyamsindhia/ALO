@@ -72,7 +72,7 @@ struct FourfoldPanel: View {
                 }
                 Text(status).font(.system(size: 12, weight: .semibold)).foregroundStyle(.white)
                 if showHelp {
-                    Text("Drop a disc into any open column. Connect four horizontally, vertically, or diagonally. Lavender moves first. Two on this Mac shares this keyboard and screen; it does not invite room members.")
+                    Text("Drop a disc into any open column. Connect four horizontally, vertically, or diagonally. Lavender moves first. Two on this Mac shares this keyboard and screen; it does not invite channel members.")
                         .font(.system(size: 11)).foregroundStyle(.white.opacity(0.7)).fixedSize(horizontal: false, vertical: true)
                 }
                 HStack(spacing: 4) {

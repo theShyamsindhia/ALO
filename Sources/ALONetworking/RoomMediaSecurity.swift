@@ -36,6 +36,12 @@ public struct RoomMediaSecurity: Sendable {
         let options = tls.securityProtocolOptions
         sec_protocol_options_set_min_tls_protocol_version(options, .TLSv12)
         sec_protocol_options_set_max_tls_protocol_version(options, .TLSv12)
+        // Every connection must prove its currently configured PSK. With TLS
+        // reuse enabled, a same-process client configured with a different key
+        // can inherit a prior successful connection's authentication. Disable
+        // both reuse mechanisms on the original listener and dialer options.
+        sec_protocol_options_set_tls_resumption_enabled(options, false)
+        sec_protocol_options_set_tls_tickets_enabled(options, false)
         // Network.framework requires an explicit external-PSK cipher suite.
         // RFC 5487 PSK-AES128-GCM-SHA256; certificate ciphers are not enabled.
         sec_protocol_options_append_tls_ciphersuite(options, tls_ciphersuite_t(rawValue: 0x00a8)!)

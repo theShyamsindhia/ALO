@@ -129,7 +129,7 @@ final class ALONotchFeatureBridge: ObservableObject {
                              canControl: Bool) -> RoomPlaybackSnapshot? {
         guard isLive, !media.isEmpty || audioIsRendering else { return nil }
         let duration = position != nil && media.duration?.isFinite == true ? max(0, media.duration ?? 0) : 0
-        return RoomPlaybackSnapshot(title: media.title ?? "Live room audio",
+        return RoomPlaybackSnapshot(title: media.title ?? "Live channel audio",
             artist: media.artist ?? roomName, album: media.album ?? "", artworkData: media.artworkData,
             isPlaying: isPlaying, elapsed: position ?? 0, duration: duration,
             canTogglePlayback: canControl, canSkipNext: canControl, canSkipPrevious: canControl,

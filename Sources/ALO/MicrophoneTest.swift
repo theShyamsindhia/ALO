@@ -28,7 +28,7 @@ struct MicrophoneTestClip {
 final class MicrophoneTestController: ObservableObject {
     enum Phase: Equatable { case idle, requesting, recording, ready, playing }
     @Published private(set) var phase: Phase = .idle
-    @Published private(set) var notice = "Record up to 5 seconds, then listen back. Nothing is sent to the room."
+    @Published private(set) var notice = "Record up to 5 seconds, then listen back. Nothing is sent to the channel."
     private let microphone = WalkieTalkieMicrophone()
     private var clip = MicrophoneTestClip()
     private var player: AVAudioPlayer?
@@ -116,7 +116,7 @@ final class MicrophoneTestController: ObservableObject {
         microphone.stop()
         player?.stop(); player = nil
         clip = MicrophoneTestClip(); phase = .idle
-        notice = "Record up to 5 seconds, then listen back. Nothing is sent to the room."
+        notice = "Record up to 5 seconds, then listen back. Nothing is sent to the channel."
     }
 }
 

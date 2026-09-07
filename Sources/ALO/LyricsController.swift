@@ -15,7 +15,7 @@ final class LyricsController: ObservableObject {
     }
     @Published private(set) var state: State = .disabled
     static let preferenceKey = "lyricsEnabled"
-    static let privacyNotice = "When enabled, track title, artist, album and duration are sent to LRCLIB to find lyrics. Room details and audio are not sent."
+    static let privacyNotice = "When enabled, track title, artist, album and duration are sent to LRCLIB to find lyrics. Channel details and audio are not sent."
     private let preferences: UserDefaults
     private let provider: LyricsProvider
     private(set) var track: LyricsTrack?

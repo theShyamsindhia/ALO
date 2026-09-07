@@ -90,7 +90,10 @@ struct RoomScaleLatencyReproductionTests {
         let networkOneWayNanos: UInt64 = 2_000_000
 
         for sampleIndex in 0..<4 {
-            let clientSendNanos = 1_000_000_000 + UInt64(sampleIndex) * 100_000_000
+            // Sequential observations must not send the next ping before the
+            // prior simulated receive (up to 144 ms). A backwards local clock
+            // correctly forces the new timing engine to reacquire.
+            let clientSendNanos = 1_000_000_000 + UInt64(sampleIndex) * 1_000_000_000
             let ping = synchronizer.makePing(at: clientSendNanos)
             let hostStampNanos = clientSendNanos + networkOneWayNanos + hostQueueDelayNanos
             let clientReceiveNanos = hostStampNanos + networkOneWayNanos

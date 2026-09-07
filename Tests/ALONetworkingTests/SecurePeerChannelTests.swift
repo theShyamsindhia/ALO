@@ -5,6 +5,13 @@ import Testing
 
 @Suite("Actual secure peer channels", .serialized)
 struct SecurePeerChannelTests {
+    @Test func sendOnTransportExecutorDoesNotDeferTimestampedPayload() async throws {
+        let pair = try SecureChannelPair(clientAdmission: .publicRoom, serverAdmission: .publicRoom,
+            role: .mediaControl, allowedRoles: [.mediaControl], payload: Data([4, 3, 2, 1]))
+        defer { pair.cancel() }
+        guard case .delivered = try await pair.run() else { Issue.record("Admission failed"); return }
+        #expect(pair.sentInline)
+    }
     @Test func fileTransferUsesItsOwnAuthenticatedRole() async throws {
         let payload = try DirectFileWire.chunk(offset: 0, bytes: Data(repeating: 42, count: DirectFileWire.chunkBytes)).encoded()
         let pair = try SecureChannelPair(clientAdmission: .publicRoom, serverAdmission: .publicRoom,
@@ -102,6 +109,8 @@ struct SecurePeerChannelTests {
     }
 }
 
+/// Explicit generation-1 fixtures isolate the legacy admission-proof unit tests above.
+/// Current-generation network authorization is exercised by NetworkSecureChannelTests.
 private final class SecureChannelPair: @unchecked Sendable {
     enum Outcome { case delivered(Data, AuthenticatedPeer, AuthenticatedPeer), failed(SecurePeerChannelError) }
     let clientIdentity: InstallationIdentity
@@ -114,6 +123,7 @@ private final class SecureChannelPair: @unchecked Sendable {
     private let clientPins = MemoryPeerPinStore(), serverPins = MemoryPeerPinStore()
     private let payload: Data
     private var client: SecurePeerChannel?
+    var sentInline = false
     private var server: SecurePeerChannel?
     private var clientPeer: AuthenticatedPeer?, serverPeer: AuthenticatedPeer?
     private(set) var clientCredentials: AuthenticatedChannelCredentials?, serverCredentials: AuthenticatedChannelCredentials?
@@ -168,7 +178,11 @@ private final class SecureChannelPair: @unchecked Sendable {
                             guard let self else { return }
                             self.clientPeer = peer
                             self.client?.withAuthenticatedCredentials { result in self.clientCredentials = try? result.get() }
-                            self.client?.send(payload: self.payload)
+                            if let client = self.client {
+                                let before = client.pendingSendByteCount
+                                client.send(payload: self.payload)
+                                self.sentInline = client.pendingSendByteCount > before
+                            }
                         }
                         channel.onPayload = { [weak self] data in
                             guard let self, let clientPeer = self.clientPeer, let serverPeer = self.serverPeer else { return }
