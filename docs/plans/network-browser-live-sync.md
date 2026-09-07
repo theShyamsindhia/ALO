@@ -695,3 +695,24 @@ packets in 40 native calls, matching the reference's marker at frame 12048,
 preserved. Exact known-prefix and fresh-recovery marker bounds were not widened.
 This does not cover every native contention pattern or prove live acoustic sync;
 external review, CI and paired playback remain required before a release claim.
+
+### Voice route completion investigation
+
+The receiver's voice path already uses `.dataRendered`; the media callback-cost
+finding is not automatically its cause. A separate native offline regression
+held four real completion callbacks across the existing configuration-change
+notification/reconnect path, queued 1920 new frames on the same voice session,
+then released the old callbacks. Those callbacks reduced new-route credits to
+zero (sole issue in 37 tests, log `/tmp/alo-f1-live.7jWPES/policy-green-voice-red.log`).
+This is an accounting RED, not proof that a physical route switch caused the
+reported low/choppy speech. The scoped fix fences callbacks by immutable session
+identity and route generation, rotated before stop/reset; a control also releases
+new-generation real callbacks and checks that they still spend their own credits.
+
+Voice telemetry is numeric local playback evidence: admitted audio/concealment
+counts, capacity drops, route resets, maximum playback-queue arrival gap, queued
+frames, participant gain and last actual-audio pre/post-leveler RMS/peak. It emits
+at most one small line per second per player on activity. With simultaneous
+speakers this is sampled-session evidence, not complete per-session coverage.
+Concealment never overwrites the last actual-audio level with synthetic zero.
+No PCM, names or device identifiers are logged; no gain or AEC behavior changed.

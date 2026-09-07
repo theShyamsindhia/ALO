@@ -2,6 +2,7 @@ import AVFoundation
 import AudioToolbox
 import CoreAudio
 import Foundation
+import OSLog
 import ALOCore
 
 struct VoiceInputDevice: Identifiable, Equatable {
@@ -456,8 +457,10 @@ struct VoicePlaybackLeveler: Sendable {
     }
 
     private(set) var gain: Float = 1
+    private(set) var lastSignalLevels: VoiceSignalLevels?
 
     mutating func process(_ buffer: AVAudioPCMBuffer, isConcealment: Bool = false) {
+        lastSignalLevels = nil
         guard let samples = buffer.floatChannelData?[0], buffer.frameLength > 0 else { return }
         // Packet-loss concealment is synthetic silence, not a quiet microphone
         // callback. Preserve the current speech gain so one lost packet does
@@ -472,10 +475,15 @@ struct VoicePlaybackLeveler: Sendable {
             peak = max(peak, abs(sample))
         }
         let rms = sqrt(energy / Float(count))
+        var outputEnergy: Float = 0
+        var outputPeak: Float = 0
         if rms < Self.noiseFloorRMS || peak == 0 {
             let previousGain = gain
             gain = 1
-            guard peak > 0 else { return }
+            guard peak > 0 else {
+                lastSignalLevels = .init(inputRMS: rms, inputPeak: peak, outputRMS: 0, outputPeak: 0)
+                return
+            }
             for index in 0..<count {
                 let progress = count > 1 ? Float(index) / Float(count - 1) : 1
                 let rampedGain = previousGain + (gain - previousGain) * progress
@@ -483,7 +491,11 @@ struct VoicePlaybackLeveler: Sendable {
                     -Self.peakCeiling,
                     min(Self.peakCeiling, samples[index] * rampedGain)
                 )
+                outputEnergy += samples[index] * samples[index]
+                outputPeak = max(outputPeak, abs(samples[index]))
             }
+            lastSignalLevels = .init(inputRMS: rms, inputPeak: peak,
+                outputRMS: sqrt(outputEnergy / Float(count)), outputPeak: outputPeak)
             return
         }
 
@@ -519,7 +531,11 @@ struct VoicePlaybackLeveler: Sendable {
                 -Self.peakCeiling,
                 min(Self.peakCeiling, samples[index] * rampedGain)
             )
+            outputEnergy += samples[index] * samples[index]
+            outputPeak = max(outputPeak, abs(samples[index]))
         }
+        lastSignalLevels = .init(inputRMS: rms, inputPeak: peak,
+            outputRMS: sqrt(outputEnergy / Float(count)), outputPeak: outputPeak)
     }
 }
 
@@ -737,6 +753,9 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
         let sampleRate: Double
         let player: AVAudioPlayerNode
         var scheduledFrames: AVAudioFramePosition = 0
+        var completionGeneration = UUID()
+        var telemetry = VoicePlaybackTelemetry()
+        let diagnosticOrdinal: UInt64
         var jitter: VoiceJitterBuffer
         var isActive = false
         var lifecycle = VoicePlaybackSessionLifecycle()
@@ -752,13 +771,15 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
             senderID: String,
             senderName: String,
             sampleRate: Double,
-            player: AVAudioPlayerNode
+            player: AVAudioPlayerNode,
+            diagnosticOrdinal: UInt64
         ) {
             self.id = id
             self.senderID = senderID
             self.senderName = senderName
             self.sampleRate = sampleRate
             self.player = player
+            self.diagnosticOrdinal = diagnosticOrdinal
             jitter = VoiceJitterBuffer(
                 concealmentFrames: Int((sampleRate * 0.020).rounded())
             )
@@ -782,6 +803,19 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
     private var deferredRecoveryMessages = [WalkieTalkieMessage]()
     private var muted = false
     private var participantVolumes = [String: Double]()
+    private var diagnosticOrdinal: UInt64 = 0
+    private var diagnosticThrottle = VoiceDiagnosticThrottle()
+    private static let diagnosticLogger = Logger(subsystem: "in.werai.alo", category: "voice-timing")
+    // Test-only delivery control for actual native completion callbacks.
+    // Production leaves nil and dispatches the existing completion immediately.
+    private let completionDelivery: ((@escaping @Sendable () -> Void) -> Void)?
+
+    func playbackSnapshotForTesting(sessionID: String) -> (
+        scheduledFrames: AVAudioFramePosition?, configurationRecoveryPending: Bool,
+        telemetry: VoicePlaybackTelemetry?
+    ) {
+        queue.sync { (sessions[sessionID]?.scheduledFrames, configurationRecoveryPending, sessions[sessionID]?.telemetry) }
+    }
 
     static func makePlaybackBuffer(
         fromPCM16Mono data: Data,
@@ -817,10 +851,12 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
 
     init(
         audioOutput: RoomAudioOutputEngine = RoomAudioOutputEngine(),
+        completionDelivery: ((@escaping @Sendable () -> Void) -> Void)? = nil,
         stateHandler: @escaping @Sendable (String, String, String, Bool, Double) -> Void = { _, _, _, _, _ in }
     ) {
         self.audioOutput = audioOutput
         self.stateHandler = stateHandler
+        self.completionDelivery = completionDelivery
         configurationObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange,
             object: engine,
@@ -896,6 +932,7 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
             // Secure voice uses 10 ms datagrams; legacy voice uses 20 ms.
             // Conceal exactly one packet's duration, not a fixed legacy chunk.
             session.jitter.configurePacketFramesBeforeFirstAudio(data.count / 2)
+            session.telemetry.received(at: MonotonicClock.nowNanos())
             let output = session.jitter.insert(sequence: message.sequence, data: data)
             schedule(output, for: session)
             armTimeout(for: session)
@@ -940,12 +977,14 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
             audioOutput.releaseClient()
             return nil
         }
+        diagnosticOrdinal &+= 1
         let session = Session(
             id: message.sessionID,
             senderID: message.senderID,
             senderName: message.senderName,
             sampleRate: sampleRate,
-            player: player
+            player: player,
+            diagnosticOrdinal: diagnosticOrdinal
         )
         sessions[message.sessionID] = session
         tracker.begin(message.sessionID)
@@ -993,26 +1032,37 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
         ) {
             // Keep already-queued speech continuous. Dropping this newest frame
             // bounds latency without flushing the player's render queue.
+            session.telemetry.droppedAtCapacity()
+            publishDiagnostics(for: session)
             return
         }
         session.scheduledFrames += AVAudioFramePosition(frames)
+        session.telemetry.scheduled(concealment: isConcealment, levels: session.leveler.lastSignalLevels)
         session.inactivityWorkItem?.cancel()
         session.inactivityWorkItem = nil
         let sessionID = session.id
+        let sessionIdentity = ObjectIdentifier(session)
+        let completionGeneration = session.completionGeneration
         session.player.scheduleBuffer(buffer, completionCallbackType: .dataRendered) { [weak self] _ in
-            self?.queue.async {
-                guard let self,
-                      let current = self.sessions[sessionID],
-                      current === session
-                else { return }
-                current.scheduledFrames = max(0, current.scheduledFrames - AVAudioFramePosition(frames))
-                if current.scheduledFrames == 0 {
-                    if current.lifecycle.isEnding { self.stopSession(sessionID) }
-                    else { self.armPlaybackInactivity(for: current) }
+            let complete: @Sendable () -> Void = { [weak self] in
+                self?.queue.async {
+                    guard let self,
+                          let current = self.sessions[sessionID],
+                          ObjectIdentifier(current) == sessionIdentity,
+                          current.completionGeneration == completionGeneration
+                    else { return }
+                    current.scheduledFrames = max(0, current.scheduledFrames - AVAudioFramePosition(frames))
+                    if current.scheduledFrames == 0 {
+                        if current.lifecycle.isEnding { self.stopSession(sessionID) }
+                        else { self.armPlaybackInactivity(for: current) }
+                    }
                 }
             }
+            if let delivery = self?.completionDelivery { delivery(complete) }
+            else { complete() }
         }
         if !session.player.isPlaying, audioOutput.isRunning { session.player.play() }
+        publishDiagnostics(for: session)
         let level = session.levelEnvelope.update(target: VoiceLevelMeter.normalizedLevel(fromPCM16Mono: data))
         if session.isActive {
             publishLevelIfNeeded(for: session, level: level)
@@ -1028,6 +1078,13 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
         } catch {
             return false
         }
+    }
+
+    private func publishDiagnostics(for session: Session) {
+        guard diagnosticThrottle.admit(at: MonotonicClock.nowNanos()) else { return }
+        let detail = session.telemetry.detail(session: session.diagnosticOrdinal,
+            queuedFrames: session.scheduledFrames, participantGain: session.player.volume)
+        Self.diagnosticLogger.notice("\(detail, privacy: .public)")
     }
 
     private func recoverAfterConfigurationChange() {
@@ -1070,8 +1127,13 @@ final class WalkieTalkiePlayer: @unchecked Sendable {
         if !configurationRecoveryPending {
             configurationRecoveryPending = true
             for session in sessions.values {
+                // Native callbacks can arrive after stop and after new-route
+                // PCM is queued on the same Session. Retire their credits first.
+                session.completionGeneration = UUID()
                 session.player.stop()
                 session.scheduledFrames = 0
+                session.telemetry.resetForConfiguration()
+                publishDiagnostics(for: session)
                 session.jitter.resetForRouteChange()
                 setSessionActive(session, false)
             }
