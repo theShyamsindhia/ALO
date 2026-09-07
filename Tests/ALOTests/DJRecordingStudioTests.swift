@@ -29,11 +29,14 @@ struct DJRecordingStudioTests {
         #expect(!studio.usesLiveDeckA && studio.a.isPlaying)
         #expect(DJLiveAudio.shared.process(dry, stage: .broadcast).allSatisfy { $0 == 0 })
         var peak = 0
-        for _ in 0..<12 {
-            _ = try studio.engine.renderOffline(1024, to: output)
+        for attempt in 0..<12 {
+            let beforeFrame = studio.engine.manualRenderingSampleTime
+            let status = try studio.engine.renderOffline(1024, to: output)
             studio.relay.flushForTesting()
             let mixed = DJLiveAudio.shared.process(dry, stage: .broadcast)
-            peak = max(peak, mixed.map { abs(Int($0)) }.max() ?? 0)
+            let attemptPeak = mixed.map { abs(Int($0)) }.max() ?? 0
+            peak = max(peak, attemptPeak)
+            print("DJ_RECORDING_PROBE attempt=\(attempt) status=\(status.rawValue) before_frame=\(beforeFrame) after_frame=\(studio.engine.manualRenderingSampleTime) rendered_frames=\(output.frameLength) relay_level=\(studio.relay.level) peak=\(attemptPeak) maximum_peak=\(peak) playing=\(studio.a.isPlaying) live_input=\(studio.usesLiveDeckA)")
         }
         #expect(peak > 5000)
         studio.setLiveStage(.broadcast) // Return live without ending the room source.
