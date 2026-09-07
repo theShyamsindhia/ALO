@@ -93,6 +93,8 @@ jobs:
         run: bash Scripts/test-app-icon.sh
       - name: Verify dev installer preserves existing backups
         run: bash Scripts/test-dev-backup-cleanup.sh
+      - name: Verify live synchronization capture analysis
+        run: node --test Scripts/test-sync-capture.mjs
       - uses: ./.github/actions/swift-build-cache
         with:
           flavor: app
