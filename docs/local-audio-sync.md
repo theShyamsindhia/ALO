@@ -60,9 +60,20 @@ not final: the first actual listener after the startup grace period establishes
 it atomically when its report is accepted. This must happen before a concurrent
 removal can interleave with the subsequent delay calculation. Once established,
 removal or report expiry never reopens eligibility to unrelated later joiners.
-Keep the first-listener and record/remove/record regressions when changing this
-policy; a permanently frozen empty cohort strands that listener on the default
-buffer despite its measured recommendation.
+Expired reports must be removed before every initial cohort freeze, including
+both report acceptance and delay calculation; stale evidence cannot found it.
+Keep the first-listener, record/remove/record,
+`expiredUnfrozenGraceReportCannotExcludeFirstFreshListener`, and
+`emptyPollingDoesNotExcludeFirstListener` regressions when changing this policy;
+a permanently frozen empty cohort strands that listener on the default buffer
+despite its measured recommendation.
+
+Immediate first-listener founding after the capture grace period is intentional:
+it favors stable shared timing over enrolling a second, nearly simultaneous
+listener whose report arrives later. There is no new enrollment window after
+the first report. Changing that tradeoff requires an explicit policy decision,
+not reopening enrollment on expiry or removal. Founder departure does not lower
+the shared delay while playback continues.
 
 The delivery-gap test uses actual native offline PCM markers and a budget
 selected by this production policy. Its synthetic 300 ms gap is a controlled
