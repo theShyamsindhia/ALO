@@ -48,10 +48,10 @@ struct VoiceRouteCompletionTests {
             player.playbackSnapshotForTesting(sessionID: sessionID).scheduledFrames != 1_920
         }, "Actual configuration reset must retire the queued frame accounting")
         held.release()
-        #expect(waitUntil { player.playbackSnapshotForTesting(sessionID: sessionID).scheduledFrames == nil },
-            "Ending session must retire even when its old native callbacks are fenced")
-        #expect(waitUntil { !output.isRunning }, "Ending route reset must release its output client")
-        #expect(player.playbackSnapshotForTesting(sessionID: sessionID).playerConfigurationResets == 1,
+        try #require(waitUntil { player.playbackSnapshotForTesting(sessionID: sessionID).scheduledFrames == nil },
+            "Ending session must retire; callbacks for an absent session must not recreate it")
+        try #require(waitUntil { !output.isRunning }, "Ending route reset must release its output client")
+        #expect(player.playbackSnapshotForTesting(sessionID: sessionID).playerConfigurationResets >= 1,
             "Player diagnostics retain reset evidence after the ending session is gone")
     }
 

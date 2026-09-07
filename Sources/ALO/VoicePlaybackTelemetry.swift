@@ -30,8 +30,9 @@ struct VoicePlaybackTelemetry: Sendable {
     mutating func droppedAtCapacity() { Self.increment(&capDrops) }
     mutating func resetForConfiguration() {
         Self.increment(&configurationResets)
+        // Retain incident evidence for this session's lifetime, but do not
+        // interpret time spent recovering as a new ingress-gap observation.
         previousArrival = nil
-        maximumArrivalGapNanos = 0
     }
     private static func increment(_ value: inout UInt64) { if value < UInt64.max { value += 1 } }
 
