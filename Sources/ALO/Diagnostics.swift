@@ -298,6 +298,7 @@ struct DiagnosticReportContext: Sendable {
     let room: DiagnosticRoomContext
     let microphoneSelection: String
     var recentSyncEvents: [DiagnosticCheckResult] = []
+    var syncIncidents: [RoomSyncIncident] = []
 }
 
 enum DiagnosticRedactor {
@@ -358,7 +359,26 @@ enum DiagnosticReportBuilder {
                 lines.append("- \(time): \(event.outcome.label) — \(DiagnosticRedactor.redact(event.detail))")
             }
         }
+        if !context.syncIncidents.isEmpty {
+            lines.append("")
+            lines.append("Synchronization incident evidence (up to 16 incidents, 45 samples each)")
+            lines.append("Software render-clock measurements; these do not measure acoustic alignment between speakers.")
+            lines.append("Participant numbers are anonymous within this channel session. Missing measurements are gaps, not zero drift.")
+            for incident in context.syncIncidents.suffix(RoomSyncMonitor.maximumIncidents) {
+                let date = ISO8601DateFormatter().string(from: incident.occurredAt)
+                lines.append("- \(date) participant=\(incident.participantNumber) local=\(incident.isLocal) trigger=\(incident.trigger.rawValue)")
+                for sample in incident.samples.suffix(45) {
+                    let time = ISO8601DateFormatter().string(from: sample.occurredAt)
+                    lines.append("  \(time) monotonic-ns=\(sample.sampledAtNanos) drift-ms=\(metric(sample.driftMilliseconds)) rtt-ms=\(metric(sample.roundTripMilliseconds)) late-packets=\(sample.latePacketCount.map(String.init) ?? "unavailable") resyncs=\(sample.resyncCount.map(String.init) ?? "unavailable") buffer-ms=\(metric(sample.bufferMilliseconds)) jitter-ms=\(metric(sample.jitterMilliseconds)) output-path-ms=\(metric(sample.outputPathMilliseconds))")
+                }
+            }
+        }
         return DiagnosticRedactor.redact(lines.joined(separator: "\n")) + "\n"
+    }
+
+    private static func metric(_ value: Double?) -> String {
+        guard let value, value.isFinite else { return "unavailable" }
+        return String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), value)
     }
 }
 
@@ -802,7 +822,8 @@ private struct DiagnosticsView: View {
             architecture: Self.architecture,
             room: model.diagnosticRoomContext(),
             microphoneSelection: model.selectedVoiceInputUID == nil ? "system default" : "custom input",
-            recentSyncEvents: model.liveSyncHealth.recentTransitions
+            recentSyncEvents: model.liveSyncHealth.recentTransitions,
+            syncIncidents: model.roomSyncMonitor.incidents
         )
     }
 

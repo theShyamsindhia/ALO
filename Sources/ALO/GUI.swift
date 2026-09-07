@@ -3628,6 +3628,14 @@ final class ALOViewModel: ObservableObject {
                                 timing: freshTiming,
                                 sampledAtNanos: sampledAt)
         let result = diagnosticRoomContext(timing: freshTiming).result
+        if ALOAppFlavor.isDevelopment {
+            // Per-sample evidence for paired dev runs; production remains
+            // transition-only. Unified logging supplies the wall timestamp,
+            // while this value identifies local monotonic sampling time.
+            // Never include identities, channel names, source audio or metadata.
+            let detail = DiagnosticRedactor.redact(result.detail)
+            syncHealthLogger.notice("Dev timing sample monotonic_ns=\(sampledAt, privacy: .public) outcome=\(result.outcome.rawValue, privacy: .public): \(detail, privacy: .public)")
+        }
         if liveSyncHealth.recentTransitions.last?.outcome != result.outcome {
             // Anonymous, transition-only evidence; never log peer names or content.
             let detail = DiagnosticRedactor.redact(result.detail)
@@ -3648,6 +3656,10 @@ final class ALOViewModel: ObservableObject {
         // Guard before mutating the @Published value: even an unchanged inout
         // write would otherwise redraw the whole model on every idle timer tick.
         guard liveSyncHealth.hasCurrentSample else { return }
+        if ALOAppFlavor.isDevelopment {
+            let detail = DiagnosticRedactor.redact(reason)
+            syncHealthLogger.notice("Dev timing unavailable: \(detail, privacy: .public)")
+        }
         roomSyncMonitor.markUnavailable(participants: participants,
                                         currentParticipantID: currentParticipantID,
                                         sampledAtNanos: MonotonicClock.nowNanos(),

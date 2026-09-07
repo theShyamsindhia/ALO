@@ -40,7 +40,8 @@ struct MacNetworkSetupView: View {
                 }
                 Button { NSApp.keyWindow?.close() } label: { Image(systemName: "xmark").frame(width: 40, height: 40) }
                     .help("Hide this window").accessibilityLabel("Hide this window")
-            }.buttonStyle(.borderless).controlSize(.large).padding(18)
+            }.buttonStyle(.borderless).controlSize(account.identityReady ? .regular : .large)
+                .padding(account.identityReady ? 8 : 18)
             Divider()
             if !account.identityReady { identitySetup }
             else { networkBrowser }
@@ -152,8 +153,7 @@ struct MacNetworkSetupView: View {
                 nearbyNotice: account.nearbyNetworkNotice,
                 onRetryNearby: { Task { @MainActor in account.stopNearbyNetworking(); await account.startNearbyNetworking() } },
                 onCancelJoin: { id in account.cancelJoinRequest(networkID: id) })
-                .frame(minWidth: 250, idealWidth: 280, maxWidth: account.networks.isEmpty ? .infinity : 300)
-            if !account.networks.isEmpty {
+                .frame(minWidth: 210, idealWidth: 230, maxWidth: 260)
             Divider()
             VStack(spacing: 0) {
                 if let network = account.selectedNetwork {
@@ -177,13 +177,12 @@ struct MacNetworkSetupView: View {
                     ContentUnavailableView {
                         Label("Your networks live here", systemImage: "network")
                     } description: {
-                        Text("Choose a network to see its channels.")
+                        Text(account.networks.isEmpty ? "Create a network for your group, or join one nearby. Your channels will appear here." : "Choose a network to see its channels.")
                     } actions: {
                         Button("Create network") { present(.createNetwork) }.buttonStyle(.borderedProminent)
                     }
                     if let error = error ?? account.errorMessage ?? model.errorMessage { Text(error).foregroundStyle(.red).padding() }
                 }
-            }
             }
         }
         .safeAreaInset(edge: .bottom) {

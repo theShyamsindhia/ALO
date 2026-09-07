@@ -1,11 +1,31 @@
 import Foundation
 import ALOCore
 
-struct RoomSyncSample: Identifiable, Equatable {
+struct RoomSyncSample: Identifiable, Equatable, Sendable {
     var id: UInt64 { sampledAtNanos }
     let sampledAtNanos: UInt64
     let driftMilliseconds: Double?
     let roundTripMilliseconds: Double?
+    let occurredAt: Date
+    let latePacketCount: UInt64?
+    let resyncCount: UInt64?
+    let bufferMilliseconds: Double?
+    let jitterMilliseconds: Double?
+    let outputPathMilliseconds: Double?
+}
+
+/// Numeric evidence only: participant numbers have meaning only inside this
+/// monitor session. Never export the live trace's identity or display strings.
+struct RoomSyncIncident: Equatable, Sendable {
+    enum Trigger: String, Sendable {
+        case driftExceeded = "drift-threshold"
+        case measurementMissing = "measurement-missing"
+    }
+    let participantNumber: Int
+    let isLocal: Bool
+    let trigger: Trigger
+    let occurredAt: Date
+    var samples: [RoomSyncSample]
 }
 
 struct RoomSyncTrace: Identifiable, Equatable {
@@ -39,6 +59,16 @@ struct RoomSyncMonitor {
     static let recoveryThresholdMilliseconds = 20.0
     static let maximumSamplesPerParticipant = 90
     static let maximumEvents = 48
+    static let maximumParticipants = 32
+    static let maximumIncidents = 16
+    private static let incidentLeadingSamples = 15
+    private static let incidentFollowingSamples = 30
+
+    private struct IncidentRecording {
+        let participantID: String
+        var evidence: RoomSyncIncident
+        var remainingSamples: Int
+    }
 
     private struct ParticipantState {
         var hadFreshDrift = false
@@ -59,6 +89,11 @@ struct RoomSyncMonitor {
     private(set) var events: [RoomSyncEvent] = []
     private var participantStates: [String: ParticipantState] = [:]
     private var roomState = RoomState()
+    private var participantNumbers: [String: Int] = [:]
+    private var nextParticipantNumber = 1
+    private var recordings: [IncidentRecording] = []
+
+    var incidents: [RoomSyncIncident] { recordings.map(\.evidence) }
 
     var orderedTraces: [RoomSyncTrace] {
         traces.values.sorted {
@@ -109,7 +144,17 @@ struct RoomSyncMonitor {
                          isLocal: isLocal,
                          driftMilliseconds: freshFinite(drift),
                          roundTripMilliseconds: freshFinite(roundTrip),
-                         sampledAtNanos: sampledAtNanos)
+                         sampledAtNanos: sampledAtNanos,
+                         occurredAt: occurredAt,
+                         latePacketCount: isLocal ? timing.receiver?.latePacketCount : listener?.latePacketCount,
+                         resyncCount: isLocal ? timing.receiver?.resyncCount : listener?.resyncCount,
+                         bufferMilliseconds: timing.host?.groupBufferMilliseconds
+                            ?? timing.receiver?.activePlayoutBufferMilliseconds
+                            ?? timing.receiver?.recommendedBufferMilliseconds,
+                         jitterMilliseconds: isLocal ? timing.receiver?.jitterMilliseconds : nil,
+                         outputPathMilliseconds: isLocal ? timing.receiver.map {
+                             $0.outputLatencyMilliseconds + $0.renderHeadroomMilliseconds
+                         } : nil)
             observeParticipant(participantID: participant.id,
                                name: isLocal ? "You" : participant.name,
                                driftMilliseconds: freshFinite(drift),
@@ -142,7 +187,7 @@ struct RoomSyncMonitor {
                          isLocal: isLocal,
                          driftMilliseconds: nil,
                          roundTripMilliseconds: nil,
-                         sampledAtNanos: sampledAtNanos)
+                         sampledAtNanos: sampledAtNanos, occurredAt: occurredAt)
             state.hadFreshDrift = false
             participantStates[participant.id] = state
             interrupted = true
@@ -158,19 +203,73 @@ struct RoomSyncMonitor {
         isLocal: Bool,
         driftMilliseconds: Double?,
         roundTripMilliseconds: Double?,
-        sampledAtNanos: UInt64
+        sampledAtNanos: UInt64,
+        occurredAt: Date,
+        latePacketCount: UInt64? = nil,
+        resyncCount: UInt64? = nil,
+        bufferMilliseconds: Double? = nil,
+        jitterMilliseconds: Double? = nil,
+        outputPathMilliseconds: Double? = nil
     ) {
+        if traces[participantID] == nil {
+            if traces.count >= Self.maximumParticipants,
+               let oldest = traces.min(by: {
+                   ($0.value.latest?.sampledAtNanos ?? 0) < ($1.value.latest?.sampledAtNanos ?? 0)
+               })?.key {
+                traces.removeValue(forKey: oldest)
+                participantStates.removeValue(forKey: oldest)
+                participantNumbers.removeValue(forKey: oldest)
+                // An evicted trace cannot continue an earlier recording under
+                // a newly assigned anonymous participant number.
+                for index in recordings.indices where recordings[index].participantID == oldest {
+                    recordings[index].remainingSamples = 0
+                }
+            }
+            participantNumbers[participantID] = nextParticipantNumber
+            nextParticipantNumber += 1
+        }
         var trace = traces[participantID]
             ?? RoomSyncTrace(id: participantID, name: name, isLocal: isLocal, samples: [])
         trace.name = name
         trace.isLocal = isLocal
-        trace.samples.append(RoomSyncSample(sampledAtNanos: sampledAtNanos,
+        let sample = RoomSyncSample(sampledAtNanos: sampledAtNanos,
                                             driftMilliseconds: driftMilliseconds,
-                                            roundTripMilliseconds: roundTripMilliseconds))
+                                            roundTripMilliseconds: roundTripMilliseconds,
+                                            occurredAt: occurredAt,
+                                            latePacketCount: latePacketCount, resyncCount: resyncCount,
+                                            bufferMilliseconds: freshFinite(bufferMilliseconds),
+                                            jitterMilliseconds: freshFinite(jitterMilliseconds),
+                                            outputPathMilliseconds: freshFinite(outputPathMilliseconds))
+        trace.samples.append(sample)
         if trace.samples.count > Self.maximumSamplesPerParticipant {
             trace.samples.removeFirst(trace.samples.count - Self.maximumSamplesPerParticipant)
         }
         traces[participantID] = trace
+        for index in recordings.indices where recordings[index].participantID == participantID
+            && recordings[index].remainingSamples > 0 {
+            recordings[index].evidence.samples.append(sample)
+            recordings[index].remainingSamples -= 1
+        }
+        let state = participantStates[participantID]
+        let trigger: RoomSyncIncident.Trigger?
+        if let driftMilliseconds, driftMilliseconds >= Self.correctionThresholdMilliseconds,
+           state?.wasOutsideTolerance != true {
+            trigger = .driftExceeded
+        } else if driftMilliseconds == nil, state?.hadFreshDrift == true {
+            trigger = .measurementMissing
+        } else {
+            trigger = nil
+        }
+        if let trigger, let number = participantNumbers[participantID] {
+            recordings.append(IncidentRecording(participantID: participantID,
+                evidence: RoomSyncIncident(participantNumber: number, isLocal: isLocal,
+                    trigger: trigger, occurredAt: occurredAt,
+                    samples: Array(trace.samples.suffix(Self.incidentLeadingSamples))),
+                remainingSamples: Self.incidentFollowingSamples))
+            if recordings.count > Self.maximumIncidents {
+                recordings.removeFirst(recordings.count - Self.maximumIncidents)
+            }
+        }
     }
 
     private mutating func observeParticipant(
@@ -200,7 +299,12 @@ struct RoomSyncMonitor {
                             detail: "Fresh playback measurements are available again.", at: occurredAt)
             }
             state.hadFreshDrift = true
-            state.wasOutsideTolerance = outside
+            // Stay in warning through the hysteresis band and missing samples;
+            // only a measured recovery at <=20 ms closes this incident.
+            if outside { state.wasOutsideTolerance = true }
+            else if driftMilliseconds <= Self.recoveryThresholdMilliseconds {
+                state.wasOutsideTolerance = false
+            }
         } else {
             if state.hadFreshDrift {
                 appendEvent(.warning, title: "\(name) timing report paused",

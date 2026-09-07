@@ -18,6 +18,8 @@ public struct ALONetworkSidebar: View {
     private let nearbyNotice: String?
     private let onRetryNearby: () -> Void
     private let onCancelJoin: (UUID) -> Void
+    @State private var reviewingRequest: ALOJoinRequestSummary?
+    @State private var showingIdentity = false
 
     public init(
         networks: [ALONetworkSummary],
@@ -53,6 +55,14 @@ public struct ALONetworkSidebar: View {
     }
 
     public var body: some View {
+        #if os(macOS)
+        desktopSidebar
+        #else
+        mobileSidebar
+        #endif
+    }
+
+    private var mobileSidebar: some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 5) {
                 Text("Networks").font(.title2.weight(.semibold)).accessibilityAddTraits(.isHeader)
@@ -193,6 +203,139 @@ public struct ALONetworkSidebar: View {
         }
         .navigationTitle("Networks")
     }
+
+    #if os(macOS)
+    private var desktopSidebar: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Networks").font(.headline).accessibilityAddTraits(.isHeader)
+                Spacer()
+                Menu {
+                    Button("Create network…", systemImage: "plus", action: onCreateNetwork)
+                        .accessibilityIdentifier("ALO.Network.Create")
+                    Button("Import invitation…", systemImage: "square.and.arrow.down", action: onImportNetwork)
+                        .accessibilityIdentifier("ALO.Network.Import")
+                } label: { Image(systemName: "plus").frame(width: 24, height: 24) }
+                .menuStyle(.borderlessButton).fixedSize()
+                .help("Add a network").accessibilityLabel("Add a network")
+            }.padding(.horizontal, 16).padding(.vertical, 12)
+
+            List(selection: $selectedNetworkID) {
+                Section("Your networks") {
+                    ForEach(networks) { network in
+                        Label {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(network.name).lineLimit(2)
+                                Text("\(network.memberCount) \(network.memberCount == 1 ? "member" : "members")\(network.isOwner ? " · Owner" : "")")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        } icon: { Image(systemName: "person.2").foregroundStyle(.secondary) }
+                        .padding(.vertical, 3).tag(network.id)
+                        .help(network.name)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("ALO.Network.\(network.id)")
+                    }
+                    if networks.isEmpty {
+                        Text("Join a nearby network or create one for your group.")
+                            .font(.callout).foregroundStyle(.secondary)
+                            .lineLimit(nil)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button("Create network…", action: onCreateNetwork)
+                    }
+                }
+                if !joinRequests.isEmpty {
+                    Section("Requests · \(joinRequests.count)") {
+                        ForEach(joinRequests) { request in
+                            Button { reviewingRequest = request } label: {
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(request.name).lineLimit(2)
+                                        Text(request.networkName).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                                    }
+                                    Spacer(minLength: 4)
+                                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+                                }.padding(.vertical, 3).contentShape(Rectangle())
+                            }.buttonStyle(.plain)
+                            .accessibilityLabel("Review \(request.name)'s request to join \(request.networkName)")
+                        }
+                    }
+                }
+                Section("Nearby") {
+                    ForEach(nearbyNetworks) { network in
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack(alignment: .firstTextBaseline) {
+                                Text(network.name).lineLimit(2).help(network.name)
+                                Spacer(minLength: 4)
+                                if network.status == .waitingForApproval {
+                                    Button("Cancel") { onCancelJoin(network.id) }.controlSize(.small)
+                                        .accessibilityLabel("Cancel request to join \(network.name)")
+                                } else if network.status != .joined {
+                                    Button("Join") { onJoin(network.id) }.controlSize(.small).disabled(isBusy)
+                                        .accessibilityLabel("Join \(network.name)")
+                                }
+                            }
+                            if let status = network.status {
+                                Text(status.message).font(.caption).foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }.padding(.vertical, 3)
+                    }
+                    if nearbyNetworks.isEmpty {
+                        Text("No nearby networks").font(.callout).foregroundStyle(.secondary)
+                            .help("Networks appear while their owner has ALO open on the same local network.")
+                    }
+                    if let nearbyNotice {
+                        Text(nearbyNotice).font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if let nearbyError {
+                        ALOInlineError(message: nearbyError)
+                        Button("Try again", action: onRetryNearby)
+                    }
+                }
+            }.listStyle(.sidebar)
+            Divider()
+            HStack {
+                Label(identityName, systemImage: "person.crop.circle").lineLimit(1).help(identityName)
+                Spacer(minLength: 4)
+                Menu {
+                    Button("Share public identity…", systemImage: "square.and.arrow.up", action: onExportPublicIdentity)
+                        .accessibilityIdentifier("ALO.Identity.SharePublic")
+                    Button("View identity fingerprint…") { showingIdentity = true }
+                } label: { Image(systemName: "ellipsis.circle").frame(width: 24, height: 24) }
+                .menuStyle(.borderlessButton).fixedSize()
+                .help("Identity options").accessibilityLabel("Identity options")
+            }.padding(12)
+        }
+        .background(.regularMaterial)
+        .sheet(item: $reviewingRequest) { request in
+            VStack(alignment: .leading, spacing: 20) {
+                Text("Request to join").font(.title2.weight(.semibold))
+                Text("\(request.name) wants to join \(request.networkName).")
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Approve only if you recognize this person. Compare their fingerprint through a trusted conversation.")
+                    .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                ALOFingerprint(value: request.fingerprint)
+                HStack {
+                    Button("Cancel") { reviewingRequest = nil }.keyboardShortcut(.cancelAction)
+                    Spacer()
+                    Button("Decline", role: .destructive) { onDecline(request.id); reviewingRequest = nil }
+                    Button("Approve") { onApprove(request.id); reviewingRequest = nil }.buttonStyle(.borderedProminent)
+                }.disabled(isBusy)
+            }.padding(24).frame(width: 440).interactiveDismissDisabled(isBusy)
+        }
+        .sheet(isPresented: $showingIdentity) {
+            VStack(alignment: .leading, spacing: 20) {
+                Text(identityName).font(.title2.weight(.semibold))
+                ALOFingerprint(value: identityFingerprint)
+                HStack { Spacer(); Button("Done") { showingIdentity = false }.keyboardShortcut(.cancelAction) }
+            }.padding(24).frame(width: 440)
+        }
+        .onChange(of: joinRequests.map(\.id)) { _, ids in
+            if let request = reviewingRequest, !ids.contains(request.id) { reviewingRequest = nil }
+        }
+    }
+    #endif
 }
 
 /// Navigation only. The parent must filter private channels using authenticated
@@ -229,6 +372,26 @@ public struct ALOChannelList: View {
 
     public var body: some View {
         VStack(spacing: 0) {
+            #if os(macOS)
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(network.name).font(.title3.weight(.semibold)).lineLimit(2)
+                        .help(network.name).accessibilityAddTraits(.isHeader)
+                    Text("\(network.memberCount) \(network.memberCount == 1 ? "member" : "members") · \(channels.count) \(channels.count == 1 ? "channel" : "channels")")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                Menu {
+                    if network.isOwner {
+                        Button("Create channel…", systemImage: "plus", action: onCreateChannel)
+                        Button("Add member…", systemImage: "person.badge.plus", action: onAddMember)
+                    }
+                    Button("Import invitation…", systemImage: "square.and.arrow.down", action: onImportInvitation)
+                } label: { Image(systemName: "ellipsis.circle").frame(width: 24, height: 24) }
+                .menuStyle(.borderlessButton).fixedSize().disabled(isBusy)
+                .help("Network actions").accessibilityLabel("Network actions")
+            }.padding(20)
+            #else
             VStack(alignment: .leading, spacing: 8) {
                 Text(network.name).font(.title2.weight(.semibold)).accessibilityAddTraits(.isHeader)
                 Text("Public channels are visible only to members of this network.")
@@ -237,6 +400,7 @@ public struct ALOChannelList: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(16)
+            #endif
 
             List(selection: $selectedChannelID) {
                 Section("Channels") {
@@ -264,6 +428,7 @@ public struct ALOChannelList: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                #if !os(macOS)
                 Section {
                     if network.isOwner {
                         Button(action: onCreateChannel) {
@@ -277,11 +442,16 @@ public struct ALOChannelList: View {
                         ALOActionLabel(title: "Import invitation", systemImage: "square.and.arrow.down")
                     }.disabled(isBusy)
                 }
+                #endif
                 if let errorMessage {
                     Section { ALOInlineError(message: errorMessage) }
                 }
             }
+            #if os(macOS)
+            .listStyle(.inset)
+            #else
             .listStyle(.sidebar)
+            #endif
             .frame(minHeight: 0, maxHeight: .infinity)
         }
         .navigationTitle(network.name)
