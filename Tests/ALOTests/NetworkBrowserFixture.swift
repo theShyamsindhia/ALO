@@ -5,12 +5,13 @@ import ALONetworkUI
 /// credentials, discovery, or playback. Also usable by the standalone renderer.
 struct NetworkBrowserFixture: View {
     let state: String
+    var onSidebarProbe: ((NSView) -> Void)? = nil
     @State private var networkID: String? = "studio"
     @State private var channelID: String? = "main"
 
     private var networks: [ALONetworkSummary] {
         state == "empty" ? [] : [
-            .init(id: "studio", name: state == "long" ? "Studio for collaborative music and late-night conversations" : "Studio", memberCount: 4, isOwner: true),
+            .init(id: "studio", name: state == "long" ? "Studio for collaborative music and late-night conversations" : "Studio", memberCount: 4, isOwner: state != "member-empty"),
             .init(id: "friends", name: "Friends", memberCount: 8, isOwner: false)
         ]
     }
@@ -27,21 +28,24 @@ struct NetworkBrowserFixture: View {
                 ], joinRequests: state == "pending" || state == "long" ? [
                     .init(id: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!,
                           name: "Alex", networkName: "Studio", fingerprint: "public-preview-request")
-                ] : [])
+                ] : [], onExportRecovery: {})
                 .frame(width: 230)
+                .background(NetworkSidebarGeometryProbe(onCreate: onSidebarProbe))
             Divider()
             if let network = networks.first {
                 VStack(spacing: 0) {
-                    ALOChannelList(network: network, channels: state == "owner-empty" ? [] : [
+                    ALOChannelList(network: network, channels: state.hasSuffix("-empty") ? [] : [
                         .init(id: "main", name: "Main", isPrivate: false, isMain: true),
                         .init(id: "music", name: state == "long" ? "Music for focused work and collaborative listening sessions" : "Music", isPrivate: false),
                         .init(id: "private", name: "After hours", isPrivate: true)
-                    ], selectedChannelID: $channelID, onCreateChannel: {}, onAddMember: {}, onImportInvitation: {})
+                    ], selectedChannelID: $channelID,
+                    errorMessage: state == "error" ? "The nearby connection closed. Try joining again while the owner has ALO open." : nil,
+                    onCreateChannel: {}, onAddMember: {}, onImportInvitation: {})
                     Divider()
                     HStack {
                         Button("Members", systemImage: "person.2") {}
                         Spacer()
-                        if state != "owner-empty" {
+                        if !state.hasSuffix("-empty") {
                             Button("Join channel", systemImage: "arrow.right.circle.fill") {}.buttonStyle(.borderedProminent)
                         }
                     }.padding(16)
@@ -54,7 +58,19 @@ struct NetworkBrowserFixture: View {
                 } actions: {
                     Button("Create network") {}.buttonStyle(.borderedProminent)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
     }
+}
+
+private struct NetworkSidebarGeometryProbe: NSViewRepresentable {
+    var onCreate: ((NSView) -> Void)?
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        onCreate?(view)
+        return view
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }

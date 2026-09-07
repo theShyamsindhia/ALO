@@ -18,6 +18,7 @@ public struct ALONetworkSidebar: View {
     private let nearbyNotice: String?
     private let onRetryNearby: () -> Void
     private let onCancelJoin: (UUID) -> Void
+    private let onExportRecovery: (() -> Void)?
     @State private var reviewingRequest: ALOJoinRequestSummary?
     @State private var showingIdentity = false
 
@@ -38,7 +39,8 @@ public struct ALONetworkSidebar: View {
         nearbyError: String? = nil,
         nearbyNotice: String? = nil,
         onRetryNearby: @escaping () -> Void = {},
-        onCancelJoin: @escaping (UUID) -> Void = { _ in }
+        onCancelJoin: @escaping (UUID) -> Void = { _ in },
+        onExportRecovery: (() -> Void)? = nil
     ) {
         self.networks = networks
         _selectedNetworkID = selectedNetworkID
@@ -52,6 +54,7 @@ public struct ALONetworkSidebar: View {
         self.nearbyError = nearbyError; self.onRetryNearby = onRetryNearby
         self.nearbyNotice = nearbyNotice
         self.onCancelJoin = onCancelJoin
+        self.onExportRecovery = onExportRecovery
     }
 
     public var body: some View {
@@ -302,12 +305,17 @@ public struct ALONetworkSidebar: View {
                     Button("Share public identity…", systemImage: "square.and.arrow.up", action: onExportPublicIdentity)
                         .accessibilityIdentifier("ALO.Identity.SharePublic")
                     Button("View identity fingerprint…") { showingIdentity = true }
+                    if let onExportRecovery {
+                        Divider()
+                        Button("Export identity recovery file…", systemImage: "key", action: onExportRecovery)
+                            .accessibilityIdentifier("ALO.Identity.ExportRecovery")
+                    }
                 } label: { Image(systemName: "ellipsis.circle").frame(width: 24, height: 24) }
                 .menuStyle(.borderlessButton).fixedSize()
                 .help("Identity options").accessibilityLabel("Identity options")
             }.padding(12)
         }
-        .background(.regularMaterial)
+        .background(Color(nsColor: .windowBackgroundColor))
         .sheet(item: $reviewingRequest) { request in
             VStack(alignment: .leading, spacing: 20) {
                 Text("Request to join").font(.title2.weight(.semibold))

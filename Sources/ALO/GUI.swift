@@ -441,6 +441,33 @@ func toggleALOSetupWindow(_ window: NSWindow) {
 }
 
 @MainActor
+enum NetworkSetupWindowPresentation {
+    static let initialContentSize = NSSize(width: 760, height: 520)
+    static let minimumContentSize = NSSize(width: 640, height: 440)
+
+    static func shouldApplyIdentityUpdate(_ queuedReady: Bool, currentReady: Bool) -> Bool {
+        queuedReady == currentReady
+    }
+
+    static func configure(_ window: NSWindow, identityReady: Bool) {
+        window.styleMask = identityReady
+            ? [.titled, .closable, .miniaturizable, .resizable]
+            : [.titled, .closable, .fullSizeContentView]
+        window.title = identityReady ? "Networks — \(ALOAppFlavor.displayName)" : ALOAppFlavor.displayName
+        window.titlebarAppearsTransparent = !identityReady
+        window.titleVisibility = identityReady ? .visible : .hidden
+        window.titlebarSeparatorStyle = identityReady ? .automatic : .none
+        window.backgroundColor = identityReady ? .windowBackgroundColor : .clear
+        window.isOpaque = identityReady
+        window.isMovableByWindowBackground = !identityReady
+        window.contentMinSize = identityReady ? minimumContentSize : .zero
+        for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            window.standardWindowButton(button)?.isHidden = !identityReady
+        }
+    }
+}
+
+@MainActor
 final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     private enum SetupWindow {
         static let width: CGFloat = 800
@@ -479,6 +506,7 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     private var floatingBarObserver: AnyCancellable?
     private var walkieBarObserver: AnyCancellable?
     private var setupLayoutObserver: AnyCancellable?
+    private var setupIdentityObserver: AnyCancellable?
     private var networkJoinObserver: AnyCancellable?
     private var networkJoinAttention = NetworkJoinAttentionGate()
     private var terminationSignalSources = [DispatchSourceSignal]()
@@ -518,6 +546,10 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
         window.standardWindowButton(.closeButton)?.isHidden = true
         window.standardWindowButton(.miniaturizeButton)?.isHidden = true
         window.standardWindowButton(.zoomButton)?.isHidden = true
+        NetworkSetupWindowPresentation.configure(window, identityReady: model.account.identityReady)
+        if model.account.identityReady {
+            window.setContentSize(NetworkSetupWindowPresentation.initialContentSize)
+        }
         window.contentView = NSHostingView(rootView: ALOView(
             model: model,
             checkForUpdates: ALOAppFlavor.isDevelopment ? nil : { [weak self] in
@@ -589,6 +621,23 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async { self?.resizeSetupWindow(animated: true) }
         }
 
+        setupIdentityObserver = model.account.$identityReady.removeDuplicates().dropFirst()
+            .sink { [weak self] ready in
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, let window = self.window,
+                          NetworkSetupWindowPresentation.shouldApplyIdentityUpdate(
+                            ready, currentReady: self.model.account.identityReady) else { return }
+                    self.setupTransitionGeneration &+= 1
+                    NetworkSetupWindowPresentation.configure(window, identityReady: ready)
+                    if ready {
+                        window.setContentSize(NetworkSetupWindowPresentation.initialContentSize)
+                    } else {
+                        window.setContentSize(NSSize(width: SetupWindow.width, height: 640))
+                    }
+                    self.setupWindowFrame = window.frame
+                }
+            }
+
         networkJoinObserver = model.account.$pendingJoinRequests
             .map { !$0.isEmpty }.removeDuplicates()
             .sink { [weak self] pending in
@@ -603,7 +652,9 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
                     }
                     self.setupTransitionGeneration &+= 1
                     self.restoreSetupWindow()
-                    window.setContentSize(NSSize(width: SetupWindow.width, height: 640))
+                    if !self.model.account.identityReady {
+                        window.setContentSize(NSSize(width: SetupWindow.width, height: 640))
+                    }
                     self.setupWindowFrame = window.frame
                     window.orderFront(nil)
                 }
@@ -632,7 +683,9 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
         if !model.videoFullscreen, !model.account.pendingJoinRequests.isEmpty, let window {
             setupTransitionGeneration &+= 1
             restoreSetupWindow()
-            window.setContentSize(NSSize(width: SetupWindow.width, height: 640))
+            if !model.account.identityReady {
+                window.setContentSize(NSSize(width: SetupWindow.width, height: 640))
+            }
             setupWindowFrame = window.frame
             window.orderFront(nil)
         }
@@ -677,6 +730,16 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
 
     private func collapseSetupWindowIntoMenuBar(generation: Int) {
         guard let window else { return }
+        if model.account.identityReady {
+            // Preserve a user-resized native window, including one closed before
+            // joining. Never animate a resizable window below its minimum size.
+            setupWindowFrame = window.frame
+            guard generation == setupTransitionGeneration, model.phase == .live else { return }
+            window.orderOut(nil)
+            updateFloatingBar(hidden: model.floatingBarHidden)
+            updateWalkieBar(hidden: model.walkieBarHidden)
+            return
+        }
         let finish = { [weak self] in
             guard let self, generation == self.setupTransitionGeneration, self.model.phase == .live else { return }
             window.orderOut(nil)
@@ -712,12 +775,23 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
 
     private func restoreSetupWindow() {
         guard let window else { return }
+        if model.account.identityReady {
+            // Native presentation never shrinks its frame; reading the actual
+            // frame also retains resizes made while browsing during playback.
+            setupWindowFrame = window.frame
+            window.alphaValue = 1
+            return
+        }
         if let setupWindowFrame { window.setFrame(setupWindowFrame, display: false) }
         window.alphaValue = 1
     }
 
     private func resizeSetupWindow(animated: Bool) {
         guard model.phase != .live, let window else { return }
+        guard !model.account.identityReady else {
+            setupWindowFrame = window.frame
+            return
+        }
         let contentRect = NSRect(
             x: 0,
             y: 0,
@@ -4097,7 +4171,9 @@ struct ALOView: View {
 
     var body: some View {
         ZStack {
-            if model.phase == .idle {
+            if model.account.identityReady {
+                Color(nsColor: .windowBackgroundColor)
+            } else if model.phase == .idle {
                 Color.clear
             } else {
                 RoundedRectangle(cornerRadius: 27, style: .continuous)
@@ -4106,9 +4182,11 @@ struct ALOView: View {
             }
             switch model.phase {
             case .idle: idleView
-            case .starting: progressView
+            case .starting:
+                if model.account.identityReady { nativeProgressView } else { progressView }
             case .live: MacNetworkSetupView(model: model, account: model.account)
-            case .failed: errorView
+            case .failed:
+                if model.account.identityReady { nativeErrorView } else { errorView }
             }
             if model.permissionNotice { permissionOverlay }
         }
@@ -4118,6 +4196,27 @@ struct ALOView: View {
 
     private var idleView: some View {
         MacNetworkSetupView(model: model, account: model.account)
+    }
+
+    private var nativeProgressView: some View {
+        VStack(spacing: 12) {
+            ProgressView().controlSize(.regular)
+            Text(model.statusText).font(.headline)
+            Text("Connecting to the channel…").foregroundStyle(.secondary)
+        }.padding(24)
+    }
+
+    private var nativeErrorView: some View {
+        ContentUnavailableView {
+            Label("The channel couldn’t start", systemImage: "exclamationmark.circle")
+        } description: {
+            Text(model.errorMessage ?? "Something interrupted ALO.")
+        } actions: {
+            Button("Try again", action: model.tryAgain).buttonStyle(.borderedProminent)
+            if model.errorIsPermissionRelated {
+                Button("Open Recording Settings", action: model.openPrivacySettings)
+            }
+        }.padding(24)
     }
 
 

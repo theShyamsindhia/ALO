@@ -748,3 +748,39 @@ The follow-up passed 37 tests across three voice suites (167.08 s build,
 1.043 s runtime), including ending-session removal/output idle stop, old/new
 callback generations, privacy gating, quiet/zero leveler branches and existing
 voice controls. Log: `/tmp/alo-voice-route-red.dKN5y2/voice-review-green.log`.
+
+### Native Networks window follow-up
+
+The identity-ready window now uses standard titled, closable, minimizable and
+resizable macOS chrome (760×520 initial content, 640×440 minimum). The accepted
+identity/recovery onboarding keeps its existing custom presentation. Networks
+uses a flat sidebar/detail canvas, with recovery export in Identity options;
+starting and failed states use the native canvas and retain their existing
+retry/permission actions. Closing still leaves ALO running. Native phase changes,
+reopen and approval attention retain the current frame rather than forcing the
+old 800×640 size or animating a resizable window to 28×22. Queued identity changes
+check current identity readiness before applying chrome or resetting initial size.
+
+Credential-free NSWindow fixtures render seven public-value states in light/dark
+at both supported sizes. They initialize no account, discovery or playback.
+Initial rendering exposed an intrinsic-width empty-state HStack centered in the
+window; explicit detail/parent expansion fixes the leading strip. A native
+background view probe checks sidebar origin and width after rendering. The first
+attempt using SwiftUI preferences returned default zero bounds and failed all
+28 geometry cases: this was a fixture-delivery failure, not a production layout
+regression. Both that failed log and rerendered images are retained in
+`/tmp/alo-native-window.3Y1znX`.
+
+These tests verify real window chrome/frame primitives and rendered content,
+not the complete app-delegate phase/reopen/approval integration. Those handlers
+were independently code-reviewed; installed-app keyboard/lifecycle checks and
+physical listening validation remain separate. Inactive snapshot title text and
+traffic lights are intentionally dim. No installed app was restarted or replaced
+for this UI work.
+
+The corrected combined run passed 21 tests across six suites, including all 28
+sidebar-geometry/render combinations, voice follow-ups, early-startup contract,
+first-listener policy and delivery-gap controls. Log:
+`/tmp/alo-native-window.3Y1znX/combined-geometry-green.log`. Empty 640/760, owner
+and member empty, long-name, pending and error renders were visually inspected;
+the sidebar now meets the leading window edge without the empty-state strip.

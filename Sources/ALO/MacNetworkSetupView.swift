@@ -29,6 +29,35 @@ struct MacNetworkSetupView: View {
     private enum Sheet: String, Identifiable { case createNetwork, importNetwork, addMember, createChannel, members; var id: Self { self } }
 
     var body: some View {
+        Group {
+            if account.identityReady {
+                networkBrowser
+            } else {
+                onboardingContainer
+            }
+        }
+        .sheet(item: $sheet) { selection in
+            sheetView(selection).frame(width: 600, height: 520)
+                .interactiveDismissDisabled(busy)
+                .alert(confirmationTitle, isPresented: Binding(
+                    get: { pendingImport != nil || pendingMember != nil || removingMember != nil },
+                    set: { if !$0 { clearConfirmation() } })) {
+                    Button("Cancel", role: .cancel, action: clearConfirmation)
+                        .disabled(busy)
+                    Button(confirmationAction, role: removingMember == nil ? nil : .destructive) {
+                        confirmAction()
+                    }
+                    .disabled(busy)
+                } message: { Text(confirmationMessage) }
+        }
+        .onChange(of: account.selectedNetworkID) { _, _ in
+            selectedChannelID = account.channels.first?.id.uuidString
+            clearConfirmation()
+        }
+        .onAppear { selectedChannelID = account.channels.first?.id.uuidString }
+    }
+
+    private var onboardingContainer: some View {
         GeometryReader { geometry in
         VStack(spacing: 0) {
             HStack {
@@ -52,25 +81,6 @@ struct MacNetworkSetupView: View {
         .clipShape(RoundedRectangle(cornerRadius: 24))
         }
         .padding(10)
-        .sheet(item: $sheet) { selection in
-            sheetView(selection).frame(width: 600, height: 520)
-                .interactiveDismissDisabled(busy)
-                .alert(confirmationTitle, isPresented: Binding(
-                    get: { pendingImport != nil || pendingMember != nil || removingMember != nil },
-                    set: { if !$0 { clearConfirmation() } })) {
-                    Button("Cancel", role: .cancel, action: clearConfirmation)
-                        .disabled(busy)
-                    Button(confirmationAction, role: removingMember == nil ? nil : .destructive) {
-                        confirmAction()
-                    }
-                    .disabled(busy)
-                } message: { Text(confirmationMessage) }
-        }
-        .onChange(of: account.selectedNetworkID) { _, _ in
-            selectedChannelID = account.channels.first?.id.uuidString
-            clearConfirmation()
-        }
-        .onAppear { selectedChannelID = account.channels.first?.id.uuidString }
     }
 
     private var confirmationTitle: String {
@@ -158,7 +168,8 @@ struct MacNetworkSetupView: View {
                 nearbyError: account.nearbyNetworkError,
                 nearbyNotice: account.nearbyNetworkNotice,
                 onRetryNearby: { Task { @MainActor in account.stopNearbyNetworking(); await account.startNearbyNetworking() } },
-                onCancelJoin: { id in nearbyJoinFeedback.cancel(); account.cancelJoinRequest(networkID: id) })
+                onCancelJoin: { id in nearbyJoinFeedback.cancel(); account.cancelJoinRequest(networkID: id) },
+                onExportRecovery: exportRecovery)
                 .frame(minWidth: 210, idealWidth: 230, maxWidth: 260)
             Divider()
             VStack(spacing: 0) {
@@ -187,9 +198,12 @@ struct MacNetworkSetupView: View {
                     } actions: {
                         Button("Create network") { present(.createNetwork) }.buttonStyle(.borderedProminent)
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .safeAreaInset(edge: .bottom) {
             if account.selectedNetwork == nil, let message = nearbyJoinFeedback.errorMessage ?? error ?? account.errorMessage ?? model.errorMessage {
                 Label(message, systemImage: "exclamationmark.triangle")
