@@ -716,3 +716,13 @@ at most one small line per second per player on activity. With simultaneous
 speakers this is sampled-session evidence, not complete per-session coverage.
 Concealment never overwrites the last actual-audio level with synthetic zero.
 No PCM, names or device identifiers are logged; no gain or AEC behavior changed.
+
+Voice follow-up verification passed the real callback regression, current-route
+completion control, telemetry tests and existing WalkieTalkieAudio tests. The
+combined 42-test batch had only four intentionally introduced timing-policy RED
+assertions; voice had none (`/tmp/alo-voice-route-red.dKN5y2/voice-green-policy-red.log`).
+There were no new Session/Sendable warnings. A separate single zero-PCM real-output
+600 ms startup probe passed: 598.75 ms lead, 26 pre-start polls with valid negative
+sample positions, zero resync, then advancing positive sample time; maximum poll
+gap 18.671 ms. Log: `/tmp/alo-future-start.5ttuFH/hardware-startup.log`. That probe
+does not measure acoustic alignment, microphone capture or two-device voice.

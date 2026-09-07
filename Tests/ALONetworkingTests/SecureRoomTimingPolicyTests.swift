@@ -84,4 +84,55 @@ import ALOCore
         policy.remove(peer: peer)
         #expect(policy.measurements(at: 1_300_000_000).isEmpty)
     }
+
+    @Test(arguments: [false, true])
+    func expiredUnfrozenGraceReportCannotExcludeFirstFreshListener(pollBeforeFreshReport: Bool) throws {
+        var policy = SecureRoomTimingPolicy()
+        policy.captureStarted(at: 0)
+        let expired = UUID()
+        policy.record(peer: expired, report: try report(), receivedAt: 100_000_000)
+        // No call established the cohort while this report was fresh. A long
+        // callback gap must not turn expired evidence into permanent membership.
+        if pollBeforeFreshReport {
+            #expect(policy.desiredDelay(now: 9_000_000_000, current: 250_000_000,
+                localHardwareFloor: 250_000_000, playing: true) == 250_000_000)
+        }
+        let fresh = UUID()
+        policy.record(peer: fresh, report: try report(550_000_000), receivedAt: 10_000_000_000)
+        #expect(policy.measurements(at: 10_000_000_000).first?.peerID == fresh)
+        #expect(policy.measurements(at: 10_000_000_000).first?.isNetworkTimingEligible == true)
+        #expect(policy.desiredDelay(now: 10_000_000_000, current: 250_000_000,
+            localHardwareFloor: 250_000_000, playing: true) == 600_000_000)
+    }
+
+    @Test func emptyPollingDoesNotExcludeFirstListener() throws {
+        var policy = SecureRoomTimingPolicy()
+        policy.captureStarted(at: 0)
+        #expect(policy.desiredDelay(now: 2_000_000_000, current: 250_000_000,
+            localHardwareFloor: 250_000_000, playing: true) == 250_000_000)
+        let first = UUID()
+        policy.record(peer: first, report: try report(550_000_000), receivedAt: 3_000_000_000)
+        #expect(policy.measurements(at: 3_000_000_000).first?.isNetworkTimingEligible == true)
+        #expect(policy.desiredDelay(now: 3_000_000_000, current: 250_000_000,
+            localHardwareFloor: 250_000_000, playing: true) == 600_000_000)
+        policy.remove(peer: first)
+        policy.record(peer: first, report: try report(550_000_000), receivedAt: 4_000_000_000)
+        #expect(policy.measurements(at: 4_000_000_000).first?.isNetworkTimingEligible == true)
+        #expect(policy.desiredDelay(now: 4_000_000_000, current: 600_000_000,
+            localHardwareFloor: 250_000_000, playing: true) == 600_000_000)
+    }
+
+    @Test func expiryOfAnEstablishedCohortNeverReopensEnrollment() throws {
+        var policy = SecureRoomTimingPolicy()
+        policy.captureStarted(at: 0)
+        policy.record(peer: UUID(), report: try report(), receivedAt: 100_000_000)
+        // Unlike the unfrozen case, establish membership while evidence is fresh.
+        #expect(policy.desiredDelay(now: 1_000_000_000, current: 250_000_000,
+            localHardwareFloor: 250_000_000, playing: true) == 250_000_000)
+        let late = UUID()
+        policy.record(peer: late, report: try report(550_000_000), receivedAt: 10_000_000_000)
+        #expect(policy.measurements(at: 10_000_000_000).first?.isNetworkTimingEligible == false)
+        #expect(policy.desiredDelay(now: 10_000_000_000, current: 250_000_000,
+            localHardwareFloor: 250_000_000, playing: true) == 250_000_000)
+    }
 }

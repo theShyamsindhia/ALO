@@ -480,10 +480,30 @@ that the synthetic 300 ms delivery gap occurred on either Mac.
 
 With the minimal nonempty-cohort guard and atomic post-insertion freeze, the
 same policy-selected mode uses the existing 600 ms live-increase result and
-passes all 601 packets, markers 24,048/96,048, and zero late/resync counts. All
+submits 601 packets to `accept`, observes markers 24,048/96,048, and records zero
+late/resync counts. Submission is not proof of admission of every packet; the
+native oracle checks the two source markers, not every individual frame. All
 five policy tests pass, including record/remove/record without an intervening
 delay calculation. The fixed 250 ms failing-budget control still recovers at
 tick 260. Log: `/tmp/alo-f1-live.7jWPES/policy-green-voice-red.log`.
 That combined run contains 37 tests and one separate expected voice RED: four
 real old-route completion callbacks consume all 1,920 new-route frame credits.
 It is not a wholly passing run or evidence that the voice bug is already fixed.
+
+The subsequent external reviews found a stale, not-yet-frozen grace-period
+report could still establish an absent cohort. Both entry orders reproduced
+wrong eligibility and a 250 ms selection before correction. Expiring reports
+before each initial freeze fixes that case without reopening an already-frozen
+cohort. Empty polling and a removed member re-reporting under the same UUID are
+also covered. The final combined run passed all 43 focused tests, including
+voice route-credit controls and numeric telemetry tests:
+`/tmp/alo-voice-route-red.dKN5y2/consolidated-green.log`. The sufficient native
+delivery-gap cases now explicitly assert zero late packets; submission counts
+remain distinct from native admission proof.
+
+The separate real-output, zero-PCM 600 ms startup test also passed on this Mac's
+current route: 598.75 ms lead, 26 valid negative pre-start sample observations,
+zero resyncs, then positive sample progression, with an 18.671 ms maximum poll
+gap. Log: `/tmp/alo-future-start.5ttuFH/hardware-startup.log`. No route, volume or
+microphone setting changed. This does not certify other routes, the full shared
+successor cutover, two-device acoustic alignment, or microphone capture quality.

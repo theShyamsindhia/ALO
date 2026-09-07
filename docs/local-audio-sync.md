@@ -71,6 +71,13 @@ hardware future-start behavior; real 600 ms startup and shared future cutover
 still need native and two-device validation. See the incident record for current
 results and limitations.
 
+This contract applies to the secure media path used by current Network channels
+(`NetworkAccountModel` creates them with `.secureV2`). The older `HostServer`
+adapter still freezes its remote cohort when an identified local output first
+plays; its intentionally empty cohort behavior has not been changed by this
+fix. Do not copy that legacy rule into `SecureRoomTimingPolicy` or interpret
+legacy fixture results as validation of current Network-channel negotiation.
+
 ## Receiver correction and diagnostics
 
 Room settings → Automatically keep this Mac in sync is enabled by default and persists per Mac. A fresh measured error of at least 40 ms must persist for one second before hard realignment. Corrections have an eight-second cooldown; missing/stale samples and pauses clear accumulated evidence. Small errors continue to use the existing bounded ±1% playback-rate correction. This preference controls optional drift realignment, not mandatory recovery from a stopped render clock or changed audio device.

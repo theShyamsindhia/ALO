@@ -39,7 +39,8 @@ struct DeliveryGapBufferTests {
         var laterMarker: Int?
         var rendered = 0
         var generated = 0
-        var delivered = 0
+        // Counts accept calls, not verified admissions of every source frame.
+        var submitted = 0
         var recoveryTick: Int?
         let startTick = Int(delay / 5_000_000)
         for tick in 0...600 {
@@ -69,11 +70,11 @@ struct DeliveryGapBufferTests {
                     try #require(tick == 260 && deferred.count == 60)
                     for held in deferred {
                         try #require(held.captureTimeNanos <= clock)
-                        player.accept(held); delivered += 1
+                        player.accept(held); submitted += 1
                     }
                     deferred.removeAll()
                 }
-                player.accept(packet); delivered += 1
+                player.accept(packet); submitted += 1
             }
             // No-render offline priming cannot model a hardware graph's
             // pre-start clock progress. Exclude that artificial watchdog stall;
@@ -84,7 +85,7 @@ struct DeliveryGapBufferTests {
                 break // Do not disguise an offline future restart as recovery PCM.
             }
         }
-        print("DELIVERY_GAP mode=\(mode) delayMs=\(delay/1_000_000) generated=\(generated) delivered=\(delivered) deferred=\(deferred.count) nativeFrames=\(rendered) firstMarker=\(firstMarker.map(String.init) ?? "none") laterMarker=\(laterMarker.map(String.init) ?? "none") recoveryTick=\(recoveryTick.map(String.init) ?? "none") late=\(player.syncReport().latePacketCount) resync=\(player.syncReport().resyncCount)")
+        print("DELIVERY_GAP mode=\(mode) delayMs=\(delay/1_000_000) generated=\(generated) submitted=\(submitted) deferred=\(deferred.count) nativeFrames=\(rendered) firstMarker=\(firstMarker.map(String.init) ?? "none") laterMarker=\(laterMarker.map(String.init) ?? "none") recoveryTick=\(recoveryTick.map(String.init) ?? "none") late=\(player.syncReport().latePacketCount) resync=\(player.syncReport().resyncCount)")
         let marker = try #require(firstMarker, "Native pre-gap source marker is a prerequisite")
         try #require((24_000...24_096).contains(marker), "Original source/native mapping must be valid before the delivery gap")
         if mode == 0 {
@@ -94,7 +95,8 @@ struct DeliveryGapBufferTests {
             #expect(recoveryTick == nil, "Shared sufficient or policy-selected budget must cover this bounded delivery gap")
         }
         if recoveryTick == nil {
-            #expect(generated == 601 && delivered == 601 && deferred.isEmpty)
+            #expect(generated == 601 && submitted == 601 && deferred.isEmpty)
+            #expect(player.syncReport().latePacketCount == 0)
             let second = try #require(laterMarker)
             #expect((96_000...96_096).contains(second), "Post-gap native PCM must preserve its original source frame")
         }

@@ -35,8 +35,8 @@ public struct SecureRoomTimingPolicy: Sendable {
     }
 
     public mutating func record(peer: UUID, report: MediaReceiverTimingReport, receivedAt now: UInt64) {
-        freezeCohortIfNeeded(now: now)
         expire(now: now)
+        freezeCohortIfNeeded(now: now)
         guard reports[peer] != nil || reports.count < 64 else { return }
         reports[peer] = Sample(report: report, received: now)
         // Capture can precede every remote listener. Establish that first
@@ -47,8 +47,8 @@ public struct SecureRoomTimingPolicy: Sendable {
 
     public mutating func desiredDelay(now: UInt64, current: UInt64,
                                      localHardwareFloor: UInt64, playing: Bool) -> UInt64 {
-        freezeCohortIfNeeded(now: now)
         expire(now: now)
+        freezeCohortIfNeeded(now: now)
         let recommendations = reports.compactMap { peer, sample -> UInt64? in
             guard cohort?.contains(peer) ?? true else { return nil }
             return sample.report.networkRecommendedDelayNanos
