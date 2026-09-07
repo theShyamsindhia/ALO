@@ -364,6 +364,7 @@ enum DiagnosticReportBuilder {
             lines.append("")
             lines.append("Synchronization incident evidence (up to \(RoomSyncMonitor.maximumIncidents) incidents, \(RoomSyncMonitor.maximumIncidentSamples) samples each)")
             lines.append("Software render-clock measurements; these do not measure acoustic alignment between speakers.")
+            lines.append("Selective bounded evidence, not a complete history: measured drift is retained before missing-only incidents, including newer missing-only incidents when the cap is full.")
             lines.append("Evidence is retained from the most recent channel session and may predate the current inactive state. Participant numbers are anonymous within that session. Missing measurements are gaps, not zero drift.")
             for incident in context.syncIncidents.suffix(RoomSyncMonitor.maximumIncidents) {
                 let date = dateFormatter.string(from: incident.occurredAt)

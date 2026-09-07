@@ -26,6 +26,11 @@ states with actual native renders, not only bitmap existence assertions.
    system-wide security or remove quarantine as part of this installer.
    The plist records the pre-sign input binary hash; compare the separately reported
    signed executable hash between Macs (embedding that hash would change the signature).
+   Different OS signing tools can produce different signature bytes: in that case
+   compare the input binary hash and revision, and strictly verify each seal; a
+   signed-hash mismatch alone does not establish differing application code.
+   Prior dev bundles are deliberately retained for recovery, not automatically
+   deleted. The installer prints their durable backup location for manual cleanup.
 3. Create an isolated dev network/channel. Shyam broadcasts the Spotify audio
    already playing; Raj receives. Confirm both processes are dev, not release.
 4. Capture per-second `in.werai.audio.dev` / `synchronization` unified-log samples

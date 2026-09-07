@@ -7,6 +7,23 @@ import Testing
 
 @Suite("Single-Mac room integration", .serialized)
 struct LoopbackRoomScaleTests {
+    @Test func schedulingEvidenceIsBoundedNumericAndKeepsOrdering() {
+        let evidence = LoopbackSchedulingEvidence(capacity: 3)
+        evidence.register(port: 61_234, peer: 2)
+        let send = LoopbackSchedulingEvidence.Send(id: 7, port: 61_234, sequence: 42, byteCount: 992)
+        evidence.record(send: send, phase: .admitted, at: 1_000)
+        evidence.record(send: send, phase: .scheduled, at: 1_100, detail: 1_400)
+        evidence.record(send: send, phase: .completed, at: 1_500)
+        evidence.record(send: send, phase: .completed, at: 1_600)
+        let lines = evidence.lines()
+        #expect(lines.count == 4)
+        #expect(lines[0].contains("retained=3 dropped=1"))
+        #expect(lines[1] == "0,0,2,7,42,audio,992,admitted,0")
+        #expect(lines[2] == "1,100,2,7,42,audio,992,scheduled,400")
+        #expect(lines[3] == "2,500,2,7,42,audio,992,completed,0")
+        #expect(!lines.joined().contains("61234"), "Network endpoints must never be emitted")
+    }
+
     @Test("Broadcaster diagnostics detect remote screen lateness received over the control connection")
     func remoteScreenTimingReachesBroadcasterDiagnostics() throws {
         let ready = DispatchSemaphore(value: 0)
@@ -567,6 +584,29 @@ struct LoopbackRoomScaleTests {
         print("Bounded 8-peer audible lateness: \(boundedEight.maximumAudibleLatenessNanos / 1_000_000) ms")
         print("Bounded packets delivered per peer: \(boundedEight.minimumPacketsReceived) / 200")
         print("Automatic resync commands after detected lateness: \(unboundedEight.resyncCommandsReceived)")
+
+        let contractsHold = directEight.maximumFinalAgeNanos < 100_000_000
+            && directEight.maximumAudibleLatenessNanos < 50_000_000 && directEight.minimumPacketsReceived >= 190
+            && directBoundedEight.maximumFinalAgeNanos < 100_000_000
+            && directBoundedEight.maximumAudibleLatenessNanos < 50_000_000
+            && (schedulerOversleep != 0 || directBoundedEight.minimumPacketsReceived >= 190)
+            && shapedOne.maximumFinalAgeNanos < 100_000_000
+            && unboundedEight.maximumFinalAgeNanos > shapedOne.maximumFinalAgeNanos + 1_000_000_000
+            && unboundedEight.maximumFinalAgeNanos > SynchronizedPlayer.targetLatencyNanos
+            && unboundedEight.maximumAudibleLatenessNanos > 1_000_000_000
+            && unboundedEight.minimumPacketsReceived >= 190
+            && unboundedEight.maximumPacketArrivalSkewNanos > 5_000_000 && unboundedEight.resyncCommandsReceived > 0
+            && boundedEight.maximumFinalAgeNanos < SynchronizedPlayer.targetLatencyNanos
+            && boundedEight.maximumPacketAgeNanos < SynchronizedPlayer.targetLatencyNanos
+            && boundedEight.maximumAudibleLatenessNanos < 100_000_000
+            && boundedEight.minimumPacketsReceived >= 50
+            && boundedEight.minimumPacketsReceived < unboundedEight.minimumPacketsReceived
+        if !contractsHold {
+            for (label, result) in [("direct", directEight), ("direct-bounded", directBoundedEight),
+                ("shaped-one", shapedOne), ("unbounded-eight", unboundedEight), ("bounded-eight", boundedEight)] {
+                result.schedulingEvidence.dump(label: "\(label), injectedWake=\(schedulerOversleep)")
+            }
+        }
 
         // Negative control: fan-out over unconstrained localhost should remain comfortably
         // inside the player's 250 ms target buffer even with eight real NWConnections.
@@ -1402,6 +1442,7 @@ struct LoopbackRoomScaleTests {
         let hostReady = DispatchSemaphore(value: 0)
         let state = PortState()
         let shaper = linkBitsPerSecond.map(FluidLinkShaper.init(bitsPerSecond:))
+        let schedulingEvidence = LoopbackSchedulingEvidence()
         let completionLatencies = AudioCompletionLatencies()
         let captureCallbackAges = AudioCompletionLatencies()
         let captureToAdmissionAges = AudioCompletionLatencies()
@@ -1419,6 +1460,8 @@ struct LoopbackRoomScaleTests {
             outboundSend: { connection, data, isComplete, completion in
                 let header = AudioProbeHeader.read(in: data)
                 let sequence = header?.sequence
+                let evidenceSend = schedulingEvidence.admitted(connection: connection,
+                    audioSequence: sequence, byteCount: data.count)
                 if let header {
                     let admittedAt = MonotonicClock.nowNanos()
                     captureToAdmissionAges.record(admittedAt > header.captureTimeNanos
@@ -1434,6 +1477,8 @@ struct LoopbackRoomScaleTests {
                 }
                 let started = MonotonicClock.nowNanos()
                 let measuredCompletion: (NWError?) -> Void = { error in
+                    schedulingEvidence.record(send: evidenceSend, phase: .completed,
+                        at: MonotonicClock.nowNanos(), detail: error == nil ? 0 : 1)
                     if let sequence {
                         completionLatencies.record(MonotonicClock.nowNanos() - started)
                         submissions.completed(port: destinationPort, sequence: sequence, error: error,
@@ -1447,7 +1492,13 @@ struct LoopbackRoomScaleTests {
                         over: connection,
                         isComplete: isComplete,
                         completion: measuredCompletion,
+                        scheduled: { deadline in
+                            schedulingEvidence.record(send: evidenceSend, phase: .scheduled,
+                                at: MonotonicClock.nowNanos(), detail: deadline)
+                        },
                         timing: { serializationWait, dispatchLateness in
+                            schedulingEvidence.record(send: evidenceSend, phase: .dispatch,
+                                at: MonotonicClock.nowNanos(), detail: dispatchLateness)
                             guard let sequence else { return }
                             submissions.shaped(port: destinationPort, sequence: sequence,
                                 serializationWaitNanos: serializationWait, dispatchLatenessNanos: dispatchLateness)
@@ -1478,6 +1529,10 @@ struct LoopbackRoomScaleTests {
             guard peers.allSatisfy({ $0.waitUntilJoined(timeout: 3) }) else {
                 throw LoopbackTestError.peerDidNotJoin
             }
+            for (index, peer) in peers.enumerated() {
+                if let port = peer.audioPort { schedulingEvidence.register(port: port, peer: index) }
+                if let port = peer.controlLocalPort { schedulingEvidence.register(port: port, peer: index) }
+            }
 
             // Let the host's outbound UDP connections reach ready before capture starts.
             Thread.sleep(forTimeInterval: 0.1)
@@ -1504,6 +1559,7 @@ struct LoopbackRoomScaleTests {
             defer { source.cancel() }
             let capturePeers = peers
             source.start { sample in
+                schedulingEvidence.capture(index: sample.index, deadline: sample.deadline, wokeAt: sample.wokeAt)
                 captureWakeDelays.record(sample.wokeAt - sample.deadline)
                 let captureTimeNanos = sample.deadline - callbackDurationNanos
                 captureCallbackAges.record(MonotonicClock.nowNanos() - captureTimeNanos)
@@ -1555,6 +1611,15 @@ struct LoopbackRoomScaleTests {
             print("Capture wake delay: peers=\(peerCount), policy=\(policy), injected=\(schedulerOversleep * 1_000)ms, \(captureWakeDelays.summary)")
             print("Audio send completion latency: peers=\(peerCount), link=\(linkBitsPerSecond.map(String.init) ?? "unshaped"), policy=\(policy), \(completionLatencies.summary)")
             print("Audio sender drained: \(drainedSenders)")
+            if drainedSenders.contains(where: { sender in
+                sender.enqueued != UInt64(expectedPacketCount)
+                    || sender.sent + sender.expiredWait + sender.expiredAge + sender.admissionRejected
+                        + sender.replaced + sender.discardedBoundary != sender.enqueued
+                    || sender.sent != UInt64(submitted.submitted[sender.udpPort]?.count ?? 0)
+                    || sender.discardedBoundary != 0
+            }) {
+                schedulingEvidence.dump(label: "sender-accounting-failure")
+            }
             for sender in drainedSenders {
                 #expect(sender.enqueued == UInt64(expectedPacketCount))
                 #expect(sender.sent + sender.expiredWait + sender.expiredAge + sender.admissionRejected
@@ -1584,6 +1649,9 @@ struct LoopbackRoomScaleTests {
                 }
                 switch policy {
                 case .unbounded:
+                    if lastSequence != UInt32(expectedPacketCount - 1) {
+                        schedulingEvidence.dump(label: "unbounded-terminal-sequence-failure")
+                    }
                     #expect(lastSequence == UInt32(expectedPacketCount - 1))
                 case .boundedLatest:
                     // Permit at most the 16-packet/80ms terminal tail to expire.
@@ -1594,6 +1662,9 @@ struct LoopbackRoomScaleTests {
                     let sourceEnd = sourceStart + UInt64(expectedPacketCount) * 5_000_000
                     let boundaries = [sourceStart] + sourceTimes + [sourceEnd]
                     let maximumGap = zip(boundaries, boundaries.dropFirst()).map { $1 - $0 }.max() ?? 0
+                    if lastSequence < UInt32(expectedPacketCount - 17) || maximumGap > 200_000_000 {
+                        schedulingEvidence.dump(label: "bounded-source-continuity-failure")
+                    }
                     #expect(maximumGap <= 200_000_000, "Bounded sender stopped making source-timeline progress")
                 }
                 return arrival
@@ -1673,11 +1744,13 @@ struct LoopbackRoomScaleTests {
                 minimumPacketsReceived: snapshots.map(\.packetCount).min() ?? 0,
                 resyncCommandsReceived: resyncCommandsReceived,
                 captureCallbackAgeSummary: captureCallbackAges.summary,
-                maximumReceiveEntryAgeNanos: maximumReceiveEntryAge
+                maximumReceiveEntryAgeNanos: maximumReceiveEntryAge,
+                schedulingEvidence: schedulingEvidence
             )
         } catch {
             peers.forEach { $0.stop() }
             host.stop()
+            schedulingEvidence.dump(label: "room-error peers=\(peerCount), injectedWake=\(schedulerOversleep)")
             throw error
         }
     }
@@ -1733,6 +1806,10 @@ private final class HeadlessLoopbackPeer {
 
     var packetCount: Int { queue.sync { arrivals.count } }
     var audioPort: UInt16? { queue.sync { udpListener?.port?.rawValue } }
+    var controlLocalPort: UInt16? { queue.sync {
+        guard case .hostPort(_, let port) = control?.currentPath?.localEndpoint else { return nil }
+        return port.rawValue
+    } }
     var corruptedPacketCount: Int { queue.sync { corruptedPackets } }
     var lastSequence: UInt32? { queue.sync { arrivals.keys.max() } }
     var resyncCommandCount: Int { queue.sync { receivedResyncCommands } }
@@ -2498,6 +2575,7 @@ private final class FluidLinkShaper: @unchecked Sendable {
         over connection: NWConnection,
         isComplete: Bool,
         completion: @escaping (NWError?) -> Void,
+        scheduled: (UInt64) -> Void = { _ in },
         timing: @escaping (UInt64, UInt64) -> Void = { _, _ in }
     ) {
         let now = DispatchTime.now().uptimeNanoseconds
@@ -2507,6 +2585,8 @@ private final class FluidLinkShaper: @unchecked Sendable {
         let deliversAt = startsAt + transmissionNanos
         nextAvailableNanos = deliversAt
         lock.unlock()
+
+        scheduled(deliversAt)
 
         deliveryQueue.asyncAfter(deadline: DispatchTime(uptimeNanoseconds: deliversAt)) {
             let executedAt = DispatchTime.now().uptimeNanoseconds
@@ -2520,6 +2600,76 @@ private final class FluidLinkShaper: @unchecked Sendable {
                 completion: .contentProcessed(completion)
             )
         }
+    }
+}
+
+/// Failure-only numeric evidence. Never retains PCM, control bodies, addresses,
+/// identities, or keys. The cap covers this fixture's 1,600 audio submissions
+/// plus control traffic; overflow is explicit rather than silently losing data.
+private final class LoopbackSchedulingEvidence: @unchecked Sendable {
+    enum Phase: String { case admitted, scheduled, dispatch, completed, capture }
+    struct Send {
+        let id: Int
+        let port: UInt16?
+        let sequence: UInt32?
+        let byteCount: Int
+    }
+    struct Event {
+        let ordinal: Int
+        let time: UInt64
+        let send: Send?
+        let phase: Phase
+        let detail: UInt64
+    }
+    private let lock = NSLock()
+    private let capacity: Int
+    private var events: [Event] = []
+    private var nextSend = 0
+    private var totalEvents = 0
+    private var peers: [UInt16: Int] = [:]
+    init(capacity: Int = 12_000) {
+        self.capacity = capacity
+        events.reserveCapacity(capacity)
+    }
+    func register(port: UInt16, peer: Int) { lock.withLock { peers[port] = peer } }
+    func admitted(connection: NWConnection, audioSequence: UInt32?, byteCount: Int) -> Send {
+        let port: UInt16?
+        if case .hostPort(_, let value) = connection.endpoint { port = value.rawValue } else { port = nil }
+        return lock.withLock {
+            let send = Send(id: nextSend, port: port, sequence: audioSequence, byteCount: byteCount)
+            nextSend += 1
+            append(send: send, phase: .admitted, at: MonotonicClock.nowNanos(), detail: 0)
+            return send
+        }
+    }
+    func record(send: Send, phase: Phase, at: UInt64, detail: UInt64 = 0) {
+        lock.withLock { append(send: send, phase: phase, at: at, detail: detail) }
+    }
+    func capture(index: Int, deadline: UInt64, wokeAt: UInt64) {
+        lock.withLock {
+            // Send id is deliberately absent: capture emits four audio packets.
+            append(send: nil, phase: .capture, at: wokeAt, detail: deadline)
+        }
+    }
+    private func append(send: Send?, phase: Phase, at: UInt64, detail: UInt64) {
+        defer { totalEvents += 1 }
+        guard events.count < capacity else { return }
+        events.append(Event(ordinal: totalEvents, time: at, send: send, phase: phase, detail: detail))
+    }
+    func lines() -> [String] {
+        let (retained, total, registered) = lock.withLock { (events, totalEvents, peers) }
+        let origin = retained.map(\.time).min() ?? 0
+        return ["retained=\(retained.count) dropped=\(total - retained.count); relative ns; detail=scheduled/capture deadline, dispatch lateness, completion error(0/1)"] + retained.map { event in
+            let detail = event.phase == .scheduled || event.phase == .capture
+                ? (event.detail >= origin ? event.detail - origin : 0) : event.detail
+            let peer = event.send?.port.flatMap { registered[$0] } ?? -1
+            return "\(event.ordinal),\(event.time - origin),\(peer),\(event.send?.id ?? -1),\(event.send?.sequence.map(String.init) ?? "-"),\(event.send.map { $0.sequence == nil ? "control" : "audio" } ?? "capture"),\(event.send?.byteCount ?? 0),\(event.phase.rawValue),\(detail)"
+        }
+    }
+    func dump(label: String) {
+        print("BEGIN loopback scheduling evidence: \(label); ordinal,time,peer,send,sequence,kind,bytes,phase,detail")
+        for line in lines() { print(line) }
+        print("END loopback scheduling evidence")
     }
 }
 
@@ -2565,6 +2715,7 @@ private struct RoomMeasurements {
     let resyncCommandsReceived: Int
     let captureCallbackAgeSummary: String
     let maximumReceiveEntryAgeNanos: UInt64
+    let schedulingEvidence: LoopbackSchedulingEvidence
 }
 
 private enum VirtualAudioSink {

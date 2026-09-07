@@ -40,6 +40,7 @@ struct RoomSyncMonitorTests {
         #expect(report.contains("acoustic"))
         #expect(report.contains("most recent channel session"))
         #expect(report.contains("may predate the current inactive state"))
+        #expect(report.contains("Selective bounded evidence, not a complete history"))
     }
 
     @Test("Recovery survives intermediate drift and missing measurements")

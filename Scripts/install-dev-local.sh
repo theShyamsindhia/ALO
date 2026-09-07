@@ -19,7 +19,19 @@ fi
 build_dir="$(swift build -c release --show-bin-path)"
 test -x "$build_dir/alo"
 stage_dir="$(mktemp -d /tmp/alo-dev-install.XXXXXX)"
-trap 'if [[ -d "$stage_dir" ]]; then echo "Dev staging files retained at: $stage_dir" >&2; fi' EXIT
+report_install_exit() {
+    local install_status=$?
+    if [[ $install_status -ne 0 ]]; then
+        echo "Dev installation failed (exit $install_status)." >&2
+        if [[ -n "${backup_dir:-}" ]]; then
+            echo "Previous dev app is recoverable at: $backup_dir/ALO Dev.app" >&2
+        fi
+    fi
+    if [[ -d "$stage_dir" ]]; then
+        echo "Dev staging files retained at: $stage_dir"
+    fi
+}
+trap report_install_exit EXIT
 staged_app="$stage_dir/ALO Dev.app"
 mkdir -p "$staged_app/Contents/MacOS" "$staged_app/Contents/Resources"
 cp "$build_dir/alo" "$staged_app/Contents/MacOS/alo"
@@ -61,6 +73,7 @@ if [[ -e "$destination" ]]; then
     echo "Previous dev app preserved at: $backup_dir/ALO Dev.app"
 fi
 mv "$staged_app" "$destination"
+codesign --verify --deep --strict "$destination"
 echo "Installed: $destination"
 echo "Source: $(git rev-parse HEAD)"
 echo "Ad-hoc signed without a certificate. macOS may request dev-app permissions or first-open approval."

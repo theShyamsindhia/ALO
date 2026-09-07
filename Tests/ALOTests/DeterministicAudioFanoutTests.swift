@@ -9,6 +9,20 @@ import ALOCore
 /// its queue policy, and the TCP join/report/resync path are production code.
 @Suite("Deterministic real-host audio fan-out", .serialized)
 struct DeterministicAudioFanoutTests {
+    @Test(arguments: [UInt64(1), 7, 23, 41])
+    func mixedControlTrafficAndIrregularDispatchPreserveListenerFloor(seed: UInt64) throws {
+        // CI 34127177462 observed 23ms shaper dispatch lateness and one peer
+        // receiving 46/200 despite complete delivery of every submitted packet.
+        // This seeded stress is not an exact replay: CI retained distributions,
+        // not the full sequence of callback times. Keep the live floor intact.
+        let room = try simulate(peers: 8, rate: 4_000_000,
+            policy: .boundedLatest(maxInFlight: 8), oversleep: 0,
+            irregularDispatchSeed: seed, includesControlTraffic: true)
+        #expect(room.maximumAge < SynchronizedPlayer.targetLatencyNanos)
+        #expect(room.minimumPackets >= 50,
+            "Mixed control traffic and irregular dispatch must preserve the live per-listener floor")
+    }
+
     @Test func batchedSharedLinkCompletionsDoNotStarveOneListener() throws {
         let room = try simulate(peers: 8, rate: 4_000_000,
             policy: .boundedLatest(maxInFlight: 8), oversleep: 0,
@@ -95,8 +109,10 @@ struct DeterministicAudioFanoutTests {
 
     private func simulate(peers count: Int, rate: UInt64?, policy: HostServer.AudioBackpressurePolicy,
                           oversleep: UInt64, callbackQuantumNanos: UInt64? = nil,
-                          lateJoinAtCallback: Int? = nil) throws -> SimulatedRoomResult {
-        let wire = SimulatedAudioWire(bitsPerSecond: rate, callbackQuantumNanos: callbackQuantumNanos)
+                          lateJoinAtCallback: Int? = nil, irregularDispatchSeed: UInt64? = nil,
+                          includesControlTraffic: Bool = false) throws -> SimulatedRoomResult {
+        let wire = SimulatedAudioWire(bitsPerSecond: rate, callbackQuantumNanos: callbackQuantumNanos,
+            irregularDispatchSeed: irregularDispatchSeed)
         let controls = SimulationControlPeers()
         let hostReady = DispatchSemaphore(value: 0)
         let host = HostServer(roomName: "Virtual-time real host", advertise: false,
@@ -131,6 +147,16 @@ struct DeterministicAudioFanoutTests {
             advance(wire, through: captureWake, host: host)
             host.acceptAudio(samples: samples, captureTimeNanos: nominalDeadline - 20_000_000)
             _ = host.audioSenderSnapshot() // Completes real packetization/enqueue at this event time.
+            if includesControlTraffic && callback.isMultiple(of: 5) {
+                // The live fixture pings every peer on this cadence. Reserve
+                // the actual encoded pong bytes on the same aggregate link;
+                // these are explicit traffic fixtures, not synthetic audio.
+                for peer in 0..<count {
+                    let pong = ControlMessage(type: "pong", id: UInt64(callback * count + peer),
+                        clientNanos: nominalDeadline, hostNanos: nominalDeadline)
+                    wire.reserveControlBytes(try pong.encodedLine().count)
+                }
+            }
         }
         advance(wire, through: anchor + 5_000_000_000, host: host)
         let state = wire.snapshot
@@ -219,7 +245,7 @@ struct DeterministicAudioFanoutTests {
             maximumDeadlineMiss: deadlineMisses.max() ?? 0, minimumPackets: counts.min() ?? 0,
             maximumPackets: counts.max() ?? 0, maximumSkew: skew, resyncs: reportedPeers.count,
             packetCountsByParticipant: packetCountsByParticipant)
-        print("Virtual real-host peers=\(count) rate=\(rate.map(String.init) ?? "direct") policy=\(policy) wake=\(oversleep / 1_000_000)ms: \(result)")
+        print("Virtual real-host peers=\(count) rate=\(rate.map(String.init) ?? "direct") policy=\(policy) wake=\(oversleep / 1_000_000)ms dispatchSeed=\(irregularDispatchSeed.map(String.init) ?? "none") mixedControl=\(includesControlTraffic): \(result)")
         return result
     }
 
@@ -276,9 +302,13 @@ private final class SimulatedAudioWire: @unchecked Sendable {
     private var submitted: [UInt16: [UInt32]] = [:]
     private var arrivals: [UInt16: [UInt32: Arrival]] = [:]
     private var invalidEndpoints = 0
-    init(bitsPerSecond: UInt64?, callbackQuantumNanos: UInt64? = nil) {
+    private var dispatchRandomState: UInt64?
+    private var lastDispatch: UInt64 = 0
+    init(bitsPerSecond: UInt64?, callbackQuantumNanos: UInt64? = nil,
+         irregularDispatchSeed: UInt64? = nil) {
         self.bitsPerSecond = bitsPerSecond
         self.callbackQuantumNanos = callbackQuantumNanos
+        self.dispatchRandomState = irregularDispatchSeed
     }
     var now: UInt64 { lock.withLock { current } }
     func setNow(_ value: UInt64) { lock.withLock {
@@ -297,7 +327,7 @@ private final class SimulatedAudioWire: @unchecked Sendable {
                 completion: @escaping (NWError?) -> Void) {
         lock.withLock {
             guard case .hostPort(_, let port) = endpoint else { invalidEndpoints += 1; return }
-            let delivery: UInt64
+            var delivery: UInt64
             if let rate = bitsPerSecond {
                 // Ceiling division preserves the specified aggregate wire rate.
                 let duration = (UInt64(byteCount) * 8 * 1_000_000_000 + rate - 1) / rate
@@ -315,10 +345,27 @@ private final class SimulatedAudioWire: @unchecked Sendable {
                 // Separate burst tests inject 60ms production callback stalls.
                 delivery = current + 1_000_000
             }
+            if let state = dispatchRandomState {
+                let next = state &* 6364136223846793005 &+ 1442695040888963407
+                dispatchRandomState = next
+                let lateness = (next >> 32) % 24 * 1_000_000
+                // The live shaper has one serial dispatch queue. A late block
+                // also delays the following blocks; never reverse wire order.
+                delivery = max(lastDispatch, delivery + lateness)
+                lastDispatch = delivery
+            }
             submitted[port.rawValue, default: []].append(packet.sequence)
             events.append(Event(time: delivery, order: nextOrder, port: port.rawValue,
                 packet: packet, admittedAt: current, completion: completion))
             nextOrder += 1
+        }
+    }
+
+    func reserveControlBytes(_ byteCount: Int) {
+        lock.withLock {
+            guard let rate = bitsPerSecond else { return }
+            let duration = (UInt64(byteCount) * 8 * 1_000_000_000 + rate - 1) / rate
+            linkAvailable = max(current, linkAvailable) + duration
         }
     }
 
