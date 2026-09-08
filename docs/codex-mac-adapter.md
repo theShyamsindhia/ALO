@@ -1,10 +1,10 @@
 # Internal Mac queue adapter
 
-This stacked implementation is deliberately not wired to ALO or the transport
-service. `takeForDispatch` is a durable reservation, not an actual native-spawn
-revocation fence. Integration must revalidate consent and membership under shared
-serialization immediately around native process start, then release locks before
-waiting. Do not call the current synchronous runner while holding policy locks.
+This stacked implementation is deliberately not wired to ALO's app entry points.
+The internal macOS service now provides candidate-bound native preparation,
+start and ticketed completion. `takeForDispatch` remains a durable reservation,
+not a native-spawn revocation fence; callers must use the new service path for
+that guarantee. Never call the all-in-one synchronous runner under policy locks.
 
 The internal adapter now exposes `Runner.prepare`, single-use `Prepared.start`,
 and idempotent `Started.waitForOutcome`; `Runner.run` delegates to them for the
@@ -14,8 +14,8 @@ failure and performs no hashing or waiting. Waiting computes one cached outcome
 outside policy locks. Dropping an owned started handle immediately sends SIGKILL
 to its owned child (no grace period or child cleanup) and closes pipes without
 waiting (not descendant-process containment). The new
-split is not itself authorization: service-fence integration below remains design
-only. Added marker-helper tests cover no-spawn preparation/abandonment, duplicate
+split is not itself authorization: the concrete service fence below is required.
+Added marker-helper tests cover no-spawn preparation/abandonment, duplicate
 start exclusion, repeated outcome reads and actual native launch failure.
 
 Validation checkpoint: all 12 `MacCodexQueueAdapterTests` passed in 4.453 seconds
@@ -96,8 +96,8 @@ tested; these results are not an implemented service-to-spawn fence.
 
 Tests only create temporary harmless helper programs. They never invoke installed
 Codex, enumerate tasks, inspect private IPC/databases, or send real messages.
-Actual process-start fencing, owner-only ingress, opt-in UI, capability verification,
-and two-device delivery remain out of scope for this internal adapter checkpoint.
+Owner-only app ingress, opt-in UI, actual Codex capability verification and
+two-device delivery remain out of scope for this internal adapter checkpoint.
 
 Diagnostic validation found a genuine polling race: an actual child observed
 exited with status zero after loop admission was still labeled timed out. The
@@ -112,7 +112,44 @@ are preserved. The replacement fixture observes real parent exit status zero and
 an actual nonblocking EAGAIN read (not EOF) before requiring bounded return; it
 keeps the 500 ms runner timeout and bounds its own exit-observation prerequisite.
 
-## Proposed next integration boundary (design only)
+## Internal service integration boundary
+
+The implemented API is `prepareNativeDispatch(grantID:messageID:connection:runner:)`,
+`startPrepared(_:)`, and `finishStarted(_:)`. Preparation uses identifiers to read
+the authenticated stored body/task/root; callers cannot supply replacement
+content. An opaque native preparation retains this service-issued candidate and
+cannot be paired with a different candidate by the caller. The snapshot also
+retains its exact service issuer, network generation/revision and stored digest.
+
+The service counts at most 32 permits across filesystem preflight, prepared and
+started handles, releasing on abandonment/error/completion using a separate lock.
+Dropping a started handle leaves durable dispatching evidence, restored as
+uncertain, rather than received/retriable state. Deinit does not call back into
+the service to publish uncertainty; explicit finish performs immediate receipt
+publication. Native resource destruction retains the documented owned-child
+kill behavior, not descendant containment.
+
+Start commits intent and rechecks time against the SAME held policy context after
+the actual journal save. It then invokes only concrete `Prepared.start` inside
+the fence. Finish waits outside locks and rechecks record attempt identity and
+synchronous policy revision; an observer delayed past removal/re-add cannot
+cause a late result to revive authority. Expiry after durable intent cancels
+without spawning; clock regression/persistence failure faults closed. No retry
+or task-delivery claim follows uncertainty.
+
+The preserved raw reservation baseline genuinely started a harmless helper after
+revocation and failed the desired no-marker invariant. That documents the old
+API limitation; the raw path remains a positive limitation control, not a claimed
+behavioral repair. The initial integrated focused run passed 59 tests in six
+suites. The strengthened exact task/root argv and observed-wait-entry run also
+passed 59 tests in six suites (4.185 seconds); independent correction review
+found no actionable gap. Required final-head integration CI remains separate.
+The earlier `b3ecf9a` CI passed adapter tests but failed the room-scale fanout
+minimum (45 versus 50); this focused pass does not resolve or conceal that failure.
+
+The following design checklist records the intended ordering and remaining
+review/test opportunities; it does not claim every proposed adversarial case
+below has been exercised.
 
 Inspected the bridge owner's frozen working tree on September 8, 2026. This is
 not a copy of that WIP and does not change PR5. The relevant current structure is:
@@ -134,7 +171,7 @@ not a copy of that WIP and does not change PR5. The relevant current structure i
 
 ### Proposed internal APIs and ordering
 
-1. `service.prepareDispatch(envelopeID:connection:) -> PreparedDispatch` reads an
+1. `service.prepareNativeDispatch(grantID:messageID:connection:runner:)` reads an
    already-received record under current authorization but leaves its durable
    receipt `.received`. Return a bounded, opaque, non-Codable candidate binding
    service instance, connection, grant/message IDs, stored digest, local task UUID,
@@ -200,7 +237,7 @@ critical section with harmless helpers; if a hard spawn bound is required, revie
 a lower-level spawn primitive separately. Do not claim that an asynchronous spawn
 or a timeout wrapper preserves the same revocation fence.
 
-### File ownership for the future implementation
+### Implementation files
 
 - `CodexDeviceMessagingPolicy.swift`: internal candidate validation, single-use
   dispatch intent and post-persistence time check, conservative completion rules.
