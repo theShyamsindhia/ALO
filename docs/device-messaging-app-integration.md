@@ -126,7 +126,7 @@ they do not authorize replay or replace the receiver's durable evidence.
   duplicates remain protected until expiry, and stopped probes reject work.
 - Exact shell quoting, Dev/release endpoint mapping and bounded CLI rejection.
 
-These boundaries and the two-owner outbound flow passed in the 63-test
-checkpoint, including PR8's corrected competing socket-lock creation path.
+These boundaries and the two-owner outbound flow are included in the latest
+corrective checkpoint above, including PR8's competing socket-lock creation fix.
 Independent reviews, full CI and explicitly authorized physical app/real-task
 testing remain required.
