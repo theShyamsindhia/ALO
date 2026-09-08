@@ -128,7 +128,7 @@ final class DeviceMessagingOwner: @unchecked Sendable {
     private var observations: [String: Observed] = [:] // no message text retained after enqueue
     private var challenges: [UUID: DeviceMessageRegistration.Challenge] = [:]
     private var grants: [UUID: (UUID, UUID)] = [:] // grant -> network, local registration
-    private struct PendingApproval { let registration: UUID; let task: UUID; let token: UUID }
+    private struct PendingApproval { let registration: UUID; let task: UUID; let token: UUID; let network: UUID }
     private var approvals: [UUID: PendingApproval] = [:]
     private var messageKeys: [(UUID, UUID)] = []
     private var liveReceivers: [MacDeviceMessageReceiver] = [] // lifecycleFence: teardown references only
@@ -286,6 +286,14 @@ final class DeviceMessagingOwner: @unchecked Sendable {
         // instance. Re-enable explicitly through a fresh authorization accessor.
         context.receiver.stop(); context.access.policy.removeObserver(context.observer)
         networks.removeValue(forKey: id)
+        // stop synchronously disables service authority and revokes every grant.
+        // Its queued approval callback may be suppressed: settle this network's
+        // pending approvals here rather than waiting for a callback forever.
+        let affected = Set(approvals.values.filter { $0.network == id }.map(\.registration))
+            .union(grants.values.filter { $0.0 == id }.map { $0.1 })
+        approvals = approvals.filter { $0.value.network != id }
+        grants = grants.filter { $0.value.0 != id }
+        for registration in affected { finishForgetIfSettled(registration) }
         lifecycleFence.withLock { liveReceivers.removeAll { $0 === context.receiver } }
         for peer in outbound.values where peer.network == id { peer.transport.stop() }
         let retired = incoming.filter { $0.value.0 == id }.map(\.key)
@@ -339,17 +347,11 @@ final class DeviceMessagingOwner: @unchecked Sendable {
                 case .register:
                     guard let task = request.taskID, let title = request.title else { return (.init(status: .rejected), nil) }
                     let id = try state.register(taskID: task, title: title)
-                    return (.init(status: .pendingApproval, registration: id), nil)
+                    let entry = state.registrations.first { $0.id == id }
+                    return (.init(status: Self.registrationStatus(entry), registration: id), nil)
                 case .status:
                     let entry = state.registrations.first { $0.id == request.registration }
-                    let status: LocalDeviceMessageProtocol.Response.Status
-                    switch entry?.state {
-                    case .pendingApproval?: status = .pendingApproval
-                    case .capabilityPending?: status = .capabilityPending
-                    case .verified?: status = .ready
-                    case .revoked?: status = .revoked
-                    case nil: status = .unavailable
-                    }
+                    let status = Self.registrationStatus(entry)
                     return (.init(status: status, registration: request.registration), nil)
                 case .send, .receipt:
                     guard let registration = request.registration, !forgetting.contains(registration) else { return (.init(status: .revoked), nil) }
@@ -370,6 +372,15 @@ final class DeviceMessagingOwner: @unchecked Sendable {
         }
     }
     private func key(_ peer: UUID, _ grant: UUID, _ message: UUID) -> String { "\(peer)/\(grant)/\(message)" }
+    private static func registrationStatus(_ entry: DeviceMessageRegistration.Entry?) -> LocalDeviceMessageProtocol.Response.Status {
+        switch entry?.state {
+        case .pendingApproval?: return .pendingApproval
+        case .capabilityPending?: return .capabilityPending
+        case .verified?: return .ready
+        case .revoked?: return .revoked
+        case nil: return .unavailable
+        }
+    }
     private func perform(_ effect: DeviceMessagingControllerState.Effect) {
         guard stateLock.withLock({ state.isCurrent(effect.ticket) && !forgetting.contains(effect.request.registration ?? UUID()) }),
               let route = routes[effect.destination], let peer = outbound[route.peer],
@@ -458,7 +469,7 @@ final class DeviceMessagingOwner: @unchecked Sendable {
             guard let self, let (network, connection) = self.incoming[incomingID], let context = self.networks[network],
                   let task = self.stateLock.withLock({ self.forgetting.contains(registration) ? nil : self.state.registrations.first { $0.id == registration && $0.state == .verified }?.taskID }),
                   self.approvals.count < 32 else { return }
-            let request = UUID(); self.approvals[request] = PendingApproval(registration: registration, task: task, token: self.currentGeneration)
+            let request = UUID(); self.approvals[request] = PendingApproval(registration: registration, task: task, token: self.currentGeneration, network: network)
             context.receiver.approve(connection: connection, receiverChosenTask: task, lifetime: 3600, requestID: request)
         }
     }
