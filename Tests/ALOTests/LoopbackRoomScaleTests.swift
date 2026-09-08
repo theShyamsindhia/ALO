@@ -48,6 +48,7 @@ struct LoopbackRoomScaleTests {
         } catch LoopbackTestError.peerDidNotJoin {
             #expect(peer.controlSetupEvidence.contains("errno=48"))
             #expect(peer.packetCount == 0)
+            #expect(peer.hasStopped, "Failed setup must retire its native resources before returning to the caller")
             print("CONTROL_OCCUPIED_SOURCE \(peer.controlSetupEvidence)")
         }
     }
@@ -1944,6 +1945,7 @@ private final class HeadlessLoopbackPeer {
     }
 
     var packetCount: Int { queue.sync { arrivals.count } }
+    var hasStopped: Bool { queue.sync { stopping } }
     var audioPort: UInt16? { queue.sync { udpListener?.port?.rawValue } }
     var controlLocalPort: UInt16? { queue.sync {
         guard case .hostPort(_, let port) = control?.currentPath?.localEndpoint else { return nil }
@@ -2001,7 +2003,10 @@ private final class HeadlessLoopbackPeer {
         guard controlReady.wait(timeout: .now() + 3) == .success,
               case .ready = control.state
         else {
-            control.cancel()
+            // One teardown owner installs cancellation observers before the
+            // first request. Cancelling here and replacing the handler later
+            // can lose the terminal callback; a second cancel is not a fence.
+            stop()
             print("CONTROL_SETUP_FAILURE \(controlSetupEvidence)")
             throw LoopbackTestError.peerDidNotJoin
         }
@@ -2013,19 +2018,17 @@ private final class HeadlessLoopbackPeer {
             udp.newConnectionHandler = { [weak self] connection in
                 self?.acceptAudio(connection)
             }
-            udpPort = try start(udp, kind: "UDP")
             udpListener = udp
+            udpPort = try start(udp, kind: "UDP")
 
             let video = try NWListener(using: .tcp, on: .any)
             video.newConnectionHandler = { [weak self] connection in
                 self?.acceptVideo(connection)
             }
-            videoPort = try start(video, kind: "video")
             videoListener = video
+            videoPort = try start(video, kind: "video")
         } catch {
-            udpListener?.cancel()
-            videoListener?.cancel()
-            control.cancel()
+            stop()
             throw error
         }
 
@@ -2176,7 +2179,14 @@ private final class HeadlessLoopbackPeer {
         // cancel() is an asynchronous request, not proof that the native
         // listeners/flows from this room have released their resources. Keep
         // them alive until cancellation is observed, outside their own queue.
-        #expect(cancelled.wait(timeout: .now() + 3) == .success,
+        let cancellationResult = cancelled.wait(timeout: .now() + 3)
+        if cancellationResult != .success {
+            let evidence = queue.sync {
+                "connections=\(retired.0.map { String(describing: $0.state) }) listeners=\(retired.1.map { String(describing: $0.state) }) setup=\(setupEvents.joined(separator: " | "))"
+            }
+            print("CONTROL_CANCELLATION_FAILURE \(evidence)")
+        }
+        #expect(cancellationResult == .success,
             "Loopback fixture did not finish native connection/listener cancellation")
         queue.sync {
             retired.0.forEach { $0.stateUpdateHandler = nil }
@@ -2195,7 +2205,8 @@ private final class HeadlessLoopbackPeer {
         }
         listener.start(queue: queue)
         guard ready.wait(timeout: .now() + 3) == .success, let port = portState.port else {
-            listener.cancel()
+            // The caller retains this listener and completes teardown through
+            // stop(), including its native cancellation acknowledgement.
             throw LoopbackTestError.listenerDidNotStart(kind)
         }
         return port
