@@ -328,8 +328,12 @@ struct DeviceMessagingOwnerTests {
         #expect(try String(contentsOf: f.helper.appendingPathExtension("runs")) == "run\nrun\n")
         #expect(try String(contentsOf: senderHelper.appendingPathExtension("runs")) == "run\n")
         #expect(try MacOwnerSocket.request(request, directory: senderDirectory.appendingPathComponent("socket")).status == .codexQueued)
+        let conflict = try LocalDeviceMessageProtocol.Request(operation: .send, registration: senderRegistration,
+            destination: destination, messageID: message, text: "Different body for the same ID")
+        #expect(try MacOwnerSocket.request(conflict, directory: senderDirectory.appendingPathComponent("socket")).status == .rejected)
         sender.closePeerForTesting(remote.id)
         try await wait("actual old sender transport closed") { sent.read { $0.view.remotes.isEmpty } }
+        #expect(sender.observationCountForTesting == 0, "Closed peers must release their live observation slots.")
         sender.connect(candidate)
         try await wait("explicit fresh connection rebound same approved identity") { sent.read { $0.view.remotes.first?.id != nil && $0.view.remotes.first?.id != remote.id } }
         #expect(sent.read { $0.view.destinations.first?.id == destination })
@@ -344,6 +348,12 @@ struct DeviceMessagingOwnerTests {
         #expect(!sent.read { $0.messageHistory.contains("\(message.uuidString): \(LocalDeviceMessageProtocol.Response.Status.deliveredConfirmed.rawValue)") })
         let receiverService = try #require(received.read { $0.service })
         #expect(receiverService.localReceipt(grantID: grant, messageID: message) == .codexQueued)
+        sender.testCapability(senderRegistration)
+        try await wait("fresh capability test invalidated the previous local capability") {
+            sent.read { $0.view.registrations.contains { $0.id == senderRegistration && $0.state == .capabilityPending } }
+        }
+        #expect(sender.routeCountForTesting == 0, "Reverification must retire the old owner's routes as well as reducer destinations.")
+        #expect(sent.read { $0.view.destinations.isEmpty }, "Settings must not offer unusable old destination commands.")
     }
 }
 #endif

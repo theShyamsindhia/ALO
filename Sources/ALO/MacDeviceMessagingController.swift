@@ -367,6 +367,10 @@ final class DeviceMessagingOwner: @unchecked Sendable {
             if let effect = result.1 { worker.async { [weak self] in self?.perform(effect) } }
             worker.async { [weak self] in self?.emit() }
             return result.0
+        } catch DeviceMessagingControllerState.Failure.conflict {
+            return .init(status: .rejected, registration: request.registration, messageID: request.messageID)
+        } catch DeviceMessagingControllerState.Failure.invalidRequest {
+            return .init(status: .rejected, registration: request.registration, messageID: request.messageID)
         } catch {
             return .init(status: .unavailable, registration: request.registration, messageID: request.messageID)
         }
@@ -402,6 +406,9 @@ final class DeviceMessagingOwner: @unchecked Sendable {
                   let approval = self.stateLock.withLock({ self.forgetting.contains(registration) ? nil : self.approval }) else { return }
             do {
                 let challenge = try self.stateLock.withLock { try self.state.beginCapabilityTest(registration: registration, approvedDigest: approval.digest, now: DeviceMessagingClock.nowNanos()) }
+                self.routes = self.routes.filter { $0.value.registration != registration }
+                self.observations = self.observations.filter { $0.value.registration != registration }
+                self.stateLock.withLock { self.snapshot.destinations.removeAll { $0.registration == registration } }
                 self.challenges[registration] = challenge
                 let token = self.currentGeneration
                 let admission = probe.submit(taskID: challenge.taskID, challengeID: challenge.id, response: challenge.nonce,
@@ -588,6 +595,7 @@ final class DeviceMessagingOwner: @unchecked Sendable {
             lifecycleFence.withLock { liveTransports.removeAll { $0 === peer.transport } }
             for (entry, effect) in observations where entry.hasPrefix(id.uuidString + "/") {
                 stateLock.withLock { _ = state.finish(effect.ticket, result: .unavailable) }
+                observations.removeValue(forKey: entry)
             }
         default: break
         }
@@ -648,6 +656,8 @@ final class DeviceMessagingOwner: @unchecked Sendable {
         worker.sync {}
     }
     var pendingCountForTesting: Int { stateLock.withLock { state.pendingCount } }
+    var observationCountForTesting: Int { worker.sync { observations.count } }
+    var routeCountForTesting: Int { worker.sync { routes.count } }
     /// Actual native close, not fabricated protocol/session state.
     func closePeerForTesting(_ id: UUID) {
         worker.async { [weak self] in self?.outbound[id]?.transport.stop() }
