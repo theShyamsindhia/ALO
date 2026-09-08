@@ -265,6 +265,7 @@ final class HostServer {
             requestedPlaybackStateSetNanos = nil
             groupPlayoutDelayNanos = RoomTiming.defaultPlayoutDelayNanos
             roomTimingChangeCount = 0
+            videoEnabled = false
             // Keep user room metadata, media queue and actual paused state.
             receiverCountHandler?(0)
         }

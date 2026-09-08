@@ -1925,6 +1925,7 @@ private final class HeadlessLoopbackPeer {
     private var receivedResyncCutovers = [UInt64]()
     private var receivedPlaybackStates = [Bool]()
     private var receivedRoomPlaybackStates = [Bool]()
+    private var receivedVideoEnabledStates = [Bool]()
     private var receivedPlayoutDelays = [UInt64]()
     private var receivedLevels = [(volume: Double, muted: Bool)]()
     private var corruptedPackets = 0
@@ -1954,6 +1955,7 @@ private final class HeadlessLoopbackPeer {
     var resyncCutovers: [UInt64] { queue.sync { receivedResyncCutovers } }
     var playbackStates: [Bool] { queue.sync { receivedPlaybackStates } }
     var roomPlaybackStates: [Bool] { queue.sync { receivedRoomPlaybackStates } }
+    var videoEnabledStates: [Bool] { queue.sync { receivedVideoEnabledStates } }
     var playoutDelays: [UInt64] { queue.sync { receivedPlayoutDelays } }
     var levels: [(volume: Double, muted: Bool)] { queue.sync { receivedLevels } }
     func deferredPCMReceipts() -> DeferredPCMReceipts { queue.sync { deferredReceipts } }
@@ -2226,6 +2228,8 @@ private final class HeadlessLoopbackPeer {
                     } else if message.type == "room_playback",
                               let isPlaying = message.isPlaying {
                         self.receivedRoomPlaybackStates.append(isPlaying)
+                    } else if message.type == "media_state", let enabled = message.videoEnabled {
+                        self.receivedVideoEnabledStates.append(enabled)
                     } else if message.type == "level",
                               let volume = message.volume,
                               let muted = message.muted {
@@ -3055,6 +3059,34 @@ struct HostServerCallbackLifecycleTests {
         #expect(rejection == "Channel is already running.")
         peer.sendPing()
         #expect(peer.waitForPong(timeout: 3), "Rejected double start must preserve the original client's control route")
+    }
+
+    @Test func restartingHostDoesNotAdvertiseRetiredVideoProducer() throws {
+        let ready = DispatchSemaphore(value: 0), port = PortState()
+        let host = HostServer(roomName: "Restart video contract", advertise: false,
+            listenerReadyHandler: { port.set($0); ready.signal() })
+        try host.start(); defer { host.stop() }
+        try #require(ready.wait(timeout: .now() + 3) == .success)
+        host.setVideoEnabled(true)
+        try #require(host.diagnosticsSnapshot().videoEnabled)
+        let active = HeadlessLoopbackPeer(index: 835)
+        defer { active.stop() }
+        try active.start(hostPort: try #require(port.port))
+        try #require(active.waitUntilJoined(timeout: 3))
+        try #require(eventually { active.videoEnabledStates.last == true },
+            "Control: an actively enabled host must publish video enabled to a real joining peer")
+        host.stop(); active.stop()
+        while ready.wait(timeout: .now()) == .success {}
+        try host.start()
+        try #require(ready.wait(timeout: .now() + 3) == .success)
+        let fresh = HeadlessLoopbackPeer(index: 836)
+        defer { fresh.stop() }
+        try fresh.start(hostPort: try #require(port.port))
+        try #require(fresh.waitUntilJoined(timeout: 3))
+        try #require(eventually { !fresh.videoEnabledStates.isEmpty },
+            "The new join must actually receive media_state before checking its value")
+        #expect(fresh.videoEnabledStates.last == false,
+            "Same-instance restart must not advertise a video producer retired with the prior session")
     }
 
     @Test func restartingHostReestablishesTimingEligibility() throws {
