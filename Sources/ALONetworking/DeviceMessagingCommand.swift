@@ -3,7 +3,16 @@ import Foundation
 /// Pure CLI parsing. The eventual command owner supplies bounded stdin and uses
 /// the already-running app socket; this type performs no I/O or app startup.
 public struct DeviceMessagingCommand: Sendable {
-    public enum Failure: Error, Equatable { case invalidArguments, invalidInput, inputTooLarge }
+    public enum Failure: Error, Equatable, LocalizedError {
+        case invalidArguments, invalidInput, inputTooLarge
+        public var errorDescription: String? {
+            switch self {
+            case .invalidArguments: return "Invalid device messaging arguments. Use the exact registration, send or receipt command shown in ALO Settings."
+            case .invalidInput: return "Provide nonempty UTF-8 message text on stdin, without NUL bytes."
+            case .inputTooLarge: return "Message exceeds the 16 KiB text limit. Nothing was sent."
+            }
+        }
+    }
     public struct Input: Sendable {
         private var bytes = Data()
         public init() {}

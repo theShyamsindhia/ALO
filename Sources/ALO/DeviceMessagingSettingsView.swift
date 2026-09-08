@@ -11,6 +11,10 @@ struct DeviceMessagingSettingsView: View {
     @State private var selectedRegistration: UUID?
     @State private var confirmation = ""
     @State private var retirement: MacDeviceMessagingController.StoredGrant?
+    @State private var messageRetirement: MacDeviceMessagingController.Message?
+    private var verifiedSelection: Bool {
+        controller.view.registrations.contains { $0.id == selectedRegistration && $0.state == .verified }
+    }
     init(controller: MacDeviceMessagingController) {
         self.controller = controller; self.account = controller.account
     }
@@ -30,9 +34,10 @@ struct DeviceMessagingSettingsView: View {
                     .disabled(controller.view.executable == nil || controller.view.stopping || !controller.account.identityReady)
                 if controller.view.stopping { Text("Revoking authority and stopping…").foregroundStyle(.secondary) }
                 if let error = controller.view.error { Text(error).textSelection(.enabled) }
+                if let notice = controller.view.notice { Text(notice).font(.caption).textSelection(.enabled) }
             }
             Section("Networks") {
-                Text("Explicitly enable each saved network. This does not join an audio channel.").font(.caption)
+                Text("Explicitly enable each saved network. This advertises your device and the network identifier to nearby devices, including for networks you do not own. It does not join an audio channel or grant task access.").font(.caption)
                 ForEach(account.networks, id: \.id) { network in
                     Button("Enable messaging in \(network.name)") { controller.enableNetwork(network.id) }
                         .disabled(!controller.view.enabled)
@@ -88,7 +93,7 @@ struct DeviceMessagingSettingsView: View {
                         Button("Approve selected verified local task for this device") {
                             guard let selectedRegistration else { return }
                             controller.approve(peer.id, registration: selectedRegistration)
-                        }.disabled(selectedRegistration == nil)
+                        }.disabled(!verifiedSelection)
                     }
                 }
             }
@@ -101,7 +106,7 @@ struct DeviceMessagingSettingsView: View {
                             Button("Use receiver-approved grant \(grant.uuidString.prefix(8)) for selected local task") {
                                 guard let selectedRegistration else { return }
                                 controller.bind(peer.id, grant: grant, registration: selectedRegistration)
-                            }.disabled(selectedRegistration == nil)
+                            }.disabled(!verifiedSelection)
                         }
                     }
                 }
@@ -129,7 +134,13 @@ struct DeviceMessagingSettingsView: View {
                         }
                     }.font(.caption)
                 }
-                ForEach(controller.view.messageStatuses, id: \.self) { status in Text(status).font(.caption).textSelection(.enabled) }
+                ForEach(controller.view.messages) { message in
+                    HStack {
+                        Text("\(message.message.uuidString): \(message.status)").font(.caption).textSelection(.enabled)
+                        Button("Clear local status…") { messageRetirement = message }
+                    }
+                }
+                Text("Up to 32 local statuses are retained. Clearing one frees local capacity only; the receiver's stored receipts and duplicate protection remain.").font(.caption)
                 if let command {
                     Text("\(command) receipt --registration UUID --message UUID")
                         .font(.caption).textSelection(.enabled)
@@ -147,5 +158,13 @@ struct DeviceMessagingSettingsView: View {
                 Button("Cancel", role: .cancel) { retirement = nil }
             }
         .accessibilityIdentifier("ALO.Settings.DeviceMessaging")
+        .confirmationDialog("Clear this local status? No message will be resent and the receiver's stored receipts will remain.", isPresented: Binding(
+            get: { messageRetirement != nil }, set: { if !$0 { messageRetirement = nil } })) {
+                Button("Clear local status") {
+                    if let messageRetirement { controller.retireMessage(messageRetirement) }
+                    messageRetirement = nil
+                }
+                Button("Cancel", role: .cancel) { messageRetirement = nil }
+            }
     }
 }

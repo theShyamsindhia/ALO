@@ -71,6 +71,40 @@ retire the captured discovery/receiver instance and require explicit re-enable.
 
 ## New integration regression boundaries
 
+### Corrective review checkpoint
+
+The follow-up passed 63 optimized tests in 11 suites (13.675 seconds), including
+real owner sockets, TLS, fixed harmless helper execution and receipt lookup.
+This does not establish receipt in an actual Codex task or two-Mac acceptance.
+
+- Held approvals settle when their network is retired, after synchronous grant
+  revocation. A missing revocation context cannot acknowledge successful removal.
+- Re-registering reports the existing registration state. Re-testing removes
+  old local destinations; disconnect releases live observation bookkeeping.
+- Settings can explicitly clear a settled local status to reclaim the 32-entry
+  presentation capacity without removing receiver receipts or sending anything.
+  Pending operations cannot be cleared. The rapid capacity test respects receiver
+  rate limiting: rejected attempts also retain local status. Clearing local status
+  does not grant additional receiver capacity or bypass duplicate protection.
+- Ordinary incoming status notices cannot overwrite authority failure warnings.
+- The bundled CLI and app derive the same short endpoint beneath Darwin's
+  protected per-user temporary directory, with canonical ownership/mode checks;
+  they do not trust an inherited TMPDIR or guess a release bundle identity.
+- CLI responses are JSON. Refusals (`disabled`, `revoked`, `rejected`,
+  `unavailable`) print that response and exit 1; valid status responses exit 0.
+  Neither exit 0 nor `codexQueued` proves task delivery. Never blindly retry text.
+- Enabling a network explicitly advertises device/network discovery metadata,
+  including for networks owned by someone else. Authentication and receiver-local
+  task consent remain necessary. This disclosure is stated in the enable UI.
+
+Actual before-fix assertions reproduced retired-approval cleanup, repeated-register
+status, conflicting message IDs, disconnect observation retention and stale
+re-test destinations. The added rapid-capacity fixture initially expected all
+messages to queue, contradicting the existing rate limit; its expectation was
+corrected without changing any production rate or capacity threshold.
+
+Final external corrective review and combined CI remain separate release gates.
+
 - Actual held receiver construction then disable cannot enable/publish late.
 - Actual hashed executable approval cannot cross identity/choice generation.
 - Actual local socket registration, harmless capability helper output/manual
