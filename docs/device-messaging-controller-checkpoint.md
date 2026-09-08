@@ -1,8 +1,9 @@
 # Pure controller/parser checkpoint — not app wiring
 
-Source-only checkpoint based on PR8 `1c29a599df3b7f3f02a84b8e816d3227e10c2bba`.
-Final reviewed PR7/8 corrections must be integrated before combined validation or
-opening this dependent PR. No compile or runtime evidence exists yet.
+Source-only checkpoint originally based on PR8 `1c29a599df3b7f3f02a84b8e816d3227e10c2bba`,
+now rebased onto `f680ab29c51a1928e62f89f9303f0bfa8988f943` (includes PR7 `8a3a596`).
+PR8's independent follow-up review is still pending. No compile or runtime
+evidence exists for this checkpoint; no dependent PR has been opened.
 
 `DeviceMessagingCommand` parses register/status/send/receipt with exact named
 flags and the existing local request schema. Send accepts text through a bounded
