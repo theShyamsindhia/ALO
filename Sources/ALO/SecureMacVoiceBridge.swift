@@ -20,6 +20,27 @@ final class SecureMacVoiceBridge: @unchecked Sendable {
     private var outgoing: Outgoing?
     private var incoming: [UUID: WalkieTalkieMessage] = [:]
     private var stopped = true
+    struct ReadinessOperations {
+        let wait: (VoiceSessionIdentifier, Set<UUID>, @escaping (Result<Void, Error>) -> Void) -> Void
+        let end: (VoiceSessionIdentifier) -> Void
+    }
+    private var testingReadiness: ReadinessOperations?
+
+    /// Internal fixture only: tests the actual wait/cancel/revalidation method,
+    /// not Mesh publication, networking, or microphone capture. Production is nil.
+    convenience init(testingReadiness: ReadinessOperations, captureID: String,
+                     wire: VoiceSessionIdentifier, recipients: Set<String>) {
+        self.init(player: WalkieTalkiePlayer(), localID: UUID().uuidString)
+        self.testingReadiness = testingReadiness
+        stopped = false
+        outgoing = Outgoing(captureID: captureID, wire: wire, name: "fixture", recipients: recipients)
+    }
+    func replaceOutgoingForTesting(captureID: String, wire: VoiceSessionIdentifier, recipients: Set<String>) {
+        lock.withLock {
+            precondition(testingReadiness != nil)
+            outgoing = Outgoing(captureID: captureID, wire: wire, name: "fixture", recipients: recipients)
+        }
+    }
 
     init(player: WalkieTalkiePlayer, localID: String, failure: @escaping (Error) -> Void = { _ in }) {
         self.player = player; self.localID = localID; self.failure = failure
@@ -29,18 +50,20 @@ final class SecureMacVoiceBridge: @unchecked Sendable {
     var needsRestart: Bool { lock.withLock { stopped } }
 
     func waitUntilReady(captureID: String, recipients: Set<String>) async throws {
-        let (runtime, current) = try lock.withLock { () throws -> (DirectedVoiceSession, Outgoing) in
-            guard !stopped, let runtime = self.runtime, let current = outgoing,
+        let (operations, current) = try lock.withLock { () throws -> (ReadinessOperations, Outgoing) in
+            guard !stopped, let current = outgoing,
                   current.captureID == captureID, current.recipients == recipients else {
                 throw CancellationError()
             }
-            return (runtime, current)
+            if let testingReadiness { return (testingReadiness, current) }
+            guard let runtime else { throw CancellationError() }
+            return (ReadinessOperations(wait: runtime.whenTransmissionReady, end: runtime.endTransmitting), current)
         }
+        do {
         try await withTaskCancellationHandler(operation: {
             try Task.checkCancellation()
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                runtime.whenTransmissionReady(session: current.wire,
-                    recipients: Set(recipients.compactMap(UUID.init(uuidString:)))) {
+                operations.wait(current.wire, Set(recipients.compactMap(UUID.init(uuidString:)))) {
                     continuation.resume(with: $0)
                 }
             }
@@ -51,7 +74,14 @@ final class SecureMacVoiceBridge: @unchecked Sendable {
                     throw CancellationError()
                 }
             }
-        }, onCancel: { runtime.endTransmitting(session: current.wire) })
+        }, onCancel: { operations.end(current.wire) })
+        } catch let error as SecureTransportError {
+            switch error {
+            case .invalidState: throw CancellationError()
+            case .expired: throw ALOError("Voice could not connect to every selected device. Try Talk again.")
+            default: throw error
+            }
+        }
     }
 
     func start(mesh: MeshControlPlane) {

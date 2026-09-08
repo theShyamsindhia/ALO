@@ -115,8 +115,11 @@ public final class DirectedVoiceSession: @unchecked Sendable {
     private func checkReadiness() {
         guard let wait = readinessWait else { return }
         guard !stopped, transmission?.session == wait.session,
-              transmission?.recipients == wait.recipients, now() < wait.deadline else {
+              transmission?.recipients == wait.recipients else {
             finishReadiness(.failure(SecureTransportError.invalidState)); return
+        }
+        guard now() < wait.deadline else {
+            finishReadiness(.failure(SecureTransportError.expired)); return
         }
         let ready = Set(peers.values.compactMap { peer -> UUID? in
             guard peer.session == wait.session, peer.connection.credentials.isActive,
@@ -243,7 +246,7 @@ public final class DirectedVoiceSession: @unchecked Sendable {
     func publisherFailed(_ error: Error) { stopOnQueue(failure: error) }
     private func stopOnQueue(failure: Error? = nil) {
         guard !stopped else { return }; stopped = true; timer?.cancel(); timer = nil
-        finishReadiness(.failure(SecureTransportError.invalidState))
+        finishReadiness(.failure(failure ?? SecureTransportError.invalidState))
         transmission = nil; ingressLock.withLock { ingressSession = nil; ingress.removeAll() }
         for id in Array(peers.keys) { removePeer(id) }
         let old = Array(receivers.values); receivers.removeAll()

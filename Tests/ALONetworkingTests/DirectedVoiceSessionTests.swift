@@ -24,17 +24,42 @@ struct DirectedVoiceSessionTests {
         let audience: Set<UUID> = [NetworkFixture.receiver, UUID()]
         try h.queue.sync { try h.start(recipients: audience) }
         var results: [Bool] = []
+        var failure: SecureTransportError?
         h.sender.whenTransmissionReady(session: h.intent, recipients: audience) {
             results.append((try? $0.get()) != nil)
+            if case .failure(let error) = $0 { failure = error as? SecureTransportError }
         }
         h.queue.sync {
             #expect(results.isEmpty)
             h.time += 8_000_000_000
             h.sender.tick()
             #expect(results == [false])
+            #expect(failure == .expired)
         }
         h.sender.endTransmitting(session: h.intent)
         h.queue.sync { #expect(h.registry.count == 0) }
+    }
+
+    @Test(arguments: [0, 1, 2])
+    func pendingReadinessCompletesOnceWhenTransmissionEnds(mode: Int) throws {
+        let h = try VoiceHarness()
+        try h.queue.sync { h.holdValidation = true; try h.start() }
+        var failures: [Error] = []
+        h.sender.whenTransmissionReady(session: h.intent, recipients: [NetworkFixture.receiver]) {
+            if case .failure(let error) = $0 { failures.append(error) }
+            else { Issue.record("Unvalidated wait must not succeed") }
+        }
+        h.queue.sync { #expect(failures.isEmpty) }
+        if mode == 0 { h.sender.endTransmitting(session: h.intent) }
+        if mode == 1 { h.sender.stop() }
+        if mode == 2 { h.queue.sync { h.sender.publisherFailed(SecurePeerChannelError.connectionFailed) } }
+        h.queue.sync {
+            #expect(failures.count == 1 && h.registry.count == 0)
+            if mode == 2 { #expect(failures.first as? SecurePeerChannelError == .connectionFailed) }
+            h.validationReplies.removeFirst()()
+            h.sender.publisherFailed(SecurePeerChannelError.cancelled)
+            #expect(failures.count == 1)
+        }
     }
 
     @Test func replacementRejectsOldReadinessAndDelayedValidation() throws {

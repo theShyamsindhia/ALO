@@ -27,6 +27,20 @@ after validation. The secure discard is correct; capture ordering was wrong.
 After the fix, 29 focused tests across startup, intent, directed transport, and
 route completion passed without microphone capture or hardware playback.
 
+The readiness review follow-up reproduced three failures in 15 focused tests:
+timeout was indistinguishable from stale state, a publisher failure was lost,
+and bridge cancellation exposed a transport error. After correction, 31 tests
+across five suites passed. Timeout is now a bounded connection error; stale or
+cancelled waits cancel startup, while publisher failures retain their cause.
+Pending end, stop, and failure complete the readiness callback exactly once.
+
+The bridge regression uses the actual `waitUntilReady` and startup helper with
+an internal fixture supplying outgoing state and held readiness callbacks. It
+checks capture stays inactive until success and rejects replaced wire, capture,
+or audience identities. It does not exercise live Mesh publication, a real
+microphone, or acoustic delivery. The stale-target restart branch also releases
+only its own continuation token; it cannot authorize a dormant capture.
+
 This addresses startup clipping, not a proven cause or fix for persistent
 muffling, low volume, Bluetooth distortion, or media synchronization. Native
 speech quality and broader integration require separate evidence. These tests

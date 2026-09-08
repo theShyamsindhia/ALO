@@ -739,8 +739,11 @@ final class MeshSession {
             if let active { forceEndVoiceCapture(sessionID: active.id) }
             let token = UUID(); voiceReconcileToken = token
             Task { @MainActor [weak self] in
-                guard let self, self.voiceReconcileToken == token,
-                      self.effectiveVoiceTargets() == targets else { return }
+                guard let self, self.voiceReconcileToken == token else { return }
+                guard self.effectiveVoiceTargets() == targets else {
+                    self.voiceReconcileToken = nil
+                    return
+                }
                 do {
                     _ = try await self.beginVoiceCapture(targetIDs: targets, generation: generation,
                         inputDeviceUID: input, continuationToken: token)
