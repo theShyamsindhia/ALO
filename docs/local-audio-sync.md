@@ -1,5 +1,27 @@
 # Local audio synchronization
 
+## Capture bursts and transport deadlines
+
+Capture callbacks are batches, not a promise of one callback per 5 ms packet.
+`MediaHostSession` must preserve a timely batch through both its thread-safe
+capture inbox and its per-lease publisher FIFO. An independent 16-packet/80 ms
+limit discarded 14 packets from a 30-packet/150 ms callback even with 50 ms left
+before the first packet's presentation deadline. A gap that large exceeds the
+renderer’s short-loss concealment budget and can force a content recovery.
+
+The queue is bounded to one maximum room-buffer duration (currently 600 ms,
+121 packet slots). This is a retention ceiling, not an added playback delay.
+Each lease still prunes against its actual anchor-derived presentation deadline;
+an expired packet must not be revived by an enqueue retry. Pause, stop and epoch
+replacement must discard queued work. One slow lease must not block another.
+Keep `timelyCaptureBurstSurvivesIngressAndPublisherBackpressure`, the expiry,
+bounded-burst and retired-epoch tests when changing this policy.
+
+Live release logs on macOS 15 showed repeated content recoveries with small
+reported render drift. This motivated the regression above but does not prove
+all live interruptions have the same cause. Render-clock alignment alone never
+proves uninterrupted PCM delivery or acoustic synchronization.
+
 ## Reproduced clock failures and invariants
 
 The uninterrupted-playback investigation reproduced application-queue clock

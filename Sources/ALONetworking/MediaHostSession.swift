@@ -53,8 +53,12 @@ public final class MediaHostSession: @unchecked Sendable {
         let packet: AudioPacket
         let enqueuedAt: UInt64
     }
-    private static let maximumPendingAudio = 16
-    private static let maximumAudioWait: UInt64 = 80_000_000
+    // Capture delivers batches, not a guaranteed callback every 5ms. An 80ms
+    // FIFO silently truncated otherwise timely PCM before the renderer's
+    // 200–600ms deadline. Bound memory to one maximum room buffer instead;
+    // pruneAudio still enforces each lease's actual presentation deadline.
+    private static let maximumAudioWait = RoomTiming.maximumPlayoutDelayNanos
+    private static let maximumPendingAudio = Int(maximumAudioWait / RoomTiming.timingStepNanos) + 1
     private final class Lease {
         let ticket: MediaSubscriptionTicket
         let deadline: TimeInterval

@@ -4,6 +4,31 @@ import Testing
 
 @Suite("Media host authorization and lifecycle")
 struct MediaHostSessionTests {
+    @Test func timelyCaptureBurstSurvivesIngressAndPublisherBackpressure() throws {
+        let h = try MediaHostHarness()
+        var ticket: MediaSubscriptionTicket!
+        try h.queue.sync {
+            h.host.publisherReady(port: 54321)
+            ticket = try h.activate()
+            h.holdAudioCompletions = true
+            let captureStart = h.time
+            let packets = (0..<30).map { index in
+                AudioPacket(sequence: UInt32(index), frameIndex: UInt64(index * 240),
+                    captureTimeNanos: captureStart + UInt64(index) * 5_000_000,
+                    samples: Array(repeating: 7, count: 480))
+            }
+            // A 150ms capture callback retains 50ms of this fixture's 200ms
+            // presentation budget. Do not discard it at an unrelated 80ms cap.
+            h.time += 150_000_000
+            h.host.submitAudio(packets)
+        }
+        try h.queue.sync {
+            while !h.audioCompletions.isEmpty { h.audioCompletions.removeFirst()(true) }
+            let opener = try h.receiver.makeSubscriberDatagramOpener(ticket: ticket, channel: .audio)
+            let frames = try h.datagrams.map { try AudioPacket(data: opener.open($0.bytes))?.frameIndex }
+            #expect(frames == (0..<30).map { Optional(UInt64($0 * 240)) })
+        }
+    }
     @Test func manualSyncTargetsOnlySelectedPeerAndAllSharesOneResetID() throws {
         let h = try MediaHostHarness()
         try h.queue.sync {
@@ -119,7 +144,7 @@ struct MediaHostSessionTests {
             #expect(h.datagrams.count == 8)
             h.rejectNextAudioEnqueues = 1
             h.host.publishAudio(h.packet(index: 8))
-            h.time += 81_000_000; h.audioRetries.removeFirst()()
+            h.time += 201_000_000; h.audioRetries.removeFirst()()
             #expect(h.datagrams.count == 8)
         }
     }
@@ -134,7 +159,7 @@ struct MediaHostSessionTests {
         h.queue.sync {
             #expect(h.datagrams.count == 8)
             h.host.submitAudio((8..<16).map { h.packet(index: $0) })
-            h.time += 81_000_000
+            h.time += 201_000_000
         }
         h.queue.sync { #expect(h.datagrams.count == 8) }
     }
@@ -212,7 +237,7 @@ struct MediaHostSessionTests {
             _ = try h.activate()
             h.holdAudioCompletions = true
             h.host.publishAudio(h.packet(index: 0)); h.host.publishAudio(h.packet(index: 1))
-            h.time += 81_000_000
+            h.time += 201_000_000
             h.audioCompletions.removeFirst()(true)
             #expect(h.datagrams.count == 1)
             h.host.publishAudio(h.packet(index: 2)); h.host.publishAudio(h.packet(index: 3))
@@ -230,12 +255,12 @@ struct MediaHostSessionTests {
             h.host.publisherReady(port: 54321)
             let ticket = try h.activate()
             h.holdAudioCompletions = true
-            for index in 0..<100 { h.host.publishAudio(h.packet(index: index)) }
+            for index in 0..<200 { h.host.publishAudio(h.packet(index: index)) }
             while !h.audioCompletions.isEmpty { h.audioCompletions.removeFirst()(true) }
             let opener = try h.receiver.makeSubscriberDatagramOpener(ticket: ticket, channel: .audio)
             let frames = try h.datagrams.map { try AudioPacket(data: opener.open($0.bytes))?.frameIndex }
-            #expect(frames == ([0] + Array(84..<100)).map { Optional(UInt64($0 * 240)) })
-            h.host.publishAudio(h.packet(index: 101)); h.host.publishAudio(h.packet(index: 102))
+            #expect(frames == ([0] + Array(79..<200)).map { Optional(UInt64($0 * 240)) })
+            h.host.publishAudio(h.packet(index: 201)); h.host.publishAudio(h.packet(index: 202))
             let beforePause = h.datagrams.count
             h.anchorState = .paused; h.host.refreshTimeline()
             while !h.audioCompletions.isEmpty { h.audioCompletions.removeFirst()(true) }
