@@ -2294,8 +2294,8 @@ final class ALOViewModel: ObservableObject {
             },
             voiceCapturePhaseHandler: { [weak self] state in
                 guard let self, self.channelOpenGeneration == generation, !self.isLeavingRoom else { return }
-                let hasTalkTargets = !self.effectiveTalkTargetIDs.intersection(self.currentRemoteParticipantIDs).isEmpty
                 let targets = self.effectiveTalkTargetIDs.intersection(self.currentRemoteParticipantIDs)
+                let hasTalkTargets = !targets.isEmpty
                 let names = self.participants.filter { targets.contains($0.id) }.map(\.name)
                 let talkingStatus = targets == self.currentRemoteParticipantIDs
                     ? "Talking to everyone" : "Talking to \(ListFormatter.localizedString(byJoining: names))"

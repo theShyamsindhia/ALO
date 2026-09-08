@@ -61,3 +61,13 @@ startup, intent, and route regressions. That run preceded mechanical removal of
 an unused previous-status parameter; the next integrated build validates that
 cleanup. These status tests use no microphone or playback and do not test a live
 GUI window or acoustic behavior.
+
+An Open Line can emit the real connecting phase before its new state reaches
+the GUI: both invite and accept await capture reconciliation before publishing
+the Open Line state callback. Therefore no GUI Talk targets does not mean no
+wire audience. A follow-up regression reproduced one false "Talk is off" result;
+the corrected generic "Connecting voice…" passed all five presentation tests.
+It leaves Talk starting/talking flags unchanged and does not reorder publication.
+The microphone-change notice is retained: subsequent truthful paused/connecting
+status is acceptable, without adding separate presentation state. The duplicate
+target intersection was consolidated mechanically.

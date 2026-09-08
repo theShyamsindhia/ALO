@@ -33,10 +33,14 @@ struct VoiceCapturePresentationTests {
     }
 
     @Test(arguments: [VoiceCaptureLifecycle.Phase.connecting, .ready])
-    func noTargetsCannotLeaveConnectingOrClaimTalking(_ phase: VoiceCaptureLifecycle.Phase) {
+    func openLineStartupBeforeGUIStatePropagationDoesNotClaimTalk(_ phase: VoiceCaptureLifecycle.Phase) {
+        // MeshSession invites/accepts and awaits reconcileVoiceCapture before
+        // publishing openLineStateHandler. A real connecting phase therefore
+        // can arrive while GUI Talk targets and Open Line state are still empty.
+        // Absence of GUI Talk targets does not imply absence of a wire audience.
         let value = presentation(phase, targets: false)
         #expect(!value.starting && !value.talking)
-        #expect(value.status == "Talk is off")
+        #expect(value.status == (phase == .connecting ? "Connecting voice…" : "Talk is off"))
     }
 
     @Test func localOpenLineIsSpeakingButRemotePresenceIsNotInvented() {

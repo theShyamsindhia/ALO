@@ -10,8 +10,8 @@ struct VoiceCapturePresentation {
                       otherVoiceStatus: String?) -> Self {
         let status: String
         switch phase {
-        case .connecting where hasTalkTargets:
-            status = "Connecting voice to selected devices…"
+        case .connecting:
+            status = hasTalkTargets ? "Connecting voice to selected devices…" : "Connecting voice…"
         case .ready where hasTalkTargets:
             status = talkingStatus
         case .idle:
