@@ -12,13 +12,14 @@ public final class CodexDeviceMessageService: @unchecked Sendable {
     private let nowNanos: @Sendable () -> UInt64
     private var state: CodexDeviceMessagingPolicy
     private var sessions: [UUID: NetworkDeviceAuthorization.Session] = [:]
+    private var sessionQueryContexts: [UUID: NetworkDeviceAuthorization.Context] = [:]
     private var connectionClosures: [UUID: () -> Void] = [:]
     private var observation: UUID?
     private var faulted = false
 
     public init(policy: NetworkPolicyCenter, localDevice: DeviceIdentityBinding,
                 actualLocalTLSHash: Data, journal: CodexDeviceMessageJournal,
-                nowNanos: @escaping @Sendable () -> UInt64 = MonotonicClock.nowNanos,
+                nowNanos: @escaping @Sendable () -> UInt64 = DeviceMessagingClock.nowNanos,
                 policyChangeDelivery: ((@escaping () -> Void) -> Void)? = nil) throws {
         self.policy = policy; self.journal = journal
         self.nowNanos = nowNanos
@@ -48,6 +49,14 @@ public final class CodexDeviceMessageService: @unchecked Sendable {
         guard sessions.count < 16 else { throw CodexDeviceMessagingError.capacity }
         return try authorization.challenge(nowNanos: nowNanos())
     }
+    public func cancelChallenge(_ challenge: NetworkDeviceAuthorization.Challenge) {
+        authorization.cancel(challenge)
+    }
+    public func localGrants() -> [CodexDeviceMessagingPolicy.LocalGrant] {
+        lock.lock(); defer { lock.unlock() }; return state.localGrants
+    }
+    private struct QueryBudget { var tokens = 5.0; var last: UInt64 }
+    private var queryBudgets: [UUID: QueryBudget] = [:]
     /// Only transport invokes this with the SPKI extracted from its actual TLS
     /// connection. Returned identifiers are local handles, never wire authority.
     public func authenticate(_ claim: NetworkDeviceAuthorization.Claim, actualPeerTLSHash: Data) throws -> UUID {
@@ -55,10 +64,12 @@ public final class CodexDeviceMessageService: @unchecked Sendable {
         try requireEnabled()
         guard sessions.count < 16 else { throw CodexDeviceMessagingError.capacity }
         let session = try authorization.accept(claim, actualSenderTLSHash: actualPeerTLSHash, clock: nowNanos)
-        let id = UUID(); sessions[id] = session; return id
+        let context = try authorization.withCurrentContext(session: session, clock: nowNanos) { context, _ in context }
+        let id = UUID(); sessions[id] = session; sessionQueryContexts[id] = context; return id
     }
     public func disconnect(_ id: UUID) {
         lock.lock(); defer { lock.unlock() }; sessions.removeValue(forKey: id); connectionClosures.removeValue(forKey: id)
+        sessionQueryContexts.removeValue(forKey: id)
     }
     func bindConnection(_ id: UUID, queue: DispatchQueue, close: @escaping @Sendable () -> Void) {
         lock.lock(); defer { lock.unlock() }
@@ -82,12 +93,13 @@ public final class CodexDeviceMessageService: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         let now = nowNanos()
         try commit { try $0.retireGrant(grantID: grant, now: now, acknowledgeReceiptLoss: acknowledgeReceiptLoss) }
+        queryBudgets.removeValue(forKey: grant)
     }
     var journalWritesForTesting: Int {
         lock.lock(); defer { lock.unlock() }; return journal.committedWrites
     }
     public func receive(_ envelope: CodexDeviceMessageEnvelope, connection: UUID) throws -> CodexDeviceMessagingPolicy.Receipt {
-        try current(connection) { context, now in
+        try current(connection, queryGrant: envelope.grantID) { context, now in
             try commit { try $0.receive(envelope, context: context, now: now) }
         }
     }
@@ -116,10 +128,29 @@ public final class CodexDeviceMessageService: @unchecked Sendable {
     private func requireEnabled() throws {
         guard !faulted, state.isEnabled else { throw CodexDeviceMessagingError.disabled }
     }
-    private func current<T>(_ connection: UUID, _ body: (NetworkDeviceAuthorization.Context, UInt64) throws -> T) throws -> T {
+    private func current<T>(_ connection: UUID, queryGrant: UUID? = nil, _ body: (NetworkDeviceAuthorization.Context, UInt64) throws -> T) throws -> T {
         lock.lock(); defer { lock.unlock() }
         try requireEnabled()
         guard let session = sessions[connection] else { throw CodexDeviceMessagingError.unauthorized }
+        // Receiver-owned grant scope retains query limits across reconnects.
+        // IDs cannot allocate buckets or charge another sender's grant: cheap
+        // verified root/full-SPKI scope matching precedes bucket lookup.
+        if let queryGrant {
+            guard let context = sessionQueryContexts[connection],
+                  state.matchesQueryScope(grantID: queryGrant, context: context) else {
+                throw CodexDeviceMessagingError.unauthorized
+            }
+            let now = nowNanos()
+            var budget = queryBudgets[queryGrant] ?? QueryBudget(last: now)
+            guard now >= budget.last else {
+                faulted = true; state.setEnabled(false); invalidateConnections()
+                throw CodexDeviceMessagingError.clockRegressed
+            }
+            budget.tokens = min(5, budget.tokens + Double(now - budget.last) / 6_000_000_000)
+            budget.last = now
+            guard budget.tokens >= 1 else { throw CodexDeviceMessagingError.rateLimited }
+            budget.tokens -= 1; queryBudgets[queryGrant] = budget
+        }
         return try authorization.withCurrentContext(session: session, clock: nowNanos, body: body)
     }
     func holdSerializationForTesting(_ body: () -> Void) {
@@ -156,6 +187,8 @@ public final class CodexDeviceMessageService: @unchecked Sendable {
     }
     private func invalidateConnections() {
         sessions.removeAll()
+        sessionQueryContexts.removeAll()
+        authorization.cancelAll()
         let callbacks = Array(connectionClosures.values); connectionClosures.removeAll()
         callbacks.forEach { $0() } // These only enqueue transport cancellation.
     }

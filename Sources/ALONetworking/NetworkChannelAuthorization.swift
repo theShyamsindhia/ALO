@@ -20,6 +20,9 @@ public final class NetworkPolicyCenter: @unchecked Sendable {
     private var current: NetworkManifest
     private var invalid = false
     private var observers = [UUID: () -> Void]()
+    var observerCountForTesting: Int {
+        lock.lock(); defer { lock.unlock() }; return observers.count
+    }
 
     public init(repository: NetworkRepository, networkID: UUID) throws {
         self.repository = repository

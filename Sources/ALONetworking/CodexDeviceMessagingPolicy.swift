@@ -117,6 +117,26 @@ public struct CodexDeviceMessagingPolicy: Sendable {
     }
 
     public var checkpoint: Checkpoint { Checkpoint(grants: grants, records: records) }
+    public struct LocalGrant: Sendable {
+        public let id: UUID
+        public let localTaskID: UUID
+        public let expiresAtNanos: UInt64
+        public let revoked: Bool
+        public let recordCount: Int
+    }
+    /// Receiver-local settings only; never encoded in the peer protocol.
+    public var localGrants: [LocalGrant] {
+        grants.map { id, grant in
+            LocalGrant(id: id, localTaskID: grant.taskID, expiresAtNanos: grant.expiresAt,
+                       revoked: grant.revoked, recordCount: records.keys.filter { $0.grantID == id }.count)
+        }
+    }
+    /// Cheap local lookup for the transient pre-policy query gate, never an
+    /// authorization result. Current membership/expiry is still checked later.
+    func matchesQueryScope(grantID: UUID, context: NetworkDeviceAuthorization.Context) -> Bool {
+        guard let grant = grants[grantID], !grant.revoked else { return false }
+        return grant.scope == CodexDeviceMessagingScope(context)
+    }
     /// Receiver-local inspection only. Remote retries go through receive's
     /// authorization checks rather than exposing this lookup as an endpoint.
     public func receipt(grantID: UUID, messageID: UUID) -> Receipt? {
@@ -205,12 +225,10 @@ public struct CodexDeviceMessagingPolicy: Sendable {
         return .received
     }
 
-    /// Durable beginDispatch is the service's dispatch linearization point.
-    /// The service must serialize it with revocation and obtain current policy
-    /// immediately before handoff. Never wait for a CLI/process under the
-    /// NetworkPolicyCenter lock: the adapter needs a separate dispatch fence.
-    /// Revocation after this point cannot recall an external enqueue and marks
-    /// in-flight work uncertain. This value is not permission for delayed retry.
+    /// Durable reservation only, not external process-start authorization.
+    /// The adapter must revalidate and fence actual start against revocation;
+    /// immediacy alone is insufficient. Never wait for process completion under
+    /// NetworkPolicyCenter's lock. No external side effect occurs here.
     public mutating func beginDispatch(_ envelope: CodexDeviceMessageEnvelope,
                                        context: NetworkDeviceAuthorization.Context, now: UInt64) throws -> Dispatch {
         try advance(now)

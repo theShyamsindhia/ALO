@@ -26,6 +26,7 @@ struct NetworkDeviceTextTransportTests {
         var grant: UUID?
         var receipt: CodexDeviceMessagingPolicy.Receipt?
         var closed = false
+        var rejected = false
         func mutate(_ body: (State) -> Void) { lock.lock(); defer { lock.unlock() }; body(self) }
         func read<T>(_ body: (State) -> T) -> T { lock.lock(); defer { lock.unlock() }; return body(self) }
     }
@@ -68,20 +69,29 @@ struct NetworkDeviceTextTransportTests {
                     if case .grant(let grant) = event { $0.grant = grant }
                     if case .receipt(_, _, let receipt) = event { $0.receipt = receipt }
                     if case .closed = event { $0.closed = true }
+                    if case .rejected = event { $0.rejected = true }
                 }
             }
         client.start(); defer { client.stop() }
         try await wait { state.read { $0.authenticated } }
         #expect(state.read { $0.grant == nil && $0.receipt == nil })
         let connection = try #require(queue.sync { incoming })
-        listener.approve(connection: connection, localTaskID: task, expiresAtNanos: MonotonicClock.nowNanos() + 60_000_000_000)
+        listener.approve(connection: connection, localTaskID: task, expiresAtNanos: DeviceMessagingClock.nowNanos() + 60_000_000_000)
         try await wait { state.read { $0.grant != nil } }
         let grant = try #require(state.read { $0.grant })
+        client.send(.init(grantID: grant, text: String(repeating: "\u{0001}", count: 4_077)))
+        try await wait { state.read { $0.rejected } }
+        #expect(state.read { !$0.closed && $0.receipt == nil })
         client.send(.init(grantID: grant, text: "Attributed remote text; not local authority"))
         try await wait { state.read { $0.receipt != nil } }
         #expect(state.read { $0.receipt == .received }) // Not Codex delivery.
         try service.revoke(grant: grant)
         try await wait { state.read { $0.closed } }
+        client.stop()
+        state.mutate { $0.rejected = false }
+        client.send(.init(grantID: grant, text: "after stop"))
+        try await wait { state.read { $0.rejected } }
+        #expect(client.pendingReceiptsForTesting == 0)
     }
     private func wait(_ predicate: () -> Bool) async throws {
         let deadline = ContinuousClock.now + .seconds(5)

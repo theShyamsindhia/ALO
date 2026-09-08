@@ -100,7 +100,7 @@ public final class NetworkDeviceAuthorization: @unchecked Sendable {
     private let issuer = UUID()
     private let lock = NSLock()
     private var pending: [Data: (Challenge, UInt64)] = [:]
-    private let challengeLifetime: UInt64 = 30_000_000_000
+    private let challengeLifetime: UInt64 = 5_000_000_000
     private let sessionLifetime: UInt64 = 300_000_000_000
 
     public init(policy: NetworkPolicyCenter, localDevice: DeviceIdentityBinding,
@@ -123,6 +123,11 @@ public final class NetworkDeviceAuthorization: @unchecked Sendable {
         pending[value.nonce] = (value, nowNanos + challengeLifetime)
         return value
     }
+    public func cancel(_ challenge: Challenge) {
+        lock.lock(); defer { lock.unlock() }
+        if pending[challenge.nonce]?.0 == challenge { pending.removeValue(forKey: challenge.nonce) }
+    }
+    public func cancelAll() { lock.lock(); defer { lock.unlock() }; pending.removeAll() }
 
     /// Every attempt consumes the challenge, including invalid signatures. Reconnect creates a new one.
     public func accept(_ claim: Claim, actualSenderTLSHash: Data, nowNanos: UInt64) throws -> Session {

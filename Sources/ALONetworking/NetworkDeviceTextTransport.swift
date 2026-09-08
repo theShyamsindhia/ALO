@@ -12,6 +12,8 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
         case grant(UUID)
         case receipt(grantID: UUID, messageID: UUID, CodexDeviceMessagingPolicy.Receipt)
         case messageAccepted(UUID, CodexDeviceMessageEnvelope)
+        /// Local send validation failed; no receipt is pending and connection stays usable.
+        case rejected(grantID: UUID, messageID: UUID, CodexDeviceMessagingError)
         case closed
     }
     private struct Wire: Codable {
@@ -33,6 +35,7 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
     private let mode: Mode
     private let pins: PeerPinStore
     private let event: (Event) -> Void
+    private let admitTLS: (PeerPublicIdentity) -> Bool
     private var parser = NetworkDeviceMessageFraming()
     private var expectedChallenge: NetworkDeviceAuthorization.Challenge?
     private var localSession: UUID?
@@ -50,9 +53,12 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
     /// The supplied connection must use SecureNetworkParameters.tcp. This class
     /// still requires a real ready TLS peer certificate before starting proofs.
     public init(accepted connection: NWConnection, service: CodexDeviceMessageService,
-                pins: PeerPinStore, queue: DispatchQueue, event: @escaping (Event) -> Void) {
+                pins: PeerPinStore, queue: DispatchQueue,
+                admitTLS: @escaping (PeerPublicIdentity) -> Bool = { _ in true },
+                event: @escaping (Event) -> Void) {
         self.connection = connection; self.queue = networkDeviceExecutor(target: queue); mode = .receiver(service)
         self.pins = pins; self.event = event
+        self.admitTLS = admitTLS
     }
     public init(endpoint: NWEndpoint, identity: InstallationIdentity, user: UserIdentity,
                 binding: DeviceIdentityBinding, policy: NetworkPolicyCenter, pins: PeerPinStore,
@@ -63,6 +69,17 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
         connection = NWConnection(to: endpoint, using: parameters)
         self.queue = networkDeviceExecutor(target: queue); mode = .sender(user, binding, policy, identity.publicIdentity.publicKeyHash)
         self.pins = pins; self.event = event
+        self.admitTLS = { _ in true }
+    }
+    deinit {
+        timeout?.cancel()
+        if case .receiver(let service) = mode {
+            if let expectedChallenge { service.cancelChallenge(expectedChallenge) }
+            if let localSession { service.disconnect(localSession) }
+        }
+        if case .sender(_, _, let policy, _) = mode, let policyObserver { policy.removeObserver(policyObserver) }
+        connection.stateUpdateHandler = nil
+        connection.cancel()
     }
     public func start() { queue.async { self.startOnQueue() } }
     public func stop() { queue.async { self.close() } }
@@ -80,25 +97,44 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
     }
     public func send(_ envelope: CodexDeviceMessageEnvelope) {
         queue.async {
-            guard case .sender = self.mode, self.admitted else { return }
+            guard case .sender = self.mode, self.admitted, !self.closed else {
+                self.event(.rejected(grantID: envelope.grantID, messageID: envelope.messageID, .unauthorized)); return
+            }
+            let frame: Data
+            do { frame = try Self.textFrame(envelope) }
+            catch {
+                self.event(.rejected(grantID: envelope.grantID, messageID: envelope.messageID, .invalidEnvelope))
+                return
+            }
             let key = ReceiptKey(grant: envelope.grantID, message: envelope.messageID)
-            guard self.awaitingReceipts.contains(key) || self.awaitingReceipts.count < 32 else { self.close(); return }
+            guard (self.awaitingReceipts.contains(key) || self.awaitingReceipts.count < 32),
+                  self.outgoing.count < 32, self.queuedBytes + frame.count <= 256 * 1024 else {
+                self.event(.rejected(grantID: envelope.grantID, messageID: envelope.messageID, .capacity)); return
+            }
             self.awaitingReceipts.insert(key)
-            self.send(Wire(kind: .text, message: envelope))
+            self.outgoing.append(frame); self.queuedBytes += frame.count; self.drain()
         }
     }
+    static func textFrame(_ envelope: CodexDeviceMessageEnvelope) throws -> Data {
+        guard !envelope.text.isEmpty, envelope.text.utf8.count <= CodexDeviceMessagingPolicy.maximumTextBytes else {
+            throw CodexDeviceMessagingError.invalidEnvelope
+        }
+        return try NetworkDeviceMessageFraming.encode(JSONEncoder().encode(Wire(kind: .text, message: envelope)))
+    }
+    var pendingReceiptsForTesting: Int { queue.sync { awaitingReceipts.count } }
     private func startOnQueue() {
         guard timeout == nil, !closed else { return }
         if case .sender(_, _, let policy, _) = mode {
             policyObserver = policy.observe { [weak self] in self?.stop() }
         }
-        armDeadline(30)
+        armDeadline(5)
         connection.stateUpdateHandler = { [weak self] state in
             guard let self, !self.closed else { return }
             switch state {
             case .ready:
                 do {
-                    _ = try SecureNetworkParameters.peerIdentity(connection: self.connection)
+                    let peer = try SecureNetworkParameters.peerIdentity(connection: self.connection)
+                    guard self.admitTLS(peer) else { self.close(); return }
                     if case .receiver(let service) = self.mode {
                         let challenge = try service.challenge()
                         self.expectedChallenge = challenge
@@ -187,6 +223,7 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
         guard !closed else { return }; closed = true
         timeout?.cancel(); timeout = nil
         if case .receiver(let service) = mode, let localSession { service.disconnect(localSession) }
+        if case .receiver(let service) = mode, let expectedChallenge { service.cancelChallenge(expectedChallenge) }
         if case .sender(_, _, let policy, _) = mode, let policyObserver { policy.removeObserver(policyObserver) }
         connection.stateUpdateHandler = nil; connection.cancel()
         outgoing.removeAll(); awaitingReceipts.removeAll(); queuedBytes = 0; event(.closed)
@@ -202,6 +239,10 @@ public final class NetworkDeviceTextListener: @unchecked Sendable {
     private let queue: DispatchQueue
     private let event: (UUID, NetworkDeviceTextTransport.Event) -> Void
     private var connections: [UUID: NetworkDeviceTextTransport] = [:]
+    private var admitted = Set<UUID>()
+    private var unknownTLS = Set<UUID>()
+    private var started = false
+    private var stopped = false
     public init(identity: InstallationIdentity, service: CodexDeviceMessageService,
                 pins: PeerPinStore, port: NWEndpoint.Port = .any,
                 queue: DispatchQueue, event: @escaping (UUID, NetworkDeviceTextTransport.Event) -> Void) throws {
@@ -210,21 +251,36 @@ public final class NetworkDeviceTextListener: @unchecked Sendable {
         listener = try NWListener(using: parameters, on: port)
         self.service = service; self.pins = pins; self.queue = networkDeviceExecutor(target: queue); self.event = event
     }
+    deinit {
+        listener.stateUpdateHandler = nil; listener.newConnectionHandler = nil
+        listener.cancel()
+        for connection in connections.values { connection.stop() }
+    }
     public func start(ready: @escaping (NWEndpoint.Port) -> Void) {
         queue.async {
+            guard !self.started, !self.stopped else { return }
+            self.started = true
             self.listener.stateUpdateHandler = { [weak self] state in
-                guard let self else { return }
+                guard let self, !self.stopped else { return }
                 if case .ready = state, let port = self.listener.port { ready(port) }
                 if case .failed = state { self.stop() }
             }
             self.listener.newConnectionHandler = { [weak self] connection in
-                guard let self, self.connections.count < 16 else { connection.cancel(); return }
+                // Separate preauthorization capacity cannot evict admitted peers.
+                // Before TLS identity exists, eight slots remain susceptible to
+                // connection occupation; deadlines bound duration, not availability.
+                guard let self, !self.stopped, self.connections.count - self.admitted.count < 8,
+                      self.connections.count < 24 else { connection.cancel(); return }
                 let id = UUID()
                 let transport = NetworkDeviceTextTransport(accepted: connection, service: self.service,
-                    pins: self.pins, queue: self.queue) { [weak self] event in
-                        guard let self else { return }
-                        if case .closed = event { self.connections.removeValue(forKey: id) }
-                        self.event(id, event)
+                    pins: self.pins, queue: self.queue, admitTLS: { [weak self] peer in
+                        guard let self, !self.stopped else { return false }
+                        let known = (try? self.pins.pin(for: peer.nodeID)) == peer.publicKeyHash
+                        guard known || self.unknownTLS.count < 4 else { return false }
+                        if !known { self.unknownTLS.insert(id) }
+                        return true
+                    }) { [weak self] event in
+                        self?.handleTransportEvent(id, event)
                     }
                 self.connections[id] = transport; transport.start()
             }
@@ -232,13 +288,30 @@ public final class NetworkDeviceTextListener: @unchecked Sendable {
         }
     }
     public func approve(connection: UUID, localTaskID: UUID, expiresAtNanos: UInt64) {
-        queue.async { self.connections[connection]?.approve(localTaskID: localTaskID, expiresAtNanos: expiresAtNanos) }
+        queue.async {
+            guard !self.stopped else { return }
+            self.connections[connection]?.approve(localTaskID: localTaskID, expiresAtNanos: expiresAtNanos)
+        }
     }
+    private func handleTransportEvent(_ id: UUID, _ value: NetworkDeviceTextTransport.Event) {
+        guard !stopped else { return }
+        if case .authenticated = value { admitted.insert(id); unknownTLS.remove(id) }
+        if case .closed = value { connections.removeValue(forKey: id); admitted.remove(id); unknownTLS.remove(id) }
+        event(id, value)
+    }
+    /// Injects a delayed callback into the same serialized production handler.
+    func enqueueTransportEventForTesting(_ id: UUID, _ value: NetworkDeviceTextTransport.Event) {
+        queue.async { self.handleTransportEvent(id, value) }
+    }
+    var admittedCountForTesting: Int { queue.sync { admitted.count } }
+    var nativeListenerForTesting: NWListener { listener }
     public func stop() {
         queue.async {
+            guard !self.stopped else { return }; self.stopped = true
             self.listener.cancel()
             for connection in self.connections.values { connection.stop() }
             self.connections.removeAll()
+            self.admitted.removeAll(); self.unknownTLS.removeAll()
         }
     }
 }

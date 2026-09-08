@@ -3,12 +3,12 @@
 This isolated transport/consent branch is not an enabled application feature.
 No Codex command, local task discovery, app launch, or audio wire modification is
 implemented. Tests were written before their corresponding implementation where
-possible. The main-based focused six-suite run now passes 29 tests; this is service-layer
+possible. The main-based focused seven-suite run now passes 39 tests; this is service-layer
 validation, not an end-user feature or physical two-Mac delivery result.
 
 ## Implemented boundaries
 
-- Separate TLS text listener/client with 24 KiB framed JSON, 16-connection cap,
+- Separate TLS text listener/client with 24 KiB framed JSON, 16 admitted peers,
   bounded output queues and handshake/session deadlines. Local code explicitly
   starts it; there is no automatic discovery or audio-channel authorization.
 - Purpose/network-generation/root/device bindings and fresh signed nonces checked
@@ -29,6 +29,44 @@ validation, not an end-user feature or physical two-Mac delivery result.
 - Service APIs own their injectable receiver clock, sampling after serialization
   and again inside the stable-policy fence. Waiting callers cannot supply stale
   timestamps that bypass expiry or fault the service through call reordering.
+
+## Review follow-up validation
+
+- Bridge deadlines use `mach_continuous_time`, which includes system sleep;
+  audio's `MonotonicClock` is untouched. Local expiry UI must use
+  `DeviceMessagingClock`, not the audio clock.
+- Receiver-only grant listing exposes IDs, private task mappings, expiry,
+  revocation and record counts for explicit retirement after restart.
+- A transient per-grant/root/full-SPKI query budget (burst five, refill ten/minute)
+  charges all receipt queries before the shared-policy lock and digest/encoding.
+  It survives reconnects, never allocates for arbitrary grant IDs and does not
+  cause duplicate receipt fsyncs. Durable new-message limits remain separate.
+- Disconnect/drop cancels pending challenges. Five-second preauthorization,
+  eight pre-TLS slots separate from admitted connections, and four unknown-TLS
+  slots reserve post-TLS room for known pins. Pins are not membership authority.
+  These limits do NOT prevent denial of service: rotating certificates can occupy
+  unknown slots, and eight pre-TLS sockets can exclude even known peers before
+  identity is available. Network/interface access controls and actual deployment
+  load testing remain necessary; established connections are not evicted.
+- Exact framed-wire validation emits a local rejected event without disconnecting
+  or inserting an awaiting receipt. Dropped owners cancel native resources and
+  remove policy observers without requiring explicit `stop()`.
+
+All six review resolutions above passed the seven-suite 39-test run in
+`/tmp/alo-device-messaging.ktdBQI/review-fixes-green.log` (0.512 s runtime;
+actual TLS consent/revocation/rejected-send recovery 0.130 s). Additional tests
+cover permanent disablement after query-clock regression and stopped-listener
+delayed callbacks. No application adapter or delivery claim is implied.
+
+The first run passed 38/39 tests; only the port-rebind fixture failed
+(`review-fixes-first.log`). Native diagnostics showed the original listener
+reached cancelled, while the replacement failed POSIX EINVAL, not EADDRINUSE
+(`listener-drop-diagnostic.log`). The isolated native control probe proved both
+fresh and reused ports fail without an incoming-connection handler, while both
+become ready with a handler (`listener-handler-results.log`). Adding that missing
+handler corrected the fixture; no production cleanup behavior was changed to
+make this test pass. All original deadlines and assertions remain, with no
+disabled cases or timing relaxation. Previous failure logs are preserved.
 
 ## Focused validation
 
