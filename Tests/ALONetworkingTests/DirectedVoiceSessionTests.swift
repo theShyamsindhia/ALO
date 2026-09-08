@@ -5,6 +5,75 @@ import Testing
 
 @Suite("Directed admitted 10ms voice")
 struct DirectedVoiceSessionTests {
+    @Test func senderReadinessWaitsForValidatedReturnPathNotFirstPCM() throws {
+        let h = try VoiceHarness()
+        try h.queue.sync { h.holdValidation = true; try h.start() }
+        var results: [Bool] = []
+        h.sender.whenTransmissionReady(session: h.intent, recipients: [NetworkFixture.receiver]) {
+            results.append((try? $0.get()) != nil)
+        }
+        h.queue.sync {
+            #expect(results.isEmpty && h.received.isEmpty)
+            h.validationReplies.removeFirst()()
+            #expect(results == [true] && h.received.isEmpty)
+        }
+    }
+
+    @Test func missingRequestedPeerTimesOutInsteadOfAuthorizingSubset() throws {
+        let h = try VoiceHarness()
+        let audience: Set<UUID> = [NetworkFixture.receiver, UUID()]
+        try h.queue.sync { try h.start(recipients: audience) }
+        var results: [Bool] = []
+        h.sender.whenTransmissionReady(session: h.intent, recipients: audience) {
+            results.append((try? $0.get()) != nil)
+        }
+        h.queue.sync {
+            #expect(results.isEmpty)
+            h.time += 8_000_000_000
+            h.sender.tick()
+            #expect(results == [false])
+        }
+        h.sender.endTransmitting(session: h.intent)
+        h.queue.sync { #expect(h.registry.count == 0) }
+    }
+
+    @Test func replacementRejectsOldReadinessAndDelayedValidation() throws {
+        let h = try VoiceHarness()
+        try h.queue.sync { h.holdValidation = true; try h.start() }
+        var results: [Bool] = []
+        h.sender.whenTransmissionReady(session: h.intent, recipients: [NetworkFixture.receiver]) {
+            results.append((try? $0.get()) != nil)
+        }
+        h.queue.sync {
+            let replacement = VoiceSessionIdentifier(sessionID: UUID())
+            h.sender.beginOnQueue(session: replacement, recipients: [UUID()])
+            h.validationReplies.removeFirst()()
+            #expect(results == [false] && h.registry.count == 0)
+        }
+    }
+    @Test func captureBeforeReturnPathValidationIsNotRetainedForLaterSpeech() throws {
+        let h = try VoiceHarness()
+        try h.queue.sync {
+            h.holdValidation = true
+            try h.start()
+            #expect(h.validationReplies.count == 1)
+            h.submit()
+        }
+        // A separate queue turn lets the real production drainIngress run.
+        try h.queue.sync {
+            try h.pump()
+            #expect(h.datagrams.isEmpty && h.received.isEmpty)
+            h.validationReplies.removeFirst()()
+            h.submit()
+        }
+        try h.queue.sync {
+            try h.pump()
+            #expect(h.received.map(\.0) == [1])
+            #expect(h.received.map(\.1) == [480])
+        }
+        // Characterization, NOT a desired unauthorized-delivery assertion:
+        // startup must gate capture; the secure transport must keep this drop.
+    }
     @Test func unexpectedPublisherFailureRevokesBeforeSingleGlobalCallback() throws {
         let h = try VoiceHarness()
         try h.queue.sync {
@@ -140,6 +209,8 @@ private final class VoiceHarness {
     var received: [(UInt64, UInt64, Data)] = []
     var receiverStates: [DirectedVoiceSession.State] = []
     var holdSends = false
+    var holdValidation = false
+    var validationReplies: [() -> Void] = []
     var sendReplies: [(Bool) -> Void] = []
     var publisherFailures = 0
     init() throws {
@@ -187,7 +258,11 @@ private final class VoiceHarness {
                 let response = try credentials.answerReturnPathChallenge(challenge, ticket: ticket)
                 _ = try self.registry.confirmReturnPathResponse(response, sessionID: ticket.sessionID, acceptedFlowID: flow, now: self.seconds)
                 self.flows[ticket.sessionID] = Flow(id: flow, opener: try credentials.makeSubscriberDatagramOpener(ticket: ticket, channel: .voice), pcm: pcm)
-                self.sender.validated(ticket.sessionID); state(.active)
+                let validate = { [weak self] in
+                    self?.sender.validated(ticket.sessionID); state(.active)
+                }
+                if self.holdValidation { self.validationReplies.append(validate) }
+                else { validate() }
                 return { [weak self] in self?.cancelled.insert(ticket.sessionID) }
             }, sendDatagram: { _, _, reply in reply(false) }, cancelDatagram: { _ in })
     }
@@ -197,9 +272,9 @@ private final class VoiceHarness {
             resolve: { _, reply in reply(.failure(SecureTransportError.invalidState)) }, now: { [weak self] in self?.time ?? 0 })
         hostConnection = connection; return connection
     }
-    func start() throws {
+    func start(recipients: Set<UUID>? = nil) throws {
         sender.publisherReady(port: 54321)
-        sender.beginOnQueue(session: intent, recipients: [NetworkFixture.receiver])
+        sender.beginOnQueue(session: intent, recipients: recipients ?? [NetworkFixture.receiver])
         receiver.receiveOnQueue(from: NetworkFixture.sender, session: intent)
         try pump()
     }

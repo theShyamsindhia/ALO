@@ -2292,6 +2292,13 @@ final class ALOViewModel: ObservableObject {
                 self.errorMessage = self.readable(error)
                 self.statusText = "Talk stopped"
             },
+            voiceCapturePhaseHandler: { [weak self] state in
+                guard let self, self.channelOpenGeneration == generation, !self.isLeavingRoom else { return }
+                let hasTalkTargets = !self.effectiveTalkTargetIDs.intersection(self.currentRemoteParticipantIDs).isEmpty
+                self.walkieStarting = state == .connecting && hasTalkTargets
+                self.walkieTalking = state == .ready && hasTalkTargets
+                if state == .connecting { self.statusText = "Connecting voice to selected devices…" }
+            },
             incomingOpenLineInvitationHandler: { [weak self] invitation in
                 guard let self else { return }
                 self.statusText = "\(invitation.callerName) invited you to open a line"

@@ -84,6 +84,49 @@ public final class DirectedVoiceSession: @unchecked Sendable {
     private var timer: DispatchSourceTimer?
     private var stopped = false
     private var transmission: Transmission?
+    private struct ReadinessWait {
+        let session: VoiceSessionIdentifier
+        let recipients: Set<UUID>
+        let deadline: UInt64
+        let completion: (Result<Void, Error>) -> Void
+    }
+    private var readinessWait: ReadinessWait?
+
+    /// Sender readiness is validated return-path authority for ALL requested
+    /// recipients, not receiver-active (which requires the first PCM).
+    public func whenTransmissionReady(session: VoiceSessionIdentifier, recipients: Set<UUID>,
+                                      completion: @escaping (Result<Void, Error>) -> Void) {
+        queue.async {
+            let now = self.now()
+            guard !self.stopped, self.transmission?.session == session,
+                  self.transmission?.recipients == recipients, !recipients.isEmpty,
+                  self.readinessWait == nil, now <= UInt64.max - 8_000_000_000 else {
+                completion(.failure(SecureTransportError.invalidState)); return
+            }
+            self.readinessWait = ReadinessWait(session: session, recipients: recipients,
+                deadline: now + 8_000_000_000, completion: completion)
+            self.checkReadiness()
+        }
+    }
+    private func finishReadiness(_ result: Result<Void, Error>) {
+        let pending = readinessWait; readinessWait = nil
+        pending?.completion(result)
+    }
+    private func checkReadiness() {
+        guard let wait = readinessWait else { return }
+        guard !stopped, transmission?.session == wait.session,
+              transmission?.recipients == wait.recipients, now() < wait.deadline else {
+            finishReadiness(.failure(SecureTransportError.invalidState)); return
+        }
+        let ready = Set(peers.values.compactMap { peer -> UUID? in
+            guard peer.session == wait.session, peer.connection.credentials.isActive,
+                  [peer.active, peer.pending].compactMap({ $0 }).contains(where: {
+                      $0.validated && $0.ticket.expiresAt > seconds
+                  }) else { return nil }
+            return peer.connection.credentials.remotePeerID
+        })
+        if wait.recipients.isSubset(of: ready) { finishReadiness(.success(())) }
+    }
     private var peers: [UUID: HostPeer] = [:]
     private var receivers: [UUID: Receiver] = [:]
     private var transportGeneration: UInt64 = 0
@@ -150,6 +193,7 @@ public final class DirectedVoiceSession: @unchecked Sendable {
     func beginOnQueue(session: VoiceSessionIdentifier, recipients: Set<UUID>) {
         guard !stopped, session.isValid, !recipients.isEmpty, recipients.count <= 32, !recipients.contains(localPeerID) else { return }
         guard transmission?.session != session else { return } // Same intent cannot expand its recipients.
+        finishReadiness(.failure(SecureTransportError.invalidState))
         for id in Array(peers.keys) { removePeer(id) }
         transmission = Transmission(session: session, recipients: recipients)
         ingressLock.withLock { ingressSession = session; nextSequence = 0; ingress.removeAll() }
@@ -157,6 +201,7 @@ public final class DirectedVoiceSession: @unchecked Sendable {
     public func endTransmitting(session: VoiceSessionIdentifier) {
         queue.async {
             guard self.transmission?.session == session else { return }
+            self.finishReadiness(.failure(SecureTransportError.invalidState))
             self.transmission = nil
             self.ingressLock.withLock { self.ingressSession = nil; self.ingress.removeAll() }
             for id in Array(self.peers.keys) { self.removePeer(id) }
@@ -198,6 +243,7 @@ public final class DirectedVoiceSession: @unchecked Sendable {
     func publisherFailed(_ error: Error) { stopOnQueue(failure: error) }
     private func stopOnQueue(failure: Error? = nil) {
         guard !stopped else { return }; stopped = true; timer?.cancel(); timer = nil
+        finishReadiness(.failure(SecureTransportError.invalidState))
         transmission = nil; ingressLock.withLock { ingressSession = nil; ingress.removeAll() }
         for id in Array(peers.keys) { removePeer(id) }
         let old = Array(receivers.values); receivers.removeAll()
@@ -245,6 +291,7 @@ public final class DirectedVoiceSession: @unchecked Sendable {
     }
     func validated(_ sessionID: UUID) {
         for peer in peers.values where peer.pending?.ticket.sessionID == sessionID { peer.pending?.validated = true }
+        checkReadiness()
     }
     private func removePeer(_ id: UUID) {
         guard let peer = peers.removeValue(forKey: id) else { return }
@@ -319,6 +366,7 @@ public final class DirectedVoiceSession: @unchecked Sendable {
             for lease in [peer.active, peer.pending].compactMap({ $0 }) { drain(lease, peer: peer) }
         }
         registry.expire(now: seconds)
+        checkReadiness()
         for receiver in Array(receivers.values) { tick(receiver, time: time) }
     }
     private func tick(_ receiver: Receiver, time: UInt64) {

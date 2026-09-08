@@ -34,6 +34,11 @@ final class MeshSession {
     private let errorHandler: (Error) -> Void
     private let walkieTalkieStateHandler: (String, String, Bool, Double) -> Void
     private let walkieTalkieTransmissionEndedHandler: (Error) -> Void
+    private let voiceCapturePhaseHandler: (VoiceCaptureLifecycle.Phase) -> Void
+    private var voiceCaptureLifecycle = VoiceCaptureLifecycle()
+    private var voiceCaptureInputUID: String?
+    private var voiceReconcileToken: UUID?
+    private var voiceStartupToken: UUID?
     private let incomingOpenLineInvitationHandler: (OpenLineInvitation) -> Void
     private let openLineStateHandler: (OpenLineState) -> Void
     private let walkieTalkieMicrophone = WalkieTalkieMicrophone()
@@ -249,6 +254,7 @@ final class MeshSession {
         errorHandler: @escaping (Error) -> Void = { _ in },
         walkieTalkieStateHandler: @escaping (String, String, Bool, Double) -> Void = { _, _, _, _ in },
         walkieTalkieTransmissionEndedHandler: @escaping (Error) -> Void = { _ in },
+        voiceCapturePhaseHandler: @escaping (VoiceCaptureLifecycle.Phase) -> Void = { _ in },
         incomingOpenLineInvitationHandler: @escaping (OpenLineInvitation) -> Void = { _ in },
         openLineStateHandler: @escaping (OpenLineState) -> Void = { _ in },
         replicaPersistenceHandler: @escaping (MeshRoomReplica) -> Void = { _ in },
@@ -286,6 +292,7 @@ final class MeshSession {
         self.errorHandler = errorHandler
         self.walkieTalkieStateHandler = walkieTalkieStateHandler
         self.walkieTalkieTransmissionEndedHandler = walkieTalkieTransmissionEndedHandler
+        self.voiceCapturePhaseHandler = voiceCapturePhaseHandler
         self.incomingOpenLineInvitationHandler = incomingOpenLineInvitationHandler
         self.openLineStateHandler = openLineStateHandler
         self.openLineSessionState = OpenLineSessionState(localID: nodeID)
@@ -549,9 +556,13 @@ final class MeshSession {
     private func beginVoiceCapture(
         targetIDs: Set<String>?,
         generation: Int,
-        inputDeviceUID: String?
+        inputDeviceUID: String?,
+        continuationToken: UUID? = nil
     ) async throws -> String? {
         let targetIDs = targetIDs ?? Set(currentParticipants.map(\.id)).subtracting([nodeID])
+        if let continuationToken {
+            guard voiceReconcileToken == continuationToken else { throw CancellationError() }
+        } else { voiceReconcileToken = nil }
         guard !targetIDs.isEmpty else { return nil }
         guard VoiceCaptureIntent.acceptsAudience(targetIDs) else { throw ALOError("Talk supports up to 32 selected devices at once.") }
         if room.transportPolicy == .secureV2, !secureVoice.isReady {
@@ -559,12 +570,15 @@ final class MeshSession {
             throw ALOError("Voice is still connecting. Try Talk again in a moment.")
         }
         walkieStartGeneration = generation
+        let startupToken = UUID(); voiceStartupToken = startupToken
         guard await WalkieTalkieMicrophone.requestAccess() else {
             throw ALOError(
                 "Microphone access is needed for Talk and Open Line. Enable ALO in Privacy & Security → Microphone."
             )
         }
-        guard VoiceCaptureIntent.isCurrent(requested: targetIDs, effective: effectiveVoiceTargets(),
+        guard voiceStartupToken == startupToken,
+              continuationToken == nil || voiceReconcileToken == continuationToken,
+              VoiceCaptureIntent.isCurrent(requested: targetIDs, effective: effectiveVoiceTargets(),
             present: Set(currentParticipants.map(\.id)), requestedGeneration: generation,
             currentGeneration: walkieStartGeneration) else { throw CancellationError() }
         if let active = walkieTransmissionState.current() {
@@ -573,13 +587,17 @@ final class MeshSession {
         let sessionID = UUID().uuidString
         let senderName = displayName
         walkieTransmissionState.begin(id: sessionID, targetIDs: targetIDs, name: senderName)
+        voiceCaptureInputUID = inputDeviceUID
+        voiceCaptureLifecycle.begin(sessionID, recipients: targetIDs)
+        voiceCapturePhaseHandler(.connecting)
         let transmissionState = walkieTransmissionState
         let controlPlane = control
         let localNodeID = nodeID
         let secureVoice = self.secureVoice
         let secure = room.transportPolicy == .secureV2
         do {
-            try await walkieTalkieMicrophone.start(
+            try await VoiceCaptureStartup.perform(start: {
+                try await walkieTalkieMicrophone.start(
                 sessionID: sessionID,
                 inputDeviceUID: inputDeviceUID,
                 handler: { data in
@@ -604,7 +622,9 @@ final class MeshSession {
                     }
                 }
             )
-            guard VoiceCaptureIntent.isCurrent(requested: targetIDs, effective: effectiveVoiceTargets(),
+            }, validate: {
+            guard voiceStartupToken == startupToken,
+                  VoiceCaptureIntent.isCurrent(requested: targetIDs, effective: effectiveVoiceTargets(),
                       present: Set(currentParticipants.map(\.id)), requestedGeneration: generation,
                       currentGeneration: walkieStartGeneration),
                   walkieTransmissionState.activeID() == sessionID
@@ -613,6 +633,7 @@ final class MeshSession {
                 endWalkieTalkie(sessionID: sessionID)
                 throw CancellationError()
             }
+            }, publishBegan: {
             publishVoice(WalkieTalkieMessage(
                 kind: .began,
                 senderID: nodeID,
@@ -622,10 +643,19 @@ final class MeshSession {
                 sessionID: sessionID,
                 sampleRate: UInt32(WalkieTalkieMicrophone.sampleRate)
             ))
+            }, awaitReadiness: secure ? {
+                try await secureVoice.waitUntilReady(captureID: sessionID, recipients: targetIDs)
+            } : nil, retireAnnounced: {
+                forceEndVoiceCapture(sessionID: sessionID)
+            })
+            if voiceCaptureLifecycle.ready(sessionID) { voiceCapturePhaseHandler(.ready) }
             return sessionID
         } catch {
             walkieTalkieMicrophone.stop(sessionID: sessionID)
             _ = walkieTransmissionState.take(expectedID: sessionID)
+            if voiceCaptureLifecycle.sessionID == sessionID {
+                voiceCaptureLifecycle.end(sessionID); voiceCapturePhaseHandler(.idle)
+            }
             throw error
         }
     }
@@ -667,6 +697,16 @@ final class MeshSession {
             forceEndVoiceCapture()
             return nil
         }
+        if room.transportPolicy == .secureV2 {
+            let active = walkieTransmissionState.current()
+            if voiceCaptureLifecycle.decision(activeID: active?.id, requested: targets) == .reuse {
+                return active?.id
+            }
+            // A new explicit call never borrows an older pending await: a fresh
+            // capture/wire ID fences its later cancellation and readiness.
+            if let active { forceEndVoiceCapture(sessionID: active.id) }
+            return try await beginVoiceCapture(targetIDs: targets, generation: generation, inputDeviceUID: inputDeviceUID)
+        }
         if let update = walkieTransmissionState.updateTargets(targets) {
             publishTargetDelta(update)
             return update.active.id
@@ -684,6 +724,38 @@ final class MeshSession {
         }
         guard !targets.isEmpty else {
             forceEndVoiceCapture()
+            return
+        }
+        if room.transportPolicy == .secureV2 {
+            let active = walkieTransmissionState.current()
+            switch voiceCaptureLifecycle.remoteEventDecision(activeID: active?.id, requested: targets,
+                                                              ownsRestart: voiceReconcileToken != nil) {
+            case .reuse, .wait, .ignore: return
+            case .stop: forceEndVoiceCapture(); return
+            case .restart: break
+            }
+            let input = voiceCaptureInputUID
+            let generation = walkieStartGeneration ?? 0
+            if let active { forceEndVoiceCapture(sessionID: active.id) }
+            let token = UUID(); voiceReconcileToken = token
+            Task { @MainActor [weak self] in
+                guard let self, self.voiceReconcileToken == token,
+                      self.effectiveVoiceTargets() == targets else { return }
+                do {
+                    _ = try await self.beginVoiceCapture(targetIDs: targets, generation: generation,
+                        inputDeviceUID: input, continuationToken: token)
+                    if self.voiceReconcileToken == token { self.voiceReconcileToken = nil }
+                } catch is CancellationError {
+                    if self.voiceReconcileToken == token { self.voiceReconcileToken = nil }
+                }
+                catch {
+                    // Failed continuation cannot be revived by remote events.
+                    guard self.voiceReconcileToken == token else { return }
+                    self.voiceReconcileToken = nil
+                    self.statusHandler("Voice connection could not become ready")
+                    self.walkieTalkieTransmissionEndedHandler(error)
+                }
+            }
             return
         }
         if let update = walkieTransmissionState.updateTargets(targets) {
@@ -799,9 +871,12 @@ final class MeshSession {
     }
 
     private func forceEndVoiceCapture(sessionID: String? = nil) {
+        if sessionID == nil { voiceReconcileToken = nil; voiceStartupToken = nil }
         if sessionID == nil { walkieStartGeneration = nil }
         let active = walkieTransmissionState.take(expectedID: sessionID)
         guard let active else { return }
+        voiceCaptureLifecycle.end(active.id)
+        voiceCapturePhaseHandler(.idle)
         walkieTalkieMicrophone.stop(sessionID: active.id)
         publishVoice(WalkieTalkieMessage(
             kind: .ended,

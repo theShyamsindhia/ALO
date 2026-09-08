@@ -28,6 +28,32 @@ final class SecureMacVoiceBridge: @unchecked Sendable {
     var isReady: Bool { lock.withLock { !stopped && runtime != nil } }
     var needsRestart: Bool { lock.withLock { stopped } }
 
+    func waitUntilReady(captureID: String, recipients: Set<String>) async throws {
+        let (runtime, current) = try lock.withLock { () throws -> (DirectedVoiceSession, Outgoing) in
+            guard !stopped, let runtime = self.runtime, let current = outgoing,
+                  current.captureID == captureID, current.recipients == recipients else {
+                throw CancellationError()
+            }
+            return (runtime, current)
+        }
+        try await withTaskCancellationHandler(operation: {
+            try Task.checkCancellation()
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                runtime.whenTransmissionReady(session: current.wire,
+                    recipients: Set(recipients.compactMap(UUID.init(uuidString:)))) {
+                    continuation.resume(with: $0)
+                }
+            }
+            try Task.checkCancellation()
+            try lock.withLock {
+                guard !stopped, outgoing?.wire == current.wire,
+                      outgoing?.captureID == captureID, outgoing?.recipients == recipients else {
+                    throw CancellationError()
+                }
+            }
+        }, onCancel: { runtime.endTransmitting(session: current.wire) })
+    }
+
     func start(mesh: MeshControlPlane) {
         stop()
         let token = lock.withLock { stopped = false; return generation }
