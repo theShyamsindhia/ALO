@@ -8,6 +8,32 @@ import ALOIdentity
 @Suite(.serialized)
 struct MacCodexQueueAdapterTests {
     private typealias Adapter = MacCodexQueueAdapter
+    @Test func drainDistinguishesInterruptionsAndIncompleteCapture() {
+        enum ReadStep { case interrupted, bytes, eof, wouldBlock, failed }
+        func run(_ steps: [ReadStep]) -> (Data, Bool, Int) {
+            var capture = Data(), truncated = false, calls = 0
+            Adapter.Started.drain(-1, into: &capture, truncated: &truncated) { _, buffer, _ in
+                let step = calls < steps.count ? steps[calls] : .eof
+                calls += 1
+                switch step {
+                case .interrupted: errno = EINTR; return -1
+                case .wouldBlock: errno = EAGAIN; return -1
+                case .failed: errno = EIO; return -1
+                case .eof: return 0
+                case .bytes:
+                    buffer?.storeBytes(of: UInt8(65), as: UInt8.self); return 1
+                }
+            }
+            return (capture, truncated, calls)
+        }
+        let interrupted = run([.interrupted, .bytes, .eof])
+        #expect(interrupted.0 == Data([65]) && !interrupted.1 && interrupted.2 == 3)
+        let exhausted = run(Array(repeating: .interrupted, count: 20))
+        #expect(exhausted.1 && exhausted.2 == 16)
+        #expect(run([.failed]).1)
+        #expect(!run([.eof]).1)
+        #expect(!run([.wouldBlock]).1)
+    }
 
     private func invocation(_ text: String = "hello") throws -> Adapter.Invocation {
         try .init(localTaskID: UUID(uuidString: "00000000-0000-4000-8000-000000000001")!,

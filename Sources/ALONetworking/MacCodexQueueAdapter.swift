@@ -43,6 +43,9 @@ enum MacCodexQueueAdapter {
     /// executes by pathname: this is NOT atomic protection against a hostile local
     /// owner replacing the file between verification and exec. Local trust remains
     /// required; no peer can supply this value and this is not the revocation fence.
+    /// Omitting expectedDigest is a new explicit local approval (trust on first
+    /// use). Later constructions must supply the genuine approval-time digest;
+    /// reconstructing from the path alone is not restoration of an existing pin.
     struct ApprovedExecutable {
         let url: URL
         let approvedDigest: Data
@@ -203,6 +206,8 @@ enum MacCodexQueueAdapter {
 
         /// Exactly one wait computes an outcome; subsequent waits return the same
         /// immutable result. Never call while holding service/policy locks.
+        /// The deadline runs from Prepared.start(), not the first wait. Begin
+        /// waiting immediately after the start fence releases, not behind other work.
         func waitForOutcome(afterRunningCheckForTesting: ((Process) -> Void)? = nil) -> Result {
             lock.lock(); defer { lock.unlock() }
             if let completed { return completed }
@@ -250,15 +255,25 @@ enum MacCodexQueueAdapter {
             return result
         }
 
-        private static func drain(_ fd: Int32, into capture: inout Data, truncated: inout Bool) {
+        static func drain(_ fd: Int32, into capture: inout Data, truncated: inout Bool,
+                          readBytes: (Int32, UnsafeMutableRawPointer?, Int) -> Int = Darwin.read) {
             var buffer = [UInt8](repeating: 0, count: 4096)
             for _ in 0..<16 {
-                let count = read(fd, &buffer, buffer.count)
+                let count = readBytes(fd, &buffer, buffer.count)
+                if count < 0 {
+                    let readError = errno
+                    if readError == EINTR { continue }
+                    if readError != EAGAIN && readError != EWOULDBLOCK { truncated = true }
+                    return
+                }
                 guard count > 0 else { return }
                 let retained = min(count, Runner.captureLimit - capture.count)
                 capture.append(contentsOf: buffer.prefix(retained))
                 if retained < count { truncated = true }
             }
+            // No EOF/would-block observation within the bounded work budget:
+            // conservatively expose potentially incomplete capture.
+            truncated = true
         }
     }
 }

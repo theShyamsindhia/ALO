@@ -20,8 +20,7 @@ start exclusion, repeated outcome reads and actual native launch failure.
 
 Validation checkpoint: all 12 `MacCodexQueueAdapterTests` passed in 4.453 seconds
 (optimized build 181.99 seconds, exit zero). The original nine-test baseline and
-the polling-race RED are preserved separately. Final log:
-`/tmp/alo-codex-mac-adapter.9xPTlE/adapter-split-green.log`.
+the polling-race RED are preserved separately outside the repository.
 Command: `swift test -c release --jobs 1 --no-parallel -Xswiftc -num-threads
 -Xswiftc 1 -Xswiftc -Xllvm -Xswiftc -sil-disable-pass=CapturePropagation
 -Xswiftc -Xllvm -Xswiftc -sil-disable-pass-only-function=main
@@ -47,6 +46,10 @@ lookup, peer executable, task name, config flags, cwd, or environment is accepte
 `approvedDigest` exposes the locally computed digest; a subsequent explicit local
 approval can supply `expectedDigest` and rejects any mismatch. No approval is
 automatically saved, loaded or granted by this adapter.
+Omitting `expectedDigest` is explicit new local approval/trust-on-first-use, not
+restoration. Integration must persist the digest at genuine approval time and
+pass it on every later construction; rebuilding approval from a path per dispatch
+does not establish the previously approved binary's identity.
 The runner uses the local owner's home and a minimal environment. Rechecking the
 digest catches replacement before launch; Foundation Process still executes by
 pathname, so local replacement between verification and exec is a documented
@@ -59,6 +62,7 @@ confirmation remains a separate feature requiring actual selected-task evidence.
 
 Each pipe retains at most 8 KiB while continuing bounded nonblocking drains.
 Execution waiting uses a monotonic deadline (default five seconds, maximum 30),
+anchored at `Prepared.start()`, not the first `waitForOutcome()` call,
 then TERM with a 100 ms grace followed by KILL if still running. Native spawn
 itself is synchronous; the deadline bounds child waiting, not arbitrary OS launch
 or filesystem stalls. The runner does not wait for pipe EOF, which descendants
@@ -77,11 +81,18 @@ set-and-restored canary, distinguish native launch failure from consumed-start
 rejection, verify expected executable digests, and use a self-terminating
 hold-file descendant instead of signalling a recorded raw PID. The original
 timeout and pipe-open prerequisites are retained.
-All 13 adapter tests passed in 2.745 seconds before rebasing onto PR5 `127e522`
-(`/tmp/alo-codex-mac-adapter.9xPTlE/review-fixes-green.log`). This is pre-rebase
-adapter evidence, not a combined transport/adapter integration run. The rebased
-stack still requires compilation and independent follow-up review; no application
-or actual Codex delivery was tested.
+All 13 adapter tests passed in 2.745 seconds before rebasing onto PR5 `127e522`.
+The subsequent `5e9372c` CI checkpoint passed 382 XCTest tests, 1,142 Swift tests
+in 180 suites, seven repeatable tests in three suites, and both app builds
+([run 34181281167](https://github.com/theShyamsindhia/ALO/actions/runs/34181281167)).
+After rebasing onto PR5 `f178d6a`, a deterministic unchanged-drain regression
+recorded three genuine failures: interrupted-read data loss, unreported work
+budget exhaustion, and unreported I/O failure. EOF and would-block controls
+passed. The bounded correction retries EINTR within the original 16-read limit
+and conservatively marks incomplete capture on other errors or exhaustion.
+All 14 adapter tests then passed in 2.761 seconds on this final base. Required CI
+for the later correction is pending. No application or actual Codex delivery was
+tested; these results are not an implemented service-to-spawn fence.
 
 Tests only create temporary harmless helper programs. They never invoke installed
 Codex, enumerate tasks, inspect private IPC/databases, or send real messages.
@@ -106,7 +117,7 @@ keeps the 500 ms runner timeout and bounds its own exit-observation prerequisite
 Inspected the bridge owner's frozen working tree on September 8, 2026. This is
 not a copy of that WIP and does not change PR5. The relevant current structure is:
 
-- `CodexDeviceMessageService.current(connection:queryGrant:_:)` acquires the
+- `CodexDeviceMessageService.current(_:queryGrant:_:)` acquires the
   service NSLock, then `NetworkDeviceAuthorization.withCurrentContext` acquires
   `NetworkPolicyCenter.withStablePolicy`'s updateLock and samples the receiver
   continuous clock. Exact policy revision, membership, generation, root and
@@ -138,10 +149,12 @@ not a copy of that WIP and does not change PR5. The relevant current structure i
    transition. The candidate's content is a snapshot, never cached authorization.
    Binary and text hashing, encoding and filesystem preflight stay out of the
    policy fence. The existing pathname TOCTOU limitation still applies.
-3. `service.startPrepared(candidate, native) -> StartedDispatch` takes service
+3. `service.startPrepared(native) -> StartedDispatch` takes service
    lock then stable-policy updateLock, revalidates the connection and grant at a
    freshly sampled continuous time, and matches the candidate to the unchanged
-   `.received` record and local destination. Comparing the already-stored digest
+   `.received` record and local destination. The opaque native wrapper retains
+   the service-minted candidate and derives its arguments solely from it; there
+   is no caller-supplied candidate A beside a native preparation for B. Comparing the already-stored digest
    does not rehash peer bytes. Only then persist `.dispatching` immediately before
    attempting spawn, within this same fence. Persistence failure means no spawn.
    Re-sample continuous time after the durable write and check grant/session
@@ -156,7 +169,9 @@ not a copy of that WIP and does not change PR5. The relevant current structure i
    handle and message/attempt ticket, then release both locks. App-level queues
    cannot interpose an asynchronous gap between final authorization and spawn.
 5. `started.waitForOutcome()` performs all polling, drains and timeout handling
-   outside locks. `service.finishStarted(ticket:result:)` later commits the
+   outside locks, beginning immediately after the fence releases rather than
+   being queued behind other work; the child budget already runs from start.
+   `service.finishStarted(ticket:result:)` later commits the
    bounded outcome exactly once under the service lock. CLI exit zero remains
    queued, never delivered. A record already made uncertain by revoke/policy
    invalidation must remain conservative; a late completion must not revive
@@ -192,7 +207,8 @@ or a timeout wrapper preserves the same revocation fence.
 - `CodexDeviceMessageService.swift`: prepare/start/finish ordering and ticket
   ownership under its existing lock; no additional public peer protocol fields.
 - `MacCodexQueueAdapter.swift`: split preparation, synchronous native start, and
-  bounded waiting; no app entry point until the fence is tested and reviewed.
+  bounded waiting; restore only an actual approval-time digest. No app entry point
+  until the fence is tested and reviewed.
 - New service/adapter integration tests: exact revocation races and crash cases.
   Existing transport, UI, local ingress and discovery remain unchanged.
 
