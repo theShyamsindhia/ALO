@@ -513,27 +513,27 @@ successor cutover, two-device acoustic alignment, or microphone capture quality.
 A deterministic actual-HostServer FIFO fixture reproduced a missed admission:
 another peer's completion left a pending, non-idle peer at three sends instead
 of four. A same-clock source callback then admitted that exact pending packet
-through the unchanged production gate (age36ms, residence6ms, one in-flight send,
-expired recent evidence, unfinished interval81ms, budget225ms). All ten sends
-completed FIFO with exact accounting. This is not the original CI48/50 failure
+through the unchanged production gate (age 36 ms, residence 6 ms, one in-flight send,
+expired recent evidence, unfinished interval 81 ms, budget 225 ms). All ten sends
+completed FIFO with exact accounting. This is not the original CI 48/50 failure
 or proof of an audible incident. The regression is
 `DeterministicAudioFanoutTests.otherPeerCompletionReconsidersEligibleNonIdlePendingPeer`.
 
 The rejected initial candidate considered every pending peer with available socket credit
 on completion, preserving the completing peer's cleanup, least-served ordering,
 and all admission/expiry budgets. It passed the new regression and live bounded
-fanout (minimum55/57), but was held: the existing deterministic irregular
-dispatch/control-bandwidth seed7 regressed to49 against the unchanged50 floor.
-Its packet accounting remains exact (weak peer sent49, waitExpired151); no
-threshold was relaxed. That combined run had12tests and one issue; no installed
+fanout (minimum 55/57), but was held: the existing deterministic irregular
+dispatch/control-bandwidth seed 7 regressed to 49 against the unchanged 50 floor.
+Its packet accounting remains exact (weak peer sent 49, waitExpired 151); no
+threshold was relaxed. That combined run had 12 tests and one issue; no installed
 app was changed.
 
 The unchanged old-policy binary passed all four irregular seeds (minimums
-56/59/56/57), confirming a regression rather than waiving the49 result. An
-observation-only seed7 run then found five actual same-completion allocation
-inversions: in one refill, peer2 received sends with prior counts44/45/46 before
-peer6, at43, passed the real gate at the same clock with pending work and three
-in-flight sends. No intervening capture, completion, or peer6 admission changed
+56/59/56/57), confirming a regression rather than waiving the 49 result. An
+observation-only seed 7 run then found five actual same-completion allocation
+inversions: in one refill, peer 2 received sends with prior counts 44/45/46 before
+peer 6, at 43, passed the real gate at the same clock with pending work and three
+in-flight sends. No intervening capture, completion, or peer 6 admission changed
 its eligibility. The retained production-quantum assertions and seed matrix are
 in `DeterministicAudioFanoutTests.irregularAudioDispatchWithPongBandwidthReservationPreservesListenerFloor`.
 
@@ -541,7 +541,7 @@ Completion refill now grants at most one admission per peer per round, re-ranks
 least-served peers between rounds, stops on a no-admission round, and runs no
 more than the socket-credit limit's number of rounds. Normal capture draining
 and all admission/expiry gates remain unchanged. The corrected combined run
-passed12tests/2suites: irregular seed minimums53/58/62/57, live minimums60/58,
+passed 12 tests/2 suites: irregular seed minimums 53/58/62/57, live minimums 60/58,
 and the exact missed-refill control. Actual production observations verified
 maximum one admission per peer/round and zero same-round inversions; five
 cross-round inversions remain, consistent with per-round rather than strict
@@ -555,7 +555,7 @@ nice -n 19 swift test -c release --jobs 1 --no-parallel \
   --filter 'DeterministicAudioFanoutTests|LoopbackRoomScaleTests/boundedFanoutPreventsRoomScaleDelay'
 ```
 
-This bounded local validation does not establish the original CI48 cause,
+This bounded local validation does not establish the original CI 48 cause,
 arbitrary-load fairness, or two-device acoustic correctness. At this checkpoint,
 independent reviews and required integrated CI for the corrected PR4 candidate
 are pending; this is not a release or merge claim.
