@@ -8,6 +8,7 @@ import ALONetworkUI
 
 @MainActor
 struct MacNetworkSetupView: View {
+    @Environment(\.controlActiveState) private var controlActiveState
     @ObservedObject var model: ALOViewModel
     @ObservedObject var account: NetworkAccountModel
     @State private var sheet: Sheet?
@@ -19,6 +20,7 @@ struct MacNetworkSetupView: View {
     @State private var error: String?
     @State private var nearbyJoinFeedback = ALONearbyJoinFeedback()
     @State private var selectedChannelID: String?
+    @State private var pendingChannelID: String?
     @State private var privateChannel = false
     @State private var allowed = Set<String>()
     @State private var invitation: NetworkInvitation?
@@ -56,10 +58,23 @@ struct MacNetworkSetupView: View {
                 } message: { Text(confirmationMessage) }
         }
         .onChange(of: account.selectedNetworkID) { _, _ in
-            selectedChannelID = account.channels.first?.id.uuidString
+            selectedChannelID = account.channels.contains(where: { $0.id.uuidString == model.selectedRoomID }) ? model.selectedRoomID : nil
             clearConfirmation()
         }
-        .onAppear { selectedChannelID = account.channels.first?.id.uuidString }
+        .onAppear {
+            selectedChannelID = model.phase == .live ? model.selectedRoomID : nil
+        }
+        .onChange(of: model.phase) { _, phase in
+            if phase == .live, selectedChannelID == nil,
+               account.channels.contains(where: { $0.id.uuidString == model.selectedRoomID }) {
+                selectedChannelID = model.selectedRoomID
+            }
+            if phase == .idle, let id = pendingChannelID {
+                pendingChannelID = nil
+                model.joinChannel(id)
+            }
+        }
+        .onDisappear { pendingChannelID = nil }
     }
 
     private var onboardingContainer: some View {
@@ -169,43 +184,74 @@ struct MacNetworkSetupView: View {
                 nearbyNotice: account.nearbyNetworkNotice,
                 onRetryNearby: { Task { @MainActor in account.stopNearbyNetworking(); await account.startNearbyNetworking() } },
                 onCancelJoin: { id in nearbyJoinFeedback.cancel(); account.cancelJoinRequest(networkID: id) },
-                onExportRecovery: exportRecovery)
+                onExportRecovery: exportRecovery,
+                channels: account.channels.map { .init(id: $0.id.uuidString, name: $0.name, isPrivate: $0.isPrivate, isMain: $0.isMain) },
+                selectedChannelID: selectedChannelID,
+                onOpenChannel: openChannel)
+                .disabled(model.phase == .starting)
         } detail: {
-            VStack(spacing: 0) {
-                if let network = account.selectedNetwork {
-                    ALOChannelList(network: summary(network), channels: account.channels.map {
-                        ALOChannelSummary(id: $0.id.uuidString, name: $0.name, isPrivate: $0.isPrivate, isMain: $0.isMain)
-                    }, selectedChannelID: $selectedChannelID, errorMessage: nearbyJoinFeedback.errorMessage ?? error ?? account.errorMessage ?? model.errorMessage,
-                    onCreateChannel: { present(.createChannel) }, onAddMember: { present(.addMember) },
-                    onImportInvitation: { present(.importNetwork) })
-                    HStack {
-                        Button("Members", systemImage: "person.2") { present(.members) }
-                        Spacer()
-                        if model.phase == .live {
-                            Button("Leave channel") { model.stop() }
-                        } else if let id = selectedChannelID {
-                            Button("Join channel", systemImage: "arrow.right.circle.fill") { model.joinChannel(id) }
-                                .buttonStyle(.borderedProminent).keyboardShortcut(.return, modifiers: [])
-                        }
-                    }.controlSize(.large)
-                        .padding(.horizontal, 24).padding(.vertical, 16)
-                        .background(Color(nsColor: .controlBackgroundColor))
-                } else {
-                    ContentUnavailableView {
-                        Label("Your networks live here", systemImage: "network")
-                    } description: {
-                        Text(account.networks.isEmpty ? "Create a network for your group, or join one nearby. Your channels will appear here." : "Choose a network to see its channels.")
-                    } actions: {
-                        Button("Create network") { present(.createNetwork) }.buttonStyle(.borderedProminent)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-            }
+            channelConversation
         }
         .safeAreaInset(edge: .bottom) {
             if account.selectedNetwork == nil, let message = nearbyJoinFeedback.errorMessage ?? error ?? account.errorMessage ?? model.errorMessage {
                 Label(message, systemImage: "exclamationmark.triangle")
                     .font(.callout).padding().frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    private func openChannel(_ id: String) {
+        guard model.phase != .starting, account.channels.contains(where: { $0.id.uuidString == id }) else { return }
+        selectedChannelID = id
+        if model.phase == .live, model.selectedRoomID == id { return }
+        if model.phase == .live {
+            pendingChannelID = id
+            model.stop()
+        } else {
+            if model.phase == .failed { model.tryAgain() }
+            model.joinChannel(id)
+        }
+    }
+
+    private var channelConversation: some View {
+        VStack(spacing: 0) {
+            if model.phase == .live, selectedChannelID == model.selectedRoomID {
+                RoomChatPanel(messages: model.messages, currentParticipantID: model.currentParticipantID,
+                    roomTitle: model.roomTitle, firstUnreadMessageID: model.firstUnreadMessageID,
+                    unreadCount: model.unreadMessageCount, isPresented: controlActiveState == .active, accent: .accentColor,
+                    onLatestVisibilityChanged: model.setChatViewportAtLatest, send: model.sendChatOperation,
+                    sendAttachment: model.sendChatAttachment, attachmentURL: model.chatAttachmentURL,
+                    draft: $model.draftMessage, notificationMode: $model.chatNotificationMode,
+                    mentionNames: model.participants.map(\.name))
+                    .id(model.selectedRoomID)
+            } else if model.phase == .starting {
+                ProgressView("Opening channel…").frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ContentUnavailableView("Choose a channel", systemImage: "bubble.left.and.bubble.right",
+                    description: Text("Open a channel in the sidebar to join the conversation."))
+            }
+            if let message = nearbyJoinFeedback.errorMessage ?? error ?? account.errorMessage ?? model.errorMessage {
+                Text(message).foregroundStyle(.secondary).padding()
+            }
+        }
+        .navigationTitle(account.channels.first(where: { $0.id.uuidString == selectedChannelID })?.name ?? account.selectedNetwork?.name ?? "Networks")
+        .toolbar {
+            ToolbarItemGroup {
+                if account.selectedNetwork != nil {
+                    Button("Members", systemImage: "person.2") { present(.members) }.help("Members")
+                    if model.phase == .live, selectedChannelID == model.selectedRoomID {
+                        Button("Voice controls", systemImage: "mic") { model.showWalkieBar() }.help("Voice controls")
+                        Button("Share screen", systemImage: "rectangle.on.rectangle") { model.toggleVideoFromFloatingBar() }.help("Share screen")
+                    }
+                    Menu {
+                        if account.selectedNetwork?.owner.userID == account.identity?.publicIdentity.userID {
+                            Button("Create channel…") { present(.createChannel) }
+                            Button("Add member…") { present(.addMember) }
+                        }
+                        Button("Import invitation…") { present(.importNetwork) }
+                        if model.phase == .live { Button("Leave channel") { model.stop() } }
+                    } label: { Label("Channel options", systemImage: "ellipsis.circle") }
+                }
             }
         }
     }

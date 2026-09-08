@@ -49,6 +49,9 @@ public struct ALONetworkSidebar: View {
     private let onRetryNearby: () -> Void
     private let onCancelJoin: (UUID) -> Void
     private let onExportRecovery: (() -> Void)?
+    private let channels: [ALOChannelSummary]
+    private let selectedChannelID: String?
+    private let onOpenChannel: (String) -> Void
     @State private var reviewingRequest: ALOJoinRequestSummary?
     @State private var showingIdentity = false
 
@@ -70,7 +73,10 @@ public struct ALONetworkSidebar: View {
         nearbyNotice: String? = nil,
         onRetryNearby: @escaping () -> Void = {},
         onCancelJoin: @escaping (UUID) -> Void = { _ in },
-        onExportRecovery: (() -> Void)? = nil
+        onExportRecovery: (() -> Void)? = nil,
+        channels: [ALOChannelSummary] = [],
+        selectedChannelID: String? = nil,
+        onOpenChannel: @escaping (String) -> Void = { _ in }
     ) {
         self.networks = networks
         _selectedNetworkID = selectedNetworkID
@@ -85,6 +91,9 @@ public struct ALONetworkSidebar: View {
         self.nearbyNotice = nearbyNotice
         self.onCancelJoin = onCancelJoin
         self.onExportRecovery = onExportRecovery
+        self.channels = channels
+        self.selectedChannelID = selectedChannelID
+        self.onOpenChannel = onOpenChannel
     }
 
     public var body: some View {
@@ -258,6 +267,21 @@ public struct ALONetworkSidebar: View {
                         .help(network.name)
                         .accessibilityElement(children: .combine)
                         .accessibilityIdentifier("ALO.Network.\(network.id)")
+                        if selectedNetworkID == network.id {
+                            ForEach(channels) { channel in
+                                Button { onOpenChannel(channel.id) } label: {
+                                    Label(channel.name, systemImage: channel.isPrivate ? "lock" : "number")
+                                        .font(.callout)
+                                        .foregroundStyle(selectedChannelID == channel.id ? Color.accentColor : Color.primary)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(.vertical, 7).padding(.leading, 24)
+                                        .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain).disabled(isBusy)
+                                .accessibilityLabel("Open \(channel.name) channel")
+                                .accessibilityIdentifier("ALO.Channel.Open.\(channel.id)")
+                            }
+                        }
                     }
                     if networks.isEmpty {
                         Text("Join a nearby network or create one for your group.")

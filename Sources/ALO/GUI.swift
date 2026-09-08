@@ -751,7 +751,8 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
             // joining. Never animate a resizable window below its minimum size.
             setupWindowFrame = window.frame
             guard generation == setupTransitionGeneration, model.phase == .live else { return }
-            window.orderOut(nil)
+            // Keep the conversation browser open when a sidebar channel joins.
+            // The floating controls remain available independently.
             updateFloatingBar(hidden: model.floatingBarHidden)
             updateWalkieBar(hidden: model.walkieBarHidden)
             return
@@ -4224,13 +4225,17 @@ struct ALOView: View {
                     .fill(Palette.canvas)
                     .padding(10)
             }
-            switch model.phase {
-            case .idle: idleView
-            case .starting:
-                if model.account.identityReady { nativeProgressView } else { progressView }
-            case .live: MacNetworkSetupView(model: model, account: model.account)
-            case .failed:
-                if model.account.identityReady { nativeErrorView } else { errorView }
+            if model.account.identityReady {
+                // Keep sidebar selection and pending channel navigation alive
+                // through the leave → idle → join transition.
+                MacNetworkSetupView(model: model, account: model.account)
+            } else {
+                switch model.phase {
+                case .idle: idleView
+                case .starting: progressView
+                case .live: MacNetworkSetupView(model: model, account: model.account)
+                case .failed: errorView
+                }
             }
             if model.permissionNotice { permissionOverlay }
         }
