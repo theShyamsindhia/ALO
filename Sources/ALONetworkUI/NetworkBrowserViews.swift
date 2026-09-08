@@ -247,9 +247,26 @@ public struct ALONetworkSidebar: View {
     }
 
     #if os(macOS)
+    private var desktopSelection: Binding<String?> {
+        Binding(get: {
+            if let selectedChannelID, channels.contains(where: { $0.id == selectedChannelID }) {
+                return "channel:" + selectedChannelID
+            }
+            return selectedNetworkID
+        }, set: { selection in
+            guard let selection else { return }
+            if selection.hasPrefix("channel:") {
+                let id = String(selection.dropFirst("channel:".count))
+                if channels.contains(where: { $0.id == id }) { onOpenChannel(id) }
+            } else {
+                selectedNetworkID = selection
+            }
+        })
+    }
+
     private var desktopSidebar: some View {
         VStack(spacing: 0) {
-            List(selection: $selectedNetworkID) {
+            List(selection: desktopSelection) {
                 Section("Your networks") {
                     ForEach(networks) { network in
                         Label {
@@ -272,12 +289,12 @@ public struct ALONetworkSidebar: View {
                                 Button { onOpenChannel(channel.id) } label: {
                                     Label(channel.name, systemImage: channel.isPrivate ? "lock" : "number")
                                         .font(.callout)
-                                        .foregroundStyle(selectedChannelID == channel.id ? Color.accentColor : Color.primary)
                                         .frame(maxWidth: .infinity, alignment: .leading)
                                         .padding(.vertical, 7).padding(.leading, 24)
                                         .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain).disabled(isBusy)
+                                .tag("channel:" + channel.id)
                                 .accessibilityLabel("Open \(channel.name) channel")
                                 .accessibilityIdentifier("ALO.Channel.Open.\(channel.id)")
                             }

@@ -72,6 +72,8 @@ struct MacNetworkSetupView: View {
             if phase == .idle, let id = pendingChannelID {
                 pendingChannelID = nil
                 model.joinChannel(id)
+            } else if phase == .idle {
+                selectedChannelID = nil
             }
         }
         .onDisappear { pendingChannelID = nil }
@@ -236,6 +238,15 @@ struct MacNetworkSetupView: View {
         }
         .navigationTitle(account.channels.first(where: { $0.id.uuidString == selectedChannelID })?.name ?? account.selectedNetwork?.name ?? "Networks")
         .toolbar {
+            ToolbarItem(placement: .principal) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(account.channels.first(where: { $0.id.uuidString == selectedChannelID })?.name ?? account.selectedNetwork?.name ?? "Networks")
+                        .font(.headline).lineLimit(1)
+                    if model.phase == .live, selectedChannelID == model.selectedRoomID {
+                        Text("Connected").font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+            }
             ToolbarItemGroup {
                 if account.selectedNetwork != nil {
                     Button("Members", systemImage: "person.2") { present(.members) }.help("Members")

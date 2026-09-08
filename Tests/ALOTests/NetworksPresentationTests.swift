@@ -45,9 +45,12 @@ extension NativePresentationTests {
                     .environment(\.controlActiveState, .active)
                     .transaction { $0.disablesAnimations = true })
                 window.contentView = hosting
-                window.setContentSize(size)
                 window.orderBack(nil)
                 try await Task.sleep(for: .milliseconds(300))
+                // Native toolbar attachment changes AppKit's content rect.
+                // Apply the requested size after attachment, retaining exact
+                // geometry and account-state assertions below.
+                window.setContentSize(size)
                 hosting.layoutSubtreeIfNeeded()
                 let bitmap = try #require(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
                 hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
