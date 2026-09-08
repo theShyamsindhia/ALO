@@ -176,7 +176,8 @@ struct DeviceMessagingOwnerTests {
         #expect(captured.read { $0.view.candidates.isEmpty })
         try await stop(owner, captured)
     }
-    @Test func heldRealApprovalAndRepeatedFailedRevocationCannotForgetAuthority() async throws {
+    @Test(arguments: [false, true])
+    func heldRealApprovalAndRepeatedFailedRevocationCannotForgetAuthority(retireNetwork: Bool) async throws {
         let f = try Fixture(); defer { f.clean() }
         let captured = Captured()
         let owner = DeviceMessagingOwner(testing: .init(directory: f.directory,
@@ -215,6 +216,20 @@ struct DeviceMessagingOwnerTests {
         try await wait { captured.read { $0.heldApproval != nil && $0.grant != nil } }
         let service = try #require(captured.read { $0.service }), grant = try #require(captured.read { $0.grant })
         try #require(service.localGrants().contains { $0.id == grant && !$0.revoked })
+        if retireNetwork {
+            try f.policy.receive(f.policy.snapshot().removingMember(userID: f.sender.publicIdentity.userID, signedBy: f.user))
+            try await wait("actual retired receiver authority") {
+                service.localGrants().contains { $0.id == grant && $0.revoked }
+            }
+            owner.forget(registration)
+            let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while captured.read({ $0.view.registrations.contains { $0.id == registration } }), ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            #expect(captured.read { !$0.view.registrations.contains { $0.id == registration } },
+                "Retired authority must settle pending approvals even if the callback never arrives")
+            return
+        }
         owner.forget(registration)
         try await wait { captured.read { $0.view.capabilityStatuses[registration]?.hasPrefix("Revoking") == true } }
         let denied = try MacOwnerSocket.request(.init(operation: .receipt, registration: registration, messageID: UUID()),
@@ -272,6 +287,9 @@ struct DeviceMessagingOwnerTests {
         let receiverTask = UUID(), senderTask = UUID()
         let receiverRegistration = try await registerAndConfirm(receiver, captured: received, directory: f.directory, helper: f.helper, task: receiverTask)
         let senderRegistration = try await registerAndConfirm(sender, captured: sent, directory: senderDirectory, helper: senderHelper, task: senderTask)
+        let repeated = try MacOwnerSocket.request(.init(operation: .register, taskID: senderTask, title: "Explicit local task"),
+            directory: senderDirectory.appendingPathComponent("socket"))
+        #expect(repeated.registration == senderRegistration && repeated.status == .ready)
         receiver.addNetwork(f.network, user: f.user, identity: f.identity, pins: MemoryPeerPinStore(), access: f.access, token: receiver.currentGeneration)
         sender.addNetwork(f.network, user: f.sender, identity: f.senderIdentity, pins: MemoryPeerPinStore(),
             access: NetworkDeviceAccess(policy: f.policy, localDevice: f.senderBinding), token: sender.currentGeneration)
