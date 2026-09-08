@@ -406,6 +406,9 @@ public final class NetworkAccountModel: ObservableObject {
     /// Explicit network-device service setup, independent of audio channels.
     /// Loads fresh policy off-main and rechecks identity after the await. The
     /// returned material is not a substitute for transport/dispatch authorization.
+    /// Fetch once when creating/replacing a service, not per connection/message:
+    /// each fetch reloads repository policy and signs a fresh binding ID. Reuse
+    /// the live center; services still check current policy for each operation.
     public func deviceAuthorization(networkID: String, installationHash: Data,
                                     deviceName: String) async throws -> NetworkDeviceAccess {
         let identity = try requireIdentity(), token = identityGeneration
@@ -427,6 +430,7 @@ public final class NetworkAccountModel: ObservableObject {
             return NetworkDeviceAccess(policy: center, localDevice: device)
         }
         try requireCurrentIdentity(identity, generation: token)
+        // Short snapshot lock only: no repository/update lock on MainActor.
         let snapshot = try access.policy.snapshot()
         guard snapshot.id == networkUUID else { throw NetworkAccountError.networkUnavailable }
         guard snapshot.isMember(identity.publicIdentity) else {
@@ -554,6 +558,7 @@ private final class NetworkAccountRepositoryWorker: @unchecked Sendable {
     // Only called within perform: channel and device paths must share the same
     // live policy center and observer, including after removal and re-addition.
     func reloadedCenter(networkID: UUID) throws -> NetworkPolicyCenter {
+        dispatchPrecondition(condition: .onQueue(queue))
         if let existing = centers[networkID] {
             try existing.reload()
             return existing

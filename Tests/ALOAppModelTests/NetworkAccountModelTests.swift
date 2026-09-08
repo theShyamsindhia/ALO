@@ -80,6 +80,27 @@ struct NetworkAccountModelTests {
         try device.localDevice.verify(expectedInstallationPublicKeyHash: hash)
     }
 
+    @Test func cachedVisibleNetworkCannotBypassFreshDiskMembership() async throws {
+        let owner = try AccountModelFixture(), member = try AccountModelFixture()
+        defer { owner.cleanup(); member.cleanup() }
+        try await owner.finishNewIdentity(name: "Owner"); try await member.finishNewIdentity(name: "Member")
+        let network = try await owner.model.createNetwork(name: "Cached membership")
+        let invitation = try await owner.model.addMember(data: member.model.publicIdentityData(), networkID: network.id)
+        try await member.model.importInvitation(data: invitation.encoded())
+        let before = try member.repository.trustedManifest(id: network.id)
+        let memberID = try #require(member.model.identity?.publicIdentity.userID)
+        let ownerIdentity = try #require(owner.model.identity)
+        let removed = try before.removingMember(userID: memberID, signedBy: ownerIdentity)
+        // Direct repository update: no center has yet been requested, so no
+        // observer can remove cached presentation before the accessor's guard.
+        _ = try member.repository.acceptUpdate(removed, anchoredTo: before)
+        try #require(member.model.networks.contains { $0.id == network.id })
+        await #expect(throws: NetworkAuthorityError.notMember) {
+            try await member.model.deviceAuthorization(networkID: network.id.uuidString,
+                installationHash: Data(repeating: 4, count: 32), deviceName: "Revoked device")
+        }
+    }
+
     @Test func devicePolicyRemovalReaddDoesNotReviveOldSession() async throws {
         let owner = try AccountModelFixture(), member = try AccountModelFixture()
         defer { owner.cleanup(); member.cleanup() }
