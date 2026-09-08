@@ -122,7 +122,7 @@ struct NetworkDeviceTextTransportTests {
             listener.receiveAtCapacityForTesting(connection: connection, bytes: one + two)
             try await wait { state.read { $0.receiverEvents.contains("closed") } }
             queue.sync {} // Observe the full owner-queue batch, not just its first callback.
-            #expect(state.read { $0.receiverEvents == ["closed"] })
+            #expect(state.read { $0.receiverEvents == ["accepted", "closed"] })
             return
         }
         for index in 0..<3 {

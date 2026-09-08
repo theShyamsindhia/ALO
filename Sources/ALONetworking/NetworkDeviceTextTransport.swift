@@ -231,9 +231,10 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
                 send(Wire(kind: .rejected, grantID: message.grantID, messageID: message.messageID, rejection: "capacity"))
                 return
             }
-            send(Wire(kind: .receipt, grantID: message.grantID, messageID: message.messageID, receipt: receipt))
-            guard !closed else { return }
+            // Local notification follows durable admission even if the peer
+            // cannot receive its receipt. It is not external dispatch authority.
             if receipt == .received { event(.messageAccepted(id, message)) }
+            send(Wire(kind: .receipt, grantID: message.grantID, messageID: message.messageID, receipt: receipt))
         case (.sender, .receipt):
             guard admitted, let id = wire.messageID, let grant = wire.grantID, let receipt = wire.receipt else { throw CodexDeviceMessagingError.unauthorized }
             try responses.resolve(.init(grant: grant, message: id))

@@ -28,9 +28,11 @@ public final class CodexDeviceMessageJournal {
         directory = fd; writerLock = writer
         // Only the exclusive writer may reclaim this journal's reserved temp
         // namespace. No symlink following, directories, or unrelated names.
-        let scanFD = dup(fd)
-        guard scanFD >= 0 else { throw POSIXError(.EIO) }
-        guard let stream = fdopendir(scanFD) else { close(scanFD); throw POSIXError(.EIO) }
+        // Hygiene is best effort: an unreadable or immutable orphan must not
+        // hide a valid receipts.json. The scan descriptor never crosses exec.
+        let scanFD = openat(fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        guard scanFD >= 0 else { return }
+        guard let stream = fdopendir(scanFD) else { close(scanFD); return }
         defer { closedir(stream) }
         while let entry = readdir(stream) {
             let name = withUnsafePointer(to: &entry.pointee.d_name) {
@@ -42,7 +44,7 @@ public final class CodexDeviceMessageJournal {
             var candidate = stat()
             guard fstatat(fd, name, &candidate, AT_SYMLINK_NOFOLLOW) == 0,
                   candidate.st_mode & S_IFMT == S_IFREG, candidate.st_uid == getuid() else { continue }
-            guard unlinkat(fd, name, 0) == 0 else { throw POSIXError(.EIO) }
+            _ = unlinkat(fd, name, 0)
         }
     }
     deinit { close(writerLock); close(directory) }

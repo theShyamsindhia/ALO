@@ -25,17 +25,26 @@ no Codex invocation, task discovery, app launch or audio wire changes.
   receipt guarantee.** No F_FULLFSYNC guarantee. Restore disables grants, cancels
   received work and marks dispatching uncertain. Live text remains available for
   dispatch but is omitted from durable encoding. Cleanup after acquiring the writer
-  lock removes only owned regular canonical receipt-UUID.tmp files, preserving
-  unrelated files, directories and symlinks.
+  lock attempts to remove only owned regular canonical receipt-UUID.tmp files,
+  preserving unrelated files, directories and symlinks. Cleanup is best effort;
+  an immutable orphan does not hide a valid journal.
 - Test clock/policy-delivery seams and journal load/save are internal. Listener
   construction validates its local TLS binding. Verification defaults to a separate
   concurrent queue; owner-queue processing/fsync stalls remain possible.
-- Dropped owners request native cancellation and remove observers. Closed events
-  are terminal, including same-frame post-send events and coalesced batches.
+- Dropped owners request native cancellation and remove observers. Close is
+  terminal for wire-driven callbacks and coalesced batches. Durable receive
+  notifies locally before attempting the receipt send; this does not authorize
+  dispatch after revocation or prove peer receipt acknowledgement. An explicit
+  local send after close still rejects asynchronously on the owner queue.
   Cancellation is asynchronous; ordered same-port app restart needs a completion
   contract, not an assumption that stop synchronously releases the port.
 
 ## Availability and evidence limitations
+
+Per-grant shares limit new admission. Historical journals may exceed a new
+share: restore keeps their receipts, disables the service and revokes grants,
+without replay. Local enumeration and explicit acknowledged retirement recover
+capacity; historical uncertainty is never silently discarded to meet a quota.
 
 Five-second preauthorization, eight pre-TLS slots separate from admitted peers
 and four unknown-TLS slots preserve some capacity for known pins. Pins are not
@@ -65,9 +74,21 @@ local TLS mismatch, capacity response and post-close callbacks. Positive control
 retained exact live dispatch text and other-grant admission. After the fixes, all
 51 tests in nine suites passed, including both native TLS cases. A subsequent
 Sendable-clock warning cleanup passed 13 tests in three suites. Two final
-unused-result warning-only test edits followed that run; they do not change test
-conditions or production behavior and have not yet been recompiled.
+unused-result warning-only test edits followed that local run. CI then validated
+the exact pushed `de0b8b7` checkpoint: 382 XCTest tests, 1,135 Swift tests in 180
+suites, and seven repeatable tests in three suites passed, along with both Mac
+and iOS builds ([run 34184501336](https://github.com/theShyamsindhia/ALO/actions/runs/34184501336)).
 Local forensic logs remain outside the repository, not inaccessible review citations.
+
+The next bounded review regression produced exactly two failures in nine tests:
+an immutable orphan prevented opening the valid journal, and a receipt-send
+failure suppressed the local admission notification. The historical 1,024-record
+single-grant restore/acknowledged-retirement compatibility control already passed.
+The corrected focused run passed 53 tests in nine suites, including the actual
+TLS cases and cleanup assertions. Independent correction review found no further
+actionable gap. Required CI for this later correction is still pending; the
+`de0b8b7` CI result above applies only to that earlier checkpoint. No timeout
+changed and no case was disabled.
 
 Reproduce the hardware-free focused checks with the same test-only workarounds
 as CI; production packaging flags are unchanged:
