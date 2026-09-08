@@ -34,7 +34,7 @@ struct NetworkDeviceResponseLedgerTests {
         try ledger.reject(key, reason: "rateLimited")
         #expect(ledger.pendingCount == 0)
         #expect(throws: CodexDeviceMessagingError.unauthorized) { try ledger.reject(key, reason: "rateLimited") }
-        #expect(throws: CodexDeviceMessagingError.unauthorized) { try ledger.resolve(key) }
+        #expect(throws: CodexDeviceMessagingError.unauthorized) { try ledger.resolve(key, receipt: .codexQueued) }
     }
     @Test func duplicateOrExcessGrantFramesCannotDriveCallbacks() throws {
         var ledger = NetworkDeviceResponseLedger()

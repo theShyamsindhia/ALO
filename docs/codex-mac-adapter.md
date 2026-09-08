@@ -222,7 +222,7 @@ not a copy of that WIP and does not change PR5. The relevant current structure i
 5. `started.waitForOutcome()` performs all polling, drains and timeout handling
    outside locks, beginning immediately after the fence releases rather than
    being queued behind other work; the child budget already runs from start.
-   `service.finishStarted(ticket:result:)` later commits the
+   `service.finishStarted(started)` waits outside the fence and later commits the
    bounded outcome exactly once under the service lock. CLI exit zero remains
    queued, never delivered. A record already made uncertain by revoke/policy
    invalidation must remain conservative; a late completion must not revive

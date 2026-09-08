@@ -66,6 +66,14 @@ public final class CodexDeviceMessageService: @unchecked Sendable {
     public func localGrants() -> [CodexDeviceMessagingPolicy.LocalGrant] {
         lock.lock(); defer { lock.unlock() }; return state.localGrants
     }
+    /// Receiver-local current stored receipt, still readable after disable/revocation.
+    /// Revocation changes received to cancelled and dispatching to uncertain;
+    /// the returned value is a snapshot, not a stable execution permission.
+    /// This is not peer authorization and cannot start or mutate a dispatch.
+    public func localReceipt(grantID: UUID, messageID: UUID) -> CodexDeviceMessagingPolicy.Receipt? {
+        lock.lock(); defer { lock.unlock() }
+        return state.receipt(grantID: grantID, messageID: messageID)
+    }
     private struct QueryBudget { var tokens = 5.0; var last: UInt64 }
     private var queryBudgets: [UUID: QueryBudget] = [:]
     /// Only transport invokes this with the SPKI extracted from its actual TLS
@@ -115,6 +123,19 @@ public final class CodexDeviceMessageService: @unchecked Sendable {
     public func receive(_ envelope: CodexDeviceMessageEnvelope, connection: UUID) throws -> CodexDeviceMessagingPolicy.Receipt {
         try current(connection, queryGrant: envelope.grantID) { context, now in
             try commit { try $0.receive(envelope, context: context, now: now) }
+        }
+    }
+    /// Wire queries share the stable per-grant replay budget across reconnects.
+    func queryReceipt(grantID: UUID, messageID: UUID, connection: UUID) throws -> CodexDeviceMessagingPolicy.Receipt {
+        try current(connection, queryGrant: grantID) { context, now in
+            try commit { try $0.currentReceipt(grantID: grantID, messageID: messageID, context: context, now: now) }
+        }
+    }
+    /// Local publication uses the same authorization fence, but is not a new
+    /// remote query and cannot charge the peer for an unsolicited local change.
+    func currentReceipt(grantID: UUID, messageID: UUID, connection: UUID) throws -> CodexDeviceMessagingPolicy.Receipt {
+        try current(connection) { context, now in
+            try commit { try $0.currentReceipt(grantID: grantID, messageID: messageID, context: context, now: now) }
         }
     }
     /// Durable dispatch admission, linearized against locally applied policy

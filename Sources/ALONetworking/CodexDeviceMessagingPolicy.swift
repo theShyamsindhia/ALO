@@ -5,6 +5,8 @@ import ALOIdentity
 public enum CodexDeviceMessagingError: Error, Equatable {
     case disabled, unauthorized, expired, invalidEnvelope, capacity, rateLimited
     case duplicateConflict, invalidTransition, clockRegressed
+    /// Scoped status lookup outcomes, never durable message receipts.
+    case statusUnknown, grantExpired
 }
 
 /// Snapshot of an independently authenticated context, used only to scope local
@@ -334,6 +336,20 @@ public struct CodexDeviceMessagingPolicy: Sendable {
             throw CodexDeviceMessagingError.invalidTransition
         }
         records[key]?.receipt = .delivered
+    }
+
+    mutating func currentReceipt(grantID: UUID, messageID: UUID,
+                                context: NetworkDeviceAuthorization.Context, now: UInt64) throws -> Receipt {
+        try advance(now)
+        // Session expiry is connection-terminal. Only an otherwise-current
+        // grant expiry can be reported as a scoped unavailable observation.
+        guard now < context.sessionValidUntilNanos else { throw CodexDeviceMessagingError.expired }
+        do { _ = try authorized(grantID, context: context, now: now) }
+        catch CodexDeviceMessagingError.expired { throw CodexDeviceMessagingError.grantExpired }
+        guard let receipt = records[Key(grantID: grantID, messageID: messageID)]?.receipt else {
+            throw CodexDeviceMessagingError.statusUnknown
+        }
+        return receipt
     }
 
     private func authorized(_ id: UUID, context: NetworkDeviceAuthorization.Context, now: UInt64) throws -> Grant {

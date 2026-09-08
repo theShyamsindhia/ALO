@@ -8,17 +8,31 @@ import ALOCore
 /// a fake Main channel, or execute messages. Local application consent controls
 /// listener creation and service enablement independently.
 public final class NetworkDeviceTextTransport: @unchecked Sendable {
+    public enum QueryResult {
+        case receipt(CodexDeviceMessagingPolicy.Receipt)
+        /// No record was found in the current own grant. Not proof of non-execution.
+        case statusUnknown
+        case grantExpired
+        /// Only the query failed; previous message evidence is unchanged.
+        case unavailable(CodexDeviceMessagingError)
+    }
     public enum Event {
+        /// Sender proof was accepted. This is not a task grant or dispatch permission.
+        case ready
         case authenticated(UUID, NetworkDeviceAuthorization.Context)
         case grant(UUID)
         case receipt(grantID: UUID, messageID: UUID, CodexDeviceMessagingPolicy.Receipt)
+        case queryResult(grantID: UUID, messageID: UUID, QueryResult)
+        /// Ends only this live observation, not other grants or the message.
+        case subscriptionExpired(grantID: UUID, messageID: UUID)
         case messageAccepted(UUID, CodexDeviceMessageEnvelope)
         /// Local validation or a solicited receiver rate rejection. No automatic retry.
         case rejected(grantID: UUID, messageID: UUID, CodexDeviceMessagingError)
         case closed
     }
     private struct Wire: Codable {
-        enum Kind: String, Codable { case challenge, claim, authenticated, grant, text, receipt, rejected }
+        enum Kind: String, Codable { case challenge, claim, authenticated, grant, text, receiptQuery, queryResult, subscriptionExpired, receipt, rejected }
+        enum QueryStatus: String, Codable { case statusUnknown, grantExpired, rateLimited }
         let kind: Kind
         var challenge: NetworkDeviceAuthorization.Challenge?
         var claim: NetworkDeviceAuthorization.Claim?
@@ -27,6 +41,7 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
         var messageID: UUID?
         var receipt: CodexDeviceMessagingPolicy.Receipt?
         var rejection: String?
+        var queryStatus: QueryStatus?
     }
     private enum Mode {
         case receiver(CodexDeviceMessageService)
@@ -48,6 +63,7 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
     private var queuedBytes = 0
     private var outgoingFrameLimitForTesting: Int?
     private var responses = NetworkDeviceResponseLedger()
+    private var subscriptions: [NetworkDeviceResponseLedger.Key: CodexDeviceMessagingPolicy.Receipt] = [:]
     private var timeout: Task<Void, Never>?
     private var deadlineGeneration = UUID()
     private var policyObserver: UUID?
@@ -88,6 +104,46 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
     }
     public func start() { queue.async { self.startOnQueue() } }
     public func stop() { queue.async { self.close() } }
+    /// Explicit authenticated status lookup, including after reconnect. It does
+    /// not resend text and never starts or retries native execution.
+    /// Before an outstanding text send's first receipt, this is a no-op: the
+    /// existing live receipt remains the response path, with no queryResult.
+    /// Duplicate in-flight queries coalesce into the existing query response.
+    public func queryReceipt(grantID: UUID, messageID: UUID) {
+        queue.async {
+            guard case .sender = self.mode, self.admitted, !self.closed else {
+                self.event(.queryResult(grantID: grantID, messageID: messageID, .unavailable(.unauthorized))); return
+            }
+            do {
+                guard try self.responses.reserveQuery(.init(grant: grantID, message: messageID)) else { return }
+                self.send(Wire(kind: .receiptQuery, grantID: grantID, messageID: messageID))
+            } catch {
+                self.event(.queryResult(grantID: grantID, messageID: messageID, .unavailable(error as? CodexDeviceMessagingError ?? .capacity)))
+            }
+        }
+    }
+    /// IDs select only an existing authenticated observation. Receipt contents
+    /// always come from the receiver service, never from the caller.
+    func publishCurrentReceipt(grantID: UUID, messageID: UUID) {
+        queue.async {
+            let key = NetworkDeviceResponseLedger.Key(grant: grantID, message: messageID)
+            guard !self.closed, self.admitted, self.subscriptions[key] != nil,
+                  case .receiver(let service) = self.mode, let session = self.localSession else { return }
+            do {
+                let receipt = try service.currentReceipt(grantID: grantID, messageID: messageID, connection: session)
+                guard self.subscriptions[key] != receipt else { return }
+                self.publish(key, receipt: receipt)
+            } catch CodexDeviceMessagingError.grantExpired {
+                self.subscriptions.removeValue(forKey: key)
+                self.send(Wire(kind: .subscriptionExpired, grantID: grantID, messageID: messageID))
+            } catch { self.close() }
+        }
+    }
+    private func publish(_ key: NetworkDeviceResponseLedger.Key, receipt: CodexDeviceMessagingPolicy.Receipt, queryResponse: Bool = false) {
+        if receipt == .received || receipt == .dispatching { subscriptions[key] = receipt }
+        else { subscriptions.removeValue(forKey: key) }
+        send(Wire(kind: queryResponse ? .queryResult : .receipt, grantID: key.grant, messageID: key.message, receipt: receipt))
+    }
     /// Receiver-local approval only: callers obtain localTaskID from their local
     /// consent UI. No incoming wire message can invoke this method.
     public func approve(localTaskID: UUID, expiresAtNanos: UInt64) {
@@ -140,6 +196,14 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
     var deadlineGenerationForTesting: UUID { queue.sync { deadlineGeneration } }
     func fireDeadlineForTesting(_ generation: UUID) { queue.async { self.deadlineElapsed(generation) } }
     var closedForTesting: Bool { queue.sync { closed } }
+    /// Observe the same handler before a peer can react to an emitted response.
+    /// This does not change caps, authentication, framing, or output behavior.
+    func receiveAndObserveForTesting(_ bytes: Data, observed: @escaping (Bool) -> Void) {
+        queue.async {
+            do { try self.handleReceivedBytes(bytes) } catch { self.close() }
+            observed(self.closed)
+        }
+    }
     private func startOnQueue() {
         guard timeout == nil, !closed else { return }
         if case .sender(_, _, let policy, _) = mode {
@@ -215,12 +279,19 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
             guard !admitted, expectedChallenge != nil else { throw CodexDeviceMessagingError.unauthorized }
             try pins.recordAfterAdmission(peer)
             admitted = true; armDeadline(lifetime)
+            event(.ready)
         case (.sender, .grant):
             guard admitted, let grant = wire.grantID else { throw CodexDeviceMessagingError.unauthorized }
             try responses.receivedGrant(grant)
             event(.grant(grant))
         case (.receiver(let service), .text):
             guard admitted, let id = localSession, let message = wire.message else { throw CodexDeviceMessagingError.unauthorized }
+            let key = NetworkDeviceResponseLedger.Key(grant: message.grantID, message: message.messageID)
+            guard subscriptions[key] != nil || subscriptions.count < 32 else {
+                // The sender's identical bound prevents a legitimate 33rd
+                // observation. Close once instead of serving unbudgeted replies.
+                throw CodexDeviceMessagingError.capacity
+            }
             let receipt: CodexDeviceMessagingPolicy.Receipt
             do { receipt = try service.receive(message, connection: id) }
             catch CodexDeviceMessagingError.rateLimited {
@@ -234,11 +305,54 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
             // Local notification follows durable admission even if the peer
             // cannot receive its receipt. It is not external dispatch authority.
             if receipt == .received { event(.messageAccepted(id, message)) }
-            send(Wire(kind: .receipt, grantID: message.grantID, messageID: message.messageID, receipt: receipt))
+            publish(key, receipt: receipt)
+        case (.receiver(let service), .receiptQuery):
+            guard admitted, let session = localSession, let grant = wire.grantID,
+                  let message = wire.messageID else { throw CodexDeviceMessagingError.unauthorized }
+            let key = NetworkDeviceResponseLedger.Key(grant: grant, message: message)
+            guard subscriptions[key] != nil || subscriptions.count < 32 else {
+                throw CodexDeviceMessagingError.capacity
+            }
+            do { publish(key, receipt: try service.queryReceipt(grantID: grant, messageID: message, connection: session), queryResponse: true) }
+            catch CodexDeviceMessagingError.rateLimited {
+                send(Wire(kind: .queryResult, grantID: grant, messageID: message, queryStatus: .rateLimited))
+            }
+            catch CodexDeviceMessagingError.statusUnknown {
+                send(Wire(kind: .queryResult, grantID: grant, messageID: message, queryStatus: .statusUnknown))
+            }
+            catch CodexDeviceMessagingError.grantExpired {
+                subscriptions.removeValue(forKey: key)
+                send(Wire(kind: .queryResult, grantID: grant, messageID: message, queryStatus: .grantExpired))
+            }
+        case (.sender, .queryResult):
+            guard admitted, let id = wire.messageID, let grant = wire.grantID,
+                  (wire.receipt != nil) != (wire.queryStatus != nil) else { throw CodexDeviceMessagingError.unauthorized }
+            let key = NetworkDeviceResponseLedger.Key(grant: grant, message: id)
+            if let receipt = wire.receipt {
+                if try responses.resolveQuery(key, receipt: receipt) {
+                    event(.receipt(grantID: grant, messageID: id, receipt))
+                }
+                event(.queryResult(grantID: grant, messageID: id, .receipt(receipt)))
+            } else if let status = wire.queryStatus {
+                let reason: CodexDeviceMessagingError
+                let result: QueryResult
+                switch status {
+                case .statusUnknown: reason = .statusUnknown; result = .statusUnknown
+                case .grantExpired: reason = .grantExpired; result = .grantExpired
+                case .rateLimited: reason = .rateLimited; result = .unavailable(.rateLimited)
+                }
+                try responses.queryUnavailable(key, reason: reason)
+                event(.queryResult(grantID: grant, messageID: id, result))
+            }
+        case (.sender, .subscriptionExpired):
+            guard admitted, let id = wire.messageID, let grant = wire.grantID else { throw CodexDeviceMessagingError.unauthorized }
+            try responses.endSubscription(.init(grant: grant, message: id))
+            event(.subscriptionExpired(grantID: grant, messageID: id))
         case (.sender, .receipt):
             guard admitted, let id = wire.messageID, let grant = wire.grantID, let receipt = wire.receipt else { throw CodexDeviceMessagingError.unauthorized }
-            try responses.resolve(.init(grant: grant, message: id))
-            event(.receipt(grantID: grant, messageID: id, receipt))
+            if try responses.resolve(.init(grant: grant, message: id), receipt: receipt) {
+                event(.receipt(grantID: grant, messageID: id, receipt))
+            }
         case (.sender, .rejected):
             guard admitted, let id = wire.messageID, let grant = wire.grantID else { throw CodexDeviceMessagingError.unauthorized }
             try responses.reject(.init(grant: grant, message: id), reason: wire.rejection)
@@ -247,6 +361,7 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
         }
     }
     private func send(_ wire: Wire) {
+        guard !closed else { return }
         do {
             let frame = try NetworkDeviceMessageFraming.encode(JSONEncoder().encode(wire))
             guard outgoing.count < (outgoingFrameLimitForTesting ?? 32), queuedBytes + frame.count <= 256 * 1024 else { throw CodexDeviceMessagingError.capacity }
@@ -286,7 +401,7 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
         if case .receiver(let service) = mode, let expectedChallenge { service.cancelChallenge(expectedChallenge) }
         if case .sender(_, _, let policy, _) = mode, let policyObserver { policy.removeObserver(policyObserver) }
         connection.stateUpdateHandler = nil; connection.cancel()
-        outgoing.removeAll(); responses = .init(); queuedBytes = 0; event(.closed)
+        outgoing.removeAll(); responses = .init(); subscriptions.removeAll(); queuedBytes = 0; event(.closed)
     }
 }
 
@@ -359,6 +474,16 @@ public final class NetworkDeviceTextListener: @unchecked Sendable {
             self.connections[connection]?.approve(localTaskID: localTaskID, expiresAtNanos: expiresAtNanos)
         }
     }
+    /// A completion may belong to an old transport; each current subscription
+    /// independently revalidates its own authenticated service session.
+    func publishCurrentReceipt(grantID: UUID, messageID: UUID) {
+        queue.async {
+            guard !self.stopped else { return }
+            for connection in self.connections.values {
+                connection.publishCurrentReceipt(grantID: grantID, messageID: messageID)
+            }
+        }
+    }
     private func handleTransportEvent(_ id: UUID, _ value: NetworkDeviceTextTransport.Event) {
         guard !stopped else { return }
         if case .authenticated = value { admitted.insert(id); unknownTLS.remove(id) }
@@ -373,6 +498,9 @@ public final class NetworkDeviceTextListener: @unchecked Sendable {
     var nativeListenerForTesting: NWListener { listener }
     func receiveAtCapacityForTesting(connection: UUID, bytes: Data) {
         queue.async { self.connections[connection]?.receiveAtCapacityForTesting(bytes) }
+    }
+    func receiveAndObserveForTesting(connection: UUID, bytes: Data, observed: @escaping (Bool) -> Void) {
+        queue.async { self.connections[connection]?.receiveAndObserveForTesting(bytes, observed: observed) }
     }
     public func stop() {
         queue.async {
