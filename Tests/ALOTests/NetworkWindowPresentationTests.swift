@@ -113,8 +113,12 @@ struct NetworkWindowPresentationTests {
                     onSidebarProbe: { sidebarProbe = $0 }, onDetailProbe: { detailProbe = $0 })
                     .environment(\.controlActiveState, .active)
                     .transaction { $0.disablesAnimations = true })
-                window.setContentSize(size)
                 try await Task.sleep(for: .milliseconds(300))
+                // NavigationSplitView installs its native toolbar on attachment.
+                // Size the content after that installation, just as a user resize
+                // does; otherwise AppKit's toolbar insertion adds 28 pt to the
+                // requested content size before this geometry assertion.
+                window.setContentSize(size)
                 window.contentView?.layoutSubtreeIfNeeded()
                 let frameView = try #require(window.contentView?.superview)
                 #expect(window.contentView?.bounds.size == size)
