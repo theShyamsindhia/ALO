@@ -1,5 +1,6 @@
 import Foundation
 import ALOIdentity
+import ALORooms
 
 /// Produced by the transport from its actual TLS peer and verified challenge,
 /// not by discovery or callers. A snapshot for owner mapping, not dispatch authority.

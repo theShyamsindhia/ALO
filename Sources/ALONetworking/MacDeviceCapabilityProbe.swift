@@ -32,6 +32,11 @@ public final class MacDeviceCapabilityProbe: @unchecked Sendable {
         lock.lock(); stopped = true; generation = UUID(); pending.removeAll(); lock.unlock()
         workers.cancelAllOperations()
     }
+    /// Invalidates preparations for one forgotten local task. Already started
+    /// helpers retain their bounded wait; this does not claim to undo execution.
+    public func cancel(taskID: UUID) {
+        lock.lock(); pending = pending.filter { $0.value != taskID }; lock.unlock()
+    }
     @discardableResult public func submit(taskID: UUID, challengeID: UUID, response: UUID,
         expiresAt: UInt64, completion: @escaping (Outcome) -> Void) -> Admission {
         lock.lock()

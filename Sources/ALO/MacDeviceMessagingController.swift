@@ -216,7 +216,9 @@ final class DeviceMessagingOwner: @unchecked Sendable {
                 self.server = server; self.liveServer = server
                 self.probe = preparedProbe; self.liveProbe = preparedProbe
                 self.lifecycleFence.unlock()
-            } catch { self.reportUnavailable(token: token) }
+            } catch {
+                self.stop(expectedGeneration: token, failure: "Local ingress construction failed. Retry explicitly after cleanup completes.")
+            }
             self.emit()
         }
     }
@@ -384,7 +386,8 @@ final class DeviceMessagingOwner: @unchecked Sendable {
     }
     func testCapability(_ registration: UUID) {
         worker.async { [weak self] in
-            guard let self, let probe = self.probe, let approval = self.stateLock.withLock({ self.approval }) else { return }
+            guard let self, let probe = self.probe,
+                  let approval = self.stateLock.withLock({ self.forgetting.contains(registration) ? nil : self.approval }) else { return }
             do {
                 let challenge = try self.stateLock.withLock { try self.state.beginCapabilityTest(registration: registration, approvedDigest: approval.digest, now: DeviceMessagingClock.nowNanos()) }
                 self.challenges[registration] = challenge
@@ -403,7 +406,7 @@ final class DeviceMessagingOwner: @unchecked Sendable {
     func confirm(_ registration: UUID, response: String) {
         worker.async { [weak self] in
             guard let self, let challenge = self.challenges[registration], let response = UUID(uuidString: response),
-                  let approval = self.stateLock.withLock({ self.approval }) else { return }
+                  let approval = self.stateLock.withLock({ self.forgetting.contains(registration) ? nil : self.approval }) else { return }
             do {
                 try self.stateLock.withLock { try self.state.confirmCapability(challenge, response: response, approvedDigest: approval.digest, now: DeviceMessagingClock.nowNanos()) }
                 self.challenges.removeValue(forKey: registration)
@@ -459,7 +462,11 @@ final class DeviceMessagingOwner: @unchecked Sendable {
         }
     }
     func forget(_ registration: UUID) {
-        stateLock.withLock { forgetting.insert(registration); snapshot.capabilityStatuses[registration] = "Revoking grants; removal has not completed." }
+        let task = stateLock.withLock { () -> UUID? in
+            forgetting.insert(registration); snapshot.capabilityStatuses[registration] = "Revoking grants; removal has not completed."
+            return state.registrations.first { $0.id == registration }?.taskID
+        }
+        if let task { lifecycleFence.withLock { liveProbe }?.cancel(taskID: task) }
         emit()
         worker.async { [weak self] in
             guard let self else { return }
@@ -579,11 +586,12 @@ final class DeviceMessagingOwner: @unchecked Sendable {
         }
         emit()
     }
-    func stop() {
+    func stop(expectedGeneration: UUID? = nil, failure: String? = nil) {
         let closing: UUID? = stateLock.withLock {
-            guard !snapshot.stopping else { return nil }
+            guard !snapshot.stopping, expectedGeneration == nil || generation == expectedGeneration else { return nil }
             generation = UUID(); enabled = false; state.invalidate()
             snapshot.enabled = false; snapshot.stopping = true
+            if let failure { snapshot.error = failure }
             return generation
         }
         guard let closing else { return }; emit()
@@ -618,5 +626,12 @@ final class DeviceMessagingOwner: @unchecked Sendable {
                 self.emit()
             }
         }
+    }
+    /// Test teardown only, called off both owner queues after releasing holds.
+    /// Drains actual authority teardown and worker cleanup before temp deletion.
+    func stopAndDrainForTesting() {
+        stop()
+        lifecycle.sync {}
+        worker.sync {}
     }
 }

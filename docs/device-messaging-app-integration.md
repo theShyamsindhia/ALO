@@ -7,9 +7,19 @@ or approve a task based on a CLI exit code.
 
 The separate pure controller checkpoint passed 25 tests in four suites after a
 first compile-only Swift Testing macro error was corrected by evaluating
-mutating expressions before assertions. The runnable owner/settings/CLI delta
-has not yet been compiled or run. No app or two-Mac delivery validation is
-claimed by that pure result.
+mutating expressions before assertions. The first runnable integration compiled
+successfully but had three fixture readiness failures among 59 tests: macOS
+canonicalized the approved helper path from `/private/tmp` to `/tmp`. A labeled
+diagnostic run established that exact mismatch; correcting the expected
+canonical path preserved the protected socket path and all timing limits.
+
+The corrected owner controls then exposed one real failure among six tests:
+explicit enable could not recover after an actual occupying socket owner
+stopped. Generation-checked ingress-only failure cleanup fixed it. The full
+focused checkpoint passed **60 tests in ten suites** (160.33-second build,
+11.065-second runtime), including actual owner/socket/TLS/capability and existing
+spawn/receipt regressions. Installed-app, two-owner outbound and physical
+two-Mac delivery validation are not claimed by that result.
 
 ## Explicit workflow
 
@@ -59,6 +69,6 @@ retire the captured discovery/receiver instance and require explicit re-enable.
   duplicates remain protected until expiry, and stopped probes reject work.
 - Exact shell quoting, Dev/release endpoint mapping and bounded CLI rejection.
 
-These are prepared tests, not runtime results until the integrated run completes.
-Final dependency correction integration, focused runtime validation, independent
+These boundaries passed in the 60-test checkpoint, including PR8's corrected
+competing socket-lock creation path. Two-owner outbound validation, independent
 reviews, full CI and explicitly authorized physical app testing remain required.
