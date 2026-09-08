@@ -6,6 +6,9 @@ public enum FirstContactPolicy: Sendable {
     /// The local user explicitly joined/created this room. This permits encrypted first
     /// contact, which is not verified human identity. Persist only after room admission.
     case explicitRoomJoin
+    /// Local device-messaging opt-in permits encrypted first contact only.
+    /// Network root/device membership admission must follow before any text.
+    case explicitNetworkDeviceMessaging
 }
 
 public protocol PeerPinStore: AnyObject {
@@ -77,7 +80,7 @@ public enum PeerTrustVerifier {
         if let pinned = try pins.pin(for: peer.nodeID) {
             guard pinned == peer.publicKeyHash else { throw IdentityError.changedPeerKey }
         } else {
-            guard firstContact == .explicitRoomJoin else { throw IdentityError.unknownPeer }
+            guard firstContact == .explicitRoomJoin || firstContact == .explicitNetworkDeviceMessaging else { throw IdentityError.unknownPeer }
         }
         return peer
     }
