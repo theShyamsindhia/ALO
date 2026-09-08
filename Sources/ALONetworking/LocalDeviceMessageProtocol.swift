@@ -58,7 +58,7 @@ public enum LocalDeviceMessageProtocol {
         public enum Status: String, Codable, Sendable {
             case pendingApproval, capabilityPending, ready, revoked, disabled
             case authenticatedReceipt, codexQueued, deliveredConfirmed, definitelyNotQueued, uncertain
-            case rejected, unavailable
+            case pending, statusUnknown, rejected, unavailable
         }
         public let version: Int
         public let status: Status
