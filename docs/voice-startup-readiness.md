@@ -45,3 +45,19 @@ This addresses startup clipping, not a proven cause or fix for persistent
 muffling, low volume, Bluetooth distortion, or media synchronization. Native
 speech quality and broader integration require separate evidence. These tests
 do not claim acoustic delivery.
+
+The phase presentation follow-up reproduced eight runtime assertions across
+five tests using the unchanged production mapping: automatic restart could leave
+Connecting text after readiness, idle could claim Talk was off with remaining
+targets or retain Connecting over incoming/Open Line status, and local Open Line
+presence omitted its microphone state. The shared pure presentation boundary
+now reports ready speech, paused selected targets, and other active voice status;
+it does not authorize capture. The existing channel-generation fence remains in
+the GUI. Phase callbacks are synchronous before startup errors are presented,
+so failure messages retain precedence.
+
+The corrected mapping passed 36 tests in six suites together with the readiness,
+startup, intent, and route regressions. That run preceded mechanical removal of
+an unused previous-status parameter; the next integrated build validates that
+cleanup. These status tests use no microphone or playback and do not test a live
+GUI window or acoustic behavior.

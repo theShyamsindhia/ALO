@@ -2295,9 +2295,28 @@ final class ALOViewModel: ObservableObject {
             voiceCapturePhaseHandler: { [weak self] state in
                 guard let self, self.channelOpenGeneration == generation, !self.isLeavingRoom else { return }
                 let hasTalkTargets = !self.effectiveTalkTargetIDs.intersection(self.currentRemoteParticipantIDs).isEmpty
-                self.walkieStarting = state == .connecting && hasTalkTargets
-                self.walkieTalking = state == .ready && hasTalkTargets
-                if state == .connecting { self.statusText = "Connecting voice to selected devices…" }
+                let targets = self.effectiveTalkTargetIDs.intersection(self.currentRemoteParticipantIDs)
+                let names = self.participants.filter { targets.contains($0.id) }.map(\.name)
+                let talkingStatus = targets == self.currentRemoteParticipantIDs
+                    ? "Talking to everyone" : "Talking to \(ListFormatter.localizedString(byJoining: names))"
+                let otherVoiceStatus: String?
+                switch self.openLineState {
+                case .inviting(let invitation):
+                    otherVoiceStatus = "Waiting for \(self.openLinePeerName(invitation)) to join the line"
+                case .invited(let invitation):
+                    otherVoiceStatus = "\(invitation.callerName) invited you to open a line"
+                case .connected(let invitation):
+                    otherVoiceStatus = "Line open with \(self.openLinePeerName(invitation))"
+                case .idle:
+                    let incoming = self.participants.filter { self.incomingWalkieSpeakerIDs.contains($0.id) }.map(\.name)
+                    otherVoiceStatus = self.incomingWalkieSpeakerIDs.isEmpty ? nil
+                        : "\(incoming.isEmpty ? "Someone" : ListFormatter.localizedString(byJoining: incoming)) is talking to you"
+                }
+                let presentation = VoiceCapturePresentation.phase(state, hasTalkTargets: hasTalkTargets,
+                    talkingStatus: talkingStatus, otherVoiceStatus: otherVoiceStatus)
+                self.walkieStarting = presentation.starting
+                self.walkieTalking = presentation.talking
+                self.statusText = presentation.status
             },
             incomingOpenLineInvitationHandler: { [weak self] invitation in
                 guard let self else { return }
@@ -5308,7 +5327,9 @@ struct FloatingRoomView: View {
 
     private func participantPresence(_ participant: RoomParticipant) -> String {
         let isLocal = participant.id == model.currentParticipantID
-        if model.incomingWalkieSpeakerIDs.contains(participant.id) || (isLocal && model.walkieTalking) {
+        if VoiceCapturePresentation.isSpeaking(isLocal: isLocal, talk: model.walkieTalking,
+            openLineMicrophone: model.openLineState.isSendingMicrophone,
+            incoming: model.incomingWalkieSpeakerIDs.contains(participant.id)) {
             return "Talking"
         }
         if participant.isMuted { return "Audio muted" }
