@@ -17,6 +17,11 @@ struct ALOError: LocalizedError {
 enum ALOCommand {
     static func main() async {
         do {
+            let arguments = Array(CommandLine.arguments.dropFirst())
+            // This explicit local CLI branch precedes every GUI/preview path.
+            if arguments.first == "codex" {
+                try DeviceMessagingCommandRunner.run(Array(arguments.dropFirst())); return
+            }
             #if DEBUG
             if Bundle.main.object(forInfoDictionaryKey: "ALORoomPreview") as? Bool == true {
                 RoomPresentationPreview.run(); return
@@ -25,7 +30,6 @@ enum ALOCommand {
             if Bundle.main.object(forInfoDictionaryKey: "ALOActivityPreview") as? Bool == true {
                 ArenaStandalone.run(); return
             }
-            let arguments = Array(CommandLine.arguments.dropFirst())
             guard let command = arguments.first, !command.hasPrefix("-psn") else {
                 GUIApplication.run()
                 return

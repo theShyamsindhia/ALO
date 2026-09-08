@@ -48,6 +48,7 @@
     <string>ALO controls media apps and system features only when you use the corresponding enabled notch controls.</string>
     <key>NSBonjourServices</key>
     <array>
+        <string>_alo-codex._tcp</string>
         <string>_alo-network._tcp</string>
         <string>_alo-peer._tcp</string>
         <string>_alo-data._udp</string>
