@@ -23,6 +23,10 @@ struct DeviceMessagingVerticalSliceTests {
         #expect(lstat(release.deletingLastPathComponent().path, &parent) == 0)
         #expect(parent.st_uid == geteuid() && parent.st_mode & 0o077 == 0)
         #expect(release.appendingPathComponent("ingress.sock").path.utf8.count < 104)
+        let largestUID = try DeviceMessagingLocalEndpoint.directory(bundleID: "in.werai.audio", development: false, owner: uid_t.max)
+        #expect(largestUID != release)
+        #expect(largestUID.path.utf8.count == release.path.utf8.count)
+        #expect(largestUID.appendingPathComponent("ingress.sock").path.utf8.count < 104)
         #expect(try DeviceMessagingLocalEndpoint.directory(bundleID: String(repeating: "x", count: 10000), development: false, owner: 501).appendingPathComponent("ingress.sock").path.utf8.count < 104)
     }
     #if os(macOS)

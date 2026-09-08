@@ -49,9 +49,10 @@ enum DeviceMessagingCommandRunner {
     /// exit 1. A successful exit still never proves task delivery.
     static func requireAcceptedResponse(_ response: LocalDeviceMessageProtocol.Response) throws {
         switch response.status {
-        case .disabled, .revoked, .rejected, .unavailable:
+        case .disabled, .revoked, .rejected, .unavailable, .definitelyNotQueued:
             throw ALOError("ALO did not accept the request (\(response.status.rawValue)). Inspect Settings or query existing status before resending; no automatic retry was attempted.")
-        default: break
+        case .pendingApproval, .capabilityPending, .ready, .authenticatedReceipt,
+             .codexQueued, .deliveredConfirmed, .uncertain, .pending, .statusUnknown: break
         }
     }
     static var endpointDirectory: URL {
