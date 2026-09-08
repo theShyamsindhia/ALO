@@ -14,6 +14,60 @@ struct NativePresentationTests {}
 extension NativePresentationTests {
     @Suite(.serialized) @MainActor
     struct NetworksPresentationTests {
+        @Test("Join-error states preserve native window size and account state", arguments: [false, true], [false, true])
+        func joinErrorRendering(dark: Bool, long: Bool) async throws {
+            _ = NSApplication.shared
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("alo-error-ui-\(UUID().uuidString)")
+            let suite = "alo-error-ui-\(UUID().uuidString)"
+            let defaults = try #require(UserDefaults(suiteName: suite))
+            defer { defaults.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: directory) }
+            let storage = PresentationKeyStorage()
+            let account = NetworkAccountModel(defaults: defaults,
+                repository: NetworkRepository(directoryURL: directory), identityStore: UserIdentityStore(storage: storage))
+            account.displayName = "Test user"
+            try account.createIdentity()
+            try await account.completeIdentitySetup()
+            let model = ALOViewModel(discoverRooms: false, account: account)
+            let message = long
+                ? "The nearby connection closed before approval. Try joining again while the network owner has ALO open and both devices are connected to the same local network."
+                : "The nearby connection closed. Try joining again."
+            model.errorMessage = message
+            let insertCount = storage.insertCount
+            for size in [NSSize(width: 640, height: 440), NSSize(width: 760, height: 520)] {
+                let window = NSWindow(contentRect: NSRect(origin: NSPoint(x: -2000, y: 0), size: size),
+                    styleMask: [.titled, .closable], backing: .buffered, defer: false)
+                window.isReleasedWhenClosed = false
+                defer { window.close() }
+                NetworkSetupWindowPresentation.configure(window, identityReady: true)
+                window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+                let hosting = NSHostingView(rootView: ALOView(model: model)
+                    .environment(\.colorScheme, dark ? .dark : .light)
+                    .environment(\.controlActiveState, .active)
+                    .transaction { $0.disablesAnimations = true })
+                window.contentView = hosting
+                window.setContentSize(size)
+                window.orderBack(nil)
+                try await Task.sleep(for: .milliseconds(300))
+                hosting.layoutSubtreeIfNeeded()
+                let bitmap = try #require(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
+                hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
+                if let path = ProcessInfo.processInfo.environment["ALO_NETWORKS_SNAPSHOT_DIR"] {
+                    try FileManager.default.createDirectory(atPath: path, withIntermediateDirectories: true)
+                    let png = try #require(bitmap.representation(using: .png, properties: [:]))
+                    try png.write(to:
+                        URL(fileURLWithPath: path).appendingPathComponent("join-error-\(long ? "long" : "short")-\(dark ? "dark" : "light")-\(Int(size.width)).png"))
+                }
+                #expect(hosting.bounds.size == size)
+                #expect(window.contentLayoutRect.size == size)
+                #expect(model.errorMessage == message)
+                #expect(account.identityReady)
+                #expect(model.phase == .idle)
+                #expect(account.selectedNetwork == nil)
+                #expect(account.networks.isEmpty)
+                #expect(storage.insertCount == insertCount)
+            }
+        }
+
         @Test("Networks and identity screens render without joining or creating keys",
               arguments: [false, true], ["identity", "recovery", "empty", "main", "channels"])
         func presentation(dark: Bool, state: String) async throws {

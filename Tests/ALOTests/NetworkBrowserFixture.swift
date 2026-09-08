@@ -7,6 +7,7 @@ import ALONetworkUI
 struct NetworkBrowserFixture: View {
     let state: String
     var onSidebarProbe: ((NSView) -> Void)? = nil
+    var onDetailProbe: ((NSView) -> Void)? = nil
     @State private var networkID: String? = "studio"
     @State private var channelID: String? = "main"
 
@@ -62,6 +63,7 @@ struct NetworkBrowserFixture: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             }
+            .background(NetworkSidebarGeometryProbe(onCreate: onDetailProbe))
         }
     }
 }

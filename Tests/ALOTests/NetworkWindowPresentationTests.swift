@@ -104,11 +104,13 @@ struct NetworkWindowPresentationTests {
         for dark in [false, true] {
             for size in [NSSize(width: 640, height: 440), NSSize(width: 760, height: 520)] {
                 let window = makeWindow()
+                defer { window.close() }
                 NetworkSetupWindowPresentation.configure(window, identityReady: true)
                 window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
                 var sidebarProbe: NSView?
+                var detailProbe: NSView?
                 window.contentView = NSHostingView(rootView: NetworkBrowserFixture(state: state,
-                    onSidebarProbe: { sidebarProbe = $0 })
+                    onSidebarProbe: { sidebarProbe = $0 }, onDetailProbe: { detailProbe = $0 })
                     .environment(\.controlActiveState, .active)
                     .transaction { $0.disablesAnimations = true })
                 window.setContentSize(size)
@@ -127,13 +129,19 @@ struct NetworkWindowPresentationTests {
                 #expect(abs(bounds.minX) < 0.5)
                 #expect(bounds.width >= ALONativeNetworkLayout.minimumSidebarWidth)
                 #expect(bounds.width <= ALONativeNetworkLayout.maximumSidebarWidth)
+                let detail = try #require(detailProbe)
+                let detailBounds = detail.convert(detail.bounds, to: window.contentView)
+                let dividerWidth = detailBounds.minX - bounds.maxX
+                #expect(dividerWidth > 0 && dividerWidth <= 1)
+                #expect(abs(detailBounds.maxX - size.width) < 0.5)
+                #expect(abs(detailBounds.minY - bounds.minY) < 0.5)
+                #expect(abs(detailBounds.height - bounds.height) < 0.5)
                 if let directory = ProcessInfo.processInfo.environment["ALO_NETWORKS_SNAPSHOT_DIR"] {
                     try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
                     let data = try #require(bitmap.representation(using: .png, properties: [:]))
                     try data.write(to: URL(fileURLWithPath: directory)
                         .appendingPathComponent("window-\(state)-\(dark ? "dark" : "light")-\(Int(size.width)).png"))
                 }
-                window.close()
             }
         }
     }

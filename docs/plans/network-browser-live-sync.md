@@ -833,3 +833,15 @@ Log: `/tmp/alo-native-window.3Y1znX/shared-sizing-green.log`; final images:
 `/tmp/alo-native-window.3Y1znX/review-fixed`. Full-suite and external follow-up
 review remain subsequent gates; no installation or physical listening pass is
 implied by this focused result.
+
+The subsequent review's claimed bottom error/identity-row overlap was not
+reproduced. Actual account-backed short/long errors at minimum size render below
+the identity footer with clear separation; production layout was not changed.
+The attempted in-process accessibility traversal exposed only the window, so its
+four failed prerequisites are preserved as a fixture limitation, not a production
+RED (`/tmp/alo-native-error-repro.XyHACx/tests.log`). The retained regression is
+honestly named error rendering/window bounds with unchanged account state, not
+an automated overlap guarantee. Public fixtures additionally check detail trailing
+edge, positive native divider gap, and aligned column heights; their 28 cases
+passed. Window cleanup uses `defer` so a failed assertion cannot leak a fixture.
+No production probe, startup trust shortcut or cross-launch autosave was added.
