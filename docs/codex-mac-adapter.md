@@ -11,8 +11,9 @@ and idempotent `Started.waitForOutcome`; `Runner.run` delegates to them for the
 existing tests. Preparation validates/hashes/configures only, and abandoning it
 closes pipes without launching. Start consumes its preparation even on launch
 failure and performs no hashing or waiting. Waiting computes one cached outcome
-outside policy locks. Dropping an owned started handle requests child termination
-and closes pipes without waiting (not descendant-process containment). The new
+outside policy locks. Dropping an owned started handle immediately sends SIGKILL
+to its owned child (no grace period or child cleanup) and closes pipes without
+waiting (not descendant-process containment). The new
 split is not itself authorization: service-fence integration below remains design
 only. Added marker-helper tests cover no-spawn preparation/abandonment, duplicate
 start exclusion, repeated outcome reads and actual native launch failure.
@@ -28,6 +29,13 @@ Command: `swift test -c release --jobs 1 --no-parallel -Xswiftc -num-threads
 validation with harmless helpers, not full-app, policy-fence, or actual Codex
 delivery validation.
 
+Both `.github/workflows/verify.yml` and `build-apple-silicon.yml` already compile
+tests with the same test-only SIL entrypoint workarounds and execute them with
+`--no-parallel`. These are not adapter-specific flags or production packaging
+flags. Local `nice 19`, one build job and one frontend thread limit local load;
+they are not a promise of idle CI hardware. The five-second default runner
+deadline and two-second exit-observation prerequisite remain unchanged.
+
 The internal builder accepts a UUID selected by local consent, authenticated root
 identity, message UUID, and at most 16 KiB of peer text. It emits only the fixed
 `queue --thread UUID --message TEXT` argument array. JSON attribution preserves
@@ -36,6 +44,9 @@ a guarantee that a receiving language model will ignore prompt injection.
 
 The receiver approves a canonical executable path and SHA-256 digest. No PATH
 lookup, peer executable, task name, config flags, cwd, or environment is accepted.
+`approvedDigest` exposes the locally computed digest; a subsequent explicit local
+approval can supply `expectedDigest` and rejects any mismatch. No approval is
+automatically saved, loaded or granted by this adapter.
 The runner uses the local owner's home and a minimal environment. Rechecking the
 digest catches replacement before launch; Foundation Process still executes by
 pathname, so local replacement between verification and exec is a documented
@@ -54,6 +65,23 @@ or filesystem stalls. The runner does not wait for pipe EOF, which descendants
 could retain. It does not claim process-tree containment: an approved executable
 must itself be trusted not to detach work. Raw captures are internal diagnostics,
 not logs, and may contain private task/message information.
+The fixed CLI contract also exposes attributed message text in process arguments
+to same-user process inspection during the child's lifetime. Prefer a supported
+stdin/file form if the CLI provides one in future; this adapter does not invent it.
+Positive PID checks prevent accidentally signalling PID zero/process groups.
+They do not eliminate Foundation's exit/reap/PID-reuse race between observation
+and signalling; this remains a limitation of the current owned-Process approach.
+
+Review follow-up tests strengthen environment isolation with a
+set-and-restored canary, distinguish native launch failure from consumed-start
+rejection, verify expected executable digests, and use a self-terminating
+hold-file descendant instead of signalling a recorded raw PID. The original
+timeout and pipe-open prerequisites are retained.
+All 13 adapter tests passed in 2.745 seconds before rebasing onto PR5 `127e522`
+(`/tmp/alo-codex-mac-adapter.9xPTlE/review-fixes-green.log`). This is pre-rebase
+adapter evidence, not a combined transport/adapter integration run. The rebased
+stack still requires compilation and independent follow-up review; no application
+or actual Codex delivery was tested.
 
 Tests only create temporary harmless helper programs. They never invoke installed
 Codex, enumerate tasks, inspect private IPC/databases, or send real messages.

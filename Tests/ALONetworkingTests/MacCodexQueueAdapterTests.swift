@@ -59,13 +59,20 @@ struct MacCodexQueueAdapterTests {
     }
 
     @Test func actualHelperReceivesExactArgumentsAndMinimalEnvironment() throws {
-        try withHelper("printf '%s\\n' \"$#\" \"$1\" \"$2\" \"$3\" \"$4\" \"$5\"\nprintf 'ENV:%s:%s\\n' \"$PATH\" \"${CODEX_HOME-unset}\"\n") { url in
+        let previous = getenv("ALO_ENV_LEAK_CANARY").map { String(cString: $0) }
+        setenv("ALO_ENV_LEAK_CANARY", "must-not-be-inherited", 1)
+        defer {
+            if let previous { setenv("ALO_ENV_LEAK_CANARY", previous, 1) }
+            else { unsetenv("ALO_ENV_LEAK_CANARY") }
+        }
+        #expect(getenv("ALO_ENV_LEAK_CANARY").map { String(cString: $0) } == "must-not-be-inherited")
+        try withHelper("printf '%s\\n' \"$#\" \"$1\" \"$2\" \"$3\" \"$4\" \"$5\"\nprintf 'ENV:%s:%s:%s\\n' \"$PATH\" \"${CODEX_HOME-unset}\" \"${ALO_ENV_LEAK_CANARY-unset}\"\n") { url in
             let value = try invocation("literal $(echo should-not-execute) and --model other")
             let runner = Adapter.Runner(executable: try .init(locallyApprovedURL: url))
             let result = runner.run(value)
             #expect(result.outcome == .codexQueued)
             let text = String(decoding: result.stdout, as: UTF8.self)
-            #expect(text == (["5"] + value.arguments).joined(separator: "\n") + "\nENV:/usr/bin:/bin:unset\n")
+            #expect(text == (["5"] + value.arguments).joined(separator: "\n") + "\nENV:/usr/bin:/bin:unset:unset\n")
             #expect(!result.timedOut && !result.outputTruncated)
         }
     }
@@ -89,6 +96,20 @@ struct MacCodexQueueAdapterTests {
             #expect(runner.run(try invocation()).outcome == .definitelyNotQueued)
         }
     }
+    @Test func localApprovalCanReverifyAnExplicitDigestWithoutAutoApproval() throws {
+        try withHelper("exit 0\n") { url in
+            let approved = try Adapter.ApprovedExecutable(locallyApprovedURL: url)
+            #expect(approved.approvedDigest.count == 32)
+            _ = try Adapter.ApprovedExecutable(locallyApprovedURL: url, expectedDigest: approved.approvedDigest)
+            #expect(throws: Adapter.AdapterError.invalidExecutable) {
+                try Adapter.ApprovedExecutable(locallyApprovedURL: url, expectedDigest: Data(repeating: 0, count: 32))
+            }
+            try Data("#!/bin/sh\nexit 1\n".utf8).write(to: url)
+            #expect(throws: Adapter.AdapterError.invalidExecutable) {
+                try Adapter.ApprovedExecutable(locallyApprovedURL: url, expectedDigest: approved.approvedDigest)
+            }
+        }
+    }
 
     @Test func boundsBothPipesWhileDrainingFlood() throws {
         try withHelper("i=0\nwhile [ \"$i\" -lt 3000 ]; do printf '01234567890123456789'; printf 'abcdefghijklmnopqrst' >&2; i=$((i+1)); done\n") { url in
@@ -109,16 +130,13 @@ struct MacCodexQueueAdapterTests {
             #expect(result.outcome == .uncertain && result.timedOut)
             #expect(start.duration(to: clock.now) < .seconds(1))
         }
-        try withHelper("/bin/sleep 5 &\nprintf '%s' \"$!\" > \"$0.child\"\nwhile [ ! -f \"$0.release\" ]; do /bin/sleep 0.01; done\nexit 0\n") { url in
+        try withHelper(": > \"$0.hold\"\n(i=0; while [ -f \"$0.hold\" ] && [ \"$i\" -lt 100 ]; do /bin/sleep 0.05; i=$((i+1)); done) &\nwhile [ ! -f \"$0.release\" ]; do /bin/sleep 0.01; done\nexit 0\n") { url in
             let clock = ContinuousClock()
             let start = clock.now
             var exitObserved = false, descendantPipeOpen = false
             var prerequisiteCompleted: ContinuousClock.Instant?
-            defer {
-                // The fixed helper writes only its own freshly spawned sleep PID.
-                if let value = try? String(contentsOfFile: url.path + ".child", encoding: .utf8),
-                   let pid = Int32(value), pid > 0 { _ = kill(pid, SIGTERM) }
-            }
+            // The descendant exits when withHelper removes its private hold
+            // file, with a bounded 100-iteration fallback; no raw PID signalling.
             let result = Adapter.Runner(executable: try .init(locallyApprovedURL: url)).run(try invocation(), timeout: 0.5) { process in
                 try! Data().write(to: URL(fileURLWithPath: url.path + ".release"))
                 exitObserved = observeExit(process)
@@ -212,8 +230,13 @@ struct MacCodexQueueAdapterTests {
             // Preparation did not launch. Removing only this owned helper now
             // produces a real native launch failure, not a fabricated outcome.
             try FileManager.default.removeItem(at: url)
-            #expect(throws: (any Error).self) { try prepared.start() }
-            #expect(throws: (any Error).self) { try prepared.start() }
+            do {
+                _ = try prepared.start()
+                Issue.record("Removed executable must cause an actual native launch failure")
+            } catch {
+                #expect((error as? Adapter.AdapterError) != .alreadyConsumed)
+            }
+            #expect(throws: Adapter.AdapterError.alreadyConsumed) { try prepared.start() }
         }
     }
 }

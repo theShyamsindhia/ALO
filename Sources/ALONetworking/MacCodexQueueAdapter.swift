@@ -8,7 +8,7 @@ import ALOIdentity
 /// to call this runner. App integration requires a policy-serialized process-start
 /// fence against revocation before exposing any execution path.
 enum MacCodexQueueAdapter {
-    enum AdapterError: Error { case invalidText, invalidExecutable, invalidTimeout, pipeSetup, alreadyConsumed }
+    enum AdapterError: Error, Equatable { case invalidText, invalidExecutable, invalidTimeout, pipeSetup, alreadyConsumed }
 
     struct Invocation {
         let arguments: [String]
@@ -45,18 +45,21 @@ enum MacCodexQueueAdapter {
     /// required; no peer can supply this value and this is not the revocation fence.
     struct ApprovedExecutable {
         let url: URL
-        private let digest: Data
+        let approvedDigest: Data
 
-        init(locallyApprovedURL: URL) throws {
+        init(locallyApprovedURL: URL, expectedDigest: Data? = nil) throws {
             guard locallyApprovedURL.isFileURL, locallyApprovedURL.path.hasPrefix("/") else {
                 throw AdapterError.invalidExecutable
             }
             url = locallyApprovedURL.resolvingSymlinksInPath().standardizedFileURL
-            digest = try Self.hash(url)
+            approvedDigest = try Self.hash(url)
+            if let expectedDigest {
+                guard expectedDigest.count == 32, expectedDigest == approvedDigest else { throw AdapterError.invalidExecutable }
+            }
         }
 
         func verify() throws {
-            guard try Self.hash(url) == digest else { throw AdapterError.invalidExecutable }
+            guard try Self.hash(url) == approvedDigest else { throw AdapterError.invalidExecutable }
         }
 
         private static func hash(_ url: URL) throws -> Data {
@@ -90,7 +93,8 @@ enum MacCodexQueueAdapter {
 
     /// Owns pipes throughout preparation/start/wait. Dropping an unstarted
     /// preparation closes its descriptors without launching anything. Dropping a
-    /// started handle requests termination of its owned child, without waiting.
+    /// started handle immediately kills its owned child without a grace period
+    /// or child cleanup, then closes pipes without waiting.
     fileprivate final class NativeResources {
         let process = Process()
         let output = Pipe(), errors = Pipe()
@@ -100,7 +104,8 @@ enum MacCodexQueueAdapter {
             try? output.fileHandleForWriting.close(); try? errors.fileHandleForWriting.close()
         }
         deinit {
-            if process.isRunning { _ = kill(process.processIdentifier, SIGKILL) }
+            let pid = process.processIdentifier
+            if process.isRunning, pid > 0 { _ = kill(pid, SIGKILL) }
             closePipes()
         }
     }
@@ -228,7 +233,8 @@ enum MacCodexQueueAdapter {
                     Self.drain(errFD, into: &err, truncated: &truncated)
                     Thread.sleep(forTimeInterval: 0.005)
                 }
-                if process.isRunning { _ = kill(process.processIdentifier, SIGKILL) }
+                let pid = process.processIdentifier
+                if process.isRunning, pid > 0 { _ = kill(pid, SIGKILL) }
             }
             // Do not wait for EOF: descendants may retain the pipe indefinitely.
             // Each drain also has a work bound, so an output flood cannot prevent
