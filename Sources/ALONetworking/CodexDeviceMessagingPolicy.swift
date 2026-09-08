@@ -336,6 +336,16 @@ public struct CodexDeviceMessagingPolicy: Sendable {
         records[key]?.receipt = .delivered
     }
 
+    mutating func currentReceipt(grantID: UUID, messageID: UUID,
+                                context: NetworkDeviceAuthorization.Context, now: UInt64) throws -> Receipt {
+        try advance(now)
+        _ = try authorized(grantID, context: context, now: now)
+        guard let receipt = records[Key(grantID: grantID, messageID: messageID)]?.receipt else {
+            throw CodexDeviceMessagingError.unauthorized
+        }
+        return receipt
+    }
+
     private func authorized(_ id: UUID, context: NetworkDeviceAuthorization.Context, now: UInt64) throws -> Grant {
         guard isEnabled else { throw CodexDeviceMessagingError.disabled }
         guard let grant = grants[id], !grant.revoked, grant.scope == CodexDeviceMessagingScope(context) else {

@@ -117,6 +117,19 @@ public final class CodexDeviceMessageService: @unchecked Sendable {
             try commit { try $0.receive(envelope, context: context, now: now) }
         }
     }
+    /// Wire queries share the stable per-grant replay budget across reconnects.
+    func queryReceipt(grantID: UUID, messageID: UUID, connection: UUID) throws -> CodexDeviceMessagingPolicy.Receipt {
+        try current(connection, queryGrant: grantID) { context, now in
+            try commit { try $0.currentReceipt(grantID: grantID, messageID: messageID, context: context, now: now) }
+        }
+    }
+    /// Local publication uses the same authorization fence, but is not a new
+    /// remote query and cannot charge the peer for an unsolicited local change.
+    func currentReceipt(grantID: UUID, messageID: UUID, connection: UUID) throws -> CodexDeviceMessagingPolicy.Receipt {
+        try current(connection) { context, now in
+            try commit { try $0.currentReceipt(grantID: grantID, messageID: messageID, context: context, now: now) }
+        }
+    }
     /// Durable dispatch admission, linearized against locally applied policy
     /// and grant revocation. No external side effect happens here. The adapter
     /// must revalidate and fence actual process start against revocation under

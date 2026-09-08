@@ -12,24 +12,47 @@ enum NetworkDeviceAdmissionLimits {
 /// Owner-queue-only bounded protocol bookkeeping. Digests retain no peer text.
 struct NetworkDeviceResponseLedger {
     struct Key: Hashable { let grant: UUID; let message: UUID }
-    private var pending: [Key: Data] = [:]
+    private struct Observation {
+        let digest: Data?
+        var receipt: CodexDeviceMessagingPolicy.Receipt?
+    }
+    private var pending: [Key: Observation] = [:]
     private var grants = Set<UUID>()
     var pendingCount: Int { pending.count }
     /// False coalesces an identical in-flight send without a second frame.
     mutating func reserve(_ key: Key, digest: Data) throws -> Bool {
         if let old = pending[key] {
-            guard old == digest else { throw CodexDeviceMessagingError.duplicateConflict }
+            guard old.digest == digest else { throw CodexDeviceMessagingError.duplicateConflict }
             return false
         }
         guard pending.count < 32 else { throw CodexDeviceMessagingError.capacity }
-        pending[key] = digest; return true
+        pending[key] = Observation(digest: digest); return true
     }
-    mutating func resolve(_ key: Key) throws {
-        guard pending.removeValue(forKey: key) != nil else { throw CodexDeviceMessagingError.unauthorized }
+    /// Explicit status observation never resends the original text.
+    mutating func reserveQuery(_ key: Key) throws -> Bool {
+        if pending[key] != nil { return false }
+        guard pending.count < 32 else { throw CodexDeviceMessagingError.capacity }
+        pending[key] = Observation(digest: nil); return true
+    }
+    /// Returns false for an identical intermediate update. Terminal observations
+    /// are released; subsequent evidence requires a new explicit status query.
+    mutating func resolve(_ key: Key, receipt: CodexDeviceMessagingPolicy.Receipt) throws -> Bool {
+        guard var observation = pending[key] else { throw CodexDeviceMessagingError.unauthorized }
+        if observation.receipt == receipt { return false }
+        if observation.receipt == .dispatching, receipt == .received {
+            throw CodexDeviceMessagingError.unauthorized
+        }
+        if receipt == .received || receipt == .dispatching {
+            observation.receipt = receipt; pending[key] = observation
+        } else { pending.removeValue(forKey: key) }
+        return true
     }
     mutating func reject(_ key: Key, reason: String?) throws {
         guard reason == "rateLimited" || reason == "capacity" else { throw CodexDeviceMessagingError.unauthorized }
-        try resolve(key)
+        guard let observation = pending[key], observation.receipt == nil else {
+            throw CodexDeviceMessagingError.unauthorized
+        }
+        pending.removeValue(forKey: key)
     }
     mutating func receivedGrant(_ id: UUID) throws {
         guard grants.count < CodexDeviceMessagingPolicy.maximumGrants,
