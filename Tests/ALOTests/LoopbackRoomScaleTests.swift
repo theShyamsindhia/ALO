@@ -1930,6 +1930,8 @@ private final class HeadlessLoopbackPeer {
     private var corruptedPackets = 0
     private var stopping = false
     private var setupEvents = [String]()
+    private var controlReadTermination: String?
+    var remoteControlTermination: String? { queue.sync { controlReadTermination } }
     var controlSetupEvidence: String { queue.sync { setupEvents.joined(separator: " | ") } }
 
     init(index: Int, participantID: String? = nil, expectedSample: Int16? = nil, deferredPCM: Bool = false) {
@@ -2200,6 +2202,9 @@ private final class HeadlessLoopbackPeer {
     private func receiveControl(from connection: NWConnection) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, complete, error in
             guard let self else { return }
+            if complete || error != nil {
+                self.controlReadTermination = complete ? "EOF" : "error: \(String(describing: error))"
+            }
             if let data {
                 for message in self.controlDecoder.append(data) {
                     if message.type == "welcome" {
@@ -3010,9 +3015,112 @@ private enum LoopbackTestError: Error {
 
 /// Held native callback lifecycle regressions sharing the real loopback peer.
 /// Active, stopped, replaced, and restarted owners exercise the delivered guards
-/// without audio samples or transport parameter alterations.
+/// including source restart PCM continuity, without transport parameter changes.
 @Suite(.serialized)
 struct HostServerCallbackLifecycleTests {
+    /// Retain delivered accepts so old control ObjectIdentifiers cannot be
+    /// accidentally recycled into the new cohort and hide stale eligibility.
+    private final class RetainedAccepts: @unchecked Sendable {
+        let lock = NSLock()
+        var callbacks: [() -> Void] = []
+        func deliver(_ callback: @escaping () -> Void) {
+            lock.withLock { callbacks.append(callback) }
+            callback()
+        }
+    }
+    private func eventually(_ condition: () -> Bool) -> Bool {
+        let deadline = ContinuousClock.now + .seconds(3)
+        while ContinuousClock.now < deadline {
+            if condition() { return true }
+            Thread.sleep(forTimeInterval: 0.001)
+        }
+        return condition()
+    }
+
+    @Test func activeHostRejectsSecondStartWithoutReplacingListener() throws {
+        let ready = DispatchSemaphore(value: 0), port = PortState()
+        let host = HostServer(roomName: "Double-start contract", advertise: false,
+            listenerReadyHandler: { port.set($0); ready.signal() })
+        try host.start(); defer { host.stop() }
+        try #require(ready.wait(timeout: .now() + 3) == .success)
+        let originalPort = try #require(port.port)
+        let peer = HeadlessLoopbackPeer(index: 830)
+        defer { peer.stop() }
+        try peer.start(hostPort: originalPort)
+        try #require(peer.waitUntilJoined(timeout: 3))
+        var rejection: String?
+        do { try host.start() }
+        catch let error as ALOError { rejection = error.localizedDescription }
+        catch { Issue.record("Unexpected second-start failure, not the already-running contract: \(error)") }
+        #expect(rejection == "Channel is already running.")
+        peer.sendPing()
+        #expect(peer.waitForPong(timeout: 3), "Rejected double start must preserve the original client's control route")
+    }
+
+    @Test func restartingHostReestablishesTimingEligibility() throws {
+        let ready = DispatchSemaphore(value: 0), port = PortState(), clock = LoopbackCaptureClock(), retained = RetainedAccepts()
+        let host = HostServer(roomName: "Restart timing contract", advertise: false,
+            listenerReadyHandler: { port.set($0); ready.signal() }, audioSendNowNanos: { clock.now },
+            acceptedDeliveryForTesting: { retained.deliver($0) })
+        try host.start(); defer { host.stop(); withExtendedLifetime(retained) {} }
+        try #require(ready.wait(timeout: .now() + 3) == .success)
+        let old = HeadlessLoopbackPeer(index: 831)
+        defer { old.stop() }
+        try old.start(hostPort: try #require(port.port)); try #require(old.waitUntilJoined(timeout: 3))
+        let samples = [Int16](repeating: 100, count: Int(AudioPacket.framesPerPacket) * Int(AudioPacket.channelCount))
+        host.acceptAudio(samples: samples, captureTimeNanos: clock.now)
+        try #require(eventually { old.packetCount == 1 })
+        host.stop(); old.stop()
+        while ready.wait(timeout: .now()) == .success {}
+        try host.start(); try #require(ready.wait(timeout: .now() + 3) == .success)
+        let fresh = HeadlessLoopbackPeer(index: 832)
+        defer { fresh.stop() }
+        try fresh.start(hostPort: try #require(port.port)); try #require(fresh.waitUntilJoined(timeout: 3))
+        host.acceptAudio(samples: samples, captureTimeNanos: clock.advance(by: 5_000_000))
+        try #require(eventually { fresh.packetCount == 1 })
+        fresh.recommendPlayoutDelay(RoomTiming.maximumPlayoutDelayNanos)
+        fresh.sendPing(); try #require(fresh.waitForPong(timeout: 3))
+        #expect(eventually { fresh.playoutDelays.last == RoomTiming.maximumPlayoutDelayNanos },
+            "First real listener of a restarted host must not inherit an old listener's excluded cohort")
+    }
+
+    @Test func restartingHostDiscardsPartialPCMFromPriorSession() throws {
+        let ready = DispatchSemaphore(value: 0), port = PortState(), clock = LoopbackCaptureClock()
+        let host = HostServer(roomName: "Restart partial PCM contract", advertise: false,
+            listenerReadyHandler: { port.set($0); ready.signal() }, audioSendNowNanos: { clock.now })
+        try host.start(); defer { host.stop() }
+        try #require(ready.wait(timeout: .now() + 3) == .success)
+        let packetSamples = Int(AudioPacket.framesPerPacket) * Int(AudioPacket.channelCount)
+        host.acceptAudio(samples: [Int16](repeating: 111, count: packetSamples / 2), captureTimeNanos: clock.now)
+        _ = host.clientCountForTesting // Drain actual packetizer ingress before stop.
+        host.stop()
+        while ready.wait(timeout: .now()) == .success {}
+        try host.start(); try #require(ready.wait(timeout: .now() + 3) == .success)
+        let fresh = HeadlessLoopbackPeer(index: 833, expectedSample: 222)
+        defer { fresh.stop() }
+        try fresh.start(hostPort: try #require(port.port)); try #require(fresh.waitUntilJoined(timeout: 3))
+        // Virtual capture gap remains below the independent 500ms pause-reset
+        // threshold even if real listener setup takes longer on CI.
+        host.acceptAudio(samples: [Int16](repeating: 222, count: packetSamples), captureTimeNanos: clock.advance(by: 2_500_000))
+        try #require(eventually { fresh.packetCount >= 1 })
+        #expect(fresh.corruptedPacketCount == 0, "New-session PCM must not contain the old partial packet")
+    }
+
+    @Test func oversizedControlRetirementClosesActualRemoteRead() throws {
+        let ready = DispatchSemaphore(value: 0), port = PortState()
+        let host = HostServer(roomName: "Overflow remote retirement", advertise: false,
+            listenerReadyHandler: { port.set($0); ready.signal() })
+        try host.start(); defer { host.stop() }
+        try #require(ready.wait(timeout: .now() + 3) == .success)
+        let peer = HeadlessLoopbackPeer(index: 834)
+        defer { peer.stop() }
+        try peer.start(hostPort: try #require(port.port)); try #require(peer.waitUntilJoined(timeout: 3))
+        peer.sendRawControl(Data(repeating: 65, count: 1024 * 1024 + 1))
+        try #require(eventually { host.clientCountForTesting == 0 }, "Actual decoder must retire the oversized-control client")
+        #expect(eventually { peer.remoteControlTermination != nil }, "Actual remote read must terminate, not just disappear from the host dictionary")
+        print("OVERSIZED_CONTROL_REMOTE_TERMINATION \(peer.remoteControlTermination ?? "not observed")")
+    }
+
     private final class Held: @unchecked Sendable {
         let lock = NSLock()
         var callback: (() -> Void)?
@@ -3089,6 +3197,7 @@ struct HostServerCallbackLifecycleTests {
         try #require(host.clientCountForTesting == 0)
         if retirement != 0 { host.stop() }
         if retirement == 2 {
+            while ready.wait(timeout: .now()) == .success {}
             try host.start()
             try #require(ready.wait(timeout: .now() + 3) == .success, "Replacement listener must really be ready")
         }

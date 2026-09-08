@@ -40,13 +40,9 @@ struct PrivateMediaIntegrationTests {
         try host.start()
         defer {
             host.stop()
-            audio.newConnectionHandler = nil; video.newConnectionHandler = nil
-            audio.cancel(); video.cancel()
             let connections = probe.stopConnections()
-            for connection in connections {
-                connection.stateUpdateHandler = nil
-                connection.cancel()
-            }
+            #expect(PrivateNativeRetirement.cancelAndWait(connections: connections, listeners: [audio, video], queue: queue),
+                "Private fixture must observe native cancellation before releasing its started resources")
         }
         for _ in 0..<200 {
             if audio.port != nil, video.port != nil, probe.lock.withLock({ probe.port != nil }) { break }
@@ -114,7 +110,7 @@ struct PrivateMediaIntegrationTests {
     }
 
     @Test
-    func teardownRejectsAlreadyQueuedAcceptWithoutStartingIt() {
+    func probeRegistrationAfterTeardownDoesNotStartOrRetainConnection() {
         let probe = PrivateHostProbe()
         let connection = NWConnection(host: "127.0.0.1", port: 1, using: .tcp)
         // Invoke the same registration path as a queued listener callback after
@@ -125,6 +121,77 @@ struct PrivateMediaIntegrationTests {
         defer { connection.cancel() }
         #expect(starts == 0)
         #expect(probe.stopConnections().isEmpty)
+    }
+
+    @Test func nativeFixtureWaitsForStartedConnectionAndListenerCancellation() throws {
+        let probe = PrivateHostProbe(), queue = DispatchQueue(label: "private-fixture.native-cancellation")
+        let listener = try NWListener(using: .tcp, on: .any)
+        let ready = DispatchSemaphore(value: 0), accepted = DispatchSemaphore(value: 0)
+        listener.stateUpdateHandler = { state in if case .ready = state { ready.signal() } }
+        listener.newConnectionHandler = { connection in
+            probe.registerConnection(connection) { connection.start(queue: queue) }
+            accepted.signal()
+        }
+        listener.start(queue: queue)
+        defer { _ = PrivateNativeRetirement.cancelAndWait(connections: probe.stopConnections(), listeners: [listener], queue: queue) }
+        try #require(ready.wait(timeout: .now() + 3) == .success)
+        let client = NWConnection(host: "127.0.0.1", port: try #require(listener.port), using: .tcp)
+        probe.registerConnection(client) { client.start(queue: queue) }
+        try #require(accepted.wait(timeout: .now() + 3) == .success, "Require a real accepted native connection")
+        let retired = probe.stopConnections()
+        try #require(retired.count == 2)
+        #expect(PrivateNativeRetirement.cancelAndWait(connections: retired, listeners: [listener], queue: queue))
+        #expect(retired.allSatisfy { if case .cancelled = $0.state { return true }; return false })
+        if case .cancelled = listener.state {} else { Issue.record("Listener did not reach native cancelled state") }
+    }
+}
+
+private enum PrivateNativeRetirement {
+    private final class Completion: @unchecked Sendable {
+        private let lock = NSLock()
+        private var completed = false
+        private let group: DispatchGroup
+        init(_ group: DispatchGroup) { self.group = group; group.enter() }
+        func finish() {
+            lock.withLock {
+                guard !completed else { return }
+                completed = true; group.leave()
+            }
+        }
+    }
+    /// Retain exact started resources until their native callbacks arrive. The
+    /// wait is never on the queue delivering those callbacks. A rejected late
+    /// registration did not start and is deliberately outside this snapshot.
+    static func cancelAndWait(connections: [NWConnection], listeners: [NWListener], queue: DispatchQueue) -> Bool {
+        dispatchPrecondition(condition: .notOnQueue(queue))
+        let group = DispatchGroup()
+        var completions: [Completion] = []
+        queue.sync {
+            for connection in connections {
+                if case .cancelled = connection.state { continue }
+                let completion = Completion(group)
+                completions.append(completion)
+                connection.stateUpdateHandler = { state in if case .cancelled = state { completion.finish() } }
+                connection.cancel()
+            }
+            for listener in listeners {
+                listener.newConnectionHandler = nil
+                if case .cancelled = listener.state { continue }
+                let completion = Completion(group)
+                completions.append(completion)
+                listener.stateUpdateHandler = { state in if case .cancelled = state { completion.finish() } }
+                listener.cancel()
+            }
+        }
+        let observed = group.wait(timeout: .now() + 3) == .success
+        queue.sync {
+            connections.forEach { $0.stateUpdateHandler = nil }
+            listeners.forEach { $0.stateUpdateHandler = nil }
+        }
+        // Balance bookkeeping after abandoning observation, without pretending
+        // native cancellation happened. The returned failure remains unchanged.
+        if !observed { completions.forEach { $0.finish() } }
+        return observed
     }
 }
 

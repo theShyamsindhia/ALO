@@ -197,43 +197,47 @@ final class HostServer {
         self.localParticipantID = localParticipantID
     }
 
+    /// Restart callers must retire old capture producers first. stop's queue
+    /// barrier drains already-enqueued ingress before resetting transport state;
+    /// acceptAudio itself does not carry a source-generation token.
     func start() throws {
-        let listener = try NWListener(using: mediaSecurity?.tcp() ?? LocalNetworkParameters.tcp(), on: .any)
-        if advertise {
-            listener.service = NWListener.Service(name: roomName, type: Self.serviceType)
-        }
-        listener.stateUpdateHandler = { [weak self, weak listener] state in
-            guard let self, let listener, self.listener === listener else { return }
-            switch state {
-            case .ready:
-                print("Channel \"\(self.roomName)\" is visible on the local network.")
-                self.statusHandler?("Channel is visible on your local network")
-                if let port = listener.port {
-                    self.listenerReadyHandler?(port)
-                }
-            case .failed(let error):
-                fputs("Host listener failed: \(error)\n", stderr)
-                self.statusHandler?("Could not open the channel: \(error.localizedDescription)")
-            default:
-                break
+        try queue.sync {
+            guard self.listener == nil else { throw ALOError("Channel is already running.") }
+            let listener = try NWListener(using: mediaSecurity?.tcp() ?? LocalNetworkParameters.tcp(), on: .any)
+            if advertise {
+                listener.service = NWListener.Service(name: roomName, type: Self.serviceType)
             }
-        }
-        listener.newConnectionHandler = { [weak self, weak listener] connection in
-            guard let self else { connection.cancel(); return }
-            let accept = { [weak self, weak listener] in
-                guard let self, let listener, self.listener === listener else {
-                    connection.cancel(); return
+            listener.stateUpdateHandler = { [weak self, weak listener] state in
+                guard let self, let listener, self.listener === listener else { return }
+                switch state {
+                case .ready:
+                    print("Channel \"\(self.roomName)\" is visible on the local network.")
+                    self.statusHandler?("Channel is visible on your local network")
+                    if let port = listener.port {
+                        self.listenerReadyHandler?(port)
+                    }
+                case .failed(let error):
+                    fputs("Host listener failed: \(error)\n", stderr)
+                    self.statusHandler?("Could not open the channel: \(error.localizedDescription)")
+                default:
+                    break
                 }
-                self.accept(connection)
             }
-            if let delivery = self.acceptedDeliveryForTesting {
-                delivery { [weak self] in
-                    guard let self else { connection.cancel(); return }
-                    self.queue.async { accept() }
+            listener.newConnectionHandler = { [weak self, weak listener] connection in
+                guard let self else { connection.cancel(); return }
+                let accept = { [weak self, weak listener] in
+                    guard let self, let listener, self.listener === listener else {
+                        connection.cancel(); return
+                    }
+                    self.accept(connection)
                 }
-            } else { accept() }
-        }
-        queue.sync {
+                if let delivery = self.acceptedDeliveryForTesting {
+                    delivery { [weak self] in
+                        guard let self else { connection.cancel(); return }
+                        self.queue.async { accept() }
+                    }
+                } else { accept() }
+            }
             self.listener = listener
             listener.start(queue: queue)
         }
@@ -252,6 +256,16 @@ final class HostServer {
                 client.control.cancel()
             }
             clients.removeAll()
+            timingEligibleClients = nil
+            audioFanoutCohort.removeAll()
+            audioFanoutOffset = 0
+            packetizer.discardPendingSamples()
+            lastAudioCaptureNanos = nil
+            requestedPlaybackState = nil
+            requestedPlaybackStateSetNanos = nil
+            groupPlayoutDelayNanos = RoomTiming.defaultPlayoutDelayNanos
+            roomTimingChangeCount = 0
+            // Keep user room metadata, media queue and actual paused state.
             receiverCountHandler?(0)
         }
     }
@@ -914,6 +928,7 @@ final class HostServer {
         discardPendingAudio(for: client)
         client.audio?.cancel()
         client.video?.cancel()
+        client.control.cancel()
         receiverCountHandler?(participantNames.count)
         broadcastPresence()
         updateGroupTiming()
