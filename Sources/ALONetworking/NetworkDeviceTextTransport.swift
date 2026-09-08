@@ -19,6 +19,8 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
     public enum Event {
         /// Sender proof was accepted. This is not a task grant or dispatch permission.
         case ready
+        /// Actual TLS/challenge-derived receiver identity; never a Bonjour claim.
+        case remoteAuthenticated(NetworkDeviceAuthenticatedRemote)
         case authenticated(UUID, NetworkDeviceAuthorization.Context)
         case grant(UUID)
         case receipt(grantID: UUID, messageID: UUID, CodexDeviceMessagingPolicy.Receipt)
@@ -55,6 +57,7 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
     private let admitTLS: (PeerPublicIdentity) -> Bool
     private var parser = NetworkDeviceMessageFraming()
     private var expectedChallenge: NetworkDeviceAuthorization.Challenge?
+    private var authenticatedRemote: NetworkDeviceAuthenticatedRemote?
     private var localSession: UUID?
     private var admitted = false
     private var closed = false
@@ -147,13 +150,22 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
     /// Receiver-local approval only: callers obtain localTaskID from their local
     /// consent UI. No incoming wire message can invoke this method.
     public func approve(localTaskID: UUID, expiresAtNanos: UInt64) {
+        approve(localTaskID: localTaskID, expiresAtNanos: expiresAtNanos, result: nil)
+    }
+    func approve(localTaskID: UUID, expiresAtNanos: UInt64,
+                 result: ((Result<UUID, CodexDeviceMessagingError>) -> Void)?) {
         queue.async {
-            guard case .receiver(let service) = self.mode, let id = self.localSession, !self.closed else { return }
+            guard case .receiver(let service) = self.mode, let id = self.localSession, !self.closed else {
+                result?(.failure(.unauthorized)); return
+            }
             do {
                 let grant = try service.approve(connection: id, localTaskID: localTaskID,
                     expiresAt: expiresAtNanos)
+                // Receiver-local durable approval result is independent of wire
+                // delivery. The owner can revoke this grant even if send closes.
+                result?(.success(grant))
                 self.send(Wire(kind: .grant, grantID: grant))
-            } catch { self.close() }
+            } catch { result?(.failure(error as? CodexDeviceMessagingError ?? .unauthorized)); self.close() }
         }
     }
     public func send(_ envelope: CodexDeviceMessageEnvelope) {
@@ -263,6 +275,8 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
             guard !admitted, expectedChallenge == nil, let challenge = wire.challenge else { throw CodexDeviceMessagingError.unauthorized }
             let claim = try NetworkDeviceAuthorization.Claim.signed(challenge: challenge, sender: binding,
                 user: user, policy: policy, actualSenderTLSHash: localHash, actualReceiverTLSHash: peer.publicKeyHash)
+            authenticatedRemote = try NetworkDeviceAuthenticatedRemote(challenge: challenge,
+                actualTLSHash: peer.publicKeyHash, localUser: user.publicIdentity, policy: policy)
             expectedChallenge = challenge
             send(Wire(kind: .claim, claim: claim))
         case (.receiver(let service), .claim):
@@ -275,10 +289,13 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
             send(Wire(kind: .authenticated))
             guard !closed else { return }
             event(.authenticated(id, try service.peer(connection: id)))
-        case (.sender, .authenticated):
-            guard !admitted, expectedChallenge != nil else { throw CodexDeviceMessagingError.unauthorized }
+        case (.sender(let user, _, let policy, _), .authenticated):
+            guard !admitted, expectedChallenge != nil, let remote = authenticatedRemote,
+                  remote.fullSPKIHash == peer.publicKeyHash,
+                  try remote.isCurrent(in: policy, localUser: user.publicIdentity) else { throw CodexDeviceMessagingError.unauthorized }
             try pins.recordAfterAdmission(peer)
             admitted = true; armDeadline(lifetime)
+            event(.remoteAuthenticated(remote))
             event(.ready)
         case (.sender, .grant):
             guard admitted, let grant = wire.grantID else { throw CodexDeviceMessagingError.unauthorized }
@@ -436,6 +453,15 @@ public final class NetworkDeviceTextListener: @unchecked Sendable {
         listener.cancel()
         for connection in connections.values { connection.stop() }
     }
+    /// Untrusted discovery metadata only. Authentication still binds the actual
+    /// TLS certificate and signed network challenge, never this TXT record.
+    func advertise(networkID: UUID) {
+        queue.async {
+            guard !self.started, !self.stopped else { return }
+            self.listener.service = NWListener.Service(name: nil, type: NetworkDeviceMessagingDiscovery.serviceType,
+                txtRecord: NWTXTRecord(["v": "1", "id": networkID.uuidString]))
+        }
+    }
     public func start(ready: @escaping (NWEndpoint.Port) -> Void) {
         queue.async {
             guard !self.started, !self.stopped else { return }
@@ -469,9 +495,15 @@ public final class NetworkDeviceTextListener: @unchecked Sendable {
         }
     }
     public func approve(connection: UUID, localTaskID: UUID, expiresAtNanos: UInt64) {
+        approve(connection: connection, localTaskID: localTaskID, expiresAtNanos: expiresAtNanos, result: nil)
+    }
+    func approve(connection: UUID, localTaskID: UUID, expiresAtNanos: UInt64,
+                 result: ((Result<UUID, CodexDeviceMessagingError>) -> Void)?) {
         queue.async {
-            guard !self.stopped else { return }
-            self.connections[connection]?.approve(localTaskID: localTaskID, expiresAtNanos: expiresAtNanos)
+            guard !self.stopped, let transport = self.connections[connection] else {
+                result?(.failure(.unauthorized)); return
+            }
+            transport.approve(localTaskID: localTaskID, expiresAtNanos: expiresAtNanos, result: result)
         }
     }
     /// A completion may belong to an old transport; each current subscription

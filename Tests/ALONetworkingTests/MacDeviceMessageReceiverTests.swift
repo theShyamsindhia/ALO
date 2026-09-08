@@ -92,6 +92,7 @@ struct MacDeviceMessageReceiverTests {
             queue: DispatchQueue(label: "alo.test.facade", attributes: .concurrent)) { value in
                 state.mutate {
                     switch value {
+                    case .approvalResult: break // Legacy approve does not request local settlement.
                     case .authenticated(let connection, _):
                         $0.connections.append(connection); $0.events[connection, default: []].append("authenticated")
                     case .received(let connection, _, _): $0.events[connection, default: []].append("received")

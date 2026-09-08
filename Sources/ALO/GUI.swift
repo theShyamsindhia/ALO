@@ -510,6 +510,7 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     private var statusMenuController: ALOStatusMenuController?
     private var diagnosticsController: DiagnosticsWindowController?
     private var settingsController: AppSettingsWindowController?
+    private var deviceMessagingController: MacDeviceMessagingController?
     private var shortcutManager: GlobalShortcutManager?
     private var shortcutMapperController: ShortcutMapperWindowController?
     private var phaseObserver: AnyCancellable?
@@ -706,6 +707,7 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        deviceMessagingController?.stop()
         model.stopImmediately()
     }
 
@@ -958,7 +960,9 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func showSettings(_ sender: Any?) {
         if settingsController == nil {
-            settingsController = AppSettingsWindowController()
+            let messaging = deviceMessagingController ?? MacDeviceMessagingController(account: model.account)
+            deviceMessagingController = messaging
+            settingsController = AppSettingsWindowController(deviceMessaging: messaging)
         }
         settingsController?.show()
     }

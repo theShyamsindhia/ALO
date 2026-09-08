@@ -314,7 +314,7 @@ final class AppIconPreferences: ObservableObject {
 final class AppSettingsWindowController {
     private let window: NSWindow
 
-    init() {
+    init(deviceMessaging: MacDeviceMessagingController) {
         window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 800, height: 720),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -323,7 +323,7 @@ final class AppSettingsWindowController {
         window.title = "ALO Settings"
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 760, height: 600)
-        window.contentView = NSHostingView(rootView: AppSettingsView())
+        window.contentView = NSHostingView(rootView: AppSettingsView(deviceMessaging: deviceMessaging))
         let autosaveName = "ALO.AppSettings"
         if !window.setFrameUsingName(autosaveName) { window.center() }
         window.setFrameAutosaveName(autosaveName)
@@ -336,9 +336,11 @@ final class AppSettingsWindowController {
 }
 
 private struct AppSettingsView: View {
+    let deviceMessaging: MacDeviceMessagingController
     private enum Section: String, CaseIterable, Identifiable {
         case appearance = "Appearance"
         case notch = "Notch"
+        case deviceMessaging = "Device messaging"
 
         var id: Self { self }
     }
@@ -352,10 +354,12 @@ private struct AppSettingsView: View {
                     .tag(Section.appearance)
                 Label("Notch", systemImage: "rectangle.topthird.inset.filled")
                     .tag(Section.notch)
+                Label("Device messaging", systemImage: "network")
+                    .tag(Section.deviceMessaging)
             }
             .labelsHidden()
             .pickerStyle(.segmented)
-            .frame(width: 260)
+            .frame(maxWidth: 520)
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
             .accessibilityIdentifier("ALO.Settings.SectionPicker")
@@ -366,6 +370,8 @@ private struct AppSettingsView: View {
                 switch selection {
                 case .appearance:
                     AppAppearanceSettingsView()
+                case .deviceMessaging:
+                    DeviceMessagingSettingsView(controller: deviceMessaging)
                 case .notch:
                     VStack(spacing: 12) {
                         Text("Notch settings open below the media player.")

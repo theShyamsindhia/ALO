@@ -26,6 +26,7 @@ struct BrandingTests {
         #expect(services.contains(HostServer.serviceType))
         #expect(services.contains(MeshRoomBrowser.serviceType))
         #expect(services.contains(NearbyNetworkService.serviceType))
+        #expect(services.contains(NetworkDeviceMessagingDiscovery.serviceType))
         let mobileData = try Data(contentsOf: root.appendingPathComponent("iOS/ALOApp/Info.plist"))
         let mobile = try #require(PropertyListSerialization.propertyList(from: mobileData, format: nil) as? [String: Any])
         try RoomDiscovery.validateApplicationConfiguration(mobile)

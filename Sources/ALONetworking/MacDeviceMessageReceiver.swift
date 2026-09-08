@@ -26,6 +26,8 @@ public final class MacDeviceMessageReceiver: @unchecked Sendable {
     }
     public enum ReviewReason: Equatable, Sendable { case capacity, disconnected, unavailable }
     public enum Event {
+        /// Local approval settlement, not a peer receipt or wire-delivery claim.
+        case approvalResult(UUID, Result<UUID, CodexDeviceMessagingError>)
         case authenticated(Connection, NetworkDeviceAuthorization.Context)
         case received(Connection, grantID: UUID, messageID: UUID)
         case completion(Connection, grantID: UUID, messageID: UUID, recorded: Bool)
@@ -80,14 +82,29 @@ public final class MacDeviceMessageReceiver: @unchecked Sendable {
             }
         }
     }
-    public func approve(connection: Connection, receiverChosenTask: UUID, lifetime: TimeInterval) {
-        guard connection.owner == issuer, lifetime.isFinite, lifetime > 0, lifetime <= 86_400 else { return }
+    public func advertise(networkID: UUID) {
         queue.async { [weak self] in
-            guard let self, !self.stopped, self.admission.isOpen, self.sessions[connection.transport] != nil else { return }
+            guard let self, !self.stopped, self.admission.isOpen else { return }
+            self.listener?.advertise(networkID: networkID)
+        }
+    }
+    public func approve(connection: Connection, receiverChosenTask: UUID, lifetime: TimeInterval, requestID: UUID? = nil) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            let settle: (Result<UUID, CodexDeviceMessagingError>) -> Void = { [weak self] result in
+                guard let self, let requestID else { return }
+                self.queue.async {
+                    guard !self.stopped, self.admission.isOpen else { return }
+                    self.event(.approvalResult(requestID, result))
+                }
+            }
+            guard connection.owner == self.issuer, lifetime.isFinite, lifetime > 0, lifetime <= 86_400,
+                  !self.stopped, self.admission.isOpen, self.sessions[connection.transport] != nil,
+                  let listener = self.listener else { settle(.failure(.unauthorized)); return }
             let duration = UInt64(lifetime * 1_000_000_000)
             let (expiry, overflow) = DeviceMessagingClock.nowNanos().addingReportingOverflow(duration)
-            guard !overflow else { return }
-            self.listener?.approve(connection: connection.transport, localTaskID: receiverChosenTask, expiresAtNanos: expiry)
+            guard !overflow else { settle(.failure(.unauthorized)); return }
+            listener.approve(connection: connection.transport, localTaskID: receiverChosenTask, expiresAtNanos: expiry, result: settle)
         }
     }
     public func localGrants() -> [CodexDeviceMessagingPolicy.LocalGrant] { service.localGrants() }
