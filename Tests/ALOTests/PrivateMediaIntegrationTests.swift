@@ -19,8 +19,7 @@ struct PrivateMediaIntegrationTests {
         let video = try NWListener(using: security.tcp(video: true), on: .any)
         for listener in [audio, video] {
             listener.newConnectionHandler = { connection in
-                probe.lock.withLock { probe.connections.append(connection) }
-                connection.start(queue: queue)
+                probe.registerConnection(connection) { connection.start(queue: queue) }
             }
             listener.start(queue: queue)
         }
@@ -43,11 +42,7 @@ struct PrivateMediaIntegrationTests {
             host.stop()
             audio.newConnectionHandler = nil; video.newConnectionHandler = nil
             audio.cancel(); video.cancel()
-            let connections = probe.lock.withLock {
-                let connections = probe.connections
-                probe.connections.removeAll()
-                return connections
-            }
+            let connections = probe.stopConnections()
             for connection in connections {
                 connection.stateUpdateHandler = nil
                 connection.cancel()
@@ -61,7 +56,6 @@ struct PrivateMediaIntegrationTests {
         let audioPort = try #require(audio.port), videoPort = try #require(video.port)
         for (label, parameters) in [("authorized", security.tcp()), ("wrong-key", wrong.tcp()), ("plaintext", LocalNetworkParameters.tcp())] {
             let connection = NWConnection(host: "127.0.0.1", port: port, using: parameters)
-            probe.lock.withLock { probe.connections.append(connection) }
             connection.stateUpdateHandler = { [weak connection] state in
                 probe.lock.withLock {
                     probe.diagnostics.append("\(label): \(state); local=\(String(describing: connection?.currentPath?.localEndpoint))")
@@ -75,7 +69,7 @@ struct PrivateMediaIntegrationTests {
                     }
                 }
             }
-            connection.start(queue: queue)
+            probe.registerConnection(connection) { connection.start(queue: queue) }
             let join = try ControlMessage(type: "join", udpPort: audioPort.rawValue, videoPort: videoPort.rawValue,
                                           displayName: label, participantID: label).encodedLine()
             connection.send(content: join, completion: .contentProcessed { error in
@@ -118,10 +112,25 @@ struct PrivateMediaIntegrationTests {
         #expect(packet.samples == samples)
         #expect(throws: SecureTransportError.replay) { try opener.open(encrypted) }
     }
+
+    @Test
+    func teardownRejectsAlreadyQueuedAcceptWithoutStartingIt() {
+        let probe = PrivateHostProbe()
+        let connection = NWConnection(host: "127.0.0.1", port: 1, using: .tcp)
+        // Invoke the same registration path as a queued listener callback after
+        // teardown. No connection is started and no network I/O is needed.
+        #expect(probe.stopConnections().isEmpty)
+        var starts = 0
+        probe.registerConnection(connection) { starts += 1 }
+        defer { connection.cancel() }
+        #expect(starts == 0)
+        #expect(probe.stopConnections().isEmpty)
+    }
 }
 
 private final class PrivateHostProbe: @unchecked Sendable {
     let lock = NSLock()
+    private var stopped = false
     var port: NWEndpoint.Port?
     var connections = [NWConnection]()
     var sessions = [UUID]()
@@ -130,4 +139,25 @@ private final class PrivateHostProbe: @unchecked Sendable {
     var tlsRejectedClients = Set<String>()
     var diagnostics = [String]()
     var audioPackets = [Data]()
+
+    // The fixture's start closure only starts this connection asynchronously;
+    // it must not re-enter the probe. Serialize it with the teardown snapshot.
+    func registerConnection(_ connection: NWConnection, start: () -> Void) {
+        let accepted = lock.withLock {
+            guard !stopped else { return false }
+            connections.append(connection)
+            start()
+            return true
+        }
+        if !accepted { connection.cancel() }
+    }
+
+    func stopConnections() -> [NWConnection] {
+        lock.withLock {
+            stopped = true
+            let snapshot = connections
+            connections.removeAll()
+            return snapshot
+        }
+    }
 }
