@@ -441,6 +441,46 @@ func toggleALOSetupWindow(_ window: NSWindow) {
 }
 
 @MainActor
+enum NetworkSetupWindowPresentation {
+    static let initialContentSize = NSSize(width: 760, height: 520)
+    static let minimumContentSize = NSSize(width: 640, height: 440)
+
+    static func shouldApplyIdentityUpdate(_ queuedReady: Bool, currentReady: Bool) -> Bool {
+        queuedReady == currentReady
+    }
+
+    static func configure(_ window: NSWindow, identityReady: Bool) {
+        let managedFullScreen = window.styleMask.intersection(.fullScreen)
+        let presentation: NSWindow.StyleMask = identityReady
+            ? [.titled, .closable, .miniaturizable, .resizable]
+            : [.titled, .closable, .fullSizeContentView]
+        window.styleMask = presentation.union(managedFullScreen)
+        // Networks is a utility browser. Keep ordinary zoom/resizing without
+        // creating a full-screen Space that channel handoff would abandon.
+        window.collectionBehavior.insert(.fullScreenNone)
+        window.title = identityReady ? "Networks — \(ALOAppFlavor.displayName)" : ALOAppFlavor.displayName
+        window.titlebarAppearsTransparent = !identityReady
+        window.titleVisibility = identityReady ? .visible : .hidden
+        window.titlebarSeparatorStyle = identityReady ? .automatic : .none
+        window.backgroundColor = identityReady ? .windowBackgroundColor : .clear
+        window.isOpaque = identityReady
+        window.isMovableByWindowBackground = !identityReady
+        window.contentMinSize = identityReady ? minimumContentSize : .zero
+        for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            window.standardWindowButton(button)?.isHidden = !identityReady
+        }
+    }
+
+    static func enterBrowserPreservingCenter(_ window: NSWindow) {
+        let center = NSPoint(x: window.frame.midX, y: window.frame.midY)
+        configure(window, identityReady: true)
+        window.setContentSize(initialContentSize)
+        window.setFrameOrigin(NSPoint(x: center.x - window.frame.width / 2,
+                                      y: center.y - window.frame.height / 2))
+    }
+}
+
+@MainActor
 final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     private enum SetupWindow {
         static let width: CGFloat = 800
@@ -479,6 +519,7 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     private var floatingBarObserver: AnyCancellable?
     private var walkieBarObserver: AnyCancellable?
     private var setupLayoutObserver: AnyCancellable?
+    private var setupIdentityObserver: AnyCancellable?
     private var networkJoinObserver: AnyCancellable?
     private var networkJoinAttention = NetworkJoinAttentionGate()
     private var terminationSignalSources = [DispatchSourceSignal]()
@@ -518,6 +559,10 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
         window.standardWindowButton(.closeButton)?.isHidden = true
         window.standardWindowButton(.miniaturizeButton)?.isHidden = true
         window.standardWindowButton(.zoomButton)?.isHidden = true
+        NetworkSetupWindowPresentation.configure(window, identityReady: model.account.identityReady)
+        if model.account.identityReady {
+            window.setContentSize(NetworkSetupWindowPresentation.initialContentSize)
+        }
         window.contentView = NSHostingView(rootView: ALOView(
             model: model,
             checkForUpdates: ALOAppFlavor.isDevelopment ? nil : { [weak self] in
@@ -589,6 +634,23 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async { self?.resizeSetupWindow(animated: true) }
         }
 
+        setupIdentityObserver = model.account.$identityReady.removeDuplicates().dropFirst()
+            .sink { [weak self] ready in
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, let window = self.window,
+                          NetworkSetupWindowPresentation.shouldApplyIdentityUpdate(
+                            ready, currentReady: self.model.account.identityReady) else { return }
+                    self.setupTransitionGeneration &+= 1
+                    if ready {
+                        NetworkSetupWindowPresentation.enterBrowserPreservingCenter(window)
+                    } else {
+                        NetworkSetupWindowPresentation.configure(window, identityReady: false)
+                        window.setContentSize(NSSize(width: SetupWindow.width, height: 640))
+                    }
+                    self.setupWindowFrame = window.frame
+                }
+            }
+
         networkJoinObserver = model.account.$pendingJoinRequests
             .map { !$0.isEmpty }.removeDuplicates()
             .sink { [weak self] pending in
@@ -603,7 +665,9 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
                     }
                     self.setupTransitionGeneration &+= 1
                     self.restoreSetupWindow()
-                    window.setContentSize(NSSize(width: SetupWindow.width, height: 640))
+                    if !self.model.account.identityReady {
+                        window.setContentSize(NSSize(width: SetupWindow.width, height: 640))
+                    }
                     self.setupWindowFrame = window.frame
                     window.orderFront(nil)
                 }
@@ -632,7 +696,9 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
         if !model.videoFullscreen, !model.account.pendingJoinRequests.isEmpty, let window {
             setupTransitionGeneration &+= 1
             restoreSetupWindow()
-            window.setContentSize(NSSize(width: SetupWindow.width, height: 640))
+            if !model.account.identityReady {
+                window.setContentSize(NSSize(width: SetupWindow.width, height: 640))
+            }
             setupWindowFrame = window.frame
             window.orderFront(nil)
         }
@@ -677,6 +743,16 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
 
     private func collapseSetupWindowIntoMenuBar(generation: Int) {
         guard let window else { return }
+        if model.account.identityReady {
+            // Preserve a user-resized native window, including one closed before
+            // joining. Never animate a resizable window below its minimum size.
+            setupWindowFrame = window.frame
+            guard generation == setupTransitionGeneration, model.phase == .live else { return }
+            window.orderOut(nil)
+            updateFloatingBar(hidden: model.floatingBarHidden)
+            updateWalkieBar(hidden: model.walkieBarHidden)
+            return
+        }
         let finish = { [weak self] in
             guard let self, generation == self.setupTransitionGeneration, self.model.phase == .live else { return }
             window.orderOut(nil)
@@ -712,12 +788,23 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
 
     private func restoreSetupWindow() {
         guard let window else { return }
+        if model.account.identityReady {
+            // Native presentation never shrinks its frame; reading the actual
+            // frame also retains resizes made while browsing during playback.
+            setupWindowFrame = window.frame
+            window.alphaValue = 1
+            return
+        }
         if let setupWindowFrame { window.setFrame(setupWindowFrame, display: false) }
         window.alphaValue = 1
     }
 
     private func resizeSetupWindow(animated: Bool) {
         guard model.phase != .live, let window else { return }
+        guard !model.account.identityReady else {
+            setupWindowFrame = window.frame
+            return
+        }
         let contentRect = NSRect(
             x: 0,
             y: 0,
@@ -2205,6 +2292,32 @@ final class ALOViewModel: ObservableObject {
                 self.errorMessage = self.readable(error)
                 self.statusText = "Talk stopped"
             },
+            voiceCapturePhaseHandler: { [weak self] state in
+                guard let self, self.channelOpenGeneration == generation, !self.isLeavingRoom else { return }
+                let targets = self.effectiveTalkTargetIDs.intersection(self.currentRemoteParticipantIDs)
+                let hasTalkTargets = !targets.isEmpty
+                let names = self.participants.filter { targets.contains($0.id) }.map(\.name)
+                let talkingStatus = targets == self.currentRemoteParticipantIDs
+                    ? "Talking to everyone" : "Talking to \(ListFormatter.localizedString(byJoining: names))"
+                let otherVoiceStatus: String?
+                switch self.openLineState {
+                case .inviting(let invitation):
+                    otherVoiceStatus = "Waiting for \(self.openLinePeerName(invitation)) to join the line"
+                case .invited(let invitation):
+                    otherVoiceStatus = "\(invitation.callerName) invited you to open a line"
+                case .connected(let invitation):
+                    otherVoiceStatus = "Line open with \(self.openLinePeerName(invitation))"
+                case .idle:
+                    let incoming = self.participants.filter { self.incomingWalkieSpeakerIDs.contains($0.id) }.map(\.name)
+                    otherVoiceStatus = self.incomingWalkieSpeakerIDs.isEmpty ? nil
+                        : "\(incoming.isEmpty ? "Someone" : ListFormatter.localizedString(byJoining: incoming)) is talking to you"
+                }
+                let presentation = VoiceCapturePresentation.phase(state, hasTalkTargets: hasTalkTargets,
+                    talkingStatus: talkingStatus, otherVoiceStatus: otherVoiceStatus)
+                self.walkieStarting = presentation.starting
+                self.walkieTalking = presentation.talking
+                self.statusText = presentation.status
+            },
             incomingOpenLineInvitationHandler: { [weak self] invitation in
                 guard let self else { return }
                 self.statusText = "\(invitation.callerName) invited you to open a line"
@@ -3563,7 +3676,8 @@ final class ALOViewModel: ObservableObject {
         diagnosticRoomContext(timing: meshSession?.diagnosticsSnapshot())
     }
 
-    private func diagnosticRoomContext(timing: SessionTimingDiagnostics?) -> DiagnosticRoomContext {
+    private func diagnosticRoomContext(timing: SessionTimingDiagnostics?,
+                                       observedAtNanos: UInt64 = MonotonicClock.nowNanos()) -> DiagnosticRoomContext {
         let active = phase == .live && meshSession != nil
         let remotePeerCount = participants.filter { $0.id != currentParticipantID }.count
         return DiagnosticRoomContext(
@@ -3574,7 +3688,10 @@ final class ALOViewModel: ObservableObject {
             syncLabel: roomSyncLabel,
             audioIsRendering: audioIsRendering,
             hasBroadcaster: hasBroadcaster,
-            timing: timing
+            timing: timing,
+            recovery: liveSyncHealth.recovery,
+            observedAtNanos: observedAtNanos,
+            peerPlaybackTiming: DiagnosticRoomContext.uniquePeerPlaybackTiming(participants)
         )
     }
 
@@ -3627,11 +3744,24 @@ final class ALOViewModel: ObservableObject {
                                 currentParticipantID: currentParticipantID,
                                 timing: freshTiming,
                                 sampledAtNanos: sampledAt)
-        let result = diagnosticRoomContext(timing: freshTiming).result
+        let result = diagnosticRoomContext(timing: freshTiming, observedAtNanos: sampledAt).result
+        if ALOAppFlavor.isDevelopment {
+            // Per-sample evidence for paired dev runs; production remains
+            // transition-only. Unified logging supplies the wall timestamp,
+            // while this value identifies local monotonic sampling time.
+            // Never include identities, channel names, source audio or metadata.
+            let detail = DiagnosticRedactor.redact(result.detail)
+            for part in DevTimingLogChunks.make(detail: "outcome=\(result.outcome.rawValue): \(detail)",
+                                                sampledAtNanos: sampledAt) {
+                syncHealthLogger.notice("\(part.line, privacy: .public)")
+            }
+        }
         if liveSyncHealth.recentTransitions.last?.outcome != result.outcome {
             // Anonymous, transition-only evidence; never log peer names or content.
             let detail = DiagnosticRedactor.redact(result.detail)
-            syncHealthLogger.notice("Playback timing \(result.outcome.rawValue, privacy: .public): \(detail, privacy: .public)")
+            for line in DevTimingLogChunks.transitionLines(detail: "\(result.outcome.rawValue): \(detail)", sampledAtNanos: sampledAt) {
+                syncHealthLogger.notice("\(line, privacy: .public)")
+            }
         }
         liveSyncHealth.observe(result, at: sampledAt)
     }
@@ -3645,8 +3775,12 @@ final class ALOViewModel: ObservableObject {
     private func invalidateLiveSyncSample(reason: String, kind: RoomSyncEvent.Kind = .warning) {
         meshSession?.publishPlaybackTiming(nil)
         if localAudioTiming != nil { localAudioTiming = nil }
-        // Guard before mutating the @Published value: even an unchanged inout
-        // write would otherwise redraw the whole model on every idle timer tick.
+        if ALOAppFlavor.isDevelopment {
+            let detail = DiagnosticRedactor.redact(reason)
+            syncHealthLogger.notice("Dev timing unavailable: \(detail, privacy: .public)")
+        }
+        // Log dev liveness even during an ongoing gap, but guard before mutating
+        // @Published state: an unchanged inout write redraws the idle model.
         guard liveSyncHealth.hasCurrentSample else { return }
         roomSyncMonitor.markUnavailable(participants: participants,
                                         currentParticipantID: currentParticipantID,
@@ -4076,7 +4210,9 @@ struct ALOView: View {
 
     var body: some View {
         ZStack {
-            if model.phase == .idle {
+            if model.account.identityReady {
+                Color(nsColor: .windowBackgroundColor)
+            } else if model.phase == .idle {
                 Color.clear
             } else {
                 RoundedRectangle(cornerRadius: 27, style: .continuous)
@@ -4085,9 +4221,11 @@ struct ALOView: View {
             }
             switch model.phase {
             case .idle: idleView
-            case .starting: progressView
+            case .starting:
+                if model.account.identityReady { nativeProgressView } else { progressView }
             case .live: MacNetworkSetupView(model: model, account: model.account)
-            case .failed: errorView
+            case .failed:
+                if model.account.identityReady { nativeErrorView } else { errorView }
             }
             if model.permissionNotice { permissionOverlay }
         }
@@ -4097,6 +4235,27 @@ struct ALOView: View {
 
     private var idleView: some View {
         MacNetworkSetupView(model: model, account: model.account)
+    }
+
+    private var nativeProgressView: some View {
+        VStack(spacing: 12) {
+            ProgressView().controlSize(.regular)
+            Text(model.statusText).font(.headline)
+            Text("Connecting to the channel…").foregroundStyle(.secondary)
+        }.padding(24)
+    }
+
+    private var nativeErrorView: some View {
+        ContentUnavailableView {
+            Label("The channel couldn’t start", systemImage: "exclamationmark.circle")
+        } description: {
+            Text(model.errorMessage ?? "Something interrupted ALO.")
+        } actions: {
+            Button("Try again", action: model.tryAgain).buttonStyle(.borderedProminent)
+            if model.errorIsPermissionRelated {
+                Button("Open Recording Settings", action: model.openPrivacySettings)
+            }
+        }.padding(24)
     }
 
 
@@ -5168,7 +5327,9 @@ struct FloatingRoomView: View {
 
     private func participantPresence(_ participant: RoomParticipant) -> String {
         let isLocal = participant.id == model.currentParticipantID
-        if model.incomingWalkieSpeakerIDs.contains(participant.id) || (isLocal && model.walkieTalking) {
+        if VoiceCapturePresentation.isSpeaking(isLocal: isLocal, talk: model.walkieTalking,
+            openLineMicrophone: model.openLineState.isSendingMicrophone,
+            incoming: model.incomingWalkieSpeakerIDs.contains(participant.id)) {
             return "Talking"
         }
         if participant.isMuted { return "Audio muted" }

@@ -5,6 +5,145 @@ import ALOCore
 
 @Suite("Room synchronization monitor")
 struct RoomSyncMonitorTests {
+    @Test("Incident export keeps anonymous pre-failure and recovery evidence after graph rolls over")
+    func incidentEvidenceSurvivesRecovery() {
+        var monitor = RoomSyncMonitor()
+        let participant = RoomParticipant(id: "secret-peer-id", name: "Private Mac Name")
+        for index in 0..<130 {
+            let drift: Double? = index == 4 ? 70 : (index == 5 ? nil : 10)
+            monitor.observe(participants: [participant], currentParticipantID: participant.id,
+                timing: timing(localDrift: drift, localRTT: 2, buffer: 250, jitter: 1,
+                    output: 20, localLate: 0, localResync: 0,
+                    peerID: nil, peerDrift: nil, peerLate: 0, peerResync: 0, roomTimingChanges: 0),
+                sampledAtNanos: UInt64(index + 1) * 1_000_000_000,
+                occurredAt: Date(timeIntervalSince1970: Double(index)))
+        }
+        let evidence = monitor.incidents
+        #expect(evidence.count == 2)
+        #expect(evidence[0].samples.first?.driftMilliseconds == 10)
+        #expect(evidence[0].samples.contains { $0.driftMilliseconds == 70 } == true)
+        #expect(evidence[0].samples.contains { $0.driftMilliseconds == nil } == true)
+        #expect(evidence[0].samples.last?.driftMilliseconds == 10)
+        #expect(evidence[0].samples.count <= RoomSyncMonitor.maximumIncidentSamples)
+        let room = DiagnosticRoomContext(isActive: false, role: .none, participantCount: 0,
+            remotePeerCount: 0, syncLabel: "Disconnected", audioIsRendering: false,
+            hasBroadcaster: false, timing: nil)
+        let context = DiagnosticReportContext(generatedAt: Date(), appVersion: "test", appBuild: "test",
+            operatingSystem: "macOS", architecture: "arm64", room: room,
+            microphoneSelection: "system default", syncIncidents: evidence)
+        let report = DiagnosticReportBuilder.build(context: context, results: [:])
+        #expect(report.contains("1970-01-01T00:00:04Z"))
+        #expect(report.contains("drift-ms=70.0"))
+        #expect(report.contains("drift-ms=unavailable"))
+        #expect(!report.contains(participant.id))
+        #expect(!report.contains(participant.name))
+        #expect(report.contains("acoustic"))
+        #expect(report.contains("most recent channel session"))
+        #expect(report.contains("may predate the current inactive state"))
+        #expect(report.contains("Selective bounded evidence, not a complete history"))
+    }
+
+    @Test("Recovery survives intermediate drift and missing measurements")
+    func recoveryHysteresis() {
+        for values: [Double?] in [[70, 30, 10], [70, nil, 30, 10]] {
+            var monitor = RoomSyncMonitor()
+            for (index, drift) in values.enumerated() {
+                monitor.observe(participants: [RoomParticipant(id: "local", name: "Private Mac")],
+                    currentParticipantID: "local",
+                    timing: timing(localDrift: drift, localRTT: 2, buffer: 250, jitter: 1,
+                        output: 20, localLate: 0, localResync: 0,
+                        peerID: nil, peerDrift: nil, peerLate: 0, peerResync: 0, roomTimingChanges: 0),
+                    sampledAtNanos: UInt64(index + 1) * 1_000_000_000)
+            }
+            #expect(monitor.events.filter { $0.title == "You returned to sync" }.count == 1)
+            #expect(monitor.events.filter { $0.title == "You moved out of sync" }.count == 1)
+        }
+    }
+
+    @Test("Participant churn and repeated failures stay bounded, and new sessions clear evidence")
+    func boundedIncidentsAndParticipants() {
+        var monitor = RoomSyncMonitor()
+        for index in 0..<80 {
+            let participant = RoomParticipant(id: "peer-\(index)", name: "Private name \(index)")
+            monitor.observe(participants: [participant], currentParticipantID: participant.id,
+                timing: timing(localDrift: 70, localRTT: 2, buffer: 250, jitter: 1,
+                    output: 20, localLate: 0, localResync: 0,
+                    peerID: nil, peerDrift: nil, peerLate: 0, peerResync: 0, roomTimingChanges: 0),
+                sampledAtNanos: UInt64(index + 1) * 1_000_000_000)
+        }
+        #expect(monitor.traces.count == RoomSyncMonitor.maximumParticipants)
+        #expect(monitor.incidents.count == RoomSyncMonitor.maximumIncidents)
+        #expect(Set(monitor.incidents.map(\.participantNumber)).count == RoomSyncMonitor.maximumIncidents)
+        #expect(monitor.incidents.first?.participantNumber == 81 - RoomSyncMonitor.maximumIncidents)
+        #expect(monitor.incidents.last?.participantNumber == 80)
+        #expect(monitor.events.count <= RoomSyncMonitor.maximumEvents)
+        monitor.reset()
+        #expect(monitor.traces.isEmpty)
+        #expect(monitor.incidents.isEmpty)
+    }
+
+    @Test("Explicit interruption records a missing sample without inventing recovery")
+    func explicitInterruptionEvidence() {
+        var monitor = RoomSyncMonitor()
+        let participants = [RoomParticipant(id: "local", name: "Private Mac")]
+        monitor.observe(participants: participants, currentParticipantID: "local",
+            timing: timing(localDrift: 70, localRTT: 2, buffer: 250, jitter: 1,
+                output: 20, localLate: 0, localResync: 0,
+                peerID: nil, peerDrift: nil, peerLate: 0, peerResync: 0, roomTimingChanges: 0),
+            sampledAtNanos: 1_000_000_000, occurredAt: Date(timeIntervalSince1970: 1))
+        for second in 2...3 {
+            monitor.markUnavailable(participants: participants, currentParticipantID: "local",
+                sampledAtNanos: UInt64(second) * 1_000_000_000,
+                reason: "private interruption text", occurredAt: Date(timeIntervalSince1970: Double(second)))
+        }
+        #expect(monitor.incidents.count == 2)
+        #expect(monitor.incidents[0].samples.count == 2)
+        #expect(monitor.incidents[0].samples.last?.driftMilliseconds == nil)
+        #expect(!monitor.events.contains { $0.title == "You returned to sync" })
+    }
+
+    @Test("Expected pause and leave gaps do not evict failure evidence")
+    func expectedInterruptionDoesNotCreateIncidents() {
+        var monitor = RoomSyncMonitor()
+        let participants = [RoomParticipant(id: "local", name: "Private Mac")]
+        for index in 0...20 {
+            monitor.observe(participants: participants, currentParticipantID: "local",
+                timing: timing(localDrift: index == 0 ? 70 : 10, localRTT: 2, buffer: 250, jitter: 1,
+                    output: 20, localLate: 0, localResync: 0,
+                    peerID: nil, peerDrift: nil, peerLate: 0, peerResync: 0, roomTimingChanges: 0),
+                sampledAtNanos: UInt64(index * 2 + 1) * 1_000_000_000)
+            monitor.markUnavailable(participants: participants, currentParticipantID: "local",
+                sampledAtNanos: UInt64(index * 2 + 2) * 1_000_000_000,
+                reason: "Playback paused", kind: .notice)
+        }
+        #expect(monitor.incidents.count == 1)
+        #expect(monitor.incidents.first?.trigger == .driftExceeded)
+        #expect(monitor.incidents.first?.samples.contains { $0.driftMilliseconds == nil } == true)
+        #expect(monitor.orderedTraces.first?.latest?.driftMilliseconds == nil)
+    }
+
+    @Test("Missing-measurement churn preserves measured drift evidence within the cap")
+    func missingMeasurementsPreferentiallyEvictOlderGaps() {
+        var monitor = RoomSyncMonitor()
+        let participants = [RoomParticipant(id: "local", name: "Private Mac")]
+        let samples: [Double?] = [70, 10] + Array(repeating: [nil, 10] as [Double?], count: 20).flatMap { $0 }
+        for (index, drift) in samples.enumerated() {
+            monitor.observe(participants: participants, currentParticipantID: "local",
+                timing: timing(localDrift: drift, localRTT: 2, buffer: 250, jitter: 1,
+                    output: 20, localLate: 0, localResync: 0,
+                    peerID: nil, peerDrift: nil, peerLate: 0, peerResync: 0, roomTimingChanges: 0),
+                sampledAtNanos: UInt64(index + 1) * 1_000_000_000,
+                occurredAt: Date(timeIntervalSince1970: Double(index)))
+        }
+        #expect(monitor.incidents.count == RoomSyncMonitor.maximumIncidents)
+        #expect(monitor.incidents.first?.trigger == .driftExceeded)
+        #expect(monitor.incidents.first?.occurredAt == Date(timeIntervalSince1970: 0))
+        let gaps = monitor.incidents.filter { $0.trigger == .measurementMissing }
+        #expect(gaps.count == RoomSyncMonitor.maximumIncidents - 1)
+        #expect(gaps.first?.occurredAt == Date(timeIntervalSince1970: 12))
+        #expect(gaps.last?.occurredAt == Date(timeIntervalSince1970: 40))
+    }
+
     @Test("Records every participant and explains measured timing changes")
     func recordsTracesAndObservedEvents() {
         var monitor = RoomSyncMonitor()

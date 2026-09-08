@@ -14,6 +14,7 @@ protocol SecureMacPlaybackTrack: AnyObject {
     var pendingPlaybackPacketCount: Int { get }
     var activePlayoutDelayNanos: UInt64 { get }
     var automaticSyncState: String { get }
+    var renderObservation: RenderObservation? { get }
     func accept(_ packet: AudioPacket)
     func maintainSync()
     func forceResync(atOrAfterCaptureNanos: UInt64?)
@@ -27,6 +28,9 @@ protocol SecureMacPlaybackTrack: AnyObject {
 }
 
 extension SynchronizedPlayer: SecureMacPlaybackTrack {}
+extension SecureMacPlaybackTrack {
+    var renderObservation: RenderObservation? { nil }
+}
 
 /// One selected broadcaster's output timeline, independent of transport ticket
 /// UUIDs/generations. Like MediaPlaybackTransition, prepare is reversible and
@@ -93,9 +97,14 @@ final class SecureMacPlaybackTimeline {
         return Int((duration + packetDuration - 1) / packetDuration)
     }()
 
-    convenience init(audioOutput: RoomAudioOutputEngine, playbackActivity: @escaping (Bool) -> Void = { _ in }) throws {
+    /// The owner must service maintenance at this cadence; nil disables holding
+    /// PCM between calls when the owner cannot provide a bounded tail flush.
+    convenience init(audioOutput: RoomAudioOutputEngine,
+                     maintenanceIntervalNanos: UInt64? = 20_000_000,
+                     playbackActivity: @escaping (Bool) -> Void = { _ in }) throws {
         try self.init(makePlayer: { activity in
-            try SynchronizedPlayer(audioOutput: audioOutput, playbackActivityChanged: activity)
+            try SynchronizedPlayer(audioOutput: audioOutput, playbackActivityChanged: activity,
+                                   maintenanceIntervalNanos: maintenanceIntervalNanos)
         }, playbackActivity: playbackActivity)
     }
 
@@ -345,6 +354,15 @@ final class SecureMacPlaybackTimeline {
 
     func syncReport() -> PlaybackSyncReport {
         reportingPlayer.syncReport()
+    }
+
+    func localDiagnosticReport() -> (playback: PlaybackSyncReport, observation: RenderObservation?,
+        activeDelay: UInt64, automaticState: String, outputLatency: UInt64, renderHeadroom: UInt64,
+        hardwareFormat: AudioOutputHardwareFormat?) {
+        let player = reportingPlayer
+        return (player.syncReport(), player.renderObservation, player.activePlayoutDelayNanos,
+                player.automaticSyncState, player.outputLatencyForTimingNanos, player.renderSchedulingHeadroomForTimingNanos,
+                player.outputHardwareFormatForDiagnostics)
     }
 
     func stop() {

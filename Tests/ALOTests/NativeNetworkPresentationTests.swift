@@ -6,6 +6,21 @@ import Testing
 extension NativePresentationTests {
     @Suite(.serialized) @MainActor
     struct NativeNetworkPresentationTests {
+        @Test("Network browser at compact and regular sizes", arguments: [false, true], ["normal", "long", "empty", "pending", "owner-empty"])
+        func browserRenders(dark: Bool, state: String) async throws {
+            _ = NSApplication.shared
+            let folder = ProcessInfo.processInfo.environment["ALO_NETWORKS_SNAPSHOT_DIR"].map {
+                URL(fileURLWithPath: $0, isDirectory: true)
+            }
+            if let folder { try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true) }
+            // Additional below-minimum content stress coverage; actual supported
+            // native window sizes are covered by NetworkWindowPresentationTests.
+            for size in [NSSize(width: 600, height: 420), NSSize(width: 800, height: 550)] {
+                try await capture(NetworkBrowserFixture(state: state),
+                    name: "browser-\(state)-\(Int(size.width))", folder: folder, size: size, dark: dark)
+            }
+        }
+
         @Test(arguments: [false, true])
         func onboardingRenders(dark: Bool) async throws {
             _ = NSApplication.shared

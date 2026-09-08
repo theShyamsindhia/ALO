@@ -1,0 +1,79 @@
+import SwiftUI
+import AppKit
+import ALONetworkUI
+
+/// Deterministic public display values: this fixture never touches an account,
+/// credentials, discovery, or playback. Also usable by the standalone renderer.
+struct NetworkBrowserFixture: View {
+    let state: String
+    var onSidebarProbe: ((NSView) -> Void)? = nil
+    var onDetailProbe: ((NSView) -> Void)? = nil
+    @State private var networkID: String? = "studio"
+    @State private var channelID: String? = "main"
+
+    private var networks: [ALONetworkSummary] {
+        state == "empty" ? [] : [
+            .init(id: "studio", name: state == "long" ? "Studio for collaborative music and late-night conversations" : "Studio", memberCount: 4, isOwner: state != "member-empty"),
+            .init(id: "friends", name: "Friends", memberCount: 8, isOwner: false)
+        ]
+    }
+
+    var body: some View {
+        ALONativeNetworkColumns {
+            ALONetworkSidebar(networks: networks, selectedNetworkID: $networkID,
+                identityName: "Raj", identityFingerprint: "public-preview-identity",
+                onCreateNetwork: {}, onImportNetwork: {}, onExportPublicIdentity: {},
+                nearbyNetworks: state == "empty" ? [] : [
+                    .init(id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
+                          name: state == "long" ? "Shyam’s network for the entire neighbourhood" : "Shyam’s network",
+                          status: state == "pending" || state == "long" ? .waitingForApproval : nil)
+                ], joinRequests: state == "pending" || state == "long" ? [
+                    .init(id: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!,
+                          name: "Alex", networkName: "Studio", fingerprint: "public-preview-request")
+                ] : [], onExportRecovery: {})
+                .background(NetworkSidebarGeometryProbe(onCreate: onSidebarProbe))
+        } detail: {
+            VStack(spacing: 0) {
+            if let network = networks.first {
+                VStack(spacing: 0) {
+                    ALOChannelList(network: network, channels: state.hasSuffix("-empty") ? [] : [
+                        .init(id: "main", name: "Main", isPrivate: false, isMain: true),
+                        .init(id: "music", name: state == "long" ? "Music for focused work and collaborative listening sessions" : "Music", isPrivate: false),
+                        .init(id: "private", name: "After hours", isPrivate: true)
+                    ], selectedChannelID: $channelID,
+                    errorMessage: state == "error" ? "The nearby connection closed. Try joining again while the owner has ALO open." : nil,
+                    onCreateChannel: {}, onAddMember: {}, onImportInvitation: {})
+                    Divider()
+                    HStack {
+                        Button("Members", systemImage: "person.2") {}
+                        Spacer()
+                        if !state.hasSuffix("-empty") {
+                            Button("Join channel", systemImage: "arrow.right.circle.fill") {}.buttonStyle(.borderedProminent)
+                        }
+                    }.padding(16)
+                }
+            } else {
+                ContentUnavailableView {
+                    Label("Your networks live here", systemImage: "network")
+                } description: {
+                    Text("Create a network for your group, or join one nearby. Your channels will appear here.")
+                } actions: {
+                    Button("Create network") {}.buttonStyle(.borderedProminent)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            }
+            .background(NetworkSidebarGeometryProbe(onCreate: onDetailProbe))
+        }
+    }
+}
+
+private struct NetworkSidebarGeometryProbe: NSViewRepresentable {
+    var onCreate: ((NSView) -> Void)?
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        onCreate?(view)
+        return view
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}

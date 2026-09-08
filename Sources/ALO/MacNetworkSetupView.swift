@@ -17,6 +17,7 @@ struct MacNetworkSetupView: View {
     @State private var recoveryExported = false
     @State private var busy = false
     @State private var error: String?
+    @State private var nearbyJoinFeedback = ALONearbyJoinFeedback()
     @State private var selectedChannelID: String?
     @State private var privateChannel = false
     @State private var allowed = Set<String>()
@@ -28,28 +29,18 @@ struct MacNetworkSetupView: View {
     private enum Sheet: String, Identifiable { case createNetwork, importNetwork, addMember, createChannel, members; var id: Self { self } }
 
     var body: some View {
-        GeometryReader { geometry in
-        VStack(spacing: 0) {
-            HStack {
-                Text("ALO").font(.title3.weight(.bold))
-                Text(account.identityReady ? "Networks" : "Set up ALO").foregroundStyle(.secondary)
-                Spacer()
-                if account.identityReady {
-                    Button { exportRecovery() } label: { Image(systemName: "key").frame(width: 40, height: 40) }
-                        .help("Export your identity recovery file").accessibilityLabel("Export identity recovery file")
+        Group {
+            if account.identityReady {
+                // The native window owns its dimensions. Keep the original
+                // geometry proposal without the old card/header: otherwise
+                // List's intrinsic size can enlarge NSHostingView's window.
+                GeometryReader { geometry in
+                    networkBrowser.frame(width: geometry.size.width, height: geometry.size.height)
                 }
-                Button { NSApp.keyWindow?.close() } label: { Image(systemName: "xmark").frame(width: 40, height: 40) }
-                    .help("Hide this window").accessibilityLabel("Hide this window")
-            }.buttonStyle(.borderless).controlSize(.large).padding(18)
-            Divider()
-            if !account.identityReady { identitySetup }
-            else { networkBrowser }
+            } else {
+                onboardingContainer
+            }
         }
-        .frame(width: geometry.size.width, height: geometry.size.height)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24))
-        .clipShape(RoundedRectangle(cornerRadius: 24))
-        }
-        .padding(10)
         .sheet(item: $sheet) { selection in
             sheetView(selection).frame(width: 600, height: 520)
                 .interactiveDismissDisabled(busy)
@@ -69,6 +60,27 @@ struct MacNetworkSetupView: View {
             clearConfirmation()
         }
         .onAppear { selectedChannelID = account.channels.first?.id.uuidString }
+    }
+
+    private var onboardingContainer: some View {
+        GeometryReader { geometry in
+        VStack(spacing: 0) {
+            HStack {
+                Text("ALO").font(.title3.weight(.bold))
+                Text("Set up ALO").foregroundStyle(.secondary)
+                Spacer()
+                Button { NSApp.keyWindow?.close() } label: { Image(systemName: "xmark").frame(width: 40, height: 40) }
+                    .help("Hide this window").accessibilityLabel("Hide this window")
+            }.buttonStyle(.borderless).controlSize(.large)
+                .padding(18)
+            Divider()
+            identitySetup
+        }
+        .frame(width: geometry.size.width, height: geometry.size.height)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24))
+        .clipShape(RoundedRectangle(cornerRadius: 24))
+        }
+        .padding(10)
     }
 
     private var confirmationTitle: String {
@@ -130,7 +142,7 @@ struct MacNetworkSetupView: View {
     }
 
     private var networkBrowser: some View {
-        HStack(spacing: 0) {
+        ALONativeNetworkColumns {
             ALONetworkSidebar(networks: account.networks.map(summary), selectedNetworkID: $account.selectedNetworkID,
                 identityName: account.displayName, identityFingerprint: account.identity?.publicIdentity.userID ?? "",
                 onCreateNetwork: { present(.createNetwork) }, onImportNetwork: { present(.importNetwork) },
@@ -141,25 +153,29 @@ struct MacNetworkSetupView: View {
                           networkName: account.networks.first(where: { $0.id == request.networkID })?.name ?? "your network",
                           fingerprint: request.identity.userID)
                 }, isBusy: busy,
-                onJoin: { id in Task { @MainActor in
-                    do { try await account.requestToJoin(networkID: id) }
-                    catch is CancellationError { }
-                    catch { self.error = NetworkAccountModel.describe(error) }
-                } },
+                onJoin: { id in
+                    let attempt = nearbyJoinFeedback.begin()
+                    Task { @MainActor in
+                        do {
+                            try await account.requestToJoin(networkID: id)
+                            nearbyJoinFeedback.finish(attempt)
+                        } catch is CancellationError { nearbyJoinFeedback.finish(attempt) }
+                        catch { nearbyJoinFeedback.finish(attempt, errorMessage: NetworkAccountModel.describe(error)) }
+                    }
+                },
                 onApprove: { id in performAsync { try await account.approveJoinRequest(id: id) } },
                 onDecline: { id in performAsync { try await account.rejectJoinRequest(id: id) } },
                 nearbyError: account.nearbyNetworkError,
                 nearbyNotice: account.nearbyNetworkNotice,
                 onRetryNearby: { Task { @MainActor in account.stopNearbyNetworking(); await account.startNearbyNetworking() } },
-                onCancelJoin: { id in account.cancelJoinRequest(networkID: id) })
-                .frame(minWidth: 250, idealWidth: 280, maxWidth: account.networks.isEmpty ? .infinity : 300)
-            if !account.networks.isEmpty {
-            Divider()
+                onCancelJoin: { id in nearbyJoinFeedback.cancel(); account.cancelJoinRequest(networkID: id) },
+                onExportRecovery: exportRecovery)
+        } detail: {
             VStack(spacing: 0) {
                 if let network = account.selectedNetwork {
                     ALOChannelList(network: summary(network), channels: account.channels.map {
                         ALOChannelSummary(id: $0.id.uuidString, name: $0.name, isPrivate: $0.isPrivate, isMain: $0.isMain)
-                    }, selectedChannelID: $selectedChannelID, errorMessage: error ?? account.errorMessage ?? model.errorMessage,
+                    }, selectedChannelID: $selectedChannelID, errorMessage: nearbyJoinFeedback.errorMessage ?? error ?? account.errorMessage ?? model.errorMessage,
                     onCreateChannel: { present(.createChannel) }, onAddMember: { present(.addMember) },
                     onImportInvitation: { present(.importNetwork) })
                     Divider()
@@ -177,17 +193,16 @@ struct MacNetworkSetupView: View {
                     ContentUnavailableView {
                         Label("Your networks live here", systemImage: "network")
                     } description: {
-                        Text("Choose a network to see its channels.")
+                        Text(account.networks.isEmpty ? "Create a network for your group, or join one nearby. Your channels will appear here." : "Choose a network to see its channels.")
                     } actions: {
                         Button("Create network") { present(.createNetwork) }.buttonStyle(.borderedProminent)
                     }
-                    if let error = error ?? account.errorMessage ?? model.errorMessage { Text(error).foregroundStyle(.red).padding() }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
-            }
             }
         }
         .safeAreaInset(edge: .bottom) {
-            if account.networks.isEmpty, let message = error ?? account.errorMessage ?? model.errorMessage {
+            if account.selectedNetwork == nil, let message = nearbyJoinFeedback.errorMessage ?? error ?? account.errorMessage ?? model.errorMessage {
                 Label(message, systemImage: "exclamationmark.triangle")
                     .font(.callout).padding().frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -279,6 +294,8 @@ struct MacNetworkSetupView: View {
 
     private func present(_ next: Sheet) {
         guard !busy else { return }
+        // Retire screen feedback only; the account's join request is untouched.
+        nearbyJoinFeedback.cancel()
         error = nil; name = ""; packageText = ""; invitation = nil; privateChannel = false; allowed = []; sheet = next
     }
 

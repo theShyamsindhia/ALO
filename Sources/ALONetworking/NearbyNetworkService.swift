@@ -21,11 +21,12 @@ public struct NearbyNetworkJoinRequest: Identifiable, Equatable, Sendable {
 }
 
 public enum NearbyNetworkError: LocalizedError {
-    case unavailable, invalidMessage, rejected, timedOut, busy
+    case unavailable, invalidMessage, connectionClosed, rejected, timedOut, busy
     public var errorDescription: String? {
         switch self {
         case .unavailable: return "This network is no longer nearby. Refresh and try again."
         case .invalidMessage: return "The nearby network identity could not be verified."
+        case .connectionClosed: return "The nearby connection closed before the request finished. It may have expired. Try again while the owner is available."
         case .rejected: return "The owner declined the join request."
         case .timedOut: return "The join request expired. Try again while the owner is available."
         case .busy: return "Too many join requests are active. Try again shortly."
@@ -256,7 +257,7 @@ public final class NearbyNetworkService: @unchecked Sendable {
         })
     }
 
-    private func accept(_ connection: NWConnection, networkID: UUID) {
+    private func accept(_ connection: NWConnection, networkID: UUID, approvalTimeout: TimeInterval = 120) {
         guard hasSessionCapacity(outbound: false) else { connection.cancel(); return }
         guard case .hostPort(let host, _) = connection.endpoint else { connection.cancel(); return }
         let remoteHost = String(describing: host)
@@ -289,7 +290,7 @@ public final class NearbyNetworkService: @unchecked Sendable {
                     }
                     self.pending[id] = NearbyNetworkJoinRequest(id: id, networkID: networkID,
                         displayName: remote.deviceName, identity: remote.userIdentity)
-                    self.armTimeout(id, seconds: 120); self.publishRequests()
+                    self.armTimeout(id, seconds: approvalTimeout); self.publishRequests()
                     // Keep a read outstanding while the owner decides. EOF must
                     // retire Cancel/disconnect promptly; extra bytes are invalid
                     // because this protocol accepts exactly one join request.
@@ -378,10 +379,15 @@ public final class NearbyNetworkService: @unchecked Sendable {
         return try await request(networkID: network.id)
     }
 
-    func listenOnLoopback(network: NetworkManifest) async throws -> NWEndpoint {
+    enum LoopbackConfigurationError: Error { case invalidApprovalTimeout }
+
+    func listenOnLoopback(network: NetworkManifest, approvalTimeout: TimeInterval = 120) async throws -> NWEndpoint {
         try await withCheckedThrowingContinuation { continuation in
             queue.async { [self] in
                 do {
+                    guard approvalTimeout.isFinite, approvalTimeout > 0, approvalTimeout <= 120 else {
+                        throw LoopbackConfigurationError.invalidApprovalTimeout
+                    }
                     try network.validateSignature()
                     guard network.owner == binding.userIdentity else { throw NetworkAuthorityError.ownerRequired }
                     let profile = try parameters()
@@ -389,7 +395,9 @@ public final class NearbyNetworkService: @unchecked Sendable {
                     let listener = try NWListener(using: profile)
                     listeners[network.id] = listener
                     var returned = false
-                    listener.newConnectionHandler = { [weak self] connection in self?.accept(connection, networkID: network.id) }
+                    listener.newConnectionHandler = { [weak self] connection in
+                        self?.accept(connection, networkID: network.id, approvalTimeout: approvalTimeout)
+                    }
                     listener.stateUpdateHandler = { state in
                         guard !returned else { return }
                         if case .ready = state, let port = listener.port {
@@ -468,7 +476,9 @@ public final class NearbyNetworkService: @unchecked Sendable {
             guard let self, self.sessions[id] != nil else { return }
             do {
                 if let error { throw error }
-                guard let data, data.count == count else { throw NearbyNetworkError.invalidMessage }
+                // A peer can close after its approval deadline without sending a
+                // response. EOF is not evidence of a failed identity check.
+                guard let data, data.count == count else { throw NearbyNetworkError.connectionClosed }
                 try handle(data)
             } catch { self.finish(id, result: .failure(error)) }
         }

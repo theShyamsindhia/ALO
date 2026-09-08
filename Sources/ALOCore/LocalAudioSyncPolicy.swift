@@ -33,15 +33,28 @@ public struct LocalAudioSyncPolicy: Sendable {
 /// This measures software playout timing; it cannot measure acoustic speaker delay.
 public struct RenderDriftEstimate: Sendable {
     public static let maximumAgeNanos: UInt64 = 250_000_000
+    /// Engineering horizon, not a guarantee about any output device's timing.
+    public static let maximumFutureLeadNanos: UInt64 = maximumAgeNanos
     public let errorSeconds: Double
     public let magnitudeNanos: UInt64
+    /// Future render phase is useful, but freshness must never be in the future.
+    /// Preserve the actual age of already-past samples rather than refreshing
+    /// them on every maintenance poll.
+    public let freshnessNanos: UInt64
+
+    public static func clockIsWithinWindow(nowNanos: UInt64, renderLocalNanos: UInt64,
+                                          permittedFutureLeadNanos: UInt64 = 0) -> Bool {
+        guard permittedFutureLeadNanos <= maximumFutureLeadNanos else { return false }
+        if renderLocalNanos > nowNanos { return renderLocalNanos - nowNanos <= permittedFutureLeadNanos }
+        return nowNanos - renderLocalNanos <= maximumAgeNanos
+    }
 
     public init?(nowNanos: UInt64, renderLocalNanos: UInt64, renderHostNanos: UInt64,
                  outputLatencyNanos: UInt64, captureAnchorNanos: UInt64,
                  playoutDelayNanos: UInt64, sampleTime: Int64, sampleRate: Double,
-                 captureOffsetNanos: Double = 0) {
-        guard nowNanos >= renderLocalNanos,
-              nowNanos - renderLocalNanos <= Self.maximumAgeNanos,
+                 captureOffsetNanos: Double = 0, permittedFutureLeadNanos: UInt64 = 0) {
+        guard Self.clockIsWithinWindow(nowNanos: nowNanos, renderLocalNanos: renderLocalNanos,
+                                      permittedFutureLeadNanos: permittedFutureLeadNanos),
               sampleTime >= 0, sampleRate.isFinite, sampleRate > 0, captureOffsetNanos.isFinite else { return nil }
         let audible = renderHostNanos.addingReportingOverflow(outputLatencyNanos)
         let start = captureAnchorNanos.addingReportingOverflow(playoutDelayNanos)
@@ -51,6 +64,7 @@ public struct RenderDriftEstimate: Sendable {
         let magnitude = abs(errorSeconds) * 1_000_000_000
         guard magnitude.isFinite, magnitude < Double(UInt64.max) else { return nil }
         magnitudeNanos = UInt64(magnitude)
+        freshnessNanos = min(nowNanos, renderLocalNanos)
     }
 }
 
@@ -105,4 +119,43 @@ public enum PlaybackRateCorrection {
         let smoothed = previous + (desired - previous) * 0.12
         return abs(smoothed) < 0.000_005 ? 0 : smoothed
     }
+}
+
+/// Holds a learned correction through brief missing render measurements, then
+/// returns to neutral at the next maintenance call once the sample is 500ms
+/// old. At the existing 1% rate limit this budgets about 5ms of unobserved
+/// correction while maintenance runs; a blocked queue can exceed that budget.
+/// Indefinite holdover would add up to 10ms/second of unobserved correction.
+public struct PlaybackRateController: Sendable {
+    public static let maximumHoldoverNanos: UInt64 = 500_000_000
+    private var correction = 0.0
+    private var lastFreshNanos: UInt64?
+    private var missingSinceNanos: UInt64?
+    public init() {}
+    public var rate: Float { Float(1 + correction) }
+
+    public mutating func updateFresh(errorSeconds: Double, sampledAtNanos: UInt64) -> Float {
+        if let lastFreshNanos,
+           sampledAtNanos < lastFreshNanos || sampledAtNanos - lastFreshNanos >= Self.maximumHoldoverNanos {
+            // A blocked maintenance queue may return directly with a fresh
+            // sample, without having delivered any intermediate missing tick.
+            correction = 0
+        }
+        correction = PlaybackRateCorrection.next(previous: correction, errorSeconds: errorSeconds)
+        lastFreshNanos = sampledAtNanos
+        missingSinceNanos = nil
+        return rate
+    }
+
+    /// True means the audio unit must also be returned to rate 1. Clearing the
+    /// smoothed state prevents an old correction being replayed on recovery.
+    public mutating func handleMissing(at now: UInt64) -> Bool {
+        if missingSinceNanos == nil { missingSinceNanos = now }
+        let reference = lastFreshNanos ?? missingSinceNanos ?? now
+        guard now < reference || now - reference >= Self.maximumHoldoverNanos else { return false }
+        correction = 0
+        return true
+    }
+
+    public mutating func reset() { self = Self() }
 }

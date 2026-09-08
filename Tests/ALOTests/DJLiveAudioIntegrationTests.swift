@@ -32,7 +32,14 @@ struct DJLiveAudioIntegrationTests {
         #expect(abs(live.snapshot().historyDuration - 0.005) < 0.000001)
         player.accept(packet(1))
         #expect(abs(live.snapshot().historyDuration - 0.015) < 0.000001)
+        #expect(player.pendingPlaybackPacketCount == 2)
+        #expect(player.outstandingPlaybackBufferCount == 1)
+        // Both admitted packets have already passed DSP. Real maintenance
+        // flushes the processed tail without processing those samples again.
+        player.maintainSync()
         #expect(player.pendingPlaybackPacketCount == 0)
+        #expect(player.outstandingPlaybackBufferCount == 3)
+        #expect(abs(live.snapshot().historyDuration - 0.015) < 0.000001)
         player.accept(packet(2))
         #expect(abs(live.snapshot().historyDuration - 0.015) < 0.000001)
     }

@@ -7,6 +7,135 @@ import Testing
 
 @Suite("Single-Mac room integration", .serialized)
 struct LoopbackRoomScaleTests {
+    @Test func boundedControlConnectionLifecycleEvidence() throws {
+        // Fixed-count diagnosis, not retry-until-green. No audio is produced.
+        for iteration in 0..<32 {
+            let ready = DispatchSemaphore(value: 0)
+            let state = PortState()
+            let host = HostServer(roomName: "Lifecycle evidence", advertise: false,
+                listenerReadyHandler: { state.set($0); ready.signal() })
+            try host.start()
+            defer { host.stop() }
+            try #require(ready.wait(timeout: .now() + 3) == .success)
+            let port = try #require(state.port)
+            let peer = HeadlessLoopbackPeer(index: 500 + iteration)
+            defer { peer.stop() }
+            try peer.start(hostPort: port)
+            try #require(peer.waitUntilJoined(timeout: 3))
+            print("CONTROL_LIFECYCLE iteration=\(iteration) \(peer.controlSetupEvidence)")
+        }
+    }
+
+    @Test func occupiedSourceEndpointIsAControlSetupFailure() throws {
+        let ready = DispatchSemaphore(value: 0)
+        let state = PortState()
+        let host = HostServer(roomName: "Occupied source evidence", advertise: false,
+            listenerReadyHandler: { state.set($0); ready.signal() })
+        try host.start()
+        defer { host.stop() }
+        try #require(ready.wait(timeout: .now() + 3) == .success)
+        let port = try #require(state.port)
+        let parameters = NWParameters.tcp
+        // The source endpoint is deliberately the occupied listener. This
+        // classifies bind failure; it does not prove automatic selection chose
+        // the same endpoint in the earlier full-suite failures.
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: port)
+        let peer = HeadlessLoopbackPeer(index: 600)
+        defer { peer.stop() }
+        do {
+            try peer.start(hostPort: port, controlParameters: parameters)
+            Issue.record("An explicitly occupied source endpoint must not join")
+        } catch LoopbackTestError.peerDidNotJoin {
+            #expect(peer.controlSetupEvidence.contains("errno=48"))
+            #expect(peer.packetCount == 0)
+            #expect(peer.hasStopped, "Failed setup must retire its native resources before returning to the caller")
+            print("CONTROL_OCCUPIED_SOURCE \(peer.controlSetupEvidence)")
+        }
+    }
+
+    @Test func schedulingEvidenceIsBoundedNumericAndKeepsOrdering() {
+        let evidence = LoopbackSchedulingEvidence(capacity: 3)
+        evidence.register(port: 61_234, transport: .udp, peer: 2)
+        let send = LoopbackSchedulingEvidence.Send(id: 7, endpoint: .init(transport: .udp, port: 61_234), sequence: 42, byteCount: 992)
+        evidence.record(send: send, phase: .admitted, at: 1_000)
+        evidence.record(send: send, phase: .scheduled, at: 1_100, detail: 1_400)
+        evidence.record(send: send, phase: .completed, at: 1_500)
+        evidence.record(send: send, phase: .completed, at: 1_600)
+        let lines = evidence.lines()
+        #expect(lines.count == 4)
+        #expect(lines[0].contains("retained=3 dropped=1"))
+        #expect(lines[0].contains("retention=newest"))
+        #expect(lines[1] == "1,100,2,7,42,-1,audio,992,scheduled,400")
+        #expect(lines[2] == "2,500,2,7,42,-1,audio,992,completed,0")
+        #expect(lines[3] == "3,600,2,7,42,-1,audio,992,completed,0")
+        #expect(!lines.joined().contains("61234"), "Network endpoints must never be emitted")
+        #expect(evidence.takeDump(label: "first") != nil)
+        #expect(evidence.takeDump(label: "second") == nil, "Only one dump is permitted per run")
+    }
+
+    @Test func schedulingEvidenceExportsBoundedArtifactAndReportsWriteFailure() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("alo-gate-export-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let evidence = LoopbackSchedulingEvidence(capacity: 1)
+        evidence.register(port: 61_234, transport: .udp, peer: 2)
+        for time in [UInt64(100), 200] {
+            evidence.completionOwner(.init(port: 61_234, entryNanos: time,
+                ownerNanos: time + 10))
+        }
+        #expect(evidence.takeDump(label: "console first") != nil)
+        try evidence.export(directory: directory, filename: "trace.csv", label: "bounded test")
+        let text = try String(contentsOf: directory.appendingPathComponent("trace.csv"), encoding: .utf8)
+        #expect(text.contains("owner retained=1 dropped=1"))
+        #expect(text.contains("owner retained=1 dropped=1; retention=oldest"))
+        #expect(text.contains("gate retained=0 dropped=0; retention=oldest"))
+        #expect(text.contains("retained=0 dropped=0; retention=newest"))
+        #expect(text.contains("owner,2,100,110,10"))
+        #expect(!text.contains("61234"))
+        #expect(evidence.takeDump(label: "console remains suppressed") == nil)
+        let artifactFirst = LoopbackSchedulingEvidence()
+        try artifactFirst.export(directory: directory, filename: "artifact-first.csv", label: "artifact first")
+        #expect(artifactFirst.takeDump(label: "later console") != nil,
+            "Artifact export must not consume the independent one-time console dump")
+        #expect(artifactFirst.takeDump(label: "duplicate console") == nil)
+        // A regular file cannot serve as the export directory. Failure must
+        // propagate instead of producing a success summary or a validated claim.
+        let failing = LoopbackSchedulingEvidence()
+        var failed = false
+        do {
+            try failing.export(directory: directory.appendingPathComponent("trace.csv"),
+                filename: "impossible.csv", label: "failure control")
+        } catch { failed = true }
+        #expect(failed)
+    }
+
+    @Test func schedulingEvidenceReportsMappingOmittedAttemptsWithoutUnboundedKeys() throws {
+        let evidence = LoopbackSchedulingEvidence(capacity: 1)
+        let connection = NWConnection(host: "127.0.0.1", port: 61_234, using: .udp)
+        _ = evidence.admitted(connection: connection, audioSequence: 0, byteCount: 992, captureNanos: 100)
+        _ = evidence.admitted(connection: connection, audioSequence: 1, byteCount: 992, captureNanos: 200)
+        _ = evidence.admitted(connection: connection, audioSequence: 1, byteCount: 992, captureNanos: 200)
+        _ = evidence.admitted(connection: connection, audioSequence: 0, byteCount: 992, captureNanos: 100)
+        let lines = try #require(evidence.takeDump(label: "mapping cap"))
+        #expect(lines.contains("capture mapping retained=1 omitted_attempts=2; retention=first-keys; omissions count attempts, not unique timestamps"))
+        #expect(lines.filter { $0.hasPrefix("capture_sequence,") } == ["capture_sequence,100,0"])
+    }
+
+    @Test func schedulingEvidenceSeparatesTransportsAndRetainsCaptureIndex() {
+        let evidence = LoopbackSchedulingEvidence()
+        evidence.register(port: 61_234, transport: .udp, peer: 2)
+        evidence.register(port: 61_234, transport: .tcp, peer: 6)
+        let udp = NWConnection(host: "127.0.0.1", port: 61_234, using: .udp)
+        let tcp = NWConnection(host: "127.0.0.1", port: 61_234, using: .tcp)
+        let audio = evidence.admitted(connection: udp, audioSequence: 42, byteCount: 992)
+        let control = evidence.admitted(connection: tcp, audioSequence: nil, byteCount: 90)
+        evidence.capture(index: 19, deadline: 0, wokeAt: MonotonicClock.nowNanos())
+        let lines = evidence.lines()
+        #expect(audio.endpoint?.transport == .udp && control.endpoint?.transport == .tcp)
+        #expect(lines[1].contains(",2,0,42,-1,audio,992,admitted,0"))
+        #expect(lines[2].contains(",6,1,-,-1,control,90,admitted,0"))
+        #expect(lines[3].hasSuffix(",-1,-1,-,19,capture,0,capture,0"))
+    }
+
     @Test("Broadcaster diagnostics detect remote screen lateness received over the control connection")
     func remoteScreenTimingReachesBroadcasterDiagnostics() throws {
         let ready = DispatchSemaphore(value: 0)
@@ -29,11 +158,13 @@ struct LoopbackRoomScaleTests {
 
         """.utf8))
         try #require(waitUntil(timeout: 3) { host.diagnosticsSnapshot().reportingListenerCount == 1 })
-        func result() -> DiagnosticCheckResult {
+        func result(includeClockTelemetry: Bool = true) -> DiagnosticCheckResult {
             DiagnosticRoomContext(isActive: true, role: .broadcaster,
                 participantCount: 2, remotePeerCount: 1, syncLabel: "Broadcasting",
                 audioIsRendering: true, hasBroadcaster: true,
-                timing: SessionTimingDiagnostics(receiver: nil, host: host.diagnosticsSnapshot())).result
+                timing: SessionTimingDiagnostics(receiver: nil, host: host.diagnosticsSnapshot()),
+                peerPlaybackTiming: includeClockTelemetry
+                    ? ["loopback-peer-720": .init(roundTripMilliseconds: 2, driftMilliseconds: 2)] : [:]).result
         }
         #expect(result().outcome == .warning,
             "Healthy audio cannot conceal a current remote screen handoff miss")
@@ -59,6 +190,8 @@ struct LoopbackRoomScaleTests {
         host.setVideoEnabled(false)
         try #require(waitUntil(timeout: 3) { !host.diagnosticsSnapshot().videoEnabled })
         #expect(result().outcome == .passed, "Audio-only rooms do not require screen telemetry")
+        #expect(result(includeClockTelemetry: false).outcome == .warning,
+            "Screen health cannot substitute for missing listener clock telemetry")
         let previousScreen = PlaybackScreenTimingReport(latestHandoffAgeNanos: 10_000_000_000,
             latestDeadlineMissNanos: 0)
         peer.sendRawControl(try ControlMessage(type: "sync_status", participantID: "loopback-peer-720",
@@ -553,7 +686,7 @@ struct LoopbackRoomScaleTests {
         let directBoundedEight = try runRoom(peerCount: 8, linkBitsPerSecond: nil, policy: boundedPolicy, schedulerOversleep: schedulerOversleep)
         let shapedOne = try runRoom(peerCount: 1, linkBitsPerSecond: 4_000_000, policy: boundedPolicy, schedulerOversleep: schedulerOversleep)
         let unboundedEight = try runRoom(peerCount: 8, linkBitsPerSecond: 4_000_000, policy: .unbounded, schedulerOversleep: schedulerOversleep)
-        let boundedEight = try runRoom(peerCount: 8, linkBitsPerSecond: 4_000_000, policy: boundedPolicy, schedulerOversleep: schedulerOversleep)
+        let boundedEight = try runRoom(peerCount: 8, linkBitsPerSecond: 4_000_000, policy: boundedPolicy, schedulerOversleep: schedulerOversleep, gateTraceCandidate: true)
 
         print("Injected capture wake oversleep: \(schedulerOversleep * 1_000) ms")
         print("Direct 8-peer final packet age: \(directEight.maximumFinalAgeNanos / 1_000_000) ms")
@@ -567,6 +700,29 @@ struct LoopbackRoomScaleTests {
         print("Bounded 8-peer audible lateness: \(boundedEight.maximumAudibleLatenessNanos / 1_000_000) ms")
         print("Bounded packets delivered per peer: \(boundedEight.minimumPacketsReceived) / 200")
         print("Automatic resync commands after detected lateness: \(unboundedEight.resyncCommandsReceived)")
+
+        let contractsHold = directEight.maximumFinalAgeNanos < 100_000_000
+            && directEight.maximumAudibleLatenessNanos < 50_000_000 && directEight.minimumPacketsReceived >= 190
+            && directBoundedEight.maximumFinalAgeNanos < 100_000_000
+            && directBoundedEight.maximumAudibleLatenessNanos < 50_000_000
+            && (schedulerOversleep != 0 || directBoundedEight.minimumPacketsReceived >= 190)
+            && shapedOne.maximumFinalAgeNanos < 100_000_000
+            && unboundedEight.maximumFinalAgeNanos > shapedOne.maximumFinalAgeNanos + 1_000_000_000
+            && unboundedEight.maximumFinalAgeNanos > SynchronizedPlayer.targetLatencyNanos
+            && unboundedEight.maximumAudibleLatenessNanos > 1_000_000_000
+            && unboundedEight.minimumPacketsReceived >= 190
+            && unboundedEight.maximumPacketArrivalSkewNanos > 5_000_000 && unboundedEight.resyncCommandsReceived > 0
+            && boundedEight.maximumFinalAgeNanos < SynchronizedPlayer.targetLatencyNanos
+            && boundedEight.maximumPacketAgeNanos < SynchronizedPlayer.targetLatencyNanos
+            && boundedEight.maximumAudibleLatenessNanos < 100_000_000
+            && boundedEight.minimumPacketsReceived >= 50
+            && boundedEight.minimumPacketsReceived < unboundedEight.minimumPacketsReceived
+        if !contractsHold {
+            for (label, result) in [("direct", directEight), ("direct-bounded", directBoundedEight),
+                ("shaped-one", shapedOne), ("unbounded-eight", unboundedEight), ("bounded-eight", boundedEight)] {
+                result.schedulingEvidence.dump(label: "\(label), injectedWake=\(schedulerOversleep)")
+            }
+        }
 
         // Negative control: fan-out over unconstrained localhost should remain comfortably
         // inside the player's 250 ms target buffer even with eight real NWConnections.
@@ -1388,7 +1544,8 @@ struct LoopbackRoomScaleTests {
         linkBitsPerSecond: UInt64?,
         policy: HostServer.AudioBackpressurePolicy,
         schedulerOversleep: TimeInterval,
-        deferredPCM: Bool = false
+        deferredPCM: Bool = false,
+        gateTraceCandidate: Bool = false
     ) throws -> RoomMeasurements {
         // This headless fixture has no active audio device. Request precise
         // scheduling only while measuring live capture/transport, as a real
@@ -1402,6 +1559,22 @@ struct LoopbackRoomScaleTests {
         let hostReady = DispatchSemaphore(value: 0)
         let state = PortState()
         let shaper = linkBitsPerSecond.map(FluidLinkShaper.init(bitsPerSecond:))
+        let schedulingEvidence = LoopbackSchedulingEvidence()
+        let gateTraceEnabled = gateTraceCandidate
+            && ProcessInfo.processInfo.environment["ALO_TEST_FANOUT_GATE_TRACE"] == "1"
+        defer {
+            if gateTraceEnabled {
+                do {
+                    guard let directory = ProcessInfo.processInfo.environment["ALO_TEST_FANOUT_TRACE_DIR"],
+                          !directory.isEmpty else { throw LoopbackTraceExportError.missingDirectory }
+                    try schedulingEvidence.export(directory: URL(fileURLWithPath: directory, isDirectory: true),
+                        filename: "bounded-eight-wake-\(Int(schedulerOversleep * 1_000)).csv",
+                        label: "bounded-eight 4000000 bits/s injectedWake=\(schedulerOversleep)")
+                } catch {
+                    Issue.record("Fanout diagnostic export failed (not a timing result): \(error)")
+                }
+            }
+        }
         let completionLatencies = AudioCompletionLatencies()
         let captureCallbackAges = AudioCompletionLatencies()
         let captureToAdmissionAges = AudioCompletionLatencies()
@@ -1419,6 +1592,9 @@ struct LoopbackRoomScaleTests {
             outboundSend: { connection, data, isComplete, completion in
                 let header = AudioProbeHeader.read(in: data)
                 let sequence = header?.sequence
+                let evidenceSend = schedulingEvidence.admitted(connection: connection,
+                    audioSequence: sequence, byteCount: data.count,
+                    captureNanos: gateTraceEnabled ? header?.captureTimeNanos : nil)
                 if let header {
                     let admittedAt = MonotonicClock.nowNanos()
                     captureToAdmissionAges.record(admittedAt > header.captureTimeNanos
@@ -1434,6 +1610,8 @@ struct LoopbackRoomScaleTests {
                 }
                 let started = MonotonicClock.nowNanos()
                 let measuredCompletion: (NWError?) -> Void = { error in
+                    schedulingEvidence.record(send: evidenceSend, phase: .completed,
+                        at: MonotonicClock.nowNanos(), detail: error == nil ? 0 : 1)
                     if let sequence {
                         completionLatencies.record(MonotonicClock.nowNanos() - started)
                         submissions.completed(port: destinationPort, sequence: sequence, error: error,
@@ -1447,7 +1625,13 @@ struct LoopbackRoomScaleTests {
                         over: connection,
                         isComplete: isComplete,
                         completion: measuredCompletion,
+                        scheduled: { deadline in
+                            schedulingEvidence.record(send: evidenceSend, phase: .scheduled,
+                                at: MonotonicClock.nowNanos(), detail: deadline)
+                        },
                         timing: { serializationWait, dispatchLateness in
+                            schedulingEvidence.record(send: evidenceSend, phase: .dispatch,
+                                at: MonotonicClock.nowNanos(), detail: dispatchLateness)
                             guard let sequence else { return }
                             submissions.shaped(port: destinationPort, sequence: sequence,
                                 serializationWaitNanos: serializationWait, dispatchLatenessNanos: dispatchLateness)
@@ -1458,6 +1642,8 @@ struct LoopbackRoomScaleTests {
                         isComplete: isComplete, completion: .contentProcessed(measuredCompletion))
                 }
             },
+            audioCompletionObservationForTesting: gateTraceEnabled ? { schedulingEvidence.completionOwner($0) } : nil,
+            audioAdmissionObservationForTesting: gateTraceEnabled ? { schedulingEvidence.admission($0) } : nil,
             audioBackpressurePolicy: policy
         )
         try host.start()
@@ -1477,6 +1663,10 @@ struct LoopbackRoomScaleTests {
             }
             guard peers.allSatisfy({ $0.waitUntilJoined(timeout: 3) }) else {
                 throw LoopbackTestError.peerDidNotJoin
+            }
+            for (index, peer) in peers.enumerated() {
+                if let port = peer.audioPort { schedulingEvidence.register(port: port, transport: .udp, peer: index) }
+                if let port = peer.controlLocalPort { schedulingEvidence.register(port: port, transport: .tcp, peer: index) }
             }
 
             // Let the host's outbound UDP connections reach ready before capture starts.
@@ -1504,6 +1694,7 @@ struct LoopbackRoomScaleTests {
             defer { source.cancel() }
             let capturePeers = peers
             source.start { sample in
+                schedulingEvidence.capture(index: sample.index, deadline: sample.deadline, wokeAt: sample.wokeAt)
                 captureWakeDelays.record(sample.wokeAt - sample.deadline)
                 let captureTimeNanos = sample.deadline - callbackDurationNanos
                 captureCallbackAges.record(MonotonicClock.nowNanos() - captureTimeNanos)
@@ -1555,6 +1746,15 @@ struct LoopbackRoomScaleTests {
             print("Capture wake delay: peers=\(peerCount), policy=\(policy), injected=\(schedulerOversleep * 1_000)ms, \(captureWakeDelays.summary)")
             print("Audio send completion latency: peers=\(peerCount), link=\(linkBitsPerSecond.map(String.init) ?? "unshaped"), policy=\(policy), \(completionLatencies.summary)")
             print("Audio sender drained: \(drainedSenders)")
+            if drainedSenders.contains(where: { sender in
+                sender.enqueued != UInt64(expectedPacketCount)
+                    || sender.sent + sender.expiredWait + sender.expiredAge + sender.admissionRejected
+                        + sender.replaced + sender.discardedBoundary != sender.enqueued
+                    || sender.sent != UInt64(submitted.submitted[sender.udpPort]?.count ?? 0)
+                    || sender.discardedBoundary != 0
+            }) {
+                schedulingEvidence.dump(label: "sender-accounting-failure")
+            }
             for sender in drainedSenders {
                 #expect(sender.enqueued == UInt64(expectedPacketCount))
                 #expect(sender.sent + sender.expiredWait + sender.expiredAge + sender.admissionRejected
@@ -1584,6 +1784,9 @@ struct LoopbackRoomScaleTests {
                 }
                 switch policy {
                 case .unbounded:
+                    if lastSequence != UInt32(expectedPacketCount - 1) {
+                        schedulingEvidence.dump(label: "unbounded-terminal-sequence-failure")
+                    }
                     #expect(lastSequence == UInt32(expectedPacketCount - 1))
                 case .boundedLatest:
                     // Permit at most the 16-packet/80ms terminal tail to expire.
@@ -1594,6 +1797,9 @@ struct LoopbackRoomScaleTests {
                     let sourceEnd = sourceStart + UInt64(expectedPacketCount) * 5_000_000
                     let boundaries = [sourceStart] + sourceTimes + [sourceEnd]
                     let maximumGap = zip(boundaries, boundaries.dropFirst()).map { $1 - $0 }.max() ?? 0
+                    if lastSequence < UInt32(expectedPacketCount - 17) || maximumGap > 200_000_000 {
+                        schedulingEvidence.dump(label: "bounded-source-continuity-failure")
+                    }
                     #expect(maximumGap <= 200_000_000, "Bounded sender stopped making source-timeline progress")
                 }
                 return arrival
@@ -1673,11 +1879,13 @@ struct LoopbackRoomScaleTests {
                 minimumPacketsReceived: snapshots.map(\.packetCount).min() ?? 0,
                 resyncCommandsReceived: resyncCommandsReceived,
                 captureCallbackAgeSummary: captureCallbackAges.summary,
-                maximumReceiveEntryAgeNanos: maximumReceiveEntryAge
+                maximumReceiveEntryAgeNanos: maximumReceiveEntryAge,
+                schedulingEvidence: schedulingEvidence
             )
         } catch {
             peers.forEach { $0.stop() }
             host.stop()
+            schedulingEvidence.dump(label: "room-error peers=\(peerCount), injectedWake=\(schedulerOversleep)")
             throw error
         }
     }
@@ -1718,10 +1926,15 @@ private final class HeadlessLoopbackPeer {
     private var receivedResyncCutovers = [UInt64]()
     private var receivedPlaybackStates = [Bool]()
     private var receivedRoomPlaybackStates = [Bool]()
+    private var receivedVideoEnabledStates = [Bool]()
     private var receivedPlayoutDelays = [UInt64]()
     private var receivedLevels = [(volume: Double, muted: Bool)]()
     private var corruptedPackets = 0
     private var stopping = false
+    private var setupEvents = [String]()
+    private var controlReadTermination: String?
+    var remoteControlTermination: String? { queue.sync { controlReadTermination } }
+    var controlSetupEvidence: String { queue.sync { setupEvents.joined(separator: " | ") } }
 
     init(index: Int, participantID: String? = nil, expectedSample: Int16? = nil, deferredPCM: Bool = false) {
         self.index = index
@@ -1732,13 +1945,19 @@ private final class HeadlessLoopbackPeer {
     }
 
     var packetCount: Int { queue.sync { arrivals.count } }
+    var hasStopped: Bool { queue.sync { stopping } }
     var audioPort: UInt16? { queue.sync { udpListener?.port?.rawValue } }
+    var controlLocalPort: UInt16? { queue.sync {
+        guard case .hostPort(_, let port) = control?.currentPath?.localEndpoint else { return nil }
+        return port.rawValue
+    } }
     var corruptedPacketCount: Int { queue.sync { corruptedPackets } }
     var lastSequence: UInt32? { queue.sync { arrivals.keys.max() } }
     var resyncCommandCount: Int { queue.sync { receivedResyncCommands } }
     var resyncCutovers: [UInt64] { queue.sync { receivedResyncCutovers } }
     var playbackStates: [Bool] { queue.sync { receivedPlaybackStates } }
     var roomPlaybackStates: [Bool] { queue.sync { receivedRoomPlaybackStates } }
+    var videoEnabledStates: [Bool] { queue.sync { receivedVideoEnabledStates } }
     var playoutDelays: [UInt64] { queue.sync { receivedPlayoutDelays } }
     var levels: [(volume: Double, muted: Bool)] { queue.sync { receivedLevels } }
     func deferredPCMReceipts() -> DeferredPCMReceipts { queue.sync { deferredReceipts } }
@@ -1747,16 +1966,27 @@ private final class HeadlessLoopbackPeer {
     /// same queue that is still receiving the packets being timed.
     func receivedSequencesForDrain() -> Set<UInt32> { queue.sync { Set(arrivals.keys) } }
 
-    func start(hostPort: NWEndpoint.Port) throws {
+    func start(hostPort: NWEndpoint.Port, controlParameters: NWParameters = .tcp) throws {
         // Reserve the outbound control endpoint before opening either media
         // listener. Network.framework can otherwise select a just-opened local
         // listener port for this loopback flow and leave it in EADDRINUSE.
         let controlReady = DispatchSemaphore(value: 0)
-        let control = NWConnection(host: "127.0.0.1", port: hostPort, using: .tcp)
+        let setupBegan = MonotonicClock.nowNanos()
+        let control = NWConnection(host: "127.0.0.1", port: hostPort, using: controlParameters)
         self.control = control
         receiveControl(from: control)
         control.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
+            let elapsed = MonotonicClock.nowNanos() - setupBegan
+            let local = self.control?.currentPath?.localEndpoint.map(String.init(describing:)) ?? "unavailable"
+            let code: Int32?
+            switch state {
+            case .waiting(.posix(let error)), .failed(.posix(let error)): code = error.rawValue
+            default: code = nil
+            }
+            if self.setupEvents.count < 8 {
+                self.setupEvents.append("ns=\(elapsed),state=\(state),errno=\(code.map(String.init) ?? "none"),source=\(local),destination=\(hostPort)")
+            }
             switch state {
             case .waiting(let error):
                 print("Loopback peer \(self.index) control \(state): host=127.0.0.1:\(hostPort), error=\(error)")
@@ -1773,7 +2003,11 @@ private final class HeadlessLoopbackPeer {
         guard controlReady.wait(timeout: .now() + 3) == .success,
               case .ready = control.state
         else {
-            control.cancel()
+            // One teardown owner installs cancellation observers before the
+            // first request. Cancelling here and replacing the handler later
+            // can lose the terminal callback; a second cancel is not a fence.
+            stop()
+            print("CONTROL_SETUP_FAILURE \(controlSetupEvidence)")
             throw LoopbackTestError.peerDidNotJoin
         }
 
@@ -1784,19 +2018,17 @@ private final class HeadlessLoopbackPeer {
             udp.newConnectionHandler = { [weak self] connection in
                 self?.acceptAudio(connection)
             }
-            udpPort = try start(udp, kind: "UDP")
             udpListener = udp
+            udpPort = try start(udp, kind: "UDP")
 
             let video = try NWListener(using: .tcp, on: .any)
             video.newConnectionHandler = { [weak self] connection in
                 self?.acceptVideo(connection)
             }
-            videoPort = try start(video, kind: "video")
             videoListener = video
+            videoPort = try start(video, kind: "video")
         } catch {
-            udpListener?.cancel()
-            videoListener?.cancel()
-            control.cancel()
+            stop()
             throw error
         }
 
@@ -1947,7 +2179,14 @@ private final class HeadlessLoopbackPeer {
         // cancel() is an asynchronous request, not proof that the native
         // listeners/flows from this room have released their resources. Keep
         // them alive until cancellation is observed, outside their own queue.
-        #expect(cancelled.wait(timeout: .now() + 3) == .success,
+        let cancellationResult = cancelled.wait(timeout: .now() + 3)
+        if cancellationResult != .success {
+            let evidence = queue.sync {
+                "connections=\(retired.0.map { String(describing: $0.state) }) listeners=\(retired.1.map { String(describing: $0.state) }) setup=\(setupEvents.joined(separator: " | "))"
+            }
+            print("CONTROL_CANCELLATION_FAILURE \(evidence)")
+        }
+        #expect(cancellationResult == .success,
             "Loopback fixture did not finish native connection/listener cancellation")
         queue.sync {
             retired.0.forEach { $0.stateUpdateHandler = nil }
@@ -1966,7 +2205,8 @@ private final class HeadlessLoopbackPeer {
         }
         listener.start(queue: queue)
         guard ready.wait(timeout: .now() + 3) == .success, let port = portState.port else {
-            listener.cancel()
+            // The caller retains this listener and completes teardown through
+            // stop(), including its native cancellation acknowledgement.
             throw LoopbackTestError.listenerDidNotStart(kind)
         }
         return port
@@ -1975,6 +2215,9 @@ private final class HeadlessLoopbackPeer {
     private func receiveControl(from connection: NWConnection) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, complete, error in
             guard let self else { return }
+            if complete || error != nil {
+                self.controlReadTermination = complete ? "EOF" : "error: \(String(describing: error))"
+            }
             if let data {
                 for message in self.controlDecoder.append(data) {
                     if message.type == "welcome" {
@@ -1996,6 +2239,8 @@ private final class HeadlessLoopbackPeer {
                     } else if message.type == "room_playback",
                               let isPlaying = message.isPlaying {
                         self.receivedRoomPlaybackStates.append(isPlaying)
+                    } else if message.type == "media_state", let enabled = message.videoEnabled {
+                        self.receivedVideoEnabledStates.append(enabled)
                     } else if message.type == "level",
                               let volume = message.volume,
                               let muted = message.muted {
@@ -2498,6 +2743,7 @@ private final class FluidLinkShaper: @unchecked Sendable {
         over connection: NWConnection,
         isComplete: Bool,
         completion: @escaping (NWError?) -> Void,
+        scheduled: (UInt64) -> Void = { _ in },
         timing: @escaping (UInt64, UInt64) -> Void = { _, _ in }
     ) {
         let now = DispatchTime.now().uptimeNanoseconds
@@ -2507,6 +2753,8 @@ private final class FluidLinkShaper: @unchecked Sendable {
         let deliversAt = startsAt + transmissionNanos
         nextAvailableNanos = deliversAt
         lock.unlock()
+
+        scheduled(deliversAt)
 
         deliveryQueue.asyncAfter(deadline: DispatchTime(uptimeNanoseconds: deliversAt)) {
             let executedAt = DispatchTime.now().uptimeNanoseconds
@@ -2520,6 +2768,164 @@ private final class FluidLinkShaper: @unchecked Sendable {
                 completion: .contentProcessed(completion)
             )
         }
+    }
+}
+
+/// Failure-only numeric evidence. Never retains PCM, control bodies, addresses,
+/// identities, or keys. The cap covers this fixture's 1,600 audio submissions
+/// plus control traffic; overflow is explicit rather than silently losing data.
+private enum LoopbackTraceExportError: Error { case missingDirectory, byteLimitExceeded }
+
+private final class LoopbackSchedulingEvidence: @unchecked Sendable {
+    enum Phase: String { case admitted, scheduled, dispatch, completed, capture }
+    enum Transport: Hashable { case tcp, udp, other }
+    struct Endpoint: Hashable { let transport: Transport; let port: UInt16 }
+    struct Send {
+        let id: Int
+        let endpoint: Endpoint?
+        let sequence: UInt32?
+        let byteCount: Int
+    }
+    struct Event {
+        let ordinal: Int
+        let time: UInt64
+        let send: Send?
+        let phase: Phase
+        let detail: UInt64
+        let captureIndex: Int?
+    }
+    private let lock = NSLock()
+    private let capacity: Int
+    private var events: [Event] = []
+    private var nextSend = 0
+    private var totalEvents = 0
+    private var origin: UInt64?
+    private var dumped = false
+    private var peers: [Endpoint: Int] = [:]
+    private var admissions: [HostServer.AudioAdmissionObservation] = []
+    private var completions: [HostServer.AudioCompletionObservation] = []
+    private var admissionTotal = 0
+    private var completionTotal = 0
+    private var captureSequences: [UInt64: UInt32] = [:]
+    private var captureMappingOmittedAttempts = 0
+    init(capacity: Int = 12_000) {
+        self.capacity = max(1, capacity)
+        events.reserveCapacity(self.capacity)
+        admissions.reserveCapacity(self.capacity)
+        completions.reserveCapacity(self.capacity)
+    }
+    func admission(_ value: HostServer.AudioAdmissionObservation) {
+        lock.withLock {
+            admissionTotal += 1
+            if admissions.count < capacity { admissions.append(value) }
+        }
+    }
+    func completionOwner(_ value: HostServer.AudioCompletionObservation) {
+        lock.withLock {
+            completionTotal += 1
+            if completions.count < capacity { completions.append(value) }
+        }
+    }
+    private func gateLines() -> [String] {
+        let (gates, owners, gateCount, ownerCount, registered, start, sequences, mappingOmissions) = lock.withLock {
+            (admissions, completions, admissionTotal, completionTotal, peers, origin ?? 0, captureSequences, captureMappingOmittedAttempts)
+        }
+        func relative(_ value: UInt64) -> UInt64 { value >= start ? value - start : 0 }
+        func peer(_ port: UInt16) -> Int { registered[Endpoint(transport: .udp, port: port)] ?? -1 }
+        // Absolute capture time is retained numerically: the first packet can precede
+        // trace origin. It joins gate retries to actual admitted packet timestamps.
+        var result = ["gate retained=\(gates.count) dropped=\(gateCount - gates.count); retention=oldest; decision 0=admit 1=requeue 2=reject; pending excludes current candidate",
+            "gate,owner_relative_ns,peer,capture_absolute_ns,capture_age_ns,residence_ns,budget_ns,duration_ns,recent_interval_ns,unfinished_interval_ns,in_flight,pending,idle,last_completion_absolute_ns,decision"]
+        result.append("capture mapping retained=\(sequences.count) omitted_attempts=\(mappingOmissions); retention=first-keys; omissions count attempts, not unique timestamps")
+        result.append("coverage: gate rows omit pre-gate expiry/replacement; aggregate sender accounting is in alo-tests.log; overflow can leave different retained time windows")
+        for (capture, sequence) in sequences.sorted(by: { $0.key < $1.key }) {
+            result.append("capture_sequence,\(capture),\(sequence)")
+        }
+        for gate in gates {
+            result.append("gate,\(relative(gate.ownerNanos)),\(peer(gate.port)),\(gate.captureNanos),\(gate.captureAge),\(gate.queueResidence),\(gate.admissionBudget),\(gate.estimatedDuration),\(gate.recentInterval),\(gate.unfinishedInterval),\(gate.inFlight),\(gate.pending),\(gate.fanoutIdle ? 1 : 0),\(gate.lastCompletion.map(String.init) ?? "-"),\(gate.decision.rawValue)")
+        }
+        result.append("owner retained=\(owners.count) dropped=\(ownerCount - owners.count); retention=oldest; owner,peer,entry_relative_ns,owner_relative_ns,extra_hop_ns")
+        for owner in owners {
+            result.append("owner,\(peer(owner.port)),\(relative(owner.entryNanos)),\(relative(owner.ownerNanos)),\(owner.ownerNanos >= owner.entryNanos ? owner.ownerNanos - owner.entryNanos : 0)")
+        }
+        return result
+    }
+    func register(port: UInt16, transport: Transport, peer: Int) {
+        lock.withLock { peers[Endpoint(transport: transport, port: port)] = peer }
+    }
+    func admitted(connection: NWConnection, audioSequence: UInt32?, byteCount: Int, captureNanos: UInt64? = nil) -> Send {
+        let transport: Transport = connection.parameters.defaultProtocolStack.transportProtocol is NWProtocolUDP.Options
+            ? .udp : (connection.parameters.defaultProtocolStack.transportProtocol is NWProtocolTCP.Options ? .tcp : .other)
+        let endpoint: Endpoint?
+        if case .hostPort(_, let value) = connection.endpoint {
+            endpoint = .init(transport: transport, port: value.rawValue)
+        } else { endpoint = nil }
+        return lock.withLock {
+            if let captureNanos, let audioSequence {
+                if captureSequences[captureNanos] != nil || captureSequences.count < capacity {
+                    captureSequences[captureNanos] = audioSequence
+                } else {
+                    captureMappingOmittedAttempts += 1
+                }
+            }
+            let send = Send(id: nextSend, endpoint: endpoint, sequence: audioSequence, byteCount: byteCount)
+            nextSend += 1
+            append(send: send, phase: .admitted, at: MonotonicClock.nowNanos(), detail: 0)
+            return send
+        }
+    }
+    func record(send: Send, phase: Phase, at: UInt64, detail: UInt64 = 0) {
+        lock.withLock { append(send: send, phase: phase, at: at, detail: detail) }
+    }
+    func capture(index: Int, deadline: UInt64, wokeAt: UInt64) {
+        lock.withLock {
+            // Send id is deliberately absent: capture emits four audio packets.
+            append(send: nil, phase: .capture, at: wokeAt, detail: deadline, captureIndex: index)
+        }
+    }
+    private func append(send: Send?, phase: Phase, at: UInt64, detail: UInt64, captureIndex: Int? = nil) {
+        if origin == nil { origin = at }
+        defer { totalEvents += 1 }
+        let event = Event(ordinal: totalEvents, time: at, send: send, phase: phase, detail: detail,
+            captureIndex: captureIndex)
+        if events.count < capacity { events.append(event) }
+        else { events[totalEvents % capacity] = event }
+    }
+    func lines() -> [String] {
+        let (snapshot, total, registered, snapshotOrigin) = lock.withLock { (events, totalEvents, peers, self.origin ?? 0) }
+        let retained = snapshot.sorted { $0.ordinal < $1.ordinal }
+        return ["retained=\(retained.count) dropped=\(total - retained.count); retention=newest; relative ns; detail=scheduled/capture deadline, dispatch lateness, completion error(0/1)"] + retained.map { event in
+            let detail = event.phase == .scheduled || event.phase == .capture
+                ? (event.detail >= snapshotOrigin ? event.detail - snapshotOrigin : 0) : event.detail
+            let peer = event.send?.endpoint.flatMap { registered[$0] } ?? -1
+            return "\(event.ordinal),\(event.time >= snapshotOrigin ? event.time - snapshotOrigin : 0),\(peer),\(event.send?.id ?? -1),\(event.send?.sequence.map(String.init) ?? "-"),\(event.captureIndex ?? -1),\(event.send.map { $0.sequence == nil ? "control" : "audio" } ?? "capture"),\(event.send?.byteCount ?? 0),\(event.phase.rawValue),\(detail)"
+        }
+    }
+    func takeDump(label: String) -> [String]? {
+        guard lock.withLock({ if dumped { return false }; dumped = true; return true }) else { return nil }
+        return renderLines(label: label)
+    }
+    private func renderLines(label: String) -> [String] {
+        return ["BEGIN loopback scheduling evidence: \(label); ordinal,time,peer,send,sequence,callback,kind,bytes,phase,detail"]
+            + lines() + gateLines() + ["END loopback scheduling evidence"]
+    }
+    func export(directory: URL, filename: String, label: String) throws {
+        let lines = renderLines(label: label)
+        let data = Data((lines.joined(separator: "\n") + "\n").utf8)
+        guard data.count <= 8 * 1_024 * 1_024 else { throw LoopbackTraceExportError.byteLimitExceeded }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let destination = directory.appendingPathComponent(filename)
+        try data.write(to: destination, options: .atomic)
+        // These are the exact headers written above, not a later live-state read.
+        let summary = lines.filter {
+            $0.hasPrefix("retained=") || $0.hasPrefix("gate retained=")
+                || $0.hasPrefix("owner retained=") || $0.hasPrefix("capture mapping retained=")
+        }.joined(separator: " | ")
+        print("Fanout diagnostic exported \(destination.path) bytes=\(data.count); \(summary). Instrumented evidence, not a CI-cause or overhead proof.")
+    }
+    func dump(label: String) {
+        guard let lines = takeDump(label: label) else { return }
+        for line in lines { print(line) }
     }
 }
 
@@ -2565,6 +2971,7 @@ private struct RoomMeasurements {
     let resyncCommandsReceived: Int
     let captureCallbackAgeSummary: String
     let maximumReceiveEntryAgeNanos: UInt64
+    let schedulingEvidence: LoopbackSchedulingEvidence
 }
 
 private enum VirtualAudioSink {
@@ -2619,4 +3026,233 @@ private enum LoopbackTestError: Error {
     case audioDidNotDrain([Int])
     case noAudioReceived
     case missingCommonPacket(UInt32)
+}
+
+/// Held native callback lifecycle regressions sharing the real loopback peer.
+/// Active, stopped, replaced, and restarted owners exercise the delivered guards
+/// including source restart PCM continuity, without transport parameter changes.
+@Suite(.serialized)
+struct HostServerCallbackLifecycleTests {
+    /// Retain delivered accepts so old control ObjectIdentifiers cannot be
+    /// accidentally recycled into the new cohort and hide stale eligibility.
+    private final class RetainedAccepts: @unchecked Sendable {
+        let lock = NSLock()
+        var callbacks: [() -> Void] = []
+        func deliver(_ callback: @escaping () -> Void) {
+            lock.withLock { callbacks.append(callback) }
+            callback()
+        }
+    }
+    private func eventually(_ condition: () -> Bool) -> Bool {
+        let deadline = ContinuousClock.now + .seconds(3)
+        while ContinuousClock.now < deadline {
+            if condition() { return true }
+            Thread.sleep(forTimeInterval: 0.001)
+        }
+        return condition()
+    }
+
+    @Test func activeHostRejectsSecondStartWithoutReplacingListener() throws {
+        let ready = DispatchSemaphore(value: 0), port = PortState()
+        let host = HostServer(roomName: "Double-start contract", advertise: false,
+            listenerReadyHandler: { port.set($0); ready.signal() })
+        try host.start(); defer { host.stop() }
+        try #require(ready.wait(timeout: .now() + 3) == .success)
+        let originalPort = try #require(port.port)
+        let peer = HeadlessLoopbackPeer(index: 830)
+        defer { peer.stop() }
+        try peer.start(hostPort: originalPort)
+        try #require(peer.waitUntilJoined(timeout: 3))
+        var rejection: String?
+        do { try host.start() }
+        catch let error as ALOError { rejection = error.localizedDescription }
+        catch { Issue.record("Unexpected second-start failure, not the already-running contract: \(error)") }
+        #expect(rejection == "Channel is already running.")
+        peer.sendPing()
+        #expect(peer.waitForPong(timeout: 3), "Rejected double start must preserve the original client's control route")
+    }
+
+    @Test func restartingHostDoesNotAdvertiseRetiredVideoProducer() throws {
+        let ready = DispatchSemaphore(value: 0), port = PortState()
+        let host = HostServer(roomName: "Restart video contract", advertise: false,
+            listenerReadyHandler: { port.set($0); ready.signal() })
+        try host.start(); defer { host.stop() }
+        try #require(ready.wait(timeout: .now() + 3) == .success)
+        host.setVideoEnabled(true)
+        try #require(host.diagnosticsSnapshot().videoEnabled)
+        let active = HeadlessLoopbackPeer(index: 835)
+        defer { active.stop() }
+        try active.start(hostPort: try #require(port.port))
+        try #require(active.waitUntilJoined(timeout: 3))
+        try #require(eventually { active.videoEnabledStates.last == true },
+            "Control: an actively enabled host must publish video enabled to a real joining peer")
+        host.stop(); active.stop()
+        while ready.wait(timeout: .now()) == .success {}
+        try host.start()
+        try #require(ready.wait(timeout: .now() + 3) == .success)
+        let fresh = HeadlessLoopbackPeer(index: 836)
+        defer { fresh.stop() }
+        try fresh.start(hostPort: try #require(port.port))
+        try #require(fresh.waitUntilJoined(timeout: 3))
+        try #require(eventually { !fresh.videoEnabledStates.isEmpty },
+            "The new join must actually receive media_state before checking its value")
+        #expect(fresh.videoEnabledStates.last == false,
+            "Same-instance restart must not advertise a video producer retired with the prior session")
+    }
+
+    @Test func restartingHostReestablishesTimingEligibility() throws {
+        let ready = DispatchSemaphore(value: 0), port = PortState(), clock = LoopbackCaptureClock(), retained = RetainedAccepts()
+        let host = HostServer(roomName: "Restart timing contract", advertise: false,
+            listenerReadyHandler: { port.set($0); ready.signal() }, audioSendNowNanos: { clock.now },
+            acceptedDeliveryForTesting: { retained.deliver($0) })
+        try host.start(); defer { host.stop(); withExtendedLifetime(retained) {} }
+        try #require(ready.wait(timeout: .now() + 3) == .success)
+        let old = HeadlessLoopbackPeer(index: 831)
+        defer { old.stop() }
+        try old.start(hostPort: try #require(port.port)); try #require(old.waitUntilJoined(timeout: 3))
+        let samples = [Int16](repeating: 100, count: Int(AudioPacket.framesPerPacket) * Int(AudioPacket.channelCount))
+        host.acceptAudio(samples: samples, captureTimeNanos: clock.now)
+        try #require(eventually { old.packetCount == 1 })
+        host.stop(); old.stop()
+        while ready.wait(timeout: .now()) == .success {}
+        try host.start(); try #require(ready.wait(timeout: .now() + 3) == .success)
+        let fresh = HeadlessLoopbackPeer(index: 832)
+        defer { fresh.stop() }
+        try fresh.start(hostPort: try #require(port.port)); try #require(fresh.waitUntilJoined(timeout: 3))
+        host.acceptAudio(samples: samples, captureTimeNanos: clock.advance(by: 5_000_000))
+        try #require(eventually { fresh.packetCount == 1 })
+        fresh.recommendPlayoutDelay(RoomTiming.maximumPlayoutDelayNanos)
+        fresh.sendPing(); try #require(fresh.waitForPong(timeout: 3))
+        #expect(eventually { fresh.playoutDelays.last == RoomTiming.maximumPlayoutDelayNanos },
+            "First real listener of a restarted host must not inherit an old listener's excluded cohort")
+    }
+
+    @Test func restartingHostDiscardsPartialPCMFromPriorSession() throws {
+        let ready = DispatchSemaphore(value: 0), port = PortState(), clock = LoopbackCaptureClock()
+        let host = HostServer(roomName: "Restart partial PCM contract", advertise: false,
+            listenerReadyHandler: { port.set($0); ready.signal() }, audioSendNowNanos: { clock.now })
+        try host.start(); defer { host.stop() }
+        try #require(ready.wait(timeout: .now() + 3) == .success)
+        let packetSamples = Int(AudioPacket.framesPerPacket) * Int(AudioPacket.channelCount)
+        host.acceptAudio(samples: [Int16](repeating: 111, count: packetSamples / 2), captureTimeNanos: clock.now)
+        _ = host.clientCountForTesting // Drain actual packetizer ingress before stop.
+        host.stop()
+        while ready.wait(timeout: .now()) == .success {}
+        try host.start(); try #require(ready.wait(timeout: .now() + 3) == .success)
+        let fresh = HeadlessLoopbackPeer(index: 833, expectedSample: 222)
+        defer { fresh.stop() }
+        try fresh.start(hostPort: try #require(port.port)); try #require(fresh.waitUntilJoined(timeout: 3))
+        // Virtual capture gap remains below the independent 500ms pause-reset
+        // threshold even if real listener setup takes longer on CI.
+        host.acceptAudio(samples: [Int16](repeating: 222, count: packetSamples), captureTimeNanos: clock.advance(by: 2_500_000))
+        try #require(eventually { fresh.packetCount >= 1 })
+        #expect(fresh.corruptedPacketCount == 0, "New-session PCM must not contain the old partial packet")
+    }
+
+    @Test func oversizedControlRetirementClosesActualRemoteRead() throws {
+        let ready = DispatchSemaphore(value: 0), port = PortState()
+        let host = HostServer(roomName: "Overflow remote retirement", advertise: false,
+            listenerReadyHandler: { port.set($0); ready.signal() })
+        try host.start(); defer { host.stop() }
+        try #require(ready.wait(timeout: .now() + 3) == .success)
+        let peer = HeadlessLoopbackPeer(index: 834)
+        defer { peer.stop() }
+        try peer.start(hostPort: try #require(port.port)); try #require(peer.waitUntilJoined(timeout: 3))
+        peer.sendRawControl(Data(repeating: 65, count: 1024 * 1024 + 1))
+        try #require(eventually { host.clientCountForTesting == 0 }, "Actual decoder must retire the oversized-control client")
+        #expect(eventually { peer.remoteControlTermination != nil }, "Actual remote read must terminate, not just disappear from the host dictionary")
+        print("OVERSIZED_CONTROL_REMOTE_TERMINATION \(peer.remoteControlTermination ?? "not observed")")
+    }
+
+    private final class Held: @unchecked Sendable {
+        let lock = NSLock()
+        var callback: (() -> Void)?
+        var armed = false
+        var commands = 0
+        let captured = DispatchSemaphore(value: 0)
+        func arm() { lock.lock(); armed = true; lock.unlock() }
+        func receive(_ data: Data?, callback: @escaping () -> Void) {
+            // Require a complete real pause frame. A fragmented completion is
+            // a prerequisite miss, not evidence that a retired command was safe.
+            let message = data.flatMap { try? JSONDecoder().decode(ControlMessage.self, from: $0) }
+            lock.lock()
+            let shouldHold = armed && message?.type == "media_command" && message?.mediaCommand == .pause
+            if shouldHold { armed = false; self.callback = callback }
+            lock.unlock()
+            if shouldHold { captured.signal() } else { callback() }
+        }
+        func accept(_ callback: @escaping () -> Void) {
+            lock.lock(); self.callback = callback; lock.unlock(); captured.signal()
+        }
+        func release() {
+            lock.lock(); let callback = self.callback; self.callback = nil; lock.unlock()
+            callback?()
+        }
+        func command() -> Bool { lock.lock(); commands += 1; lock.unlock(); return true }
+        var count: Int { lock.lock(); defer { lock.unlock() }; return commands }
+    }
+
+    @Test(arguments: [0, 1, 2])
+    func heldActualControlCannotActAfterStopOrReplacement(retirement: Int) throws {
+        let held = Held(), ready = DispatchSemaphore(value: 0), port = PortState()
+        let host = HostServer(roomName: "Held real control", advertise: false,
+            listenerReadyHandler: { port.set($0); ready.signal() },
+            playbackRequestHandler: { _ in held.command() },
+            controlDeliveryForTesting: { data, callback in held.receive(data, callback: callback) })
+        try host.start(); defer { held.release(); host.stop() }
+        try #require(ready.wait(timeout: .now() + 3) == .success)
+        let endpoint = try #require(port.port)
+        let peer = HeadlessLoopbackPeer(index: 820, participantID: "held-lifecycle-peer")
+        defer { peer.stop() }
+        try peer.start(hostPort: endpoint)
+        try #require(peer.waitUntilJoined(timeout: 3))
+        held.arm(); peer.sendMediaCommand(.pause)
+        try #require(held.captured.wait(timeout: .now() + 3) == .success, "Actual NWConnection completion containing pause must be held")
+        try #require(held.count == 0)
+        var replacement: HeadlessLoopbackPeer?
+        defer { replacement?.stop() }
+        if retirement == 1 {
+            host.stop(); try #require(host.clientCountForTesting == 0)
+        } else if retirement == 2 {
+            let next = HeadlessLoopbackPeer(index: 821, participantID: "held-lifecycle-peer")
+            replacement = next
+            try next.start(hostPort: endpoint)
+            try #require(next.waitUntilJoined(timeout: 3))
+            try #require(host.clientCountForTesting == 1)
+        }
+        held.release()
+        _ = host.clientCountForTesting // Barrier behind the released owner-queue completion.
+        #expect(held.count == (retirement == 0 ? 1 : 0), "Only the still-current real Client may issue playback commands")
+    }
+
+    @Test(arguments: [0, 1, 2])
+    func heldActualAcceptedConnectionCannotRepopulateStoppedHost(retirement: Int) throws {
+        let held = Held(), ready = DispatchSemaphore(value: 0), port = PortState()
+        let host = HostServer(roomName: "Held real accept", advertise: false,
+            listenerReadyHandler: { port.set($0); ready.signal() },
+            acceptedDeliveryForTesting: { held.accept($0) })
+        try host.start(); defer { held.release(); host.stop() }
+        try #require(ready.wait(timeout: .now() + 3) == .success)
+        let endpoint = try #require(port.port)
+        let peer = NWConnection(host: "127.0.0.1", port: endpoint, using: .tcp)
+        peer.start(queue: DispatchQueue(label: "alo.test.held-accept.peer")); defer { peer.cancel() }
+        try #require(held.captured.wait(timeout: .now() + 3) == .success, "NWListener must supply an actual accepted connection")
+        try #require(host.clientCountForTesting == 0)
+        if retirement != 0 { host.stop() }
+        if retirement == 2 {
+            while ready.wait(timeout: .now()) == .success {}
+            try host.start()
+            try #require(ready.wait(timeout: .now() + 3) == .success, "Replacement listener must really be ready")
+        }
+        held.release()
+        #expect(host.clientCountForTesting == (retirement == 0 ? 1 : 0), "A captured old listener callback must not recreate a Client")
+        if retirement == 2 {
+            let replacementPort = try #require(port.port)
+            let fresh = NWConnection(host: "127.0.0.1", port: replacementPort, using: .tcp)
+            fresh.start(queue: DispatchQueue(label: "alo.test.held-accept.fresh")); defer { fresh.cancel() }
+            try #require(held.captured.wait(timeout: .now() + 3) == .success)
+            held.release()
+            #expect(host.clientCountForTesting == 1, "Current listener must still accept its actual fresh connection")
+        }
+    }
 }

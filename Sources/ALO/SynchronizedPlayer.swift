@@ -32,6 +32,26 @@ struct AudioOutputHardwareFormat: Equatable {
 struct AudioOutputRenderBudget {
     static let safetyMarginNanos: UInt64 = 10_000_000
     static let maximumHeadroomNanos: UInt64 = 200_000_000
+    static func futureLeadAfterLatencyRefresh(proposed: UInt64?, latencyAccepted: Bool) -> UInt64? {
+        latencyAccepted ? proposed : nil
+    }
+
+    /// Two IO buffers plus the device safety offset matched the observed native
+    /// output lead. The 2ms margin is empirical, not an Apple timing guarantee.
+    /// Missing/unsupported geometry stays unknown; never invent a sample rate
+    /// or add Bluetooth presentation latency to the host-clock allowance.
+    static func permittedFutureLeadNanos(bufferFrames: UInt32?, safetyOffsetFrames: UInt32?,
+                                         sampleRate: Double?) -> UInt64? {
+        guard let bufferFrames, bufferFrames > 0, let safetyOffsetFrames,
+              let sampleRate, sampleRate.isFinite, sampleRate > 0 else { return nil }
+        let doubled = UInt64(bufferFrames).multipliedReportingOverflow(by: 2)
+        let frames = doubled.partialValue.addingReportingOverflow(UInt64(safetyOffsetFrames))
+        guard !doubled.overflow, !frames.overflow else { return nil }
+        let nanos = ceil(Double(frames.partialValue) * 1_000_000_000 / sampleRate) + 2_000_000
+        guard nanos.isFinite, nanos >= 0,
+              nanos <= Double(RenderDriftEstimate.maximumFutureLeadNanos) else { return nil }
+        return UInt64(nanos)
+    }
 
     static func schedulingHeadroomNanos(
         bufferFrames: UInt32?,
@@ -74,6 +94,13 @@ struct AudioConfigurationRecoveryGate {
 }
 
 final class SynchronizedPlayer {
+    struct OutputTimingMeasurement {
+        var latencyNanos: UInt64
+        var bufferFrames: UInt32?
+        var safetyFrames: UInt32?
+        var sampleRate: Double?
+    }
+    private let outputTimingMeasurement: (() -> OutputTimingMeasurement)?
     static let targetLatencyNanos = RoomTiming.defaultPlayoutDelayNanos
     static let hardResyncThresholdNanos: UInt64 = 100_000_000
     private let audioOutput: RoomAudioOutputEngine
@@ -88,6 +115,7 @@ final class SynchronizedPlayer {
     private var pending = [UInt32: AudioPacket]()
     private var expectedSequence: UInt32?
     private var anchorFrameIndex: UInt64?
+    private var scheduledContentEnd: (frame: UInt64, render: UInt64)?
     private var anchorCaptureNanos: UInt64?
     private var captureTimeline = CaptureTimelineTracker()
     private var hasStarted = false
@@ -97,10 +125,18 @@ final class SynchronizedPlayer {
     private var activeOutputDeviceID: AudioDeviceID?
     private var activeOutputHardwareFormat: AudioOutputHardwareFormat?
     private var targetLatencyNanos = RoomTiming.defaultPlayoutDelayNanos
-    private var smoothedCorrection = 0.0
+    private var rateController = PlaybackRateController()
     private let playbackActivityChanged: ((Bool) -> Void)?
     private var latestLatenessNanos: UInt64 = 0
     private var latestDriftMeasurement: (magnitude: UInt64, time: UInt64)?
+    private var renderObservationRecorder = RenderObservationRecorder()
+    private var contentRecoveryDiagnostics = PlaybackContentRecoveryDiagnostics()
+    private var outputBufferMilliseconds: Double?
+    private var outputSafetyMilliseconds: Double?
+    private var permittedFutureLeadNanos: UInt64?
+    var renderObservation: RenderObservation? {
+        renderObservationRecorder.snapshot(at: nowNanos())
+    }
     private var latePacketCount: UInt64 = 0
     private var resyncCount: UInt64 = 0
     private var lastPacketReceivedNanos: UInt64?
@@ -122,10 +158,19 @@ final class SynchronizedPlayer {
     private var outputLeaseHeld = false
     private var observedOutputStartGeneration: UInt64 = 0
     private let scheduledCompletions = PlaybackBufferCompletions()
+    // Test-only delay injection after admission; production callers leave nil.
+    private let beforeNativeSchedule: (() -> Void)?
+    private let failBufferAllocation: (() -> Bool)?
+    private let nowNanos: () -> UInt64
+    private let maintenanceIntervalNanos: UInt64?
+    private var heldCohort: PlaybackPCMCohort?
+    private var admittedContentEnd: (frame: UInt64, render: UInt64)? {
+        heldCohort.map { ($0.endFrame, $0.endRenderNanos) } ?? scheduledContentEnd
+    }
 
     /// Includes hardware-buffered PCM, not just the receive-side jitter queue.
     var outstandingPlaybackBufferCount: Int { scheduledCompletions.count }
-    var pendingPlaybackPacketCount: Int { pending.count }
+    var pendingPlaybackPacketCount: Int { pending.count + (heldCohort?.packetCount ?? 0) }
 
     var expectedSequenceForTesting: UInt32? { expectedSequence }
     var outputLatencyForTimingNanos: UInt64 { outputLatencyNanos }
@@ -141,9 +186,22 @@ final class SynchronizedPlayer {
         outputDeviceUID: String? = nil,
         outputDeviceID: AudioDeviceID? = nil,
         playbackActivityChanged: ((Bool) -> Void)? = nil,
-        liveDJAudio: DJLiveAudio = .shared
+        liveDJAudio: DJLiveAudio = .shared,
+        outputTimingMeasurement: (() -> OutputTimingMeasurement)? = nil,
+        beforeNativeSchedule: (() -> Void)? = nil,
+        failBufferAllocation: (() -> Bool)? = nil,
+        nowNanos: @escaping () -> UInt64 = MonotonicClock.nowNanos,
+        maintenanceIntervalNanos: UInt64? = 20_000_000
     ) throws {
         self.audioOutput = audioOutput
+        self.beforeNativeSchedule = beforeNativeSchedule
+        self.failBufferAllocation = failBufferAllocation
+        self.nowNanos = nowNanos
+        // A path without a <=20ms maintenance guarantee must not retain tails.
+        self.maintenanceIntervalNanos = maintenanceIntervalNanos.flatMap {
+            $0 > 0 && $0 <= PlaybackPCMCohort.maximumHoldNanos ? $0 : nil
+        }
+        self.outputTimingMeasurement = outputTimingMeasurement
         self.liveDJAudio = liveDJAudio
         self.playbackActivityChanged = playbackActivityChanged
         self.outputDeviceUID = outputDeviceUID
@@ -201,7 +259,7 @@ final class SynchronizedPlayer {
             guard packet.captureTimeNanos >= cutover else { return }
             resyncCutoverCaptureNanos = nil
         }
-        let now = MonotonicClock.nowNanos()
+        let now = nowNanos()
         lastPacketReceivedNanos = now
         pending[packet.sequence] = packet
         if expectedSequence == nil {
@@ -213,9 +271,23 @@ final class SynchronizedPlayer {
     func maintainSync() {
         // An unavailable render clock is unknown, not a fresh zero-error sample.
         latestDriftMeasurement = nil
-        defer { if latestDriftMeasurement == nil { automaticSyncPolicy.resetEvidence() } }
+        let now = nowNanos()
+        var observation = RenderObservationSample(observedAtNanos: now)
+        defer {
+            if latestDriftMeasurement == nil {
+                automaticSyncPolicy.resetEvidence()
+                if hasStarted {
+                    if rateController.handleMissing(at: now), varispeed.rate != 1 { varispeed.rate = 1 }
+                } else {
+                    rateController.reset()
+                }
+            }
+            observation.appliedPlaybackRate = Double(varispeed.rate)
+            observation.contentRecovery = contentRecoveryDiagnostics
+            renderObservationRecorder.record(observation)
+        }
         guard nodesAreAttached else { return }
-        let now = MonotonicClock.nowNanos()
+        observation.reason = .paused
         guard roomPlaybackIsPlaying else {
             setPlaybackActive(false)
             return
@@ -223,14 +295,32 @@ final class SynchronizedPlayer {
         applyPendingAudioEngineConfigurationChange()
         refreshOutputTimingIfNeeded(nowNanos: now)
         drain()
+        // Refresh/queue work can block. This helper reads a fresh clock rather
+        // than reusing the poll timestamp captured before that work.
+        flushCohortIfDue(anticipating: maintenanceIntervalNanos ?? 0)
         updatePlaybackActivity(nowNanos: now)
+        observation.reason = .notStarted
         guard hasStarted else {
             playbackWatchdog.reset()
             return
         }
 
         let renderTime = player.lastRenderTime
-        let playerTime = renderTime.flatMap { player.playerTime(forNodeTime: $0) }
+        let playerTime = renderTime.flatMap {
+            Self.hasUsableNodeClock($0) ? player.playerTime(forNodeTime: $0) : nil
+        }
+        observation.observedAtNanos = nowNanos()
+        observation.outputBufferMilliseconds = outputBufferMilliseconds
+        observation.outputSafetyMilliseconds = outputSafetyMilliseconds
+        observation.permittedFutureLeadMilliseconds = permittedFutureLeadNanos.map { Double($0) / 1_000_000 }
+        if let lastPacketReceivedNanos {
+            observation.packetAgeMilliseconds = RenderObservationSample.signedAgeMilliseconds(now: now, sample: lastPacketReceivedNanos)
+        }
+        if let playerTime, playerTime.isSampleTimeValid {
+            observation.sampleTime = playerTime.sampleTime
+            observation.sampleRate = playerTime.sampleRate.isFinite ? playerTime.sampleRate : nil
+        }
+        observation.reason = .recovery
         if playbackWatchdog.shouldResynchronize(
             sampleTime: playerTime?.sampleTime,
             nowNanos: now,
@@ -241,39 +331,55 @@ final class SynchronizedPlayer {
             return
         }
 
-        guard let offset = clockOffsetNanos,
-              anchorFrameIndex != nil,
-              let anchorCaptureNanos,
-              let renderTime,
-              renderTime.isHostTimeValid,
-              let playerTime
-        else { return }
+        observation.reason = .missingClock
+        guard let offset = clockOffsetNanos else { return }
+        observation.reason = .missingAnchor
+        guard anchorFrameIndex != nil, let anchorCaptureNanos else { return }
+        observation.reason = .missingRenderTime
+        guard let renderTime else { return }
+        observation.reason = .invalidHostTime
+        guard renderTime.isHostTimeValid else { return }
+        observation.reason = .missingPlayerTime
+        guard let playerTime else { return }
 
         let renderLocalNanos = MonotonicClock.ticksToNanos(renderTime.hostTime)
+        observation.renderAgeAtPollMilliseconds = RenderObservationSample.signedAgeMilliseconds(now: now, sample: renderLocalNanos)
+        observation.renderAgeAtObservationMilliseconds = RenderObservationSample.signedAgeMilliseconds(now: observation.observedAtNanos, sample: renderLocalNanos)
+        observation.reason = .clockRange
         guard let renderHostNanos = RoomTiming.hostTimeNanos(clientTimeNanos: renderLocalNanos,
                                                            clockOffsetNanos: offset) else { return }
-        guard playerTime.isSampleTimeValid,
-              let lastPacketReceivedNanos,
+        observation.anchorMarginMilliseconds = (Double(renderHostNanos) - Double(anchorCaptureNanos)
+            + Double(outputLatencyNanos) - Double(targetLatencyNanos)) / 1_000_000
+        observation.reason = .invalidSampleTime
+        guard playerTime.isSampleTimeValid else { return }
+        observation.reason = .stalePacket
+        guard let lastPacketReceivedNanos,
               now >= lastPacketReceivedNanos,
-              now - lastPacketReceivedNanos <= 500_000_000,
-              let estimate = RenderDriftEstimate(
-                nowNanos: now, renderLocalNanos: renderLocalNanos,
+              now - lastPacketReceivedNanos <= 500_000_000 else { return }
+        observation.reason = RenderObservationSample.clockGate(pollNanos: observation.observedAtNanos,
+            renderNanos: renderLocalNanos, permittedFutureLeadNanos: permittedFutureLeadNanos ?? 0) ?? .invalidTimeline
+        guard let estimate = RenderDriftEstimate(
+                nowNanos: observation.observedAtNanos, renderLocalNanos: renderLocalNanos,
                 renderHostNanos: renderHostNanos, outputLatencyNanos: outputLatencyNanos,
                 captureAnchorNanos: anchorCaptureNanos, playoutDelayNanos: targetLatencyNanos,
                 sampleTime: playerTime.sampleTime, sampleRate: playerTime.sampleRate,
-                captureOffsetNanos: captureTimeline.offsetNanos
+                captureOffsetNanos: captureTimeline.offsetNanos,
+                permittedFutureLeadNanos: permittedFutureLeadNanos ?? 0
               ) else { return }
         let absoluteErrorNanos = estimate.magnitudeNanos
-        // Age belongs to the audio render sample, not the polling timer.
-        latestDriftMeasurement = (absoluteErrorNanos, renderLocalNanos)
+        observation.reason = .measured
+        observation.signedPhaseErrorMilliseconds = estimate.errorSeconds * 1_000
+        // Keep raw render time for phase; freshness preserves past sample age
+        // but cannot claim a future observation in reports or rate holdover.
+        latestDriftMeasurement = (absoluteErrorNanos, estimate.freshnessNanos)
         if automaticSyncPolicy.shouldRealign(driftNanos: absoluteErrorNanos, now: now) {
+            observation.reason = .afterMeasurement(realigned: true)
             latestLatenessNanos = absoluteErrorNanos
             hardResynchronize()
             return
         }
-        smoothedCorrection = PlaybackRateCorrection.next(previous: smoothedCorrection,
-                                                          errorSeconds: estimate.errorSeconds)
-        let rate = Float(1 + smoothedCorrection)
+        let rate = rateController.updateFresh(errorSeconds: estimate.errorSeconds,
+                                              sampledAtNanos: estimate.freshnessNanos)
         if abs(varispeed.rate - rate) > 0.000_005 {
             varispeed.rate = rate
         }
@@ -281,16 +387,21 @@ final class SynchronizedPlayer {
 
     private func drain() {
         guard let offset = clockOffsetNanos else { return }
+        flushCohortIfDue(anticipating: 0)
+        var concealmentBudget = PlaybackConcealmentPolicy.maximumPacketsPerDrain
+        var concealmentWindowAdmitted = false
 
         while let sequence = expectedSequence {
             guard let packet = pending.removeValue(forKey: sequence) else {
-                if !hasStarted, let next = pending.values.min(by: { $0.sequence < $1.sequence }) {
+                if !hasStarted, let next = earliestPending() {
                     expectedSequence = next.sequence
                     continue
                 }
-                concealMissingPacketIfNeeded(sequence: sequence, offset: offset)
+                if concealMissingPacketIfNeeded(sequence: sequence, budget: &concealmentBudget,
+                    windowAdmitted: &concealmentWindowAdmitted) { continue }
                 return
             }
+            concealmentWindowAdmitted = false
 
             if hasStarted, let anchorFrameIndex, let anchorCaptureNanos {
                 switch captureTimeline.observe(
@@ -298,6 +409,12 @@ final class SynchronizedPlayer {
                     anchorFrameIndex: anchorFrameIndex, anchorCaptureNanos: anchorCaptureNanos
                 ) {
                 case .stale:
+                    // Covered duplicate PCM is harmless; an unqueued new tail
+                    // cannot be skipped while retaining the source/sample map.
+                    let end = packet.frameIndex.addingReportingOverflow(UInt64(packet.frameCount))
+                    if end.overflow || (admittedContentEnd.map({ end.partialValue > $0.frame }) ?? true) {
+                        hardResynchronize(reason: .contentAdmissionDropped)
+                    }
                     expectedSequence = sequence &+ 1
                     continue
                 case .discontinuous:
@@ -313,11 +430,13 @@ final class SynchronizedPlayer {
 
             guard let localCaptureNanos = RoomTiming.clientTimeNanos(hostTimeNanos: packet.captureTimeNanos,
                                                                     clockOffsetNanos: offset) else {
+                if hasStarted { hardResynchronize(reason: .contentAdmissionDropped) }
                 expectedSequence = sequence &+ 1
                 continue
             }
             let audibleTime = localCaptureNanos.addingReportingOverflow(targetLatencyNanos)
             guard !audibleTime.overflow else {
+                if hasStarted { hardResynchronize(reason: .contentAdmissionDropped) }
                 expectedSequence = sequence &+ 1
                 continue
             }
@@ -325,7 +444,7 @@ final class SynchronizedPlayer {
             let desiredRenderNanos = desiredAudibleNanos > outputLatencyNanos
                 ? desiredAudibleNanos - outputLatencyNanos
                 : desiredAudibleNanos
-            let now = MonotonicClock.nowNanos()
+            let now = nowNanos()
 
             if hasStarted, now > desiredRenderNanos + Self.hardResyncThresholdNanos {
                 latestLatenessNanos = now - desiredRenderNanos
@@ -333,6 +452,13 @@ final class SynchronizedPlayer {
                 hardResynchronize()
                 expectedSequence = sequence &+ 1
                 continue
+            }
+
+            // A player clock can advance through an empty native queue. A
+            // source-contiguous packet is not safe to append once its sample
+            // position is reached, even below the 100ms late threshold.
+            if maintenanceIntervalNanos == nil, hasStarted, nativeRenderHasReachedSourceFrame(packet.frameIndex, strictlyPast: false) {
+                hardResynchronize(reason: .nativeSourcePositionReached)
             }
 
             if !hasStarted, desiredRenderNanos <= now + renderSchedulingHeadroomNanos {
@@ -348,11 +474,25 @@ final class SynchronizedPlayer {
             // timestamp guard also excludes a late predecessor from new history.
             let djSamples = liveDJAudio.process(packet.samples, stage: .listening,
                                                        captureTimeNanos: packet.captureTimeNanos)
-            guard let buffer = makeBuffer(djSamples.count == packet.samples.count ? djSamples : packet.samples) else {
+            if hasStarted, maintenanceIntervalNanos != nil {
+                _ = holdPCM(djSamples.count == packet.samples.count ? djSamples : packet.samples,
+                    sourceFrame: packet.frameIndex, renderNanos: desiredRenderNanos, offset: offset)
                 expectedSequence = sequence &+ 1
                 continue
             }
-            scheduleTrackedBuffer(buffer)
+            guard let buffer = makeBuffer(djSamples.count == packet.samples.count ? djSamples : packet.samples) else {
+                if hasStarted { hardResynchronize(reason: .contentAdmissionDropped) }
+                expectedSequence = sequence &+ 1
+                continue
+            }
+            guard scheduleTrackedBuffer(buffer, sourceFrame: hasStarted ? packet.frameIndex : nil, admittedAtNanos: now) else {
+                expectedSequence = sequence &+ 1
+                continue
+            }
+            let endFrame = packet.frameIndex.addingReportingOverflow(UInt64(packet.frameCount))
+            let endRender = desiredRenderNanos.addingReportingOverflow(
+                UInt64(packet.frameCount) * 1_000_000_000 / UInt64(AudioPacket.sampleRate))
+            scheduledContentEnd = endFrame.overflow || endRender.overflow ? nil : (endFrame.partialValue, endRender.partialValue)
 
             if !hasStarted {
                 anchorFrameIndex = packet.frameIndex
@@ -369,11 +509,11 @@ final class SynchronizedPlayer {
 
     func stop() {
         scheduledCompletions.invalidate()
-        player.stop()
+        stopPlayerClock()
         pending.removeAll()
         expectedSequence = nil
         hasStarted = false
-        smoothedCorrection = 0
+        rateController.reset()
         varispeed.rate = 1
         latestLatenessNanos = 0
         lastPacketReceivedNanos = nil
@@ -394,10 +534,10 @@ final class SynchronizedPlayer {
         if !roomPlaybackIsPlaying { return "Suspended while playback is paused" }
         if !hasStarted { return "Waiting for live audio" }
         if !automaticSyncPolicy.enabled { return "Automatic drift realignment off" }
-        if automaticSyncPolicy.isCoolingDown(at: MonotonicClock.nowNanos()) { return "Settling after realignment" }
+        if automaticSyncPolicy.isCoolingDown(at: nowNanos()) { return "Settling after realignment" }
         guard let sample = latestDriftMeasurement,
-              MonotonicClock.nowNanos() >= sample.time,
-              MonotonicClock.nowNanos() - sample.time <= RenderDriftEstimate.maximumAgeNanos
+              nowNanos() >= sample.time,
+              nowNanos() - sample.time <= RenderDriftEstimate.maximumAgeNanos
         else { return "Waiting for a fresh timing measurement" }
         return sample.magnitude >= LocalAudioSyncPolicy.thresholdNanos
             ? "Checking sustained playback drift" : "Watching estimated playback timing"
@@ -424,14 +564,14 @@ final class SynchronizedPlayer {
         guard !playing else { return }
 
         scheduledCompletions.invalidate()
-        player.stop()
+        stopPlayerClock()
         pending.removeAll()
         expectedSequence = nil
         anchorFrameIndex = nil
         anchorCaptureNanos = nil
         captureTimeline.reset()
         hasStarted = false
-        smoothedCorrection = 0
+        rateController.reset()
         varispeed.rate = 1
         latestLatenessNanos = 0
         resyncCutoverCaptureNanos = nil
@@ -447,7 +587,7 @@ final class SynchronizedPlayer {
             muted: participantMuted,
             duckingGain: duckingGain
         ))
-        updatePlaybackActivity(nowNanos: MonotonicClock.nowNanos())
+        updatePlaybackActivity(nowNanos: nowNanos())
     }
 
     private func updatePlaybackActivity(nowNanos: UInt64) {
@@ -464,7 +604,7 @@ final class SynchronizedPlayer {
     }
 
     func syncReport() -> PlaybackSyncReport {
-        let now = MonotonicClock.nowNanos()
+        let now = nowNanos()
         return PlaybackSyncReport(
             measuredAtNanos: now,
             latenessNanos: latestLatenessNanos,
@@ -487,14 +627,14 @@ final class SynchronizedPlayer {
         // and pending audio, then ignore the live stream until the broadcaster's
         // shared future cutover timestamp arrives.
         scheduledCompletions.invalidate()
-        player.stop()
+        stopPlayerClock()
         pending.removeAll()
         expectedSequence = nil
         anchorFrameIndex = nil
         anchorCaptureNanos = nil
         captureTimeline.reset()
         hasStarted = false
-        smoothedCorrection = 0
+        rateController.reset()
         varispeed.rate = 1
         latestLatenessNanos = 0
         lastPacketReceivedNanos = nil
@@ -503,7 +643,7 @@ final class SynchronizedPlayer {
         latestDriftMeasurement = nil
         resyncCutoverCaptureNanos = cutoverCaptureNanos
         resyncCount &+= 1
-        automaticSyncPolicy.didRealign(at: MonotonicClock.nowNanos())
+        automaticSyncPolicy.didRealign(at: nowNanos())
         setPlaybackActive(false)
     }
 
@@ -513,14 +653,14 @@ final class SynchronizedPlayer {
     /// make every packet from the new stream look stale.
     func resetStream() {
         scheduledCompletions.invalidate()
-        player.stop()
+        stopPlayerClock()
         pending.removeAll()
         expectedSequence = nil
         anchorFrameIndex = nil
         anchorCaptureNanos = nil
         captureTimeline.reset()
         hasStarted = false
-        smoothedCorrection = 0
+        rateController.reset()
         varispeed.rate = 1
         latestLatenessNanos = 0
         lastPacketReceivedNanos = nil
@@ -550,7 +690,7 @@ final class SynchronizedPlayer {
             configurationGate.takePendingChange()
         }
         guard pending else { return }
-        let now = MonotonicClock.nowNanos()
+        let now = nowNanos()
         guard now >= recoveryRetryNotBeforeNanos else {
             configurationLock.withLock { configurationGate.markChanged() }
             return
@@ -581,16 +721,17 @@ final class SynchronizedPlayer {
         ) {
             handleAudioEngineConfigurationChange()
         } else {
-            if Self.shouldAcceptOutputLatencyMeasurement(
+            let latencyAccepted = Self.shouldAcceptOutputLatencyMeasurement(
                 engineIsRunning: audioOutput.isRunning,
                 previousLatencyNanos: outputLatencyNanos,
                 measuredLatencyNanos: currentLatencyNanos
-            ) {
+            )
+            if latencyAccepted {
                 outputLatencyNanos = currentLatencyNanos
             }
             renderSchedulingHeadroomNanos = measuredRenderSchedulingHeadroomNanos(
                 deviceID: currentDeviceID,
-                hardwareFormat: currentHardwareFormat
+                hardwareFormat: currentHardwareFormat, latencyAccepted: latencyAccepted
             )
             activeOutputDeviceID = currentDeviceID
             activeOutputHardwareFormat = currentHardwareFormat
@@ -631,7 +772,7 @@ final class SynchronizedPlayer {
 
         guard nodesAreAttached else { return }
         scheduledCompletions.invalidate()
-        player.stop()
+        stopPlayerClock()
         hardResynchronize()
         do {
             try audioOutput.withGraph { engine in
@@ -647,13 +788,13 @@ final class SynchronizedPlayer {
             recoveryRetryNotBeforeNanos = 0
         } catch {
             fputs("Audio output recovery failed: \(error.localizedDescription)\n", stderr)
-            recoveryRetryNotBeforeNanos = MonotonicClock.nowNanos() + 500_000_000
+            recoveryRetryNotBeforeNanos = nowNanos() + 500_000_000
             configurationLock.withLock { configurationGate.markChanged() }
         }
     }
 
     private func measuredOutputLatencyNanos() -> UInt64 {
-        UInt64(max(0, engine.outputNode.presentationLatency) * 1_000_000_000)
+        outputTimingMeasurement?().latencyNanos ?? UInt64(max(0, engine.outputNode.presentationLatency) * 1_000_000_000)
     }
 
     private func refreshOutputState() {
@@ -663,9 +804,9 @@ final class SynchronizedPlayer {
         activeOutputHardwareFormat = currentOutputHardwareFormat()
         renderSchedulingHeadroomNanos = measuredRenderSchedulingHeadroomNanos(
             deviceID: activeOutputDeviceID,
-            hardwareFormat: activeOutputHardwareFormat
+            hardwareFormat: activeOutputHardwareFormat, latencyAccepted: true
         )
-        lastOutputStateRefreshNanos = MonotonicClock.nowNanos()
+        lastOutputStateRefreshNanos = nowNanos()
     }
 
     private func refreshOutputTimingIfNeeded(nowNanos: UInt64) {
@@ -675,35 +816,57 @@ final class SynchronizedPlayer {
         else { return }
         lastOutputStateRefreshNanos = nowNanos
         let measuredLatencyNanos = measuredOutputLatencyNanos()
-        guard Self.shouldAcceptOutputLatencyMeasurement(
+        // Geometry can disappear/change even when a transient zero presentation
+        // latency must be ignored. Refresh/clear its future-lead allowance on
+        // every scheduled running refresh, independently of that phase policy.
+        let latencyAccepted = Self.shouldAcceptOutputLatencyMeasurement(
             engineIsRunning: audioOutput.isRunning,
             previousLatencyNanos: outputLatencyNanos,
             measuredLatencyNanos: measuredLatencyNanos
-        ) else { return }
-        outputLatencyNanos = measuredLatencyNanos
-        renderSchedulingHeadroomNanos = measuredRenderSchedulingHeadroomNanos(
-            deviceID: currentOutputDeviceID(),
-            hardwareFormat: currentOutputHardwareFormat()
         )
+        let refreshedHeadroom = measuredRenderSchedulingHeadroomNanos(
+            deviceID: currentOutputDeviceID(), hardwareFormat: currentOutputHardwareFormat(),
+            latencyAccepted: latencyAccepted)
+        guard latencyAccepted else { return }
+        outputLatencyNanos = measuredLatencyNanos
+        renderSchedulingHeadroomNanos = refreshedHeadroom
+    }
+
+    /// Exercises the actual refresh paths with injected hardware measurements.
+    /// The default production constructor never supplies that injection.
+    func refreshOutputTimingForTesting(configurationChange: Bool) {
+        precondition(outputTimingMeasurement != nil)
+        if configurationChange {
+            markAudioEngineConfigurationChanged()
+            applyPendingAudioEngineConfigurationChange()
+        } else {
+            refreshOutputTimingIfNeeded(nowNanos: lastOutputStateRefreshNanos + 2_000_000_000)
+        }
     }
 
     private func measuredRenderSchedulingHeadroomNanos(
         deviceID: AudioDeviceID?,
-        hardwareFormat: AudioOutputHardwareFormat?
+        hardwareFormat: AudioOutputHardwareFormat?,
+        latencyAccepted: Bool
     ) -> UInt64 {
-        guard let deviceID else { return RoomTiming.renderSchedulingHeadroomNanos }
+        let injected = outputTimingMeasurement?()
+        guard deviceID != nil || injected != nil else {
+            outputBufferMilliseconds = nil; outputSafetyMilliseconds = nil
+            permittedFutureLeadNanos = nil
+            return RoomTiming.renderSchedulingHeadroomNanos
+        }
+        let bufferFrames = injected.map(\.bufferFrames) ?? deviceID.flatMap { Self.audioDeviceUInt32Property(deviceID: $0, selector: kAudioDevicePropertyBufferFrameSize) }
+        let safetyFrames = injected.map(\.safetyFrames) ?? deviceID.flatMap { Self.audioDeviceUInt32Property(deviceID: $0, selector: kAudioDevicePropertySafetyOffset) }
+        let measuredRate = injected.map(\.sampleRate) ?? (deviceID.flatMap { Self.audioDeviceNominalSampleRate($0) } ?? hardwareFormat?.sampleRate)
+        let sampleRate = measuredRate ?? Double(AudioPacket.sampleRate)
+        permittedFutureLeadNanos = AudioOutputRenderBudget.futureLeadAfterLatencyRefresh(
+            proposed: AudioOutputRenderBudget.permittedFutureLeadNanos(
+                bufferFrames: bufferFrames, safetyOffsetFrames: safetyFrames, sampleRate: measuredRate),
+            latencyAccepted: latencyAccepted)
+        outputBufferMilliseconds = sampleRate > 0 ? bufferFrames.map { Double($0) * 1000 / sampleRate } : nil
+        outputSafetyMilliseconds = sampleRate > 0 ? safetyFrames.map { Double($0) * 1000 / sampleRate } : nil
         return AudioOutputRenderBudget.schedulingHeadroomNanos(
-            bufferFrames: Self.audioDeviceUInt32Property(
-                deviceID: deviceID,
-                selector: kAudioDevicePropertyBufferFrameSize
-            ),
-            safetyOffsetFrames: Self.audioDeviceUInt32Property(
-                deviceID: deviceID,
-                selector: kAudioDevicePropertySafetyOffset
-            ),
-            sampleRate: Self.audioDeviceNominalSampleRate(deviceID)
-                ?? hardwareFormat?.sampleRate
-                ?? Double(AudioPacket.sampleRate)
+            bufferFrames: bufferFrames, safetyOffsetFrames: safetyFrames, sampleRate: sampleRate
         )
     }
 
@@ -814,7 +977,7 @@ final class SynchronizedPlayer {
         audioOutput.withGraph { engine in
             guard nodesAreAttached else { return }
             scheduledCompletions.invalidate()
-            player.stop()
+            stopPlayerClock()
             engine.disconnectNodeOutput(player)
             engine.disconnectNodeOutput(varispeed)
             engine.detach(player)
@@ -879,10 +1042,39 @@ final class SynchronizedPlayer {
         return status == noErr && deviceID != kAudioObjectUnknown ? deviceID : nil
     }
 
-    private func hardResynchronize() {
-        scheduledCompletions.invalidate()
+    private func stopPlayerClock() {
+        heldCohort = nil
+        scheduledContentEnd = nil
+        renderObservationRecorder.resetSampleTimeContinuity()
         player.stop()
-        smoothedCorrection = 0
+    }
+
+    static func hasUsableNodeClock(_ time: AVAudioTime) -> Bool {
+        // AVAudioPlayerNode throws an Objective-C exception for a nonnil time
+        // with neither validity flag. Offline startup can expose this shape;
+        // absence of a usable clock must remain unavailable, not terminate.
+        time.isSampleTimeValid || time.isHostTimeValid
+    }
+
+    private func nativeRenderHasReachedSourceFrame(_ frame: UInt64, strictlyPast: Bool) -> Bool {
+        guard let anchorFrameIndex, frame >= anchorFrameIndex,
+              let render = player.lastRenderTime,
+              Self.hasUsableNodeClock(render),
+              let sample = player.playerTime(forNodeTime: render), sample.isSampleTimeValid,
+              sample.sampleTime >= 0, sample.sampleRate == Double(AudioPacket.sampleRate) else { return false }
+        let position = UInt64(sample.sampleTime)
+        let sourcePosition = frame - anchorFrameIndex
+        // An empty queue at exact equality has no append-placement guarantee:
+        // native nil scheduling can choose a later quantum. Retain positive
+        // queued lead; the separate post-enqueue whole-window check stays strict.
+        return position > sourcePosition || (!strictlyPast && position == sourcePosition)
+    }
+
+    private func hardResynchronize(reason: PlaybackContentRecoveryReason? = nil) {
+        if let reason { contentRecoveryDiagnostics.record(reason) }
+        scheduledCompletions.invalidate()
+        stopPlayerClock()
+        rateController.reset()
         varispeed.rate = 1
         anchorFrameIndex = nil
         anchorCaptureNanos = nil
@@ -892,40 +1084,156 @@ final class SynchronizedPlayer {
         driftRecovery.reset()
         latestDriftMeasurement = nil
         resyncCount &+= 1
-        automaticSyncPolicy.didRealign(at: MonotonicClock.nowNanos())
-        if let next = pending.values.min(by: { $0.sequence < $1.sequence }) {
+        automaticSyncPolicy.didRealign(at: nowNanos())
+        if let next = earliestPending() {
             expectedSequence = next.sequence
         }
     }
 
-    private func concealMissingPacketIfNeeded(sequence: UInt32, offset: Int64) {
+    private func concealMissingPacketIfNeeded(sequence: UInt32, budget: inout Int, windowAdmitted: inout Bool) -> Bool {
         guard hasStarted,
-              let next = pending.values.min(by: { $0.sequence < $1.sequence }),
-              next.sequence > sequence
-        else { return }
-
-        guard let localCaptureNanos = RoomTiming.clientTimeNanos(hostTimeNanos: next.captureTimeNanos,
-                                                                clockOffsetNanos: offset) else { return }
-        let audibleTime = localCaptureNanos.addingReportingOverflow(targetLatencyNanos)
-        guard !audibleTime.overflow else { return }
-        let nextAudibleNanos = audibleTime.partialValue
-        let nextRenderNanos = nextAudibleNanos > outputLatencyNanos
-            ? nextAudibleNanos - outputLatencyNanos
-            : nextAudibleNanos
-        guard nextRenderNanos <= MonotonicClock.nowNanos() + 50_000_000 else { return }
+              let next = earliestPending(), next.sequence != sequence
+        else { return false }
+        let now = nowNanos()
+        // Freeze the queued-content deadline: later clock/latency updates cannot
+        // revive an expired native interval. Reserve at least measured enqueue
+        // headroom from the FIRST missing frame; large-output routes trade a
+        // shorter reorder wait for timely native admission.
+        let contentEnd = admittedContentEnd
+        let missingRender = contentEnd?.render
+        let nativePassed = maintenanceIntervalNanos == nil
+            && (contentEnd.map { nativeRenderHasReachedSourceFrame($0.frame, strictlyPast: false) } ?? false)
+        let admissionWindow = max(50_000_000, renderSchedulingHeadroomNanos)
+        if !windowAdmitted, !nativePassed, let missingRender, missingRender > now, missingRender - now > admissionWindow { return false }
+        guard !nativePassed, budget > 0, PlaybackConcealmentPolicy.canFill(expectedSequence: sequence, nextSequence: next.sequence,
+            sourceEndFrame: contentEnd?.frame, nextFrame: next.frameIndex,
+            missingRenderNanos: missingRender, nowNanos: now) else {
+            let firstUnscheduled = heldCohort?.sourceFrame ?? contentEnd?.frame
+            let reached = nativePassed || (firstUnscheduled.map {
+                nativeRenderHasReachedSourceFrame($0, strictlyPast: false)
+            } ?? false)
+            hardResynchronize(reason: reached ? .nativeSourcePositionReached : .concealmentUnavailable)
+            expectedSequence = next.sequence
+            return true
+        }
+        // Reserve one slot for the real successor as well as every silence.
+        guard scheduledCompletions.count + pendingPlaybackPacketCount < SecureMacPlaybackTimeline.maximumScheduledPackets else { return false }
 
         let silence = [Int16](
             repeating: 0,
             count: Int(AudioPacket.framesPerPacket) * Int(AudioPacket.channelCount)
         )
+        if maintenanceIntervalNanos != nil, let contentEnd, let offset = clockOffsetNanos {
+            guard holdPCM(silence, sourceFrame: contentEnd.frame, renderNanos: contentEnd.render, offset: offset) else {
+                expectedSequence = next.sequence
+                return true
+            }
+            budget -= 1
+            windowAdmitted = true
+            expectedSequence = sequence &+ 1
+            return true
+        }
         if let buffer = makeBuffer(silence) {
-            scheduleTrackedBuffer(buffer)
+            guard scheduleTrackedBuffer(buffer, sourceFrame: scheduledContentEnd?.frame, admittedAtNanos: now) else {
+                expectedSequence = next.sequence
+                return true
+            }
+            budget -= 1
+            windowAdmitted = true
+            if let end = scheduledContentEnd {
+                let frame = end.frame.addingReportingOverflow(UInt64(AudioPacket.framesPerPacket))
+                let render = end.render.addingReportingOverflow(
+                    UInt64(AudioPacket.framesPerPacket) * 1_000_000_000 / UInt64(AudioPacket.sampleRate))
+                scheduledContentEnd = frame.overflow || render.overflow ? nil : (frame.partialValue, render.partialValue)
+            }
+        } else {
+            hardResynchronize(reason: .contentAdmissionDropped)
+            expectedSequence = next.sequence
+            return true
         }
         expectedSequence = sequence &+ 1
-        drain()
+        return true
+    }
+
+    private func earliestPending() -> AudioPacket? {
+        guard let expectedSequence else { return pending.values.min { $0.frameIndex < $1.frameIndex } }
+        guard let sequence = PlaybackConcealmentPolicy.earliestSequence(Array(pending.keys), from: expectedSequence) else { return nil }
+        return pending[sequence]
+    }
+
+    /// Startup is handled immediately by drain. Only subsequent, individually
+    /// validated PCM enters this bounded hold; DSP is never run on merged data.
+    private func holdPCM(_ samples: [Int16], sourceFrame: UInt64, renderNanos: UInt64, offset: Int64) -> Bool {
+        guard let next = PlaybackPCMCohort(samples: samples, sourceFrame: sourceFrame,
+            renderNanos: renderNanos, heldAtNanos: nowNanos(),
+            context: .init(offset: offset, targetLatency: targetLatencyNanos, outputLatency: outputLatencyNanos)) else {
+            hardResynchronize(reason: .contentAdmissionDropped)
+            return false
+        }
+        if var held = heldCohort {
+            if held.append(next) {
+                heldCohort = held
+            } else {
+                guard flushHeldCohort() else { return false }
+                guard scheduledContentEnd?.frame == sourceFrame else {
+                    hardResynchronize(reason: .contentAdmissionDropped)
+                    return false
+                }
+                heldCohort = next
+            }
+        } else {
+            guard scheduledContentEnd?.frame == sourceFrame else {
+                hardResynchronize(reason: .contentAdmissionDropped)
+                return false
+            }
+            heldCohort = next
+        }
+        if heldCohort?.isFull == true { return flushHeldCohort() }
+        return flushCohortIfDue(anticipating: 0)
+    }
+
+    @discardableResult
+    private func flushCohortIfDue(anticipating interval: UInt64) -> Bool {
+        guard let held = heldCohort else { return true }
+        let now = nowNanos()
+        let horizon = now.addingReportingOverflow(interval)
+        if horizon.overflow || horizon.partialValue >= held.flushDeadline(headroomNanos: renderSchedulingHeadroomNanos) {
+            return flushHeldCohort()
+        }
+        return true
+    }
+
+    private func flushHeldCohort() -> Bool {
+        guard let held = heldCohort else { return true }
+        // Holding is intentional. The post-enqueue stall window starts at
+        // actual flush admission, including native query/allocation, not arrival.
+        let flushBegan = nowNanos()
+        if nativeRenderHasReachedSourceFrame(held.sourceFrame, strictlyPast: false) {
+            hardResynchronize(reason: .nativeSourcePositionReached)
+            return false
+        }
+        let now = nowNanos() // The native query may itself wait on the engine.
+        // Headroom decides when to stop holding, not whether already-active
+        // PCM may be submitted immediately. Preserve positive-deadline active
+        // admission; startup retains its stricter headroom gate.
+        guard held.firstRenderNanos > now else {
+            hardResynchronize(reason: .contentAdmissionDropped)
+            return false
+        }
+        guard let buffer = makeBuffer(held.samples) else {
+            hardResynchronize(reason: .contentAdmissionDropped)
+            return false
+        }
+        // Transfer held credits to one native ticket on the same executor.
+        heldCohort = nil
+        guard scheduleTrackedBuffer(buffer, sourceFrame: held.sourceFrame,
+            admittedAtNanos: flushBegan, packetCount: held.packetCount) else { return false }
+        scheduledContentEnd = (held.endFrame, held.endRenderNanos)
+        return true
     }
 
     private func makeBuffer(_ samples: [Int16]) -> AVAudioPCMBuffer? {
+        if failBufferAllocation?() == true { return nil }
         let frames = samples.count / Int(AudioPacket.channelCount)
         guard let buffer = AVAudioPCMBuffer(
             pcmFormat: format,
@@ -941,12 +1249,27 @@ final class SynchronizedPlayer {
         return buffer
     }
 
-    private func scheduleTrackedBuffer(_ buffer: AVAudioPCMBuffer) {
+    private func scheduleTrackedBuffer(_ buffer: AVAudioPCMBuffer, sourceFrame: UInt64?, admittedAtNanos: UInt64, packetCount: Int = 1) -> Bool {
         let completions = scheduledCompletions
-        let generation = completions.scheduled()
+        let generation = completions.scheduled(packetCount: packetCount)
+        beforeNativeSchedule?()
         player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { _ in
             completions.completed(generation: generation)
         }
+        // Do not reset merely because correctly queued audio begins playing.
+        // Recover conservatively only after enqueue stalls for a packet duration
+        // AND the whole admitted source window has passed. This is not proof of
+        // displacement, nor an atomic guarantee for sub-packet enqueue races.
+        let ended = nowNanos()
+        let duration = UInt64(buffer.frameLength) * 1_000_000_000 / UInt64(AudioPacket.sampleRate)
+        if let sourceFrame, ended >= admittedAtNanos, ended - admittedAtNanos >= duration {
+            let end = sourceFrame.addingReportingOverflow(UInt64(buffer.frameLength))
+            if end.overflow || nativeRenderHasReachedSourceFrame(end.partialValue, strictlyPast: true) {
+                hardResynchronize(reason: .enqueueWindowPassed)
+                return false
+            }
+        }
+        return true
     }
 
 }
@@ -954,20 +1277,31 @@ final class SynchronizedPlayer {
 /// The native completion can run outside the playback executor. Resetting a
 /// player retires its generation before AVFoundation releases old callbacks.
 final class PlaybackBufferCompletions: @unchecked Sendable {
+    struct Ticket: Sendable {
+        fileprivate let generation: UUID
+        fileprivate let id: UUID
+    }
     private let lock = NSLock()
     private var generation = UUID()
     private var outstanding = 0
+    private var tickets: [UUID: Int] = [:]
     var count: Int { lock.withLock { outstanding } }
-    func scheduled() -> UUID {
-        lock.withLock { outstanding += 1; return generation }
-    }
-    func completed(generation: UUID) {
-        lock.withLock {
-            guard generation == self.generation, outstanding > 0 else { return }
-            outstanding -= 1
+    func scheduled(packetCount: Int = 1) -> Ticket {
+        precondition(packetCount > 0 && packetCount <= PlaybackPCMCohort.maximumPackets)
+        return lock.withLock {
+            let ticket = Ticket(generation: generation, id: UUID())
+            tickets[ticket.id] = packetCount
+            outstanding += packetCount
+            return ticket
         }
     }
-    func invalidate() { lock.withLock { generation = UUID(); outstanding = 0 } }
+    func completed(generation ticket: Ticket) {
+        lock.withLock {
+            guard ticket.generation == generation, let credits = tickets.removeValue(forKey: ticket.id) else { return }
+            outstanding -= credits
+        }
+    }
+    func invalidate() { lock.withLock { generation = UUID(); outstanding = 0; tickets.removeAll(keepingCapacity: true) } }
 }
 
 struct PlaybackDriftRecovery {

@@ -7,6 +7,8 @@ import ALONetworking
 /// A failed media connection is redialed; it is never translated into a durable
 /// broadcaster stop, and it cannot restart another participant's output graph.
 final class SecureMacMediaReceiver: @unchecked Sendable {
+    // One value drives both the timer and the player's partial-PCM deadline.
+    private static let playbackMaintenanceMilliseconds = 20
     private let mesh: any RoomPeerConnecting
     private let selection: MediaReceiverSession.Selection
     private let queue = DispatchQueue(label: "alo.secure-media.playback", qos: .userInteractive)
@@ -78,7 +80,9 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
         self.mesh = mesh; self.selection = selection; self.status = status
         self.annotations = annotations
         videoDecoder = VideoDecoder(imageHandler: videoHandler)
-        player = try SecureMacPlaybackTimeline(audioOutput: audioOutput, playbackActivity: playbackActivity)
+        player = try SecureMacPlaybackTimeline(audioOutput: audioOutput,
+                                               maintenanceIntervalNanos: UInt64(Self.playbackMaintenanceMilliseconds) * 1_000_000,
+                                               playbackActivity: playbackActivity)
     }
 
     private var now: TimeInterval { Double(MonotonicClock.nowNanos()) / 1_000_000_000 }
@@ -89,7 +93,7 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
             self.started = true
             self.stopped = false
             let timer = DispatchSource.makeTimerSource(queue: self.queue)
-            timer.schedule(deadline: .now(), repeating: .milliseconds(20))
+            timer.schedule(deadline: .now(), repeating: .milliseconds(Self.playbackMaintenanceMilliseconds))
             timer.setEventHandler { [weak self] in
                 guard let self, !self.stopped else { return }
                 self.player.maintainSync()
@@ -165,8 +169,9 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
 
     func diagnosticsSnapshot() -> ReceiverTimingDiagnostics {
         queue.sync {
-            let report = player.syncReport()
-            let format = player.outputHardwareFormatForDiagnostics
+            let local = player.localDiagnosticReport()
+            let report = local.playback
+            let format = local.hardwareFormat
             let now = MonotonicClock.nowNanos()
             let fresh = clock.flatMap { now >= $0.sampledAtLocalNanos && now - $0.sampledAtLocalNanos <= 5_000_000_000 ? $0 : nil }
             return ReceiverTimingDiagnostics(
@@ -175,10 +180,10 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
                 jitterMilliseconds: Double(jitter.jitterNanos) / 1_000_000,
                 recommendedBufferMilliseconds: Double(jitter.recommendedPlayoutDelayNanos(
                     roundTripNanos: fresh?.roundTripNanos,
-                    outputLatencyNanos: player.outputLatencyForTimingNanos,
-                    renderSchedulingHeadroomNanos: player.renderSchedulingHeadroomForTimingNanos)) / 1_000_000,
-                outputLatencyMilliseconds: Double(player.outputLatencyForTimingNanos) / 1_000_000,
-                renderHeadroomMilliseconds: Double(player.renderSchedulingHeadroomForTimingNanos) / 1_000_000,
+                    outputLatencyNanos: local.outputLatency,
+                    renderSchedulingHeadroomNanos: local.renderHeadroom)) / 1_000_000,
+                outputLatencyMilliseconds: Double(local.outputLatency) / 1_000_000,
+                renderHeadroomMilliseconds: Double(local.renderHeadroom) / 1_000_000,
                 outputSampleRate: format?.sampleRate, outputChannelCount: format?.channelCount,
                 latenessMilliseconds: Double(report.latenessNanos) / 1_000_000,
                 latePacketCount: report.latePacketCount, resyncCount: report.resyncCount,
@@ -186,8 +191,9 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
                 driftMeasurementAgeMilliseconds: fresh == nil ? nil : report.driftSampleAgeNanos.map { Double($0) / 1_000_000 },
                 video: screenTiming.presentationSnapshot(videoDecoder.presentationTimingSnapshot),
                 videoEnabled: screenTiming.videoEnabled,
-                activePlayoutBufferMilliseconds: Double(player.activePlayoutDelayNanos) / 1_000_000,
-                automaticSyncState: player.automaticSyncState)
+                activePlayoutBufferMilliseconds: Double(local.activeDelay) / 1_000_000,
+                automaticSyncState: local.automaticState,
+                renderObservation: local.observation)
         }
     }
 
@@ -357,22 +363,29 @@ final class SecureMacMediaReceiver: @unchecked Sendable {
         guard let receiver else { return }
         let now = MonotonicClock.nowNanos()
         guard force || now >= lastTimingReportNanos && now - lastTimingReportNanos >= 1_000_000_000 else { return }
-        let floor = RoomTiming.outputLatencyFloor(player.outputLatencyForTimingNanos,
-            renderSchedulingHeadroomNanos: player.renderSchedulingHeadroomForTimingNanos)
         let freshClock = clock.flatMap { now >= $0.sampledAtLocalNanos && now - $0.sampledAtLocalNanos <= MediaReceiverTimingReport.maximumAgeNanos ? $0 : nil }
-        let network = jitter.recommendedPlayoutDelayNanos(roundTripNanos: freshClock?.roundTripNanos,
-            outputLatencyNanos: player.outputLatencyForTimingNanos,
-            renderSchedulingHeadroomNanos: player.renderSchedulingHeadroomForTimingNanos)
-        let rendered = player.syncReport()
-        let playback = PlaybackSyncReport(measuredAtNanos: 0, latenessNanos: rendered.latenessNanos,
-            latePacketCount: rendered.latePacketCount, resyncCount: rendered.resyncCount,
-            driftNanos: freshClock == nil ? nil : rendered.driftNanos,
-            driftSampleAgeNanos: freshClock == nil ? nil : rendered.driftSampleAgeNanos,
-            screenTiming: screenTiming.presentationSnapshot(videoDecoder.presentationTimingSnapshot).relativeTimingReport)
-        guard let report = try? MediaReceiverTimingReport(hardwareOutputFloorNanos: floor,
-            networkRecommendedDelayNanos: max(floor, network), roundTripNanos: freshClock?.roundTripNanos,
-            playback: playback) else { return }
+        guard let report = Self.timingReport(player: player, jitter: jitter, roundTripNanos: freshClock?.roundTripNanos,
+            screenTiming: screenTiming.presentationSnapshot(videoDecoder.presentationTimingSnapshot).relativeTimingReport) else { return }
         receiver.updateTiming(report)
         lastTimingReportNanos = now
+    }
+
+    static func timingReport(player: SecureMacPlaybackTimeline, jitter: NetworkJitterEstimator,
+                             roundTripNanos: UInt64?, screenTiming: PlaybackScreenTimingReport?) -> MediaReceiverTimingReport? {
+        let local = player.localDiagnosticReport()
+        let floor = RoomTiming.outputLatencyFloor(local.outputLatency,
+            renderSchedulingHeadroomNanos: local.renderHeadroom)
+        let network = jitter.recommendedPlayoutDelayNanos(roundTripNanos: roundTripNanos,
+            outputLatencyNanos: local.outputLatency,
+            renderSchedulingHeadroomNanos: local.renderHeadroom)
+        let rendered = local.playback
+        let playback = PlaybackSyncReport(measuredAtNanos: 0, latenessNanos: rendered.latenessNanos,
+            latePacketCount: rendered.latePacketCount, resyncCount: rendered.resyncCount,
+            driftNanos: roundTripNanos == nil ? nil : rendered.driftNanos,
+            driftSampleAgeNanos: roundTripNanos == nil ? nil : rendered.driftSampleAgeNanos,
+            screenTiming: screenTiming)
+        return try? MediaReceiverTimingReport(hardwareOutputFloorNanos: floor,
+            networkRecommendedDelayNanos: max(floor, network), roundTripNanos: roundTripNanos,
+            playback: playback)
     }
 }

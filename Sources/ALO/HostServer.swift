@@ -26,6 +26,10 @@ final class HostServer {
         let value: UInt64
         let observedAtNanos: UInt64
     }
+    private struct AudioSubmission: Sendable {
+        let id: UUID
+        let nanos: UInt64
+    }
     struct AudioSenderSnapshot {
         let participantID: String
         let udpPort: UInt16
@@ -38,6 +42,44 @@ final class HostServer {
         let admissionRejected: UInt64
         let replaced: UInt64
         let discardedBoundary: UInt64
+    }
+    /// Numeric-only observation of actual owner-queue processing. It changes
+    /// neither timestamps nor gate decisions and is disabled by default.
+    struct AudioCompletionObservation {
+        let port: UInt16
+        let entryNanos: UInt64
+        let ownerNanos: UInt64
+    }
+    /// Optional numeric evidence of the actual gate, never a second gate implementation.
+    struct AudioAdmissionObservation {
+        struct YoungerCandidate {
+            let captureNanos: UInt64
+            let enqueuedNanos: UInt64
+            let pendingIndex: Int
+            let pendingCount: Int
+        }
+        enum Decision: Int { case admitted, deferred, rejected }
+        let port: UInt16
+        let ownerNanos: UInt64
+        let captureNanos: UInt64
+        let captureAge: UInt64
+        let queueResidence: UInt64
+        let admissionBudget: UInt64
+        let estimatedDuration: UInt64
+        let recentInterval: UInt64
+        let unfinishedInterval: UInt64
+        let lastCompletion: UInt64?
+        let inFlight: Int
+        let pending: Int
+        let fanoutIdle: Bool
+        let decision: Decision
+        var completionRound: Int? = nil
+        var youngerCandidate: YoungerCandidate? = nil
+        var supersededPrefixCount: Int = 0
+        var projectedCompletion: UInt64 = 0
+        var completionGrowth: UInt64 = 0
+        var submissionLedgerCount: Int = 0
+        var cadenceOrderValid: Bool = true
     }
     typealias OutboundSend = (
         _ connection: NWConnection,
@@ -78,6 +120,10 @@ final class HostServer {
         var audioCompletionDurations: [AudioCompletionSample] = []
         var audioCompletionIntervals: [AudioCompletionSample] = []
         var lastAudioCompletionNanos: UInt64?
+        var lastAudioCompletedSubmissionNanos: UInt64?
+        var audioCompletionGrowth: [AudioCompletionSample] = []
+        var audioSubmissions: [AudioSubmission] = []
+        var audioCadenceOrderValid = true
         var audioReplaced: UInt64 = 0
         var audioDiscardedBoundary: UInt64 = 0
         var lastAudioAgeWarningNanos: UInt64?
@@ -100,8 +146,12 @@ final class HostServer {
     private let listenerReadyHandler: ((NWEndpoint.Port) -> Void)?
     private let outboundSend: OutboundSend?
     private let audioSendNowNanos: () -> UInt64
+    private let audioCompletionObservationForTesting: ((AudioCompletionObservation) -> Void)?
+    private let audioAdmissionObservationForTesting: ((AudioAdmissionObservation) -> Void)?
     private let audioBackpressurePolicy: AudioBackpressurePolicy
     private let playbackRequestHandler: ((RoomMediaCommand) -> Bool)?
+    private let acceptedDeliveryForTesting: ((@escaping () -> Void) -> Void)?
+    private let controlDeliveryForTesting: ((Data?, @escaping () -> Void) -> Void)?
     private let localParticipantID: String?
     private let packetizer = AudioPacketizer()
     /// Rotate first submission on every packet so a shared outbound link cannot
@@ -142,8 +192,12 @@ final class HostServer {
         outboundSend: OutboundSend? = nil,
         // Must be thread-safe: read on the owning queue and at send-callback entry.
         audioSendNowNanos: @escaping () -> UInt64 = MonotonicClock.nowNanos,
+        audioCompletionObservationForTesting: ((AudioCompletionObservation) -> Void)? = nil,
+        audioAdmissionObservationForTesting: ((AudioAdmissionObservation) -> Void)? = nil,
         audioBackpressurePolicy: AudioBackpressurePolicy = .boundedLatest(maxInFlight: 8),
         playbackRequestHandler: ((RoomMediaCommand) -> Bool)? = nil,
+        acceptedDeliveryForTesting: ((@escaping () -> Void) -> Void)? = nil,
+        controlDeliveryForTesting: ((Data?, @escaping () -> Void) -> Void)? = nil,
         localParticipantID: String? = nil
     ) {
         self.mediaSecurity = mediaSecurity
@@ -154,36 +208,59 @@ final class HostServer {
         self.listenerReadyHandler = listenerReadyHandler
         self.outboundSend = outboundSend
         self.audioSendNowNanos = audioSendNowNanos
+        self.audioCompletionObservationForTesting = audioCompletionObservationForTesting
+        self.audioAdmissionObservationForTesting = audioAdmissionObservationForTesting
         self.audioBackpressurePolicy = audioBackpressurePolicy
         self.playbackRequestHandler = playbackRequestHandler
+        self.acceptedDeliveryForTesting = acceptedDeliveryForTesting
+        self.controlDeliveryForTesting = controlDeliveryForTesting
         self.localParticipantID = localParticipantID
     }
 
+    /// Restart callers must retire old capture producers first. stop's queue
+    /// barrier drains already-enqueued ingress before resetting transport state;
+    /// acceptAudio itself does not carry a source-generation token.
     func start() throws {
-        let listener = try NWListener(using: mediaSecurity?.tcp() ?? LocalNetworkParameters.tcp(), on: .any)
-        if advertise {
-            listener.service = NWListener.Service(name: roomName, type: Self.serviceType)
-        }
-        listener.stateUpdateHandler = { state in
-            switch state {
-            case .ready:
-                print("Channel \"\(self.roomName)\" is visible on the local network.")
-                self.statusHandler?("Channel is visible on your local network")
-                if let port = listener.port {
-                    self.listenerReadyHandler?(port)
-                }
-            case .failed(let error):
-                fputs("Host listener failed: \(error)\n", stderr)
-                self.statusHandler?("Could not open the channel: \(error.localizedDescription)")
-            default:
-                break
+        try queue.sync {
+            guard self.listener == nil else { throw ALOError("Channel is already running.") }
+            let listener = try NWListener(using: mediaSecurity?.tcp() ?? LocalNetworkParameters.tcp(), on: .any)
+            if advertise {
+                listener.service = NWListener.Service(name: roomName, type: Self.serviceType)
             }
+            listener.stateUpdateHandler = { [weak self, weak listener] state in
+                guard let self, let listener, self.listener === listener else { return }
+                switch state {
+                case .ready:
+                    print("Channel \"\(self.roomName)\" is visible on the local network.")
+                    self.statusHandler?("Channel is visible on your local network")
+                    if let port = listener.port {
+                        self.listenerReadyHandler?(port)
+                    }
+                case .failed(let error):
+                    fputs("Host listener failed: \(error)\n", stderr)
+                    self.statusHandler?("Could not open the channel: \(error.localizedDescription)")
+                default:
+                    break
+                }
+            }
+            listener.newConnectionHandler = { [weak self, weak listener] connection in
+                guard let self else { connection.cancel(); return }
+                let accept = { [weak self, weak listener] in
+                    guard let self, let listener, self.listener === listener else {
+                        connection.cancel(); return
+                    }
+                    self.accept(connection)
+                }
+                if let delivery = self.acceptedDeliveryForTesting {
+                    delivery { [weak self] in
+                        guard let self else { connection.cancel(); return }
+                        self.queue.async { accept() }
+                    }
+                } else { accept() }
+            }
+            self.listener = listener
+            listener.start(queue: queue)
         }
-        listener.newConnectionHandler = { [weak self] connection in
-            self?.accept(connection)
-        }
-        listener.start(queue: queue)
-        self.listener = listener
     }
 
     func stop() {
@@ -199,6 +276,17 @@ final class HostServer {
                 client.control.cancel()
             }
             clients.removeAll()
+            timingEligibleClients = nil
+            audioFanoutCohort.removeAll()
+            audioFanoutOffset = 0
+            packetizer.discardPendingSamples()
+            lastAudioCaptureNanos = nil
+            requestedPlaybackState = nil
+            requestedPlaybackStateSetNanos = nil
+            groupPlayoutDelayNanos = RoomTiming.defaultPlayoutDelayNanos
+            roomTimingChangeCount = 0
+            videoEnabled = false
+            // Keep user room metadata, media queue and actual paused state.
             receiverCountHandler?(0)
         }
     }
@@ -223,6 +311,7 @@ final class HostServer {
                         reportAgeMilliseconds: client.lastSyncReportNanos.map { Double(now >= $0 ? now - $0 : 0) / 1_000_000 },
                         recommendedBufferMilliseconds: Double(client.recommendedPlayoutDelayNanos) / 1_000_000,
                         hardwareFloorMilliseconds: Double(client.outputLatencyPlayoutFloorNanos) / 1_000_000,
+                        audioSendCountersAvailable: true,
                         audioEnqueued: client.audioEnqueued, audioSent: client.audioSent,
                         audioExpiredWait: client.audioExpiredWait, audioExpiredAge: client.audioExpiredAge,
                         audioAdmissionRejected: client.audioAdmissionRejected,
@@ -239,6 +328,7 @@ final class HostServer {
             )
         }
     }
+    var clientCountForTesting: Int { queue.sync { clients.count } }
 
     /// A queue-barrier snapshot, never a drain request or an expiry sweep.
     func audioSenderSnapshot() -> [AudioSenderSnapshot] {
@@ -509,20 +599,28 @@ final class HostServer {
     private func receiveControl(for client: Client, identifier: ObjectIdentifier) {
         client.control.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [weak self] data, _, isComplete, error in
             guard let self else { return }
-            if let data {
-                for message in client.decoder.append(data) {
-                    self.handle(message, for: client)
+            let process = { [weak self] in
+                guard let self, self.clients[identifier] === client else { return }
+                if let data {
+                    for message in client.decoder.append(data) {
+                        guard self.clients[identifier] === client else { return }
+                        self.handle(message, for: client)
+                    }
+                    if client.decoder.isOverflowed {
+                        self.removeClient(identifier)
+                        return
+                    }
                 }
-                if client.decoder.isOverflowed {
+                guard self.clients[identifier] === client else { return }
+                if isComplete || error != nil {
                     self.removeClient(identifier)
                     return
                 }
+                self.receiveControl(for: client, identifier: identifier)
             }
-            if isComplete || error != nil {
-                self.removeClient(identifier)
-                return
-            }
-            self.receiveControl(for: client, identifier: identifier)
+            if let delivery = self.controlDeliveryForTesting {
+                delivery(data) { [weak self] in self?.queue.async { process() } }
+            } else { process() }
         }
     }
 
@@ -557,6 +655,10 @@ final class HostServer {
             client.audioCompletionDurations.removeAll()
             client.audioCompletionIntervals.removeAll()
             client.lastAudioCompletionNanos = nil
+            client.lastAudioCompletedSubmissionNanos = nil
+            client.audioCompletionGrowth.removeAll()
+            client.audioSubmissions.removeAll()
+            client.audioCadenceOrderValid = true
             discardPendingAudio(for: client)
             client.audioBacklogCongested = false
             let connection = NWConnection(
@@ -851,6 +953,7 @@ final class HostServer {
         discardPendingAudio(for: client)
         client.audio?.cancel()
         client.video?.cancel()
+        client.control.cancel()
         receiverCountHandler?(participantNames.count)
         broadcastPresence()
         updateGroupTiming()
@@ -1105,9 +1208,12 @@ final class HostServer {
         }
     }
 
-    private func drainAudio(for client: Client, over connection: NWConnection, maxInFlight: Int) {
+    @discardableResult
+    private func drainAudio(for client: Client, over connection: NWConnection, maxInFlight: Int,
+                            admissionQuantum: Int = Int.max, completionRound: Int? = nil) -> Int {
         guard client.audio === connection,
-              clients[ObjectIdentifier(client.control)] === client else { return }
+              clients[ObjectIdentifier(client.control)] === client else { return 0 }
+        var admittedCount = 0
         expirePendingAudio(for: client, now: audioSendNowNanos())
         // Only backlog growth triggers latest-only mode, not delayed callback
         // dispatch on a fast link. Congestion clears only with an empty pending
@@ -1115,10 +1221,12 @@ final class HostServer {
         // slot at full capacity is not recovery, but a steady stream need not
         // become completely idle. Queue wait and the shared playout deadline still
         // expire old audio even if capture has stopped.
-        while client.audioSendsInFlight < max(1, maxInFlight), !client.pendingAudio.isEmpty {
-            let packet = client.pendingAudio.removeFirst()
+        while admittedCount < admissionQuantum,
+              client.audioSendsInFlight < max(1, maxInFlight), !client.pendingAudio.isEmpty {
+            var packet = client.pendingAudio.removeFirst()
             let submittedAt = audioSendNowNanos()
-            let captureAge = submittedAt >= packet.captureTimeNanos ? submittedAt - packet.captureTimeNanos : 0
+            var captureAge = submittedAt >= packet.captureTimeNanos ? submittedAt - packet.captureTimeNanos : 0
+            var supersededPrefixCount = 0
             let schedulingHeadroom = RoomTiming.renderSchedulingHeadroomNanos
             let admissionBudget = groupPlayoutDelayNanos > schedulingHeadroom
                 ? groupPlayoutDelayNanos - schedulingHeadroom : 0
@@ -1134,6 +1242,9 @@ final class HostServer {
                 client.audioCompletionDurations.removeAll()
                 client.audioCompletionIntervals.removeAll()
                 client.lastAudioCompletionNanos = nil
+                client.lastAudioCompletedSubmissionNanos = nil
+                client.audioCompletionGrowth.removeAll()
+                client.audioCadenceOrderValid = true
             }
             // Pending audio itself may wait for at most 80ms. Older completed
             // evidence cannot describe its remaining queue residence, while an
@@ -1159,17 +1270,84 @@ final class HostServer {
                 ? client.lastAudioCompletionNanos.map { submittedAt >= $0 ? submittedAt - $0 : 0 } ?? 0
                 : 0
             let completionInterval = max(recentCompletionInterval, unfinishedCompletionInterval)
+            client.audioCompletionGrowth.removeAll {
+                submittedAt >= $0.observedAtNanos && submittedAt - $0.observedAtNanos >= completionSampleHorizon
+            }
+            let oldestSubmission = client.audioSubmissions.map(\.nanos).min()
+            let oldestAge = oldestSubmission.map { submittedAt >= $0 ? submittedAt - $0 : UInt64.max } ?? 0
+            var unfinishedGrowth = unfinishedCompletionInterval
+            if client.audioCadenceOrderValid, let oldestSubmission,
+               let priorSubmission = client.lastAudioCompletedSubmissionNanos,
+               oldestSubmission >= priorSubmission {
+                let cadence = oldestSubmission - priorSubmission
+                unfinishedGrowth = unfinishedGrowth > cadence ? unfinishedGrowth - cadence : 0
+            }
+            let growth = client.audioCadenceOrderValid
+                ? max(client.audioCompletionGrowth.map(\.value).max() ?? 0, unfinishedGrowth)
+                : completionInterval
+            // Full observed sojourn already includes existing queue delay.
+            // Add unexplained growth, not source/admission cadence a second time.
+            // Equal-admission bursts retain their complete interval contribution.
+            let base = max(estimatedLocalCompletion, oldestAge)
+            let (growthProjection, multiplyOverflow) = growth.multipliedReportingOverflow(by: UInt64(client.audioSendsInFlight) + 1)
+            let (projection, addOverflow) = base.addingReportingOverflow(growthProjection)
+            let projectedCompletion = multiplyOverflow || addOverflow ? UInt64.max : projection
+            // One canonical assessment for the real head and optional read-only
+            // retained-packet observation. Same time, credit and sample snapshot.
+            // Early completions understate a growing in-flight backlog. Budget
+            // the recent slowest interval without treating completion as an ACK.
+            func canAdmit(_ candidate: PendingAudio) -> Bool {
+                let age = submittedAt >= candidate.captureTimeNanos
+                    ? submittedAt - candidate.captureTimeNanos : 0
+                return age < admissionBudget
+                    && projectedCompletion < admissionBudget - age
+            }
+            func firstAdmissibleYoungerIndex() -> Int? {
+                for (index, candidate) in client.pendingAudio.enumerated() {
+                    guard canAdmit(candidate) else { continue }
+                    // Only canonically infeasible packets may be superseded.
+                    // An admissible intermediate excluded by recovery freshness
+                    // is a barrier, not permission to discard it for a later one.
+                    guard candidate.captureTimeNanos > packet.captureTimeNanos,
+                          candidate.captureTimeNanos <= submittedAt,
+                          candidate.enqueuedAtNanos <= submittedAt else { return nil }
+                    let acquisition = candidate.enqueuedAtNanos >= candidate.captureTimeNanos
+                        ? candidate.enqueuedAtNanos - candidate.captureTimeNanos : 0
+                    guard acquisition < Self.maximumPendingAudioSpanNanos
+                        && submittedAt - candidate.enqueuedAtNanos < Self.maximumPendingAudioWaitNanos
+                    else { return nil }
+                    return index
+                }
+                return nil
+            }
+            func observeAdmission(_ decision: AudioAdmissionObservation.Decision) {
+                guard let observe = audioAdmissionObservationForTesting,
+                      case .hostPort(_, let port) = connection.endpoint else { return }
+                var younger: AudioAdmissionObservation.YoungerCandidate?
+                if decision == .deferred, let index = firstAdmissibleYoungerIndex() {
+                    let candidate = client.pendingAudio[index]
+                    younger = .init(captureNanos: candidate.captureTimeNanos,
+                        enqueuedNanos: candidate.enqueuedAtNanos, pendingIndex: index,
+                        pendingCount: client.pendingAudio.count)
+                }
+                observe(.init(port: port.rawValue, ownerNanos: submittedAt,
+                    captureNanos: packet.captureTimeNanos, captureAge: captureAge,
+                    queueResidence: submittedAt >= packet.enqueuedAtNanos ? submittedAt - packet.enqueuedAtNanos : 0,
+                    admissionBudget: admissionBudget, estimatedDuration: estimatedLocalCompletion,
+                    recentInterval: recentCompletionInterval, unfinishedInterval: unfinishedCompletionInterval,
+                    lastCompletion: client.lastAudioCompletionNanos, inFlight: client.audioSendsInFlight,
+                    pending: client.pendingAudio.count, fanoutIdle: fanoutIsIdle, decision: decision,
+                    completionRound: completionRound,
+                    youngerCandidate: younger, supersededPrefixCount: supersededPrefixCount,
+                    projectedCompletion: projectedCompletion, completionGrowth: growth,
+                    submissionLedgerCount: client.audioSubmissions.count,
+                    cadenceOrderValid: client.audioCadenceOrderValid))
+            }
             // Queue wait alone ignores capture acquisition age and work already
             // occupying this path. Preserve fresh FIFO packets, but do not admit
             // one whose observed local service estimate consumes its remaining
             // room budget. Subtraction avoids overflowing unsigned timestamps.
-            guard captureAge < admissionBudget,
-                  estimatedLocalCompletion < admissionBudget - captureAge,
-                  // Early completions understate a growing in-flight backlog.
-                  // Budget its recent slowest service interval too, without multiplying
-                  // timestamps or treating local completion as a remote ACK.
-                  completionInterval < (admissionBudget - captureAge)
-                    / UInt64(client.audioSendsInFlight + 1) else {
+            if !canAdmit(packet) {
                 // A busy path is not a permanent rejection of fresh capture.
                 // Keep it in the existing bounded FIFO until a completion frees
                 // capacity, even if capture ends before another callback arrives.
@@ -1185,14 +1363,33 @@ final class HostServer {
                    acquisitionAge < Self.maximumPendingAudioSpanNanos,
                    queueResidence < Self.maximumPendingAudioWaitNanos,
                    captureAge < admissionBudget {
-                    client.pendingAudio.insert(packet, at: 0)
-                    break
+                    if let index = firstAdmissibleYoungerIndex() {
+                        // Supersede only the infeasible prefix, not all pending
+                        // audio. The earliest younger packet passes the SAME
+                        // gate at this time/credit snapshot; remaining FIFO stays.
+                        // These are replacement drops, not expiry or admission.
+                        supersededPrefixCount = index + 1
+                        client.audioReplaced &+= UInt64(supersededPrefixCount)
+                        client.pendingAudio.removeFirst(index)
+                        packet = client.pendingAudio.removeFirst()
+                        captureAge = submittedAt - packet.captureTimeNanos
+                    } else {
+                        observeAdmission(.deferred)
+                        client.pendingAudio.insert(packet, at: 0)
+                        break
+                    }
+                } else {
+                    client.audioAdmissionRejected &+= 1
+                    observeAdmission(.rejected)
+                    continue
                 }
-                client.audioAdmissionRejected &+= 1
-                continue
             }
+            observeAdmission(.admitted)
+            let submission = AudioSubmission(id: UUID(), nanos: submittedAt)
+            client.audioSubmissions.append(submission)
             client.audioSendsInFlight += 1
             client.audioSent &+= 1
+            admittedCount += 1
             send(packet.data, over: connection, isComplete: true) { [weak self, weak client] error in
                 guard let self, let client else { return }
                 // Sample at callback entry, before the additional owning-queue
@@ -1201,11 +1398,23 @@ final class HostServer {
                 self.queue.async { [weak self, weak client] in
                     guard let self, let client, client.audio === connection,
                           self.clients[ObjectIdentifier(client.control)] === client else { return }
+                    guard let submissionIndex = client.audioSubmissions.firstIndex(where: { $0.id == submission.id }) else {
+                        client.audioCadenceOrderValid = false
+                        return // Duplicate completion cannot release another send's credit.
+                    }
+                    if submissionIndex != 0 || completedAt < submittedAt
+                        || client.lastAudioCompletionNanos.map({ completedAt < $0 }) == true
+                        || client.lastAudioCompletedSubmissionNanos.map({ submittedAt < $0 }) == true {
+                        client.audioCadenceOrderValid = false
+                    }
+                    client.audioSubmissions.remove(at: submissionIndex)
                     client.audioSendsInFlight = max(0, client.audioSendsInFlight - 1)
                     if let error {
                         fputs("Audio send failed: \(error)\n", stderr)
                         connection.cancel()
                         client.audio = nil
+                        client.audioSubmissions.removeAll()
+                        client.audioSendsInFlight = 0
                         self.discardPendingAudio(for: client)
                         self.drainAudioAfterCompletion(of: client, maxInFlight: maxInFlight)
                         return
@@ -1218,13 +1427,28 @@ final class HostServer {
                         }
                     }
                     if let previous = client.lastAudioCompletionNanos, completedAt >= previous {
+                        let interval = completedAt - previous
+                        if client.audioCadenceOrderValid, let priorSubmission = client.lastAudioCompletedSubmissionNanos {
+                            let cadence = submittedAt - priorSubmission
+                            client.audioCompletionGrowth.append(AudioCompletionSample(
+                                value: interval > cadence ? interval - cadence : 0, observedAtNanos: completedAt))
+                            if client.audioCompletionGrowth.count > Self.maximumAudioCompletionSamples {
+                                client.audioCompletionGrowth.removeFirst()
+                            }
+                        }
                         client.audioCompletionIntervals.append(AudioCompletionSample(
                             value: completedAt - previous, observedAtNanos: completedAt))
                         if client.audioCompletionIntervals.count > Self.maximumAudioCompletionSamples {
                             client.audioCompletionIntervals.removeFirst()
                         }
                     }
-                    client.lastAudioCompletionNanos = completedAt
+                    client.lastAudioCompletionNanos = max(client.lastAudioCompletionNanos ?? completedAt, completedAt)
+                    client.lastAudioCompletedSubmissionNanos = max(client.lastAudioCompletedSubmissionNanos ?? submittedAt, submittedAt)
+                    if let observe = self.audioCompletionObservationForTesting,
+                       case .hostPort(_, let port) = connection.endpoint {
+                        observe(.init(port: port.rawValue, entryNanos: completedAt,
+                            ownerNanos: self.audioSendNowNanos()))
+                    }
                     self.drainAudioAfterCompletion(of: client, maxInFlight: maxInFlight)
                 }
             }
@@ -1232,24 +1456,34 @@ final class HostServer {
         if client.audioSendsInFlight <= max(1, maxInFlight) / 2, client.pendingAudio.isEmpty {
             client.audioBacklogCongested = false
         }
+        return admittedCount
     }
 
     private func drainAudioAfterCompletion(of completedClient: Client, maxInFlight: Int) {
-        // An idle listener can be waiting on shared-link capacity even though
-        // it has no completion of its own left to wake it. Give those listeners
-        // another bounded admission attempt alongside the completing listener,
-        // favoring the least-served member of the current fanout cohort.
-        let ready = clients.values.filter {
-            $0.audio != nil && ($0 === completedClient
-                || ($0.audioSendsInFlight == 0 && !$0.pendingAudio.isEmpty))
-        }.sorted {
-            let left = $0.audioSent - $0.audioFanoutEpochSent
-            let right = $1.audioSent - $1.audioFanoutEpochSent
-            return left == right ? ($0.id ?? "") < ($1.id ?? "") : left < right
-        }
-        for client in ready {
-            guard let connection = client.audio else { continue }
-            drainAudio(for: client, over: connection, maxInFlight: maxInFlight)
+        // Recent service evidence can expire while a listener still has a send
+        // outstanding. Reconsider every pending listener with socket credit,
+        // not only idle listeners, through the unchanged admission gate. A
+        // one-admission quantum prevents one stale sort from filling a peer
+        // repeatedly before the next eligible peer is considered. Re-rank each
+        // round; this is per-round fairness, not strict per-send re-sorting.
+        // Native completions hop onto this serial queue, so no socket credits
+        // can be returned during these rounds. maxInFlight bounds the rounds.
+        for round in 0..<max(1, maxInFlight) {
+            let ready = clients.values.filter {
+                $0.audio != nil && ((round == 0 && $0 === completedClient)
+                    || ($0.audioSendsInFlight < max(1, maxInFlight) && !$0.pendingAudio.isEmpty))
+            }.sorted {
+                let left = $0.audioSent - $0.audioFanoutEpochSent
+                let right = $1.audioSent - $1.audioFanoutEpochSent
+                return left == right ? ($0.id ?? "") < ($1.id ?? "") : left < right
+            }
+            var admitted = 0
+            for client in ready {
+                guard let connection = client.audio else { continue }
+                admitted += drainAudio(for: client, over: connection, maxInFlight: maxInFlight,
+                    admissionQuantum: 1, completionRound: round)
+            }
+            if admitted == 0 { break }
         }
     }
 

@@ -35,16 +35,20 @@ public struct SecureRoomTimingPolicy: Sendable {
     }
 
     public mutating func record(peer: UUID, report: MediaReceiverTimingReport, receivedAt now: UInt64) {
-        freezeCohortIfNeeded(now: now)
         expire(now: now)
+        freezeCohortIfNeeded(now: now)
         guard reports[peer] != nil || reports.count < 64 else { return }
         reports[peer] = Sample(report: report, received: now)
+        // Capture can precede every remote listener. Establish that first
+        // post-grace cohort atomically with acceptance, before removal or a
+        // later report can interleave with desiredDelay().
+        freezeCohortIfNeeded(now: now)
     }
 
     public mutating func desiredDelay(now: UInt64, current: UInt64,
                                      localHardwareFloor: UInt64, playing: Bool) -> UInt64 {
-        freezeCohortIfNeeded(now: now)
         expire(now: now)
+        freezeCohortIfNeeded(now: now)
         let recommendations = reports.compactMap { peer, sample -> UInt64? in
             guard cohort?.contains(peer) ?? true else { return nil }
             return sample.report.networkRecommendedDelayNanos
@@ -61,9 +65,11 @@ public struct SecureRoomTimingPolicy: Sendable {
     }
 
     private mutating func freezeCohortIfNeeded(now: UInt64) {
-        guard cohort == nil, let start = captureStartedAt, now >= start,
+        guard cohort == nil, !reports.isEmpty, let start = captureStartedAt, now >= start,
               now - start >= 1_000_000_000 else { return }
-        // Freeze before adding a new report at/after the established boundary.
+        // Freeze existing listeners before admitting later reports; an empty
+        // capture has no remote cohort yet. Once established it never reopens,
+        // even when its reports are removed or expire.
         cohort = Set(reports.keys)
     }
 
