@@ -140,6 +140,61 @@ struct MacOwnerSocketTests {
         #expect(calls.count == 0)
     }
 
+    @Test func competingFirstLockCreationReportsOccupied() throws {
+        let directory = try directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var competitor: Int32 = -1
+        defer { if competitor >= 0 { Darwin.close(competitor) } }
+        var staged = false
+        #expect(throws: MacOwnerSocket.Failure.occupied) {
+            try MacOwnerSocket.Server(directory: directory, afterMissingLockForTesting: {
+                competitor = open(directory.appendingPathComponent("ingress.lock").path,
+                    O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+                try #require(competitor >= 0)
+                try #require(flock(competitor, LOCK_EX | LOCK_NB) == 0)
+                staged = true
+            }) { _ in .init(status: .rejected) }
+        }
+        #expect(staged, "The competing process must actually acquire the newly created lock")
+    }
+
+    @Test(arguments: [0o600, 0o755])
+    func liveNoncooperatingSocketIsNotUnlinked(mode: Int) throws {
+        let directory = try directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("ingress.sock").path
+        let listener = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        try #require(listener >= 0)
+        defer { Darwin.close(listener) }
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+        let bytes = path.utf8CString
+        try #require(bytes.count <= MemoryLayout.size(ofValue: address.sun_path))
+        withUnsafeMutableBytes(of: &address.sun_path) { target in bytes.withUnsafeBytes { target.copyBytes(from: $0) } }
+        let bound = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(listener, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        try #require(bound == 0)
+        try #require(chmod(path, mode_t(mode)) == 0)
+        try #require(Darwin.listen(listener, 8) == 0)
+        var before = stat()
+        try #require(lstat(path, &before) == 0)
+        // No ingress.lock: the server must reach the real socket probe rather
+        // than returning early from its cooperative writer-lock check.
+        #expect(throws: MacOwnerSocket.Failure.occupied) {
+            try MacOwnerSocket.Server(directory: directory) { _ in .init(status: .rejected) }
+        }
+        var after = stat()
+        try #require(lstat(path, &after) == 0)
+        #expect(after.st_ino == before.st_ino && after.st_dev == before.st_dev)
+        #expect(after.st_mode == before.st_mode)
+        let connected = try connect(directory)
+        Darwin.close(connected)
+    }
+
     @Test(arguments: [0o600, 0o755])
     func verifiedStaleSocketRecoversIncludingPreChmodCrashMode(mode: Int) throws {
         let directory = try directory()

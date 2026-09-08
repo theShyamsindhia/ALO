@@ -35,8 +35,15 @@ public enum MacOwnerSocket {
         /// Handler must perform bounded local state work only: never await user
         /// input, hash executables, wait for a process, perform network I/O, or
         /// re-enter the server. It is serialized with stop on the owner queue.
-        public init(directory: URL,
+        public convenience init(directory: URL,
                     handler: @escaping @Sendable (LocalDeviceMessageProtocol.Request) -> LocalDeviceMessageProtocol.Response) throws {
+            try self.init(directory: directory, afterMissingLockForTesting: nil, handler: handler)
+        }
+
+        /// Test-only scheduling seam at the real first-creation race boundary.
+        /// Public construction always supplies nil and performs the same I/O.
+        init(directory: URL, afterMissingLockForTesting: (() throws -> Void)?,
+             handler: @escaping @Sendable (LocalDeviceMessageProtocol.Request) -> LocalDeviceMessageProtocol.Response) throws {
             self.handler = handler
             owner.setSpecific(key: ownerKey, value: true)
             do {
@@ -44,9 +51,15 @@ public enum MacOwnerSocket {
                 var existingLock = stat()
                 if fstatat(directoryFD, "ingress.lock", &existingLock, AT_SYMLINK_NOFOLLOW) != 0 {
                     guard errno == ENOENT else { throw Failure.system(errno) }
+                    try afterMissingLockForTesting?()
                     let created = openat(directoryFD, "ingress.lock", O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
-                    guard created >= 0 else { throw Failure.system(errno) }
-                    Darwin.close(created)
+                    if created >= 0 { Darwin.close(created) }
+                    else {
+                        // Another starter may create the same lock after our
+                        // missing-entry check. Still validate its owner/type and
+                        // acquire flock below; existence alone is not authority.
+                        guard errno == EEXIST else { throw Failure.system(errno) }
+                    }
                 }
                 writerFD = try Self.openOwnerEntry(parent: directoryFD, name: "ingress.lock", directory: false)
                 guard flock(writerFD, LOCK_EX | LOCK_NB) == 0 else { throw Failure.occupied }
