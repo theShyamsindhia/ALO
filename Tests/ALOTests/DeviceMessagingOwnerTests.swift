@@ -27,10 +27,16 @@ struct DeviceMessagingOwnerTests {
         var entered = false
         var explicitlyReleased: Bool?
         var discovery: [(UUID, Set<UUID>)] = []
+        var messageHistory: [String] = []
+        var queryResults: [(UUID, UUID)] = []
         func read<T>(_ body: (Captured) -> T) -> T { lock.lock(); defer { lock.unlock() }; return body(self) }
         func update(_ body: (Captured) -> Void) { lock.lock(); defer { lock.unlock() }; body(self) }
         func accept(_ snapshot: MacDeviceMessagingController.ViewState) {
-            update { if snapshot.revision > $0.view.revision { $0.view = snapshot } }
+            update {
+                if snapshot.revision > $0.view.revision {
+                    $0.view = snapshot; $0.messageHistory.append(contentsOf: snapshot.messageStatuses)
+                }
+            }
         }
     }
     struct Fixture {
@@ -226,6 +232,100 @@ struct DeviceMessagingOwnerTests {
         try await wait { captured.read { !$0.view.registrations.contains { $0.id == registration } } }
         #expect(service.localGrants().contains { $0.id == grant && $0.revoked })
         try await stop(owner, captured)
+    }
+    @Test func twoActualOwnersSendAttributedTextAndReconnectForStatusWithoutResend() async throws {
+        let f = try Fixture(); defer { f.clean() }
+        let senderDirectory = f.directory.appendingPathComponent("sender")
+        try FileManager.default.createDirectory(at: senderDirectory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        let senderHelper = senderDirectory.appendingPathComponent("helper")
+        let script = "#!/bin/sh\nprintf '%s\\0' \"$@\" > \"$0.args.tmp\"\n/bin/mv \"$0.args.tmp\" \"$0.args\"\nprintf 'run\\n' >> \"$0.runs\"\nexit 0\n"
+        for helper in [f.helper, senderHelper] {
+            try Data(script.utf8).write(to: helper)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
+        }
+        let received = Captured(), sent = Captured()
+        let receiver = DeviceMessagingOwner(testing: .init(directory: f.directory,
+            beforeNetworkPublication: { _, service in received.update { $0.service = service } },
+            networkReady: { port in received.update { $0.port = port } })) { received.accept($0) }
+        let sender = DeviceMessagingOwner(testing: .init(directory: senderDirectory,
+            networkReady: { port in sent.update { $0.port = port } },
+            queryResultObserved: { grant, message in sent.update { $0.queryResults.append((grant, message)) } })) { sent.accept($0) }
+        defer { sender.stopAndDrainForTesting(); receiver.stopAndDrainForTesting() }
+        try await enable(receiver, received, f)
+        sender.replaceIdentity(f.sender.publicIdentity.userID); sender.approveExecutable(senderHelper)
+        let expected = try CodexLocalExecutableApproval(locallyApprovedURL: senderHelper).canonicalURL.path
+        try await wait("second actual owner executable approved") { sent.read { $0.view.executable == expected && !$0.view.stopping } }
+        sender.enableIngress()
+        try await wait("second actual owner ingress enabled") { sent.read { $0.view.enabled } }
+        func registerAndConfirm(_ owner: DeviceMessagingOwner, captured: Captured, directory: URL, helper: URL, task: UUID) async throws -> UUID {
+            let response = try MacOwnerSocket.request(.init(operation: .register, taskID: task, title: "Explicit local task"), directory: directory.appendingPathComponent("socket"))
+            let registration = try #require(response.registration)
+            owner.testCapability(registration)
+            try await wait("actual capability helper completed") { captured.read { $0.view.capabilityStatuses[registration]?.hasPrefix("Queued test") == true } }
+            let args = try Data(contentsOf: helper.appendingPathExtension("args")).split(separator: 0).map { String(decoding: $0, as: UTF8.self) }
+            try #require(Array(args.prefix(4)) == ["queue", "--thread", task.uuidString, "--message"])
+            let nonceLine = try #require(args.last?.split(separator: "\n").first { $0.hasPrefix("Confirmation code: ") })
+            owner.confirm(registration, response: String(nonceLine.dropFirst("Confirmation code: ".count)))
+            try await wait("actual local confirmation accepted") { captured.read { $0.view.registrations.contains { $0.id == registration && $0.state == .verified } } }
+            return registration
+        }
+        let receiverTask = UUID(), senderTask = UUID()
+        let receiverRegistration = try await registerAndConfirm(receiver, captured: received, directory: f.directory, helper: f.helper, task: receiverTask)
+        let senderRegistration = try await registerAndConfirm(sender, captured: sent, directory: senderDirectory, helper: senderHelper, task: senderTask)
+        receiver.addNetwork(f.network, user: f.user, identity: f.identity, pins: MemoryPeerPinStore(), access: f.access, token: receiver.currentGeneration)
+        sender.addNetwork(f.network, user: f.sender, identity: f.senderIdentity, pins: MemoryPeerPinStore(),
+            access: NetworkDeviceAccess(policy: f.policy, localDevice: f.senderBinding), token: sender.currentGeneration)
+        try await wait("both actual network contexts ready") { received.read { $0.port != nil } && sent.read { $0.port != nil } }
+        let candidate = NetworkDeviceMessagingDiscovery.Candidate(id: UUID(), networkHint: f.network,
+            endpoint: .hostPort(host: "127.0.0.1", port: try #require(received.read { $0.port })))
+        sender.connect(candidate)
+        try await wait("actual two-owner TLS context") { received.read { !$0.view.incoming.isEmpty } && sent.read { !$0.view.remotes.isEmpty } }
+        let remote = try #require(sent.read { $0.view.remotes.first })
+        #expect(remote.root == f.user.publicIdentity.userID)
+        #expect(remote.spki == f.identity.publicIdentity.publicKeyHash.map { String(format: "%02x", $0) }.joined())
+        receiver.approve(try #require(received.read { $0.view.incoming.first?.id }), registration: receiverRegistration)
+        try await wait("actual receiver-issued grant reached sender owner") { sent.read { $0.view.remotes.first?.grants.isEmpty == false } }
+        let grant = try #require(sent.read { $0.view.remotes.first?.grants.first })
+        sender.bind(remote.id, grant: grant, registration: senderRegistration)
+        try await wait("opaque destination bound locally") { sent.read { !$0.view.destinations.isEmpty } }
+        let destination = try #require(sent.read { $0.view.destinations.first?.id })
+        let message = UUID(), body = "Peer data: exact two-owner text; never a task selector."
+        let request = try LocalDeviceMessageProtocol.Request(operation: .send, registration: senderRegistration,
+            destination: destination, messageID: message, text: body)
+        let accepted = try MacOwnerSocket.request(request, directory: senderDirectory.appendingPathComponent("socket"))
+        #expect(accepted.status == .pending)
+        let receivedStatus = "\(message.uuidString): \(LocalDeviceMessageProtocol.Response.Status.authenticatedReceipt.rawValue)"
+        let queuedStatus = "\(message.uuidString): \(LocalDeviceMessageProtocol.Response.Status.codexQueued.rawValue)"
+        try await wait("live queued receipt reached actual sender owner without query") { sent.read { $0.messageHistory.contains(queuedStatus) } }
+        #expect(sent.read { $0.messageHistory.contains(receivedStatus) })
+        #expect(sender.pendingCountForTesting == 0)
+        #expect(sent.read { $0.queryResults.isEmpty })
+        let args = try Data(contentsOf: f.helper.appendingPathExtension("args")).split(separator: 0).map { String(decoding: $0, as: UTF8.self) }
+        #expect(Array(args.prefix(4)) == ["queue", "--thread", receiverTask.uuidString, "--message"])
+        let jsonLine = try #require(args.last?.split(separator: "\n").last)
+        let attributed = try #require(JSONSerialization.jsonObject(with: Data(jsonLine.utf8)) as? [String: String])
+        #expect(attributed["senderRootID"] == f.sender.publicIdentity.userID)
+        #expect(attributed["messageID"] == message.uuidString)
+        #expect(attributed["peerText"] == body)
+        #expect(try String(contentsOf: f.helper.appendingPathExtension("runs")) == "run\nrun\n")
+        #expect(try String(contentsOf: senderHelper.appendingPathExtension("runs")) == "run\n")
+        #expect(try MacOwnerSocket.request(request, directory: senderDirectory.appendingPathComponent("socket")).status == .codexQueued)
+        sender.closePeerForTesting(remote.id)
+        try await wait("actual old sender transport closed") { sent.read { $0.view.remotes.isEmpty } }
+        sender.connect(candidate)
+        try await wait("explicit fresh connection rebound same approved identity") { sent.read { $0.view.remotes.first?.id != nil && $0.view.remotes.first?.id != remote.id } }
+        #expect(sent.read { $0.view.destinations.first?.id == destination })
+        let query = try MacOwnerSocket.request(.init(operation: .receipt, registration: senderRegistration, messageID: message),
+            directory: senderDirectory.appendingPathComponent("socket"))
+        #expect(query.status == .codexQueued)
+        try await wait("fresh authenticated status query settled") {
+            sender.pendingCountForTesting == 0 && sent.read { $0.queryResults.contains { $0.0 == grant && $0.1 == message } }
+        }
+        #expect(try String(contentsOf: f.helper.appendingPathExtension("runs")) == "run\nrun\n")
+        #expect(try String(contentsOf: senderHelper.appendingPathExtension("runs")) == "run\n")
+        #expect(!sent.read { $0.messageHistory.contains("\(message.uuidString): \(LocalDeviceMessageProtocol.Response.Status.deliveredConfirmed.rawValue)") })
+        let receiverService = try #require(received.read { $0.service })
+        #expect(receiverService.localReceipt(grantID: grant, messageID: message) == .codexQueued)
     }
 }
 #endif

@@ -105,6 +105,7 @@ final class DeviceMessagingOwner: @unchecked Sendable {
         var afterExecutableHash: (() -> Void)?
         var networkReady: ((NWEndpoint.Port) -> Void)?
         var discoveryReplacement: ((UUID, Set<UUID>) -> Void)?
+        var queryResultObserved: ((UUID, UUID) -> Void)?
     }
     private let testing: Testing?
     private var server: MacOwnerSocket.Server?
@@ -568,6 +569,7 @@ final class DeviceMessagingOwner: @unchecked Sendable {
                     }
                 }
             }
+            testing?.queryResultObserved?(grant, message)
         case .rejected(let grant, let message, _):
             if let effect = observations[key(id, grant, message)] { stateLock.withLock { _ = state.finish(effect.ticket, result: .unavailable) } }
         case .closed:
@@ -633,5 +635,10 @@ final class DeviceMessagingOwner: @unchecked Sendable {
         stop()
         lifecycle.sync {}
         worker.sync {}
+    }
+    var pendingCountForTesting: Int { stateLock.withLock { state.pendingCount } }
+    /// Actual native close, not fabricated protocol/session state.
+    func closePeerForTesting(_ id: UUID) {
+        worker.async { [weak self] in self?.outbound[id]?.transport.stop() }
     }
 }
