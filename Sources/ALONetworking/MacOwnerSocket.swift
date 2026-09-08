@@ -41,36 +41,45 @@ public enum MacOwnerSocket {
             owner.setSpecific(key: ownerKey, value: true)
             do {
                 directoryFD = try Self.openDirectory(directory)
-                writerFD = openat(directoryFD, "ingress.lock", O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK, 0o600)
-                guard writerFD >= 0 else { throw Failure.system(errno) }
-                var lockInfo = stat()
-                guard fstat(writerFD, &lockInfo) == 0, lockInfo.st_uid == geteuid(),
-                      lockInfo.st_mode & S_IFMT == S_IFREG, lockInfo.st_mode & 0o777 == 0o600,
-                      lockInfo.st_nlink == 1 else { throw Failure.unsafePath }
+                var existingLock = stat()
+                if fstatat(directoryFD, "ingress.lock", &existingLock, AT_SYMLINK_NOFOLLOW) != 0 {
+                    guard errno == ENOENT else { throw Failure.system(errno) }
+                    let created = openat(directoryFD, "ingress.lock", O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+                    guard created >= 0 else { throw Failure.system(errno) }
+                    Darwin.close(created)
+                }
+                writerFD = try Self.openOwnerEntry(parent: directoryFD, name: "ingress.lock", directory: false)
                 guard flock(writerFD, LOCK_EX | LOCK_NB) == 0 else { throw Failure.occupied }
                 let path = directory.appendingPathComponent(socketName).path
                 var previous = stat()
                 if fstatat(directoryFD, socketName, &previous, AT_SYMLINK_NOFOLLOW) == 0 {
                     guard previous.st_mode & S_IFMT == S_IFSOCK, previous.st_uid == geteuid(),
-                          previous.st_mode & 0o777 == 0o600 else { throw Failure.unsafePath }
+                          previous.st_nlink == 1 else { throw Failure.unsafePath }
                     // A lock-free socket is not automatically stale: never unlink
                     // a live endpoint belonging to a noncooperating local process.
                     let probe = try makeSocket()
                     defer { Darwin.close(probe) }
-                    let connected = try withAddress(path) { Darwin.connect(probe, $0, $1) }
-                    guard connected != 0, errno == ECONNREFUSED else { throw Failure.occupied }
+                    let connected = try withAddress(path) {
+                        let result = Darwin.connect(probe, $0, $1)
+                        return (result, errno)
+                    }
+                    guard connected.0 != 0, connected.1 == ECONNREFUSED else { throw Failure.occupied }
                     var current = stat()
                     guard fstatat(directoryFD, socketName, &current, AT_SYMLINK_NOFOLLOW) == 0,
                           current.st_ino == previous.st_ino, current.st_dev == previous.st_dev else { throw Failure.unsafePath }
                     guard unlinkat(directoryFD, socketName, 0) == 0 else { throw Failure.system(errno) }
                 } else if errno != ENOENT { throw Failure.system(errno) }
                 listener = try makeSocket()
-                guard try withAddress(path, { Darwin.bind(listener, $0, $1) }) == 0 else { throw Failure.system(errno) }
+                let boundResult = try withAddress(path) {
+                    let result = Darwin.bind(listener, $0, $1)
+                    return (result, errno)
+                }
+                guard boundResult.0 == 0 else { throw Failure.system(boundResult.1) }
                 var bound = stat()
                 guard fstatat(directoryFD, socketName, &bound, AT_SYMLINK_NOFOLLOW) == 0,
                       bound.st_mode & S_IFMT == S_IFSOCK, bound.st_uid == geteuid() else { throw Failure.unsafePath }
                 socketInode = bound.st_ino
-                guard fchmodat(directoryFD, socketName, 0o600, 0) == 0,
+                guard fchmodat(directoryFD, socketName, 0o600, AT_SYMLINK_NOFOLLOW) == 0,
                       Darwin.listen(listener, 8) == 0 else { throw Failure.system(errno) }
                 let fd = listener
                 let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: owner)
@@ -143,13 +152,47 @@ public enum MacOwnerSocket {
         private static func openDirectory(_ url: URL) throws -> Int32 {
             guard url.isFileURL, url.path.hasPrefix("/"),
                   url.standardizedFileURL.path == url.resolvingSymlinksInPath().standardizedFileURL.path else { throw Failure.unsafePath }
-            if mkdir(url.path, 0o700) != 0, errno != EEXIST { throw Failure.system(errno) }
-            let fd = open(url.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-            guard fd >= 0 else { throw Failure.unsafePath }
+            let parent = open(url.deletingLastPathComponent().path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            guard parent >= 0 else { throw Failure.unsafePath }
+            defer { Darwin.close(parent) }
             var info = stat()
-            guard fstat(fd, &info) == 0, info.st_uid == geteuid(), info.st_mode & 0o777 == 0o700 else {
-                Darwin.close(fd); throw Failure.unsafePath
+            guard fstat(parent, &info) == 0,
+                  info.st_uid == geteuid() || info.st_uid == 0,
+                  info.st_mode & 0o022 == 0 || (info.st_uid == 0 && info.st_mode & S_ISVTX != 0) else { throw Failure.unsafePath }
+            let name = url.lastPathComponent
+            guard !name.isEmpty, name != ".", name != ".." else { throw Failure.unsafePath }
+            if mkdirat(parent, name, 0o700) != 0, errno != EEXIST { throw Failure.system(errno) }
+            return try openOwnerEntry(parent: parent, name: name, directory: true)
+        }
+
+        /// Repair only the fixed final owned entry, never its ancestors or
+        /// group/world permissions. Parent is already trusted/open; a hostile
+        /// same-UID rename remains outside this local trust boundary. Validation
+        /// and reopen pin the inode, but this is not an atomic chmod-by-inode API.
+        private static func openOwnerEntry(parent: Int32, name: String, directory: Bool) throws -> Int32 {
+            let mode: mode_t = directory ? 0o700 : 0o600
+            let type = directory ? S_IFDIR : S_IFREG
+            var before = stat()
+            guard fstatat(parent, name, &before, AT_SYMLINK_NOFOLLOW) == 0,
+                  before.st_uid == geteuid(), before.st_mode & S_IFMT == type,
+                  before.st_mode & 0o7777 & ~mode == 0,
+                  directory || before.st_nlink == 1 else { throw Failure.unsafePath }
+            if before.st_mode & 0o7777 != mode {
+                guard fchmodat(parent, name, mode, AT_SYMLINK_NOFOLLOW) == 0 else { throw Failure.system(errno) }
             }
+            var after = stat()
+            guard fstatat(parent, name, &after, AT_SYMLINK_NOFOLLOW) == 0,
+                  after.st_ino == before.st_ino, after.st_dev == before.st_dev,
+                  after.st_uid == geteuid(), after.st_mode & S_IFMT == type,
+                  after.st_mode & 0o7777 == mode,
+                  directory || after.st_nlink == 1 else { throw Failure.unsafePath }
+            let fd = openat(parent, name, (directory ? O_RDONLY | O_DIRECTORY : O_RDWR | O_NONBLOCK) | O_NOFOLLOW | O_CLOEXEC)
+            guard fd >= 0 else { throw Failure.system(errno) }
+            var opened = stat()
+            guard fstat(fd, &opened) == 0, opened.st_ino == before.st_ino,
+                  opened.st_dev == before.st_dev, opened.st_uid == geteuid(),
+                  opened.st_mode & S_IFMT == type, opened.st_mode & 0o7777 == mode,
+                  directory || opened.st_nlink == 1 else { Darwin.close(fd); throw Failure.unsafePath }
             return fd
         }
 
@@ -182,8 +225,12 @@ public enum MacOwnerSocket {
               info.st_uid == geteuid(), info.st_mode & 0o777 == 0o600 else { throw Failure.unsafePath }
         let fd = try makeSocket(); defer { Darwin.close(fd) }
         let deadline = DispatchTime.now().uptimeNanoseconds + timeoutNanos
-        if try withAddress(path, { Darwin.connect(fd, $0, $1) }) != 0 {
-            guard errno == EINPROGRESS else { throw Failure.system(errno) }
+        let connected = try withAddress(path) {
+            let result = Darwin.connect(fd, $0, $1)
+            return (result, errno)
+        }
+        if connected.0 != 0 {
+            guard connected.1 == EINPROGRESS else { throw Failure.system(connected.1) }
             try wait(fd, events: Int16(POLLOUT), deadline: deadline)
             var error: Int32 = 0, size = socklen_t(MemoryLayout<Int32>.size)
             guard getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &size) == 0, error == 0 else { throw Failure.closed }
@@ -208,6 +255,9 @@ public enum MacOwnerSocket {
         catch { Darwin.close(fd); throw error }
     }
     private static func configure(_ fd: Int32) throws {
+        // Darwin accept/socket followed by fcntl is not atomic with another
+        // thread's fork/exec. These flags bound normal child inheritance, not
+        // that residual creation window; callers must not claim atomic CLOEXEC.
         let flags = fcntl(fd, F_GETFL)
         var noSignal: Int32 = 1
         guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0,
@@ -246,10 +296,14 @@ public enum MacOwnerSocket {
         while offset < count {
             try wait(fd, events: Int16(POLLIN), deadline: deadline)
             let remaining = count - offset
-            let n = data.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress!.advanced(by: offset), remaining) }
+            let result = data.withUnsafeMutableBytes {
+                let n = Darwin.read(fd, $0.baseAddress!.advanced(by: offset), remaining)
+                return (n, errno)
+            }
+            let n = result.0
             if n > 0 { offset += n }
             else if n == 0 { throw Failure.closed }
-            else if errno != EAGAIN && errno != EINTR { throw Failure.system(errno) }
+            else if result.1 != EAGAIN && result.1 != EINTR { throw Failure.system(result.1) }
         }
         return data
     }
@@ -261,10 +315,14 @@ public enum MacOwnerSocket {
         var offset = 0
         while offset < data.count {
             try wait(fd, events: Int16(POLLOUT), deadline: deadline)
-            let n = data.withUnsafeBytes { Darwin.write(fd, $0.baseAddress!.advanced(by: offset), data.count - offset) }
+            let result = data.withUnsafeBytes {
+                let n = Darwin.write(fd, $0.baseAddress!.advanced(by: offset), data.count - offset)
+                return (n, errno)
+            }
+            let n = result.0
             if n > 0 { offset += n }
             else if n == 0 { throw Failure.closed }
-            else if errno != EAGAIN && errno != EINTR { throw Failure.system(errno) }
+            else if result.1 != EAGAIN && result.1 != EINTR { throw Failure.system(result.1) }
         }
     }
 }

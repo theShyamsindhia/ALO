@@ -32,7 +32,7 @@ public enum LocalDeviceMessageProtocol {
             switch operation {
             case .register:
                 guard taskID != nil, let title, !title.isEmpty, title.utf8.count <= 160,
-                      !title.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+                      !title.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) || CharacterSet.newlines.contains($0) }),
                       registration == nil, destination == nil, messageID == nil, text == nil else {
                     throw Failure.invalidRequest
                 }
@@ -49,6 +49,7 @@ public enum LocalDeviceMessageProtocol {
                     throw Failure.invalidRequest
                 }
             }
+            guard try JSONEncoder().encode(self).count <= maximumFrameBytes else { throw Failure.invalidRequest }
         }
     }
 
@@ -80,21 +81,28 @@ public enum LocalDeviceMessageProtocol {
 
     public static func decodeRequest(_ payload: Data) throws -> Request {
         try validateKeys(payload, allowed: ["version", "operation", "taskID", "title", "registration", "destination", "messageID", "text"])
-        let request = try JSONDecoder().decode(Request.self, from: payload)
+        let request: Request
+        do { request = try JSONDecoder().decode(Request.self, from: payload) }
+        catch { throw Failure.invalidFrame }
         try request.validate()
         return request
     }
 
     public static func decodeResponse(_ payload: Data) throws -> Response {
         try validateKeys(payload, allowed: ["version", "status", "registration", "messageID"])
-        let result = try JSONDecoder().decode(Response.self, from: payload)
+        let result: Response
+        do { result = try JSONDecoder().decode(Response.self, from: payload) }
+        catch { throw Failure.invalidFrame }
         guard result.version == 1 else { throw Failure.invalidFrame }
         return result
     }
 
     private static func validateKeys(_ data: Data, allowed: Set<String>) throws {
-        guard !data.isEmpty, data.count <= maximumFrameBytes,
-              let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+        guard !data.isEmpty, data.count <= maximumFrameBytes else { throw Failure.invalidFrame }
+        let decoded: Any
+        do { decoded = try JSONSerialization.jsonObject(with: data) }
+        catch { throw Failure.invalidFrame }
+        guard let object = decoded as? [String: Any],
               Set(object.keys).isSubset(of: allowed) else { throw Failure.invalidFrame }
     }
 

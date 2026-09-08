@@ -31,7 +31,7 @@ public struct DeviceMessageRegistration: Sendable {
 
     public mutating func register(taskID: UUID, title: String) throws -> UUID {
         guard !title.isEmpty, title.utf8.count <= 160,
-              !title.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+              !title.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) || CharacterSet.newlines.contains($0) }) else {
             throw Failure.invalidInput
         }
         if let existing = entries.values.first(where: { $0.taskID == taskID }) { return existing.id }

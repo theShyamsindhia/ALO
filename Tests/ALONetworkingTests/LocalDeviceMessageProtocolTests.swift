@@ -42,4 +42,30 @@ struct LocalDeviceMessageProtocolTests {
         #expect(LocalDeviceMessageProtocol.Response.Status.codexQueued != .deliveredConfirmed)
         #expect(LocalDeviceMessageProtocol.Response.Status.uncertain != .definitelyNotQueued)
     }
+    @Test(arguments: ["\"", "\u{0001}"])
+    func encodedFrameOverflowIsRejectedAtConstruction(character: String) throws {
+        let text = String(repeating: character, count: 13 * 1024)
+        try #require(text.utf8.count <= LocalDeviceMessageProtocol.maximumTextBytes)
+        #expect(throws: LocalDeviceMessageProtocol.Failure.invalidRequest) {
+            try LocalDeviceMessageProtocol.Request(operation: .send, registration: UUID(),
+                destination: UUID(), messageID: UUID(), text: text)
+        }
+        #expect(LocalDeviceMessageProtocol.maximumFrameBytes == 24 * 1024)
+    }
+    @Test func malformedJSONHasStableProtocolError() {
+        for payload in [Data("{".utf8), Data("{}".utf8), Data("{\"version\":1,\"operation\":\"unknown\"}".utf8)] {
+            #expect(throws: LocalDeviceMessageProtocol.Failure.invalidFrame) {
+                try LocalDeviceMessageProtocol.decodeRequest(payload)
+            }
+            #expect(throws: LocalDeviceMessageProtocol.Failure.invalidFrame) {
+                try LocalDeviceMessageProtocol.decodeResponse(payload)
+            }
+        }
+    }
+    @Test(arguments: ["\u{2028}", "\u{2029}"])
+    func registrationTitleCannotInsertDisplayLines(separator: String) {
+        #expect(throws: LocalDeviceMessageProtocol.Failure.invalidRequest) {
+            try LocalDeviceMessageProtocol.Request(operation: .register, taskID: UUID(), title: "Task\(separator)Approval")
+        }
+    }
 }

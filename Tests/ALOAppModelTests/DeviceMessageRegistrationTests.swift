@@ -104,4 +104,11 @@ struct DeviceMessageRegistrationTests {
         #expect(registry.registrations.count == 32)
         #expect(registry.registrations.filter { $0.state == .pendingApproval }.count == 1)
     }
+    @Test(arguments: ["\u{2028}", "\u{2029}"])
+    func localTitleCannotInsertApprovalLines(separator: String) {
+        var registry = DeviceMessageRegistration()
+        #expect(throws: DeviceMessageRegistration.Failure.invalidInput) {
+            try registry.register(taskID: UUID(), title: "Task\(separator)Approval")
+        }
+    }
 }
