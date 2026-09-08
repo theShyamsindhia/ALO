@@ -66,7 +66,9 @@ public final class CodexDeviceMessageService: @unchecked Sendable {
     public func localGrants() -> [CodexDeviceMessagingPolicy.LocalGrant] {
         lock.lock(); defer { lock.unlock() }; return state.localGrants
     }
-    /// Receiver-local immutable evidence, including after disable/revocation.
+    /// Receiver-local current stored receipt, still readable after disable/revocation.
+    /// Revocation changes received to cancelled and dispatching to uncertain;
+    /// the returned value is a snapshot, not a stable execution permission.
     /// This is not peer authorization and cannot start or mutate a dispatch.
     public func localReceipt(grantID: UUID, messageID: UUID) -> CodexDeviceMessagingPolicy.Receipt? {
         lock.lock(); defer { lock.unlock() }

@@ -106,6 +106,9 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
     public func stop() { queue.async { self.close() } }
     /// Explicit authenticated status lookup, including after reconnect. It does
     /// not resend text and never starts or retries native execution.
+    /// Before an outstanding text send's first receipt, this is a no-op: the
+    /// existing live receipt remains the response path, with no queryResult.
+    /// Duplicate in-flight queries coalesce into the existing query response.
     public func queryReceipt(grantID: UUID, messageID: UUID) {
         queue.async {
             guard case .sender = self.mode, self.admitted, !self.closed else {

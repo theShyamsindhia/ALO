@@ -26,23 +26,30 @@ At most 32 operations, including pending owner-queue work, prepared handles, and
 started handles, hold admission permits; at most four workers run concurrently.
 The per-record admission key prevents duplicate queued workers. `dispatchStored`
 returns a typed scheduled/alreadyScheduled/capacity/stopped/invalidConnection
-outcome; scheduled is queue admission, not proof of native execution. Capacity
-on an automatically accepted message and loss of its connection before admission
-produce a connection-independent local `reviewNeeded` signal with stored receipt
-evidence. Failed admission does not invent a receipt or retry: a still-received
+outcome; scheduled is queue admission, not proof of native execution. A local
+connection-independent `reviewNeeded` signal carries a stored-receipt snapshot:
+`capacity` means capacity refusal of an automatically accepted message;
+`disconnected` means loss of the peer session after admission but before the
+native attempt; `unavailable` means a failed attempt whose session has since
+gone away. The snapshot may change before the event is handled. Failed admission
+does not invent a receipt or retry: a still-received
 record requires an explicit local attempt or retirement. A generic `dispatchFailed`
 event is not evidence of non-execution: a post-start journal error can be
 uncertain. Native-start failure and completion are recorded only by the service.
-The ID-only `localReceipt` method reads immutable stored evidence under the service
-lock even after local disable/revocation. It does not expose mutable policy or
+The ID-only `localReceipt` method reads the current stored receipt under the service
+lock, still readable after local disable/revocation. Revocation itself changes
+`received` to `cancelled` and `dispatching` to `uncertain`. It does not expose mutable policy or
 authorize peer work. A missing record returns nil rather than claiming cancelled.
 
 Enable and terminal stop share a lifecycle lock; a previously checked enable
 cannot resume after stop and reactivate the service. Stop cancels pending workers
 and disables service authority. Started helpers are bounded by the existing
 adapter timeout. Waiting remains outside service/policy locks. A disconnected
-connection gets no subsequent facade completion/failure event. Stored outcomes
-remain available to a new authorized session without replaying text.
+connection gets no subsequent connection-scoped facade completion/failure event.
+The disconnected/unavailable paths instead emit the local review signals above.
+Successful completion after disconnect emits no local completion event: the local
+owner can read its outcome through `localReceipt`. Stored outcomes also remain
+available to a new authorized session without replaying text.
 
 ## Receipt protocol
 
@@ -59,7 +66,9 @@ then only that bounded solicited response remains outstanding. **Queued is not d
 32 observations, retaining only a digest and receipt stage, not another payload.
 
 `queryReceipt(grantID:messageID:)` is an explicit status-only request on a settled
-intermediate observation or after reconnect. Duplicate in-flight queries coalesce.
+intermediate observation or after reconnect. Before an outstanding text send's
+first receipt it is a no-op, with no `queryResult`; the existing live receipt is
+still the response path. Duplicate in-flight queries coalesce into their existing response.
 It never resends text, dispatches work, or automatically retries. Its authoritative
 lookup is current-membership/grant fenced and shares
 the stable per-grant replay budget across reconnects. Guessing unrelated grant
@@ -72,8 +81,9 @@ receipt arriving while a query is outstanding cannot cause the later solicited
 response to look unsolicited. Query rate-limit/unavailable events clear only
 query state and preserve any original message evidence; they are not text
 rejection events. A current own-grant lookup with no record returns explicit
-`statusUnknown`, never cancelled or definitely-not-queued. An expired grant ends
-only that key's observation; foreign grants, expired sessions and current-policy
+`statusUnknown`, never cancelled or definitely-not-queued. Grant expiry on a status
+lookup/publication ends only that key's status observation; sending text on an
+expired grant remains connection-terminal. Foreign grants, expired sessions and current-policy
 authorization failures remain connection-terminal. Existing accepted history is
 not overwritten by an incompatible unknown response.
 A raw 33rd observation is a protocol violation and closes the connection once,
@@ -128,6 +138,11 @@ fence and raw-cap controls. No assertion or deadline was relaxed. This local
 checkpoint does not establish full-suite, app integration, or two-Mac delivery.
 The five-second native helper default is unchanged: prior local and full CI
 passed, and no reproduced timeout failure justifies widening that gate.
+
+The narrow documentation/snapshot-contract follow-up additionally pins the exact
+`.disconnected` review reason. Its focused `MacDeviceMessageReceiverTests` run
+passed **two tests in one suite** (1.066 seconds runtime). This is a focused
+follow-up, not a replacement for full CI on the final commit.
 
 Focused command (single native compiler lease):
 

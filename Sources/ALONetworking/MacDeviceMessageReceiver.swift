@@ -24,7 +24,7 @@ public final class MacDeviceMessageReceiver: @unchecked Sendable {
     public enum DispatchAdmission: Equatable, Sendable {
         case scheduled, alreadyScheduled, capacity, stopped, invalidConnection
     }
-    public enum ReviewReason: Sendable { case capacity, disconnected, unavailable }
+    public enum ReviewReason: Equatable, Sendable { case capacity, disconnected, unavailable }
     public enum Event {
         case authenticated(Connection, NetworkDeviceAuthorization.Context)
         case received(Connection, grantID: UUID, messageID: UUID)
@@ -33,7 +33,8 @@ public final class MacDeviceMessageReceiver: @unchecked Sendable {
         /// outcome is uncertain. Query authoritative state; never auto-retry.
         case dispatchFailed(Connection, grantID: UUID, messageID: UUID)
         /// Local review information is independent of a closed peer connection.
-        /// Its receipt is immutable evidence, not permission to retry.
+        /// Its receipt is a stored-state snapshot that may later change, not
+        /// permission to retry. Re-read localReceipt for the current state.
         case reviewNeeded(grantID: UUID, messageID: UUID, receipt: CodexDeviceMessagingPolicy.Receipt, ReviewReason)
         case closed(Connection)
     }

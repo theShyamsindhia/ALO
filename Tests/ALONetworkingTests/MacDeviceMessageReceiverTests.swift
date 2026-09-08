@@ -18,7 +18,7 @@ struct MacDeviceMessageReceiverTests {
         var closed = Set<Int>()
         var ready = Set<Int>()
         var heldDispatch: (() -> Void)?
-        var reviews: [(UUID, UUID, CodexDeviceMessagingPolicy.Receipt)] = []
+        var reviews: [(UUID, UUID, CodexDeviceMessagingPolicy.Receipt, MacDeviceMessageReceiver.ReviewReason)] = []
         func mutate(_ body: (State) -> Void) { lock.lock(); defer { lock.unlock() }; body(self) }
         func read<T>(_ body: (State) -> T) -> T { lock.lock(); defer { lock.unlock() }; return body(self) }
     }
@@ -97,7 +97,7 @@ struct MacDeviceMessageReceiverTests {
                     case .received(let connection, _, _): $0.events[connection, default: []].append("received")
                     case .completion(let connection, _, _, _): $0.events[connection, default: []].append("completion")
                     case .dispatchFailed(let connection, _, _): $0.events[connection, default: []].append("failed")
-                    case .reviewNeeded(let grant, let message, let receipt, _): $0.reviews.append((grant, message, receipt))
+                    case .reviewNeeded(let grant, let message, let receipt, let reason): $0.reviews.append((grant, message, receipt, reason))
                     case .closed(let connection): $0.events[connection, default: []].append("closed")
                     }
                 }
@@ -142,6 +142,7 @@ struct MacDeviceMessageReceiverTests {
             try await wait { state.read { !$0.reviews.isEmpty } }
             let review = try #require(state.read { $0.reviews.first })
             #expect(review.0 == grant && review.1 == message.messageID && review.2 == .received)
+            #expect(review.3 == .disconnected)
             #expect(facade.localReceipt(grantID: grant, messageID: message.messageID) == .received)
             #expect(state.read { $0.events[original] == ["authenticated", "received", "closed"] })
             #expect(!FileManager.default.fileExists(atPath: marker.path))
