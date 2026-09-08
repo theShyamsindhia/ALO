@@ -85,9 +85,10 @@ public struct CodexDeviceMessagingPolicy: Sendable {
         let byteCount: Int
         var text: String?
         var receipt: Receipt
+        var nativeAttempt: UUID?
         // Live dispatch needs text; restart never restores/replays it.
         // Keep it in memory but exclude plaintext from every durable encoding.
-        enum CodingKeys: String, CodingKey { case digest, byteCount, receipt }
+        enum CodingKeys: String, CodingKey { case digest, byteCount, receipt, nativeAttempt }
     }
     /// Local-only durable data contains private task mappings. Never send this
     /// to a peer. No decoder accepts a replacement checkpoint from the network.
@@ -209,7 +210,7 @@ public struct CodexDeviceMessagingPolicy: Sendable {
         try advance(now)
         var grant = try authorized(envelope.grantID, context: context, now: now)
         let size = envelope.text.utf8.count
-        guard size > 0, size <= Self.maximumTextBytes,
+        guard size > 0, size <= Self.maximumTextBytes, !envelope.text.utf8.contains(0),
               try JSONEncoder().encode(envelope).count <= Self.maximumFrameBytes else {
             throw CodexDeviceMessagingError.invalidEnvelope
         }
@@ -257,12 +258,72 @@ public struct CodexDeviceMessagingPolicy: Sendable {
 
     public mutating func completeDispatch(grantID: UUID, messageID: UUID, result: DispatchResult) throws {
         let key = Key(grantID: grantID, messageID: messageID)
-        guard records[key]?.receipt == .dispatching else { throw CodexDeviceMessagingError.invalidTransition }
+        guard records[key]?.receipt == .dispatching, records[key]?.nativeAttempt == nil else {
+            throw CodexDeviceMessagingError.invalidTransition
+        }
         switch result {
         case .queued: records[key]?.receipt = .codexQueued
         case .definitelyNotQueued: records[key]?.receipt = .cancelled
         case .uncertain: records[key]?.receipt = .uncertain
         }
+    }
+
+    /// Minted only from an authenticated received record. Native preparation
+    /// uses these stored bytes, never a caller-supplied replacement envelope.
+    struct NativeSnapshot {
+        let grantID: UUID, messageID: UUID, localTaskID: UUID
+        let digest: Data
+        let text: String
+        let sender: PublicUserIdentity
+        fileprivate init(grantID: UUID, messageID: UUID, grant: Grant, record: Record, text: String) {
+            self.grantID = grantID; self.messageID = messageID
+            localTaskID = grant.taskID; digest = record.digest
+            self.text = text; sender = grant.scope.sender
+        }
+    }
+    mutating func nativeSnapshot(grantID: UUID, messageID: UUID,
+                                context: NetworkDeviceAuthorization.Context, now: UInt64) throws -> NativeSnapshot {
+        try advance(now)
+        let grant = try authorized(grantID, context: context, now: now)
+        guard let record = records[Key(grantID: grantID, messageID: messageID)],
+              record.receipt == .received, let text = record.text else {
+            throw CodexDeviceMessagingError.invalidTransition
+        }
+        return NativeSnapshot(grantID: grantID, messageID: messageID, grant: grant, record: record, text: text)
+    }
+    mutating func reserveNative(_ snapshot: NativeSnapshot, attempt: UUID,
+                                context: NetworkDeviceAuthorization.Context, now: UInt64) throws {
+        try validateNative(snapshot, attempt: nil, context: context, now: now)
+        let key = Key(grantID: snapshot.grantID, messageID: snapshot.messageID)
+        records[key]?.receipt = .dispatching
+        records[key]?.nativeAttempt = attempt
+        records[key]?.text = nil
+    }
+    /// Reuse the SAME currently-held authorization context after persistence.
+    /// No policy-lock acquisition, hashing, or caller callbacks occur here.
+    mutating func validateNative(_ snapshot: NativeSnapshot, attempt: UUID?,
+                                 context: NetworkDeviceAuthorization.Context, now: UInt64) throws {
+        try advance(now)
+        let grant = try authorized(snapshot.grantID, context: context, now: now)
+        guard let record = records[Key(grantID: snapshot.grantID, messageID: snapshot.messageID)],
+              record.digest == snapshot.digest, grant.taskID == snapshot.localTaskID,
+              record.receipt == (attempt == nil ? .received : .dispatching),
+              attempt == nil || record.nativeAttempt == attempt else {
+            throw CodexDeviceMessagingError.invalidTransition
+        }
+    }
+    /// A late completion cannot overwrite revoked uncertainty or recreate a
+    /// retired record. The persisted attempt also prevents ticket reuse.
+    mutating func finishNative(_ snapshot: NativeSnapshot, attempt: UUID, result: DispatchResult) -> Bool {
+        let key = Key(grantID: snapshot.grantID, messageID: snapshot.messageID)
+        guard let record = records[key], record.receipt == .dispatching,
+              record.nativeAttempt == attempt, record.digest == snapshot.digest else { return false }
+        switch result {
+        case .queued: records[key]?.receipt = .codexQueued
+        case .definitelyNotQueued: records[key]?.receipt = .cancelled
+        case .uncertain: records[key]?.receipt = .uncertain
+        }
+        return true
     }
 
     /// Only an adapter's independently observed receipt in the selected task

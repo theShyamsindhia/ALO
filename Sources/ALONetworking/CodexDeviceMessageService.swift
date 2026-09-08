@@ -17,6 +17,10 @@ public final class CodexDeviceMessageService: @unchecked Sendable {
     private var observation: UUID?
     private var faulted = false
     let localTLSHashForBinding: Data
+    #if os(macOS)
+    private let nativeIssuer = UUID()
+    private let nativeWorkers = DeviceMessageNativeWorkerPool()
+    #endif
 
     public convenience init(policy: NetworkPolicyCenter, localDevice: DeviceIdentityBinding,
                             actualLocalTLSHash: Data, journal: CodexDeviceMessageJournal) throws {
@@ -205,3 +209,153 @@ public final class CodexDeviceMessageService: @unchecked Sendable {
         callbacks.forEach { $0() } // These only enqueue transport cancellation.
     }
 }
+
+#if os(macOS)
+/// Separate permit lock avoids service-lock reentry during object abandonment.
+/// Counts all preparation and started work, including filesystem preflight.
+fileprivate final class DeviceMessageNativeWorkerPool {
+    private let lock = NSLock()
+    private var active: Set<UUID> = []
+    func acquire() throws -> DeviceMessageNativePermit {
+        lock.lock(); defer { lock.unlock() }
+        guard active.count < 32 else { throw CodexDeviceMessagingError.capacity }
+        let id = UUID(); active.insert(id)
+        return DeviceMessageNativePermit(pool: self, id: id)
+    }
+    func release(_ id: UUID) { lock.lock(); defer { lock.unlock() }; active.remove(id) }
+    var count: Int { lock.lock(); defer { lock.unlock() }; return active.count }
+}
+fileprivate final class DeviceMessageNativePermit {
+    private let pool: DeviceMessageNativeWorkerPool
+    private let id: UUID
+    init(pool: DeviceMessageNativeWorkerPool, id: UUID) { self.pool = pool; self.id = id }
+    func release() { pool.release(id) }
+    deinit { release() }
+}
+
+extension CodexDeviceMessageService {
+    fileprivate struct NativeCandidate {
+        let issuer: UUID
+        let connection: UUID
+        let context: NetworkDeviceAuthorization.Context
+        let snapshot: CodexDeviceMessagingPolicy.NativeSnapshot
+    }
+    fileprivate struct NativePayload {
+        let candidate: NativeCandidate
+        let prepared: MacCodexQueueAdapter.Prepared
+        let permit: DeviceMessageNativePermit
+    }
+    /// Opaque binding: callers cannot substitute a candidate or invocation.
+    final class NativePreparation: @unchecked Sendable {
+        fileprivate let issuer: UUID
+        private let lock = NSLock()
+        private var payload: NativePayload?
+        fileprivate init(_ payload: NativePayload) {
+            issuer = payload.candidate.issuer; self.payload = payload
+        }
+        fileprivate func consume() throws -> NativePayload {
+            lock.lock(); defer { lock.unlock() }
+            guard let payload else { throw CodexDeviceMessagingError.invalidTransition }
+            self.payload = nil; return payload
+        }
+        func abandon() { lock.lock(); defer { lock.unlock() }; payload = nil }
+    }
+    final class StartedDispatch: @unchecked Sendable {
+        fileprivate let candidate: NativeCandidate
+        fileprivate let attempt: UUID
+        fileprivate let started: MacCodexQueueAdapter.Started
+        fileprivate let permit: DeviceMessageNativePermit
+        fileprivate init(candidate: NativeCandidate, attempt: UUID,
+                         started: MacCodexQueueAdapter.Started, permit: DeviceMessageNativePermit) {
+            self.candidate = candidate; self.attempt = attempt
+            self.started = started; self.permit = permit
+        }
+    }
+    enum NativeCompletion { case recorded(MacCodexQueueAdapter.Result), superseded }
+
+    /// This internal local API uses IDs only. Snapshot content and destination
+    /// come solely from the immutable authenticated received record.
+    func prepareNativeDispatch(grantID: UUID, messageID: UUID, connection: UUID,
+                               runner: MacCodexQueueAdapter.Runner) throws -> NativePreparation {
+        let permit = try nativeWorkers.acquire()
+        let candidate = try current(connection) { context, now in
+            let snapshot = try commit { try $0.nativeSnapshot(grantID: grantID, messageID: messageID, context: context, now: now) }
+            return NativeCandidate(issuer: nativeIssuer, connection: connection, context: context, snapshot: snapshot)
+        }
+        // Hashing, attribution encoding, filesystem access and pipe setup are
+        // outside both service serialization and the stable membership fence.
+        let snapshot = candidate.snapshot
+        let invocation = try MacCodexQueueAdapter.Invocation(localTaskID: snapshot.localTaskID,
+            messageID: snapshot.messageID, sender: snapshot.sender, text: snapshot.text)
+        let prepared = try runner.prepare(invocation)
+        return NativePreparation(NativePayload(candidate: candidate, prepared: prepared, permit: permit))
+    }
+
+    func startPrepared(_ native: NativePreparation) throws -> StartedDispatch {
+        guard native.issuer == nativeIssuer else { throw CodexDeviceMessagingError.unauthorized }
+        let payload = try native.consume()
+        let candidate = payload.candidate
+        return try current(candidate.connection) { context, now in
+            let attempt = UUID()
+            try commit { try $0.reserveNative(candidate.snapshot, attempt: attempt, context: context, now: now) }
+            do {
+                // The policy lock remains held across durable intent and this
+                // fresh clock read. Never recursively reacquire current().
+                try commit { try $0.validateNative(candidate.snapshot, attempt: attempt, context: context, now: nowNanos()) }
+            } catch {
+                if !faulted {
+                    _ = try commit { $0.finishNative(candidate.snapshot, attempt: attempt, result: .definitelyNotQueued) }
+                }
+                throw error
+            }
+            let started: MacCodexQueueAdapter.Started
+            do { started = try payload.prepared.start() }
+            catch {
+                _ = try commit { $0.finishNative(candidate.snapshot, attempt: attempt, result: .definitelyNotQueued) }
+                throw error
+            }
+            return StartedDispatch(candidate: candidate, attempt: attempt, started: started, permit: payload.permit)
+        }
+    }
+
+    /// Wait immediately after start, OUTSIDE service/policy locks. Completion is
+    /// derived from the bound native handle, never a caller-asserted outcome.
+    func finishStarted(_ native: StartedDispatch) throws -> NativeCompletion {
+        try finishStartedImpl(native, afterRunningCheck: nil)
+    }
+    /// Test observation only. Called outside service/policy locks; observers
+    /// must not reenter the adapter's wait or mutate the owned child.
+    func finishStartedForTesting(_ native: StartedDispatch,
+                                 afterRunningCheck: @escaping (Process) -> Void) throws -> NativeCompletion {
+        try finishStartedImpl(native, afterRunningCheck: afterRunningCheck)
+    }
+    private func finishStartedImpl(_ native: StartedDispatch,
+                                   afterRunningCheck: ((Process) -> Void)?) throws -> NativeCompletion {
+        guard native.candidate.issuer == nativeIssuer else { throw CodexDeviceMessagingError.unauthorized }
+        let result = native.started.waitForOutcome(afterRunningCheckForTesting: afterRunningCheck)
+        defer { native.permit.release() }
+        lock.lock(); defer { lock.unlock() }
+        guard !faulted else { throw CodexDeviceMessagingError.disabled }
+        let outcome: CodexDeviceMessagingPolicy.DispatchResult
+        switch result.outcome {
+        case .codexQueued: outcome = .queued
+        case .definitelyNotQueued: outcome = .definitelyNotQueued
+        case .uncertain: outcome = .uncertain
+        }
+        return try policy.withStablePolicy {
+            let manifest = try policy.snapshot()
+            let context = native.candidate.context
+            guard manifest.id == context.networkID, manifest.generation == context.generation,
+                  manifest.revision == context.policyRevision else {
+                // Publication may precede observer delivery. Do not call this
+                // late completion queued merely because the observer is held.
+                try commit { $0.revoke(grantID: native.candidate.snapshot.grantID) }
+                return .superseded
+            }
+            let recorded = try commit { $0.finishNative(native.candidate.snapshot, attempt: native.attempt, result: outcome) }
+            return recorded ? .recorded(result) : .superseded
+        }
+    }
+    var nativeWorkerCountForTesting: Int { nativeWorkers.count }
+}
+#endif
