@@ -63,6 +63,7 @@ final class HostServer {
         let pending: Int
         let fanoutIdle: Bool
         let decision: Decision
+        var completionRound: Int? = nil
     }
     typealias OutboundSend = (
         _ connection: NWConnection,
@@ -1137,9 +1138,12 @@ final class HostServer {
         }
     }
 
-    private func drainAudio(for client: Client, over connection: NWConnection, maxInFlight: Int) {
+    @discardableResult
+    private func drainAudio(for client: Client, over connection: NWConnection, maxInFlight: Int,
+                            admissionQuantum: Int = Int.max, completionRound: Int? = nil) -> Int {
         guard client.audio === connection,
-              clients[ObjectIdentifier(client.control)] === client else { return }
+              clients[ObjectIdentifier(client.control)] === client else { return 0 }
+        var admittedCount = 0
         expirePendingAudio(for: client, now: audioSendNowNanos())
         // Only backlog growth triggers latest-only mode, not delayed callback
         // dispatch on a fast link. Congestion clears only with an empty pending
@@ -1147,7 +1151,8 @@ final class HostServer {
         // slot at full capacity is not recovery, but a steady stream need not
         // become completely idle. Queue wait and the shared playout deadline still
         // expire old audio even if capture has stopped.
-        while client.audioSendsInFlight < max(1, maxInFlight), !client.pendingAudio.isEmpty {
+        while admittedCount < admissionQuantum,
+              client.audioSendsInFlight < max(1, maxInFlight), !client.pendingAudio.isEmpty {
             let packet = client.pendingAudio.removeFirst()
             let submittedAt = audioSendNowNanos()
             let captureAge = submittedAt >= packet.captureTimeNanos ? submittedAt - packet.captureTimeNanos : 0
@@ -1200,7 +1205,8 @@ final class HostServer {
                     admissionBudget: admissionBudget, estimatedDuration: estimatedLocalCompletion,
                     recentInterval: recentCompletionInterval, unfinishedInterval: unfinishedCompletionInterval,
                     lastCompletion: client.lastAudioCompletionNanos, inFlight: client.audioSendsInFlight,
-                    pending: client.pendingAudio.count, fanoutIdle: fanoutIsIdle, decision: decision))
+                    pending: client.pendingAudio.count, fanoutIdle: fanoutIsIdle, decision: decision,
+                    completionRound: completionRound))
             }
             // Queue wait alone ignores capture acquisition age and work already
             // occupying this path. Preserve fresh FIFO packets, but do not admit
@@ -1239,6 +1245,7 @@ final class HostServer {
             observeAdmission(.admitted)
             client.audioSendsInFlight += 1
             client.audioSent &+= 1
+            admittedCount += 1
             send(packet.data, over: connection, isComplete: true) { [weak self, weak client] error in
                 guard let self, let client else { return }
                 // Sample at callback entry, before the additional owning-queue
@@ -1283,24 +1290,34 @@ final class HostServer {
         if client.audioSendsInFlight <= max(1, maxInFlight) / 2, client.pendingAudio.isEmpty {
             client.audioBacklogCongested = false
         }
+        return admittedCount
     }
 
     private func drainAudioAfterCompletion(of completedClient: Client, maxInFlight: Int) {
-        // An idle listener can be waiting on shared-link capacity even though
-        // it has no completion of its own left to wake it. Give those listeners
-        // another bounded admission attempt alongside the completing listener,
-        // favoring the least-served member of the current fanout cohort.
-        let ready = clients.values.filter {
-            $0.audio != nil && ($0 === completedClient
-                || ($0.audioSendsInFlight == 0 && !$0.pendingAudio.isEmpty))
-        }.sorted {
-            let left = $0.audioSent - $0.audioFanoutEpochSent
-            let right = $1.audioSent - $1.audioFanoutEpochSent
-            return left == right ? ($0.id ?? "") < ($1.id ?? "") : left < right
-        }
-        for client in ready {
-            guard let connection = client.audio else { continue }
-            drainAudio(for: client, over: connection, maxInFlight: maxInFlight)
+        // Recent service evidence can expire while a listener still has a send
+        // outstanding. Reconsider every pending listener with socket credit,
+        // not only idle listeners, through the unchanged admission gate. A
+        // one-admission quantum prevents one stale sort from filling a peer
+        // repeatedly before the next eligible peer is considered. Re-rank each
+        // round; this is per-round fairness, not strict per-send re-sorting.
+        // Native completions hop onto this serial queue, so no socket credits
+        // can be returned during these rounds. maxInFlight bounds the rounds.
+        for round in 0..<max(1, maxInFlight) {
+            let ready = clients.values.filter {
+                $0.audio != nil && ((round == 0 && $0 === completedClient)
+                    || ($0.audioSendsInFlight < max(1, maxInFlight) && !$0.pendingAudio.isEmpty))
+            }.sorted {
+                let left = $0.audioSent - $0.audioFanoutEpochSent
+                let right = $1.audioSent - $1.audioFanoutEpochSent
+                return left == right ? ($0.id ?? "") < ($1.id ?? "") : left < right
+            }
+            var admitted = 0
+            for client in ready {
+                guard let connection = client.audio else { continue }
+                admitted += drainAudio(for: client, over: connection, maxInFlight: maxInFlight,
+                    admissionQuantum: 1, completionRound: round)
+            }
+            if admitted == 0 { break }
         }
     }
 

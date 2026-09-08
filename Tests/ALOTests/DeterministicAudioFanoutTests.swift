@@ -9,6 +9,81 @@ import ALOCore
 /// its queue policy, and the TCP join/report/resync path are production code.
 @Suite("Deterministic real-host audio fan-out", .serialized)
 struct DeterministicAudioFanoutTests {
+    @Test func otherPeerCompletionReconsidersEligibleNonIdlePendingPeer() throws {
+        let wire = MissedRefillWire()
+        let controls = SimulationControlPeers()
+        let ready = DispatchSemaphore(value: 0)
+        let host = HostServer(roomName: "FIFO missed refill", advertise: false,
+            listenerReadyHandler: { controls.setHostPort($0); ready.signal() },
+            outboundSend: { connection, data, complete, completion in
+                if let packet = AudioPacket(data: data), case .hostPort(_, let port) = connection.endpoint {
+                    wire.submit(port: port.rawValue, packet: packet, completion: completion)
+                } else {
+                    connection.send(content: data, isComplete: complete, completion: .contentProcessed(completion))
+                }
+            }, audioSendNowNanos: { wire.now },
+            audioAdmissionObservationForTesting: { wire.observe($0) },
+            audioBackpressurePolicy: .boundedLatest(maxInFlight: 8))
+        defer { controls.stop(); host.stop() }
+        try host.start()
+        try #require(ready.wait(timeout: .now() + 3) == .success)
+        try controls.join(count: 2)
+        let weak = try #require(controls.peerIndices.first { $0.value == 0 }?.key)
+        let other = try #require(controls.peerIndices.first { $0.value == 1 }?.key)
+        let anchor = MonotonicClock.nowNanos()
+        func at(_ ms: UInt64) { wire.setNow(anchor + ms * 1_000_000) }
+        func complete(_ port: UInt16, _ sequence: UInt32, _ ms: UInt64) throws {
+            at(ms)
+            try wire.complete(port: port, sequence: sequence)
+            _ = host.audioSenderSnapshot()
+        }
+        at(0)
+        host.acceptAudio(samples: [Int16](repeating: 1_024, count: 3 * 240 * 2), captureTimeNanos: anchor - 15_000_000)
+        try #require(host.audioSenderSnapshot().allSatisfy { $0.sent == 3 && $0.inFlight == 3 })
+        // Per-peer callbacks remain FIFO. No reversed callback or extra-owner delay.
+        try complete(other, 0, 5)
+        try complete(weak, 0, 10)
+        try complete(other, 1, 15)
+        try complete(other, 2, 25)
+        try complete(weak, 1, 120)
+        at(195)
+        let pendingCapture = anchor + 165_000_000
+        host.acceptAudio(samples: [Int16](repeating: 1_024, count: 240 * 2), captureTimeNanos: pendingCapture)
+        let before = try #require(host.audioSenderSnapshot().first { $0.udpPort == weak })
+        try #require(before.sent == 3 && before.inFlight == 1 && before.pending == 1)
+        let refused = try #require(wire.observations.last { $0.port == weak && $0.captureNanos == pendingCapture })
+        try #require(refused.decision == .deferred && refused.recentInterval == 110_000_000)
+        try #require(refused.captureAge == 30_000_000 && refused.admissionBudget == 225_000_000)
+        try complete(other, 3, 201)
+        let missed = try #require(host.audioSenderSnapshot().first { $0.udpPort == weak })
+        #expect(missed.sent == 4, "Other-peer completion should reconsider an eligible non-idle pending peer")
+
+        // Same-clock production-gate control, not a copied eligibility predicate.
+        // Adding a successor wakes drainAudio without altering the old packet's
+        // timestamp, clock, in-flight count, or remaining budget.
+        host.acceptAudio(samples: [Int16](repeating: 1_024, count: 240 * 2), captureTimeNanos: anchor + 196_000_000)
+        _ = host.audioSenderSnapshot()
+        let admitted = try #require(wire.observations.first {
+            $0.port == weak && $0.captureNanos == pendingCapture && $0.decision == .admitted
+        })
+        try #require(admitted.ownerNanos == anchor + 201_000_000)
+        try #require(admitted.inFlight == 1 && admitted.captureAge == 36_000_000)
+        try #require(admitted.queueResidence == 6_000_000 && admitted.admissionBudget == 225_000_000)
+        try #require(admitted.recentInterval == 0 && admitted.estimatedDuration == 0)
+        try #require(admitted.unfinishedInterval == 81_000_000)
+        try #require(wire.sequences(port: weak) == [0, 1, 2, 3])
+        try complete(other, 4, 202)
+        try complete(weak, 2, 202)
+        try complete(weak, 3, 203)
+        try complete(weak, 4, 204)
+        for sender in host.audioSenderSnapshot() {
+            #expect(sender.enqueued == 5 && sender.sent == 5 && sender.inFlight == 0 && sender.pending == 0)
+            #expect(sender.expiredWait + sender.expiredAge + sender.admissionRejected + sender.replaced + sender.discardedBoundary == 0)
+            #expect(wire.sequences(port: sender.udpPort) == [0, 1, 2, 3, 4])
+        }
+        #expect(wire.remaining == 0)
+        print("FIFO missed-refill control: sentAfterOther=\(missed.sent), actual same-clock gate admitted captureAge=\(admitted.captureAge), unfinished=\(admitted.unfinishedInterval), inFlight=\(admitted.inFlight), budget=\(admitted.admissionBudget); all10 sends completed FIFO")
+    }
     @Test func recordedTimingKeepsArrivalSeparateFromCompletion() throws {
         let wire = SimulatedAudioWire(bitsPerSecond: 4_000_000, recordedTiming: true)
         let origin: UInt64 = 1_000_000_000
@@ -52,7 +127,8 @@ struct DeterministicAudioFanoutTests {
         // not the full sequence of callback times. Keep the live floor intact.
         let room = try simulate(peers: 8, rate: 4_000_000,
             policy: .boundedLatest(maxInFlight: 8), oversleep: 0,
-            irregularDispatchSeed: seed, includesControlTraffic: true)
+            irregularDispatchSeed: seed, includesControlTraffic: true,
+            allocationTrace: seed == 7 ? RefillAllocationTrace() : nil)
         #expect(room.maximumAge < SynchronizedPlayer.targetLatencyNanos)
         #expect(room.minimumPackets >= 50,
             "Irregular audio dispatch with reserved pong bandwidth must preserve the live per-listener floor")
@@ -164,7 +240,8 @@ struct DeterministicAudioFanoutTests {
                           oversleep: UInt64, callbackQuantumNanos: UInt64? = nil,
                           lateJoinAtCallback: Int? = nil, irregularDispatchSeed: UInt64? = nil,
                           includesControlTraffic: Bool = false,
-                          recordedTiming: Bool = false) throws -> SimulatedRoomResult {
+                          recordedTiming: Bool = false,
+                          allocationTrace: RefillAllocationTrace? = nil) throws -> SimulatedRoomResult {
         let wire = SimulatedAudioWire(bitsPerSecond: rate, callbackQuantumNanos: callbackQuantumNanos,
             irregularDispatchSeed: irregularDispatchSeed, recordedTiming: recordedTiming)
         let controls = SimulationControlPeers()
@@ -179,7 +256,9 @@ struct DeterministicAudioFanoutTests {
                     connection.send(content: bytes, isComplete: complete,
                         completion: .contentProcessed(completion))
                 }
-            }, audioSendNowNanos: { wire.now }, audioBackpressurePolicy: policy)
+            }, audioSendNowNanos: { wire.now },
+            audioAdmissionObservationForTesting: allocationTrace.map { trace in { trace.observe($0) } },
+            audioBackpressurePolicy: policy)
         defer { controls.stop(); host.stop() }
         try host.start()
         try #require(hostReady.wait(timeout: .now() + 3) == .success, "Real host listener did not start")
@@ -201,7 +280,8 @@ struct DeterministicAudioFanoutTests {
             if recordedTiming {
                 captureWake = nominalDeadline + RecordedFanoutTiming.captureWakeNanos[callback]
             }
-            advance(wire, through: captureWake, host: host)
+            advance(wire, through: captureWake, host: host, allocationTrace: allocationTrace)
+            allocationTrace?.beginCapture()
             host.acceptAudio(samples: samples, captureTimeNanos: nominalDeadline - 20_000_000)
             _ = host.audioSenderSnapshot() // Completes real packetization/enqueue at this event time.
             if includesControlTraffic && callback.isMultiple(of: 5) {
@@ -216,10 +296,19 @@ struct DeterministicAudioFanoutTests {
                 }
             }
         }
-        advance(wire, through: anchor + 5_000_000_000, host: host)
+        advance(wire, through: anchor + 5_000_000_000, host: host, allocationTrace: allocationTrace)
         let state = wire.snapshot
         let senders = host.audioSenderSnapshot()
         let ports = controls.ports
+        if let allocationTrace {
+            #expect(allocationTrace.sentCounts == state.submitted.mapValues { $0.count })
+            #expect(!allocationTrace.overflowed)
+            #expect(allocationTrace.maximumAdmissionsPerPeerRound == 1,
+                "Actual production completion rounds must grant at most one packet per peer")
+            #expect(allocationTrace.roundMetadataValid,
+                "Actual completion admissions must identify a bounded round")
+            allocationTrace.report(peers: controls.peerIndices)
+        }
         try #require(state.eventsRemaining == 0)
         try #require(state.invalidEndpoints == 0)
         try #require(senders.count == count && Set(senders.map(\.udpPort)) == Set(ports))
@@ -307,9 +396,11 @@ struct DeterministicAudioFanoutTests {
         return result
     }
 
-    private func advance(_ wire: SimulatedAudioWire, through deadline: UInt64, host: HostServer) {
+    private func advance(_ wire: SimulatedAudioWire, through deadline: UInt64, host: HostServer,
+                         allocationTrace: RefillAllocationTrace? = nil) {
         while let event = wire.takeNext(through: deadline) {
             wire.deliver(event)
+            allocationTrace?.beginCompletion()
             event.completion(nil)
             // The callback invokes the real sender. Its queue hop can schedule
             // another wire event, which must be observed before advancing time.
@@ -318,6 +409,100 @@ struct DeterministicAudioFanoutTests {
         wire.setNow(deadline)
     }
 
+}
+
+private final class RefillAllocationTrace: @unchecked Sendable {
+    struct Admission {
+        let context: Int
+        let value: HostServer.AudioAdmissionObservation
+        let sentBefore: Int
+    }
+    private let lock = NSLock()
+    private var context = 0
+    private var isCompletion = false
+    private var counts: [UInt16: Int] = [:]
+    private var admissions: [Admission] = []
+    private var dropped = false
+    var sentCounts: [UInt16: Int] { lock.withLock { counts } }
+    var overflowed: Bool { lock.withLock { dropped } }
+    var roundMetadataValid: Bool {
+        lock.withLock {
+            !admissions.isEmpty && admissions.allSatisfy {
+                $0.value.completionRound.map { (0..<8).contains($0) } == true
+            }
+        }
+    }
+    var maximumAdmissionsPerPeerRound: Int {
+        lock.withLock {
+            Dictionary(grouping: admissions) {
+                "\($0.context):\($0.value.completionRound ?? -1):\($0.value.port)"
+            }.values.map(\.count).max() ?? 0
+        }
+    }
+    func beginCapture() { lock.withLock { isCompletion = false } }
+    func beginCompletion() { lock.withLock { context += 1; isCompletion = true } }
+    func observe(_ value: HostServer.AudioAdmissionObservation) {
+        guard value.decision == .admitted else { return }
+        lock.withLock {
+            let before = counts[value.port, default: 0]
+            counts[value.port] = before + 1
+            if isCompletion {
+                if admissions.count < 8_000 {
+                    admissions.append(.init(context: context, value: value, sentBefore: before))
+                } else { dropped = true }
+            }
+        }
+    }
+    func report(peers: [UInt16: Int]) {
+        let snapshot = lock.withLock { admissions }
+        var inversions = 0
+        var sameRoundInversions = 0
+        for (index, later) in snapshot.enumerated() where later.value.queueResidence > 0
+            && later.value.inFlight > 0 && !later.value.fanoutIdle {
+            for earlier in snapshot[..<index].reversed() {
+                guard earlier.context == later.context else { break }
+                // An intervening B admission changes its gate inputs, so do not
+                // use that pair as proof B was eligible before A's extra slot.
+                if earlier.value.port == later.value.port { break }
+                guard earlier.value.ownerNanos == later.value.ownerNanos,
+                      !earlier.value.fanoutIdle,
+                      earlier.sentBefore > later.sentBefore else { continue }
+                inversions += 1
+                if earlier.value.completionRound == later.value.completionRound { sameRoundInversions += 1 }
+                if inversions <= 20 {
+                    print("Refill allocation inversion context=\(later.context) earlierPeer=\(peers[earlier.value.port] ?? -1) sentBefore=\(earlier.sentBefore) laterPeer=\(peers[later.value.port] ?? -1) sentBefore=\(later.sentBefore) laterResidence=\(later.value.queueResidence) laterInFlight=\(later.value.inFlight) laterAge=\(later.value.captureAge) sameClock=1 actualGateAdmitted=1")
+                }
+            }
+        }
+        print("Refill allocation trace retained=\(snapshot.count) overflow=\(overflowed) sameCompletionInversions=\(inversions) sameRoundInversions=\(sameRoundInversions) maximumAdmissionsPerPeerRound=\(maximumAdmissionsPerPeerRound); actual production observations")
+    }
+}
+
+private final class MissedRefillWire: @unchecked Sendable {
+    private let lock = NSLock()
+    private var clock: UInt64 = 0
+    private var callbacks: [UInt16: [(UInt32, (NWError?) -> Void)]] = [:]
+    private var submitted: [UInt16: [UInt32]] = [:]
+    private var evidence: [HostServer.AudioAdmissionObservation] = []
+    var now: UInt64 { lock.withLock { clock } }
+    var remaining: Int { lock.withLock { callbacks.values.reduce(0) { $0 + $1.count } } }
+    var observations: [HostServer.AudioAdmissionObservation] { lock.withLock { evidence } }
+    func setNow(_ value: UInt64) { lock.withLock { clock = value } }
+    func observe(_ value: HostServer.AudioAdmissionObservation) { lock.withLock { evidence.append(value) } }
+    func sequences(port: UInt16) -> [UInt32] { lock.withLock { submitted[port, default: []] } }
+    func submit(port: UInt16, packet: AudioPacket, completion: @escaping (NWError?) -> Void) {
+        lock.withLock {
+            submitted[port, default: []].append(packet.sequence)
+            callbacks[port, default: []].append((packet.sequence, completion))
+        }
+    }
+    func complete(port: UInt16, sequence: UInt32) throws {
+        let first = lock.withLock { callbacks[port]?.first }
+        let entry = try #require(first)
+        try #require(entry.0 == sequence, "Completion order must remain FIFO")
+        lock.withLock { _ = callbacks[port]?.removeFirst() }
+        entry.1(nil)
+    }
 }
 
 private struct SimulatedRoomResult {
@@ -474,6 +659,13 @@ private final class SimulationControlPeers: @unchecked Sendable {
     private var nextPeerIndex = 0
     private var stopped = false
     var ports: [UInt16] { lock.withLock { controls.keys.sorted() } }
+    var peerIndices: [UInt16: Int] {
+        lock.withLock {
+            Dictionary(uniqueKeysWithValues: controls.map { port, value in
+                (port, Int(value.id.dropFirst("virtual-peer-".count))!)
+            })
+        }
+    }
     func setHostPort(_ port: NWEndpoint.Port) { lock.withLock { hostPort = port } }
 
     func join(count: Int) throws {
