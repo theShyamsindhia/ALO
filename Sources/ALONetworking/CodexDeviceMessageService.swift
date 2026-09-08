@@ -16,12 +16,19 @@ public final class CodexDeviceMessageService: @unchecked Sendable {
     private var connectionClosures: [UUID: () -> Void] = [:]
     private var observation: UUID?
     private var faulted = false
+    let localTLSHashForBinding: Data
 
-    public init(policy: NetworkPolicyCenter, localDevice: DeviceIdentityBinding,
+    public convenience init(policy: NetworkPolicyCenter, localDevice: DeviceIdentityBinding,
+                            actualLocalTLSHash: Data, journal: CodexDeviceMessageJournal) throws {
+        try self.init(policy: policy, localDevice: localDevice, actualLocalTLSHash: actualLocalTLSHash,
+                      journal: journal, nowNanos: { DeviceMessagingClock.nowNanos() })
+    }
+    init(policy: NetworkPolicyCenter, localDevice: DeviceIdentityBinding,
                 actualLocalTLSHash: Data, journal: CodexDeviceMessageJournal,
-                nowNanos: @escaping @Sendable () -> UInt64 = DeviceMessagingClock.nowNanos,
+                nowNanos: @escaping @Sendable () -> UInt64,
                 policyChangeDelivery: ((@escaping () -> Void) -> Void)? = nil) throws {
         self.policy = policy; self.journal = journal
+        localTLSHashForBinding = actualLocalTLSHash
         self.nowNanos = nowNanos
         authorization = try .init(policy: policy, localDevice: localDevice, actualLocalTLSHash: actualLocalTLSHash)
         if let saved = try journal.load() { state = try .init(restoring: saved) } else { state = .init() }

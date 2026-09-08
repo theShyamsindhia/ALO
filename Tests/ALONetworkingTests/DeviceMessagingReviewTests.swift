@@ -43,12 +43,13 @@ struct DeviceMessagingReviewTests {
         f.service.disconnect(connection)
     }
     @Test func stoppedListenerIgnoresDelayedAuthenticatedCallback() throws {
-        let f = try CodexDeviceMessageServiceTests.Fixture()
+        let identity = try InstallationIdentity.ephemeral()
+        let f = try CodexDeviceMessageServiceTests.Fixture(receiverHash: identity.publicIdentity.publicKeyHash)
         try f.service.setEnabled(true)
         let connection = try f.connect()
         let context = try f.service.peer(connection: connection)
         let state = NetworkDeviceTextTransportTests.State()
-        let listener = try NetworkDeviceTextListener(identity: InstallationIdentity.ephemeral(), service: f.service,
+        let listener = try NetworkDeviceTextListener(identity: identity, service: f.service,
             pins: MemoryPeerPinStore(), queue: DispatchQueue(label: "stopped-listener-test")) { _, event in
                 if case .authenticated = event { state.mutate { $0.authenticated = true } }
             }
@@ -159,8 +160,8 @@ struct DeviceMessagingReviewTests {
         Issue.record("Dropping transport must release it and cancel native connection")
     }
     @Test func droppingListenerReleasesItsBoundPortWithoutStop() async throws {
-        let f = try CodexDeviceMessageServiceTests.Fixture()
         let identity = try InstallationIdentity.ephemeral()
+        let f = try CodexDeviceMessageServiceTests.Fixture(receiverHash: identity.publicIdentity.publicKeyHash)
         let queue = DispatchQueue(label: "listener-drop-test")
         let state = NetworkDeviceTextTransportTests.State()
         var listener: NetworkDeviceTextListener? = try NetworkDeviceTextListener(identity: identity,

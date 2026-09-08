@@ -15,11 +15,14 @@ struct CodexDeviceMessageServiceTests {
         let clock: Clock
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let owner = UserIdentity.ephemeral(), sender = UserIdentity.ephemeral()
-        let receiverHash = Data(repeating: 1, count: 32), senderHash = Data(repeating: 2, count: 32)
+        let receiverHash: Data
+        let senderHash = Data(repeating: 2, count: 32)
         let center: NetworkPolicyCenter
         let service: CodexDeviceMessageService
         let binding: DeviceIdentityBinding
-        init(policyChangeDelivery: ((@escaping () -> Void) -> Void)? = nil) throws {
+        init(receiverHash: Data = Data(repeating: 1, count: 32),
+             policyChangeDelivery: ((@escaping () -> Void) -> Void)? = nil) throws {
+            self.receiverHash = receiverHash
             let clock = Clock(); self.clock = clock
             let repository = NetworkRepository(directoryURL: directory.appendingPathComponent("network"))
             let manifest = try repository.create(name: "Fixture", owner: owner)

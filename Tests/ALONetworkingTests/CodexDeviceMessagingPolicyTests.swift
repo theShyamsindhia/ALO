@@ -106,7 +106,7 @@ struct CodexDeviceMessagingPolicyTests {
                     generation: rig.manifest.generation, receiverHash: Data(repeating: 9, count: 32))
         ]
         for other in variants {
-            try other.withContext { context in
+            _ = try other.withContext { context in
                 #expect(throws: CodexDeviceMessagingError.unauthorized) { try policy.receive(message, context: context, now: 0) }
             }
         }
@@ -249,7 +249,9 @@ struct CodexDeviceMessagingPolicyTests {
                 for _ in 0..<7 { grants.append(try policy.grant(context: context, localTaskID: UUID(), now: 0, expiresAt: 100)) }
                 let capacity = bytes == 1 ? 32 : 16
                 for index in 0..<capacity {
-                    let message = CodexDeviceMessageEnvelope(grantID: grants[index / 5], text: String(repeating: "x", count: bytes))
+                    // Global byte control spans grants without crossing the new
+                    // per-grant64KiB share; count control remains independent.
+                    let message = CodexDeviceMessageEnvelope(grantID: grants[index / (bytes == 1 ? 5 : 4)], text: String(repeating: "x", count: bytes))
                     _ = try policy.receive(message, context: context, now: 0)
                     if index == 0 { _ = try policy.beginDispatch(message, context: context, now: 0) }
                 }

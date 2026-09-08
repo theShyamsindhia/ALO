@@ -28,7 +28,7 @@ struct NetworkDeviceResponseLedger {
         guard pending.removeValue(forKey: key) != nil else { throw CodexDeviceMessagingError.unauthorized }
     }
     mutating func reject(_ key: Key, reason: String?) throws {
-        guard reason == "rateLimited" else { throw CodexDeviceMessagingError.unauthorized }
+        guard reason == "rateLimited" || reason == "capacity" else { throw CodexDeviceMessagingError.unauthorized }
         try resolve(key)
     }
     mutating func receivedGrant(_ id: UUID) throws {

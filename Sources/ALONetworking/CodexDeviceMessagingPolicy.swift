@@ -52,6 +52,9 @@ public struct CodexDeviceMessagingPolicy: Sendable {
     public static let maximumQueuedBytes = 256 * 1024
     public static let maximumGrants = 32
     public static let maximumReceipts = 1024
+    public static let maximumGrantReceipts = 256
+    public static let maximumGrantQueuedMessages = 8
+    public static let maximumGrantQueuedBytes = 64 * 1024
     public static let maximumGrantLifetimeNanos: UInt64 = 24 * 60 * 60 * 1_000_000_000
 
     public enum Receipt: String, Codable, Sendable {
@@ -82,6 +85,9 @@ public struct CodexDeviceMessagingPolicy: Sendable {
         let byteCount: Int
         var text: String?
         var receipt: Receipt
+        // Live dispatch needs text; restart never restores/replays it.
+        // Keep it in memory but exclude plaintext from every durable encoding.
+        enum CodingKeys: String, CodingKey { case digest, byteCount, receipt }
     }
     /// Local-only durable data contains private task mappings. Never send this
     /// to a peer. No decoder accepts a replacement checkpoint from the network.
@@ -213,9 +219,15 @@ public struct CodexDeviceMessagingPolicy: Sendable {
             guard old.digest == digest else { throw CodexDeviceMessagingError.duplicateConflict }
             return old.receipt
         }
+        let grantRecords = records.filter { $0.key.grantID == envelope.grantID }
+        let grantQueued = grantRecords.values.filter { $0.receipt == .received || $0.receipt == .dispatching }
         guard records.count < Self.maximumReceipts,
               queuedMessageCount < Self.maximumQueuedMessages,
-              queuedByteCount + size <= Self.maximumQueuedBytes else { throw CodexDeviceMessagingError.capacity }
+              queuedByteCount + size <= Self.maximumQueuedBytes,
+              grantRecords.count < Self.maximumGrantReceipts,
+              grantQueued.count < Self.maximumGrantQueuedMessages,
+              grantQueued.reduce(0, { $0 + $1.byteCount }) + size <= Self.maximumGrantQueuedBytes
+        else { throw CodexDeviceMessagingError.capacity }
         grant.tokens = min(5, grant.tokens + Double(now - grant.lastRefill) / 6_000_000_000)
         grant.lastRefill = now
         guard grant.tokens >= 1 else { throw CodexDeviceMessagingError.rateLimited }

@@ -27,6 +27,8 @@ struct NetworkDeviceTextTransportTests {
         var receipt: CodexDeviceMessagingPolicy.Receipt?
         var receiptCount = 0
         var rateRejections = 0
+        var capacityRejections = 0
+        var receiverEvents: [String] = []
         var conflicts = 0
         var holdEntered = false
         var closed = false
@@ -34,7 +36,7 @@ struct NetworkDeviceTextTransportTests {
         func mutate(_ body: (State) -> Void) { lock.lock(); defer { lock.unlock() }; body(self) }
         func read<T>(_ body: (State) -> T) -> T { lock.lock(); defer { lock.unlock() }; return body(self) }
     }
-    @Test func actualTLSWithoutAudioChannelNeedsLocalTaskConsentAndRevokes() async throws {
+    @Test(arguments: [false, true]) func actualTLSWithoutAudioChannelNeedsLocalTaskConsentAndRevokes(terminalBatch: Bool) async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let owner = UserIdentity.ephemeral(), sender = UserIdentity.ephemeral()
@@ -47,15 +49,19 @@ struct NetworkDeviceTextTransportTests {
             installationPublicKeyHash: receiverTLS.publicIdentity.publicKeyHash)
         let senderBinding = try DeviceIdentityBinding(user: sender, deviceName: "Sender", generation: 1,
             installationPublicKeyHash: senderTLS.publicIdentity.publicKeyHash)
+        let clock = CodexDeviceMessageServiceTests.Clock(); clock.set(DeviceMessagingClock.nowNanos())
         let service = try CodexDeviceMessageService(policy: policy, localDevice: receiverBinding,
             actualLocalTLSHash: receiverTLS.publicIdentity.publicKeyHash,
-            journal: CodexDeviceMessageJournal(directoryURL: directory.appendingPathComponent("journal")))
+            journal: CodexDeviceMessageJournal(directoryURL: directory.appendingPathComponent("journal")),
+            nowNanos: { clock.read() })
         try service.setEnabled(true) // Explicit local fixture action, never wire input.
         let state = State(), queue = DispatchQueue(label: "alo.test.device-text")
         let task = UUID()
         var incoming: UUID?
         let listener = try NetworkDeviceTextListener(identity: receiverTLS, service: service,
             pins: MemoryPeerPinStore(), queue: queue) { id, event in
+                if case .closed = event { state.mutate { $0.receiverEvents.append("closed") } }
+                if case .messageAccepted = event { state.mutate { $0.receiverEvents.append("accepted") } }
                 if case .authenticated(_, let context) = event {
                     #expect(context.senderSPKIHash == senderTLS.publicIdentity.publicKeyHash)
                     incoming = id
@@ -75,6 +81,7 @@ struct NetworkDeviceTextTransportTests {
                     if case .closed = event { $0.closed = true }
                     if case .rejected = event { $0.rejected = true }
                     if case .rejected(_, _, .rateLimited) = event { $0.rateRejections += 1 }
+                    if case .rejected(_, _, .capacity) = event { $0.capacityRejections += 1 }
                     if case .rejected(_, _, .duplicateConflict) = event { $0.conflicts += 1 }
                 }
             }
@@ -105,6 +112,27 @@ struct NetworkDeviceTextTransportTests {
         #expect(state.read { $0.receipt == .received }) // Not Codex delivery.
         for index in 0..<5 { client.send(.init(grantID: grant, text: "burst \(index)")) }
         try await wait { state.read { $0.receiptCount == 5 && $0.rateRejections == 1 } }
+        #expect(state.read { !$0.closed })
+        #expect(client.pendingReceiptsForTesting == 0)
+        if terminalBatch {
+            clock.set(clock.read() + 6_000_000_000)
+            let one = try NetworkDeviceTextTransport.textFrame(.init(grantID: grant, text: "terminal first"))
+            let two = try NetworkDeviceTextTransport.textFrame(.init(grantID: grant, text: "terminal second"))
+            state.mutate { $0.receiverEvents = [] }
+            listener.receiveAtCapacityForTesting(connection: connection, bytes: one + two)
+            try await wait { state.read { $0.receiverEvents.contains("closed") } }
+            queue.sync {} // Observe the full owner-queue batch, not just its first callback.
+            #expect(state.read { $0.receiverEvents == ["closed"] })
+            return
+        }
+        for index in 0..<3 {
+            clock.set(clock.read() + 6_000_000_000)
+            client.send(.init(grantID: grant, text: "fill grant share \(index)"))
+            try await wait { state.read { $0.receiptCount == 6 + index } }
+        }
+        clock.set(clock.read() + 6_000_000_000)
+        client.send(.init(grantID: grant, text: "over grant share"))
+        try await wait { state.read { $0.capacityRejections == 1 } }
         #expect(state.read { !$0.closed })
         #expect(client.pendingReceiptsForTesting == 0)
         try service.revoke(grant: grant)

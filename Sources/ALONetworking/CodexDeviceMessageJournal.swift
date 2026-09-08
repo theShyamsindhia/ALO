@@ -26,9 +26,27 @@ public final class CodexDeviceMessageJournal {
             close(writer); close(fd); throw POSIXError(.EACCES)
         }
         directory = fd; writerLock = writer
+        // Only the exclusive writer may reclaim this journal's reserved temp
+        // namespace. No symlink following, directories, or unrelated names.
+        let scanFD = dup(fd)
+        guard scanFD >= 0 else { throw POSIXError(.EIO) }
+        guard let stream = fdopendir(scanFD) else { close(scanFD); throw POSIXError(.EIO) }
+        defer { closedir(stream) }
+        while let entry = readdir(stream) {
+            let name = withUnsafePointer(to: &entry.pointee.d_name) {
+                $0.withMemoryRebound(to: CChar.self, capacity: 1024) { String(cString: $0) }
+            }
+            guard name.hasPrefix("receipt-"), name.hasSuffix(".tmp") else { continue }
+            let token = String(name.dropFirst(8).dropLast(4))
+            guard let id = UUID(uuidString: token), id.uuidString == token else { continue }
+            var candidate = stat()
+            guard fstatat(fd, name, &candidate, AT_SYMLINK_NOFOLLOW) == 0,
+                  candidate.st_mode & S_IFMT == S_IFREG, candidate.st_uid == getuid() else { continue }
+            guard unlinkat(fd, name, 0) == 0 else { throw POSIXError(.EIO) }
+        }
     }
     deinit { close(writerLock); close(directory) }
-    public func load() throws -> CodexDeviceMessagingPolicy.Checkpoint? {
+    func load() throws -> CodexDeviceMessagingPolicy.Checkpoint? {
         let fd = openat(directory, "receipts.json", O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
         if fd < 0 { if errno == ENOENT { return nil }; throw POSIXError(.EIO) }
         defer { close(fd) }
@@ -48,7 +66,7 @@ public final class CodexDeviceMessageJournal {
         }
         return try JSONDecoder().decode(CodexDeviceMessagingPolicy.Checkpoint.self, from: bytes)
     }
-    public func save(_ checkpoint: CodexDeviceMessagingPolicy.Checkpoint) throws {
+    func save(_ checkpoint: CodexDeviceMessagingPolicy.Checkpoint) throws {
         let bytes = try JSONEncoder().encode(checkpoint)
         guard bytes.count <= Self.maximumBytes else { throw CodexDeviceMessagingError.capacity }
         let temporary = "receipt-\(UUID().uuidString).tmp"

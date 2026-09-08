@@ -3,6 +3,14 @@ import Testing
 @testable import ALONetworking
 
 struct NetworkDeviceResponseLedgerTests {
+    @Test func capacityRejectionIsSolicitedAndConsumesOnlyItsKey() throws {
+        var ledger = NetworkDeviceResponseLedger()
+        let key = NetworkDeviceResponseLedger.Key(grant: UUID(), message: UUID())
+        _ = try ledger.reserve(key, digest: Data(repeating: 1, count: 32))
+        try ledger.reject(key, reason: "capacity")
+        #expect(ledger.pendingCount == 0)
+        #expect(throws: CodexDeviceMessagingError.unauthorized) { try ledger.reject(key, reason: "capacity") }
+    }
     @Test func productionAdmissionThresholdsReserveEstablishedCapacity() {
         #expect(NetworkDeviceAdmissionLimits.acceptsConnection(total: 7, admitted: 0))
         #expect(!NetworkDeviceAdmissionLimits.acceptsConnection(total: 8, admitted: 0))

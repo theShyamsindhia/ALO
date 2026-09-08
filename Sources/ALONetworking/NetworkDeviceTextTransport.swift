@@ -46,6 +46,7 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
     private var sending = false
     private var outgoing: [Data] = []
     private var queuedBytes = 0
+    private var outgoingFrameLimitForTesting: Int?
     private var responses = NetworkDeviceResponseLedger()
     private var timeout: Task<Void, Never>?
     private var deadlineGeneration = UUID()
@@ -64,10 +65,12 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
     }
     public init(endpoint: NWEndpoint, identity: InstallationIdentity, user: UserIdentity,
                 binding: DeviceIdentityBinding, policy: NetworkPolicyCenter, pins: PeerPinStore,
-                queue: DispatchQueue, event: @escaping (Event) -> Void) throws {
+                queue: DispatchQueue,
+                verificationQueue: DispatchQueue = DispatchQueue(label: "alo.device-text.verify", attributes: .concurrent),
+                event: @escaping (Event) -> Void) throws {
         try binding.verify(expectedInstallationPublicKeyHash: identity.publicIdentity.publicKeyHash)
         let parameters = try SecureNetworkParameters.tcp(identity: identity, expectedPeerID: nil, pins: pins,
-            firstContact: .explicitNetworkDeviceMessaging, verificationQueue: queue)
+            firstContact: .explicitNetworkDeviceMessaging, verificationQueue: verificationQueue)
         connection = NWConnection(to: endpoint, using: parameters)
         self.queue = networkDeviceExecutor(target: queue); mode = .sender(user, binding, policy, identity.publicIdentity.publicKeyHash)
         self.pins = pins; self.event = event
@@ -168,15 +171,28 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
             guard let self, !self.closed else { return }
             do {
                 if let bytes {
-                    for payload in try self.parser.append(bytes) {
-                        try self.handle(JSONDecoder().decode(Wire.self, from: payload))
-                    }
+                    try self.handleReceivedBytes(bytes)
                 }
                 if complete || error != nil { self.close() } else { self.receive() }
             } catch { self.close() }
         }
     }
+    private func handleReceivedBytes(_ bytes: Data) throws {
+        for payload in try parser.append(bytes) {
+            guard !closed else { return }
+            try handle(JSONDecoder().decode(Wire.self, from: payload))
+        }
+    }
+    /// Exercises the actual framing/handle path at an exhausted native-send
+    /// admission boundary. Default production limit remains unchanged.
+    func receiveAtCapacityForTesting(_ bytes: Data) {
+        queue.async {
+            self.outgoingFrameLimitForTesting = 0
+            do { try self.handleReceivedBytes(bytes) } catch { self.close() }
+        }
+    }
     private func handle(_ wire: Wire) throws {
+        guard !closed else { throw CodexDeviceMessagingError.unauthorized }
         let peer = try SecureNetworkParameters.peerIdentity(connection: connection)
         switch (mode, wire.kind) {
         case (.sender(let user, let binding, let policy, let localHash), .challenge):
@@ -193,6 +209,7 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
             try pins.recordAfterAdmission(peer)
             admitted = true; armDeadline(lifetime)
             send(Wire(kind: .authenticated))
+            guard !closed else { return }
             event(.authenticated(id, try service.peer(connection: id)))
         case (.sender, .authenticated):
             guard !admitted, expectedChallenge != nil else { throw CodexDeviceMessagingError.unauthorized }
@@ -210,7 +227,12 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
                 send(Wire(kind: .rejected, grantID: message.grantID, messageID: message.messageID, rejection: "rateLimited"))
                 return
             }
+            catch CodexDeviceMessagingError.capacity {
+                send(Wire(kind: .rejected, grantID: message.grantID, messageID: message.messageID, rejection: "capacity"))
+                return
+            }
             send(Wire(kind: .receipt, grantID: message.grantID, messageID: message.messageID, receipt: receipt))
+            guard !closed else { return }
             if receipt == .received { event(.messageAccepted(id, message)) }
         case (.sender, .receipt):
             guard admitted, let id = wire.messageID, let grant = wire.grantID, let receipt = wire.receipt else { throw CodexDeviceMessagingError.unauthorized }
@@ -219,14 +241,14 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
         case (.sender, .rejected):
             guard admitted, let id = wire.messageID, let grant = wire.grantID else { throw CodexDeviceMessagingError.unauthorized }
             try responses.reject(.init(grant: grant, message: id), reason: wire.rejection)
-            event(.rejected(grantID: grant, messageID: id, .rateLimited))
+            event(.rejected(grantID: grant, messageID: id, wire.rejection == "capacity" ? .capacity : .rateLimited))
         default: throw CodexDeviceMessagingError.invalidEnvelope
         }
     }
     private func send(_ wire: Wire) {
         do {
             let frame = try NetworkDeviceMessageFraming.encode(JSONEncoder().encode(wire))
-            guard outgoing.count < 32, queuedBytes + frame.count <= 256 * 1024 else { throw CodexDeviceMessagingError.capacity }
+            guard outgoing.count < (outgoingFrameLimitForTesting ?? 32), queuedBytes + frame.count <= 256 * 1024 else { throw CodexDeviceMessagingError.capacity }
             outgoing.append(frame); queuedBytes += frame.count; drain()
         } catch { close() }
     }
@@ -282,9 +304,14 @@ public final class NetworkDeviceTextListener: @unchecked Sendable {
     private var stopped = false
     public init(identity: InstallationIdentity, service: CodexDeviceMessageService,
                 pins: PeerPinStore, port: NWEndpoint.Port = .any,
-                queue: DispatchQueue, event: @escaping (UUID, NetworkDeviceTextTransport.Event) -> Void) throws {
+                queue: DispatchQueue,
+                verificationQueue: DispatchQueue = DispatchQueue(label: "alo.device-listener.verify", attributes: .concurrent),
+                event: @escaping (UUID, NetworkDeviceTextTransport.Event) -> Void) throws {
+        guard identity.publicIdentity.publicKeyHash == service.localTLSHashForBinding else {
+            throw CodexDeviceMessagingError.unauthorized
+        }
         let parameters = try SecureNetworkParameters.tcp(identity: identity, expectedPeerID: nil, pins: pins,
-            firstContact: .explicitNetworkDeviceMessaging, verificationQueue: queue)
+            firstContact: .explicitNetworkDeviceMessaging, verificationQueue: verificationQueue)
         listener = try NWListener(using: parameters, on: port)
         self.service = service; self.pins = pins; self.queue = networkDeviceExecutor(target: queue); self.event = event
     }
@@ -343,6 +370,9 @@ public final class NetworkDeviceTextListener: @unchecked Sendable {
     }
     var admittedCountForTesting: Int { queue.sync { admitted.count } }
     var nativeListenerForTesting: NWListener { listener }
+    func receiveAtCapacityForTesting(connection: UUID, bytes: Data) {
+        queue.async { self.connections[connection]?.receiveAtCapacityForTesting(bytes) }
+    }
     public func stop() {
         queue.async {
             guard !self.stopped else { return }; self.stopped = true
