@@ -65,6 +65,100 @@ struct NetworkAccountModelTests {
         #expect(fixture.model.errorMessage?.contains("not allowed") != true)
     }
 
+    @Test(arguments: [false, true]) func deviceAndChannelSharePolicyCenter(deviceFirst: Bool) async throws {
+        let f = try AccountModelFixture(); defer { f.cleanup() }
+        try await f.finishNewIdentity(name: "Owner")
+        let network = try await f.model.createNetwork(name: "Shared policy")
+        let hash = Data(repeating: 6, count: 32)
+        let initial = deviceFirst
+            ? try await f.model.deviceAuthorization(networkID: network.id.uuidString, installationHash: hash, deviceName: "Device") : nil
+        let channel = try await f.model.authorization(channelID: network.mainChannel.id.uuidString, installationHash: hash, deviceName: "Device")
+        let device = try await f.model.deviceAuthorization(networkID: network.id.uuidString, installationHash: hash, deviceName: "Device")
+        #expect(device.policy === channel.policy)
+        if let initial { #expect(initial.policy === channel.policy && initial.policy === device.policy) }
+        #expect(try device.policy.snapshot().id == network.id)
+        try device.localDevice.verify(expectedInstallationPublicKeyHash: hash)
+    }
+
+    @Test func devicePolicyRemovalReaddDoesNotReviveOldSession() async throws {
+        let owner = try AccountModelFixture(), member = try AccountModelFixture()
+        defer { owner.cleanup(); member.cleanup() }
+        try await owner.finishNewIdentity(name: "Owner"); try await member.finishNewIdentity(name: "Member")
+        let network = try await owner.model.createNetwork(name: "Device membership")
+        let invitation = try await owner.model.addMember(data: member.model.publicIdentityData(), networkID: network.id)
+        try await member.model.importInvitation(data: invitation.encoded())
+        let hash = Data(repeating: 7, count: 32), senderHash = Data(repeating: 8, count: 32)
+        let access = try await member.model.deviceAuthorization(networkID: network.id.uuidString, installationHash: hash, deviceName: "Member")
+        let sender = try await owner.model.deviceAuthorization(networkID: network.id.uuidString, installationHash: senderHash, deviceName: "Owner")
+        let auth = try NetworkDeviceAuthorization(policy: access.policy, localDevice: access.localDevice, actualLocalTLSHash: hash)
+        let challenge = try auth.challenge(nowNanos: 0)
+        let root = try #require(owner.model.identity)
+        let claim = try NetworkDeviceAuthorization.Claim.signed(challenge: challenge, sender: sender.localDevice,
+            user: root, policy: sender.policy, actualSenderTLSHash: senderHash, actualReceiverTLSHash: hash)
+        let session = try auth.accept(claim, actualSenderTLSHash: senderHash, nowNanos: 1)
+        let revision = try access.policy.snapshot().revision
+        let memberID = try #require(member.model.identity?.publicIdentity.userID)
+        try await owner.model.removeMember(userID: memberID, networkID: network.id)
+        try access.policy.receive(owner.repository.trustedManifest(id: network.id))
+        do {
+            _ = try await member.model.deviceAuthorization(networkID: network.id.uuidString, installationHash: hash, deviceName: "Member")
+            Issue.record("Removed member unexpectedly acquired device access")
+        } catch NetworkAuthorityError.notMember {
+            // Fresh policy denied membership before presentation refreshed.
+        } catch NetworkAccountError.networkUnavailable {
+            // The observer already removed the network from presentation.
+        } catch { Issue.record("Unexpected removal error: \(error)") }
+        let readd = try await owner.model.addMember(data: member.model.publicIdentityData(), networkID: network.id)
+        try await member.model.importInvitation(data: readd.encoded())
+        let fresh = try await member.model.deviceAuthorization(networkID: network.id.uuidString, installationHash: hash, deviceName: "Member")
+        #expect(fresh.policy === access.policy)
+        #expect(try fresh.policy.snapshot().revision > revision)
+        do {
+            try auth.withCurrentContext(session: session, nowNanos: 2) { _ in }
+            Issue.record("Old revision session revived after re-addition")
+        } catch NetworkDeviceAuthorization.Failure.invalidClaim {
+            // Same authority center, newer policy revision invalidates the session.
+        } catch { Issue.record("Unexpected stale-session error: \(error)") }
+    }
+
+    @Test(arguments: [0, 31, 33]) func deviceAccessRejectsMalformedInstallationHash(byteCount: Int) async throws {
+        let f = try AccountModelFixture(); defer { f.cleanup() }
+        try await f.finishNewIdentity(name: "Owner")
+        let network = try await f.model.createNetwork(name: "Invalid device hash")
+        await #expect(throws: UserIdentityError.invalidBinding) {
+            try await f.model.deviceAuthorization(networkID: network.id.uuidString,
+                installationHash: Data(repeating: 9, count: byteCount), deviceName: "Device")
+        }
+    }
+
+    @Test(arguments: [false, true]) func pendingDeviceAccessCannotEscapeIdentityChange(replace: Bool) async throws {
+        let f = try AccountModelFixture(); defer { f.cleanup() }
+        try await f.finishNewIdentity(name: "Owner")
+        let network = try await f.model.createNetwork(name: "Pending device")
+        let original = try #require(f.model.identity?.publicIdentity)
+        let gate = RepositoryFlockGate()
+        try gate.hold(f.repository.directoryURL.appendingPathComponent(".repository.lock"))
+        defer { gate.release.signal() }
+        var started = false
+        let request = Task { @MainActor in
+            started = true
+            return try await f.model.deviceAuthorization(networkID: network.id.uuidString,
+                installationHash: Data(repeating: 9, count: 32), deviceName: "Device")
+        }
+        while !started { await Task.yield() }
+        if replace {
+            let other = AppModelMemoryIdentityStorage()
+            _ = try UserIdentityStore(storage: other).loadOrCreateForOnboarding()
+            f.storage.replaceForTesting(with: other)
+        } else { f.storage.loadError = .invalidPrivateKey }
+        let resume = Task { @MainActor in await f.model.resume() }
+        while f.model.identity?.publicIdentity == original { await Task.yield() }
+        #expect(!gate.expired)
+        gate.release.signal()
+        await #expect(throws: NetworkAccountError.setupRequired) { try await request.value }
+        await resume.value
+    }
+
     @Test func blockedRepositoryAuthorizationLeavesMainActorResponsive() async throws {
         let fixture = try AccountModelFixture()
         defer { fixture.cleanup() }
@@ -728,4 +822,5 @@ private final class AppModelMemoryIdentityStorage: UserIdentityKeyStorage {
     }
 
     func resetCounters() { loadCount = 0; insertCount = 0 }
+    func replaceForTesting(with other: AppModelMemoryIdentityStorage) { bytes = other.bytes }
 }

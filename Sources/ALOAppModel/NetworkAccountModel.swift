@@ -10,13 +10,14 @@ public enum NetworkJoinState: Equatable, Sendable {
 }
 
 public enum NetworkAccountError: LocalizedError {
-    case setupRequired, nameRequired, nameTooLong, channelUnavailable
+    case setupRequired, nameRequired, nameTooLong, channelUnavailable, networkUnavailable
     public var errorDescription: String? {
         switch self {
         case .setupRequired: return "Set up your ALO identity and save its recovery file first."
         case .nameRequired: return "Enter a name between 1 and 80 characters, without control characters."
         case .nameTooLong: return "This name is too long for a device identity. Use fewer emoji or accented characters."
         case .channelUnavailable: return "This channel is unavailable or your identity no longer has access."
+        case .networkUnavailable: return "This network is unavailable or your identity no longer has access."
         }
     }
 }
@@ -389,13 +390,7 @@ public final class NetworkAccountModel: ObservableObject {
             throw NetworkAccountError.channelUnavailable
         }
         let authorization = try await worker.perform { worker in
-            let center: NetworkPolicyCenter
-            if let existing = worker.centers[network.id] { center = existing; try center.reload() }
-            else {
-                center = try NetworkPolicyCenter(repository: worker.repository, networkID: network.id)
-                worker.centers[network.id] = center
-                worker.observations[network.id] = center.observe(worker.policyChanged)
-            }
+            let center = try worker.reloadedCenter(networkID: network.id)
             let device = try DeviceIdentityBinding(user: identity, deviceName: Self.bindingDeviceName(deviceName), generation: 1,
                 installationPublicKeyHash: installationHash)
             return try NetworkChannelAuthorization(policy: center, channelID: channelUUID, localDevice: device)
@@ -406,6 +401,38 @@ public final class NetworkAccountModel: ObservableObject {
         _ = try authorization.policy.snapshot().authorize(identity.publicIdentity, channelID: channelUUID)
         acknowledgeAccessLoss(for: network.id)
         return authorization
+    }
+
+    /// Explicit network-device service setup, independent of audio channels.
+    /// Loads fresh policy off-main and rechecks identity after the await. The
+    /// returned material is not a substitute for transport/dispatch authorization.
+    public func deviceAuthorization(networkID: String, installationHash: Data,
+                                    deviceName: String) async throws -> NetworkDeviceAccess {
+        let identity = try requireIdentity(), token = identityGeneration
+        guard let networkUUID = UUID(uuidString: networkID),
+              networks.contains(where: { $0.id == networkUUID }) else {
+            throw NetworkAccountError.networkUnavailable
+        }
+        let access = try await worker.perform { worker in
+            let center = try worker.reloadedCenter(networkID: networkUUID)
+            let snapshot = try center.snapshot()
+            guard snapshot.id == networkUUID else { throw NetworkAccountError.networkUnavailable }
+            guard snapshot.isMember(identity.publicIdentity) else {
+                throw NetworkAuthorityError.notMember
+            }
+            let device = try DeviceIdentityBinding(user: identity,
+                deviceName: Self.bindingDeviceName(deviceName), generation: 1,
+                installationPublicKeyHash: installationHash)
+            try device.verify(expectedInstallationPublicKeyHash: installationHash)
+            return NetworkDeviceAccess(policy: center, localDevice: device)
+        }
+        try requireCurrentIdentity(identity, generation: token)
+        let snapshot = try access.policy.snapshot()
+        guard snapshot.id == networkUUID else { throw NetworkAccountError.networkUnavailable }
+        guard snapshot.isMember(identity.publicIdentity) else {
+            throw NetworkAuthorityError.notMember
+        }
+        return access
     }
 
     /// A healthy explicit selection (including the auto-selected value) or fresh
@@ -522,6 +549,19 @@ private final class NetworkAccountRepositoryWorker: @unchecked Sendable {
 
     deinit {
         for (id, observation) in observations { centers[id]?.removeObserver(observation) }
+    }
+
+    // Only called within perform: channel and device paths must share the same
+    // live policy center and observer, including after removal and re-addition.
+    func reloadedCenter(networkID: UUID) throws -> NetworkPolicyCenter {
+        if let existing = centers[networkID] {
+            try existing.reload()
+            return existing
+        }
+        let center = try NetworkPolicyCenter(repository: repository, networkID: networkID)
+        centers[networkID] = center
+        observations[networkID] = center.observe(policyChanged)
+        return center
     }
 
     func perform<T: Sendable>(_ work: @escaping @Sendable (NetworkAccountRepositoryWorker) throws -> T) async throws -> T {
