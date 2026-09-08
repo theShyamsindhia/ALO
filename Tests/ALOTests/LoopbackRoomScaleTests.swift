@@ -63,6 +63,7 @@ struct LoopbackRoomScaleTests {
         let lines = evidence.lines()
         #expect(lines.count == 4)
         #expect(lines[0].contains("retained=3 dropped=1"))
+        #expect(lines[0].contains("retention=newest"))
         #expect(lines[1] == "1,100,2,7,42,-1,audio,992,scheduled,400")
         #expect(lines[2] == "2,500,2,7,42,-1,audio,992,completed,0")
         #expect(lines[3] == "3,600,2,7,42,-1,audio,992,completed,0")
@@ -84,6 +85,9 @@ struct LoopbackRoomScaleTests {
         try evidence.export(directory: directory, filename: "trace.csv", label: "bounded test")
         let text = try String(contentsOf: directory.appendingPathComponent("trace.csv"), encoding: .utf8)
         #expect(text.contains("owner retained=1 dropped=1"))
+        #expect(text.contains("owner retained=1 dropped=1; retention=oldest"))
+        #expect(text.contains("gate retained=0 dropped=0; retention=oldest"))
+        #expect(text.contains("retained=0 dropped=0; retention=newest"))
         #expect(text.contains("owner,2,100,110,10"))
         #expect(!text.contains("61234"))
         #expect(evidence.takeDump(label: "console remains suppressed") == nil)
@@ -111,7 +115,7 @@ struct LoopbackRoomScaleTests {
         _ = evidence.admitted(connection: connection, audioSequence: 1, byteCount: 992, captureNanos: 200)
         _ = evidence.admitted(connection: connection, audioSequence: 0, byteCount: 992, captureNanos: 100)
         let lines = try #require(evidence.takeDump(label: "mapping cap"))
-        #expect(lines.contains("capture mapping retained=1 omitted_attempts=2; omissions count attempts, not unique timestamps"))
+        #expect(lines.contains("capture mapping retained=1 omitted_attempts=2; retention=first-keys; omissions count attempts, not unique timestamps"))
         #expect(lines.filter { $0.hasPrefix("capture_sequence,") } == ["capture_sequence,100,0"])
     }
 
@@ -2810,16 +2814,17 @@ private final class LoopbackSchedulingEvidence: @unchecked Sendable {
         func peer(_ port: UInt16) -> Int { registered[Endpoint(transport: .udp, port: port)] ?? -1 }
         // Absolute capture time is retained numerically: the first packet can precede
         // trace origin. It joins gate retries to actual admitted packet timestamps.
-        var result = ["gate retained=\(gates.count) dropped=\(gateCount - gates.count); decision 0=admit 1=requeue 2=reject; pending excludes current candidate",
+        var result = ["gate retained=\(gates.count) dropped=\(gateCount - gates.count); retention=oldest; decision 0=admit 1=requeue 2=reject; pending excludes current candidate",
             "gate,owner_relative_ns,peer,capture_absolute_ns,capture_age_ns,residence_ns,budget_ns,duration_ns,recent_interval_ns,unfinished_interval_ns,in_flight,pending,idle,last_completion_absolute_ns,decision"]
-        result.append("capture mapping retained=\(sequences.count) omitted_attempts=\(mappingOmissions); omissions count attempts, not unique timestamps")
+        result.append("capture mapping retained=\(sequences.count) omitted_attempts=\(mappingOmissions); retention=first-keys; omissions count attempts, not unique timestamps")
+        result.append("coverage: gate rows omit pre-gate expiry/replacement; aggregate sender accounting is in alo-tests.log; overflow can leave different retained time windows")
         for (capture, sequence) in sequences.sorted(by: { $0.key < $1.key }) {
             result.append("capture_sequence,\(capture),\(sequence)")
         }
         for gate in gates {
             result.append("gate,\(relative(gate.ownerNanos)),\(peer(gate.port)),\(gate.captureNanos),\(gate.captureAge),\(gate.queueResidence),\(gate.admissionBudget),\(gate.estimatedDuration),\(gate.recentInterval),\(gate.unfinishedInterval),\(gate.inFlight),\(gate.pending),\(gate.fanoutIdle ? 1 : 0),\(gate.lastCompletion.map(String.init) ?? "-"),\(gate.decision.rawValue)")
         }
-        result.append("owner retained=\(owners.count) dropped=\(ownerCount - owners.count); owner,peer,entry_relative_ns,owner_relative_ns,extra_hop_ns")
+        result.append("owner retained=\(owners.count) dropped=\(ownerCount - owners.count); retention=oldest; owner,peer,entry_relative_ns,owner_relative_ns,extra_hop_ns")
         for owner in owners {
             result.append("owner,\(peer(owner.port)),\(relative(owner.entryNanos)),\(relative(owner.ownerNanos)),\(owner.ownerNanos >= owner.entryNanos ? owner.ownerNanos - owner.entryNanos : 0)")
         }
@@ -2869,7 +2874,7 @@ private final class LoopbackSchedulingEvidence: @unchecked Sendable {
     func lines() -> [String] {
         let (snapshot, total, registered, snapshotOrigin) = lock.withLock { (events, totalEvents, peers, self.origin ?? 0) }
         let retained = snapshot.sorted { $0.ordinal < $1.ordinal }
-        return ["retained=\(retained.count) dropped=\(total - retained.count); relative ns; detail=scheduled/capture deadline, dispatch lateness, completion error(0/1)"] + retained.map { event in
+        return ["retained=\(retained.count) dropped=\(total - retained.count); retention=newest; relative ns; detail=scheduled/capture deadline, dispatch lateness, completion error(0/1)"] + retained.map { event in
             let detail = event.phase == .scheduled || event.phase == .capture
                 ? (event.detail >= snapshotOrigin ? event.detail - snapshotOrigin : 0) : event.detail
             let peer = event.send?.endpoint.flatMap { registered[$0] } ?? -1
@@ -2891,9 +2896,11 @@ private final class LoopbackSchedulingEvidence: @unchecked Sendable {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let destination = directory.appendingPathComponent(filename)
         try data.write(to: destination, options: .atomic)
-        let summary = lock.withLock {
-            "gate retained=\(admissions.count) dropped=\(admissionTotal - admissions.count); owner retained=\(completions.count) dropped=\(completionTotal - completions.count); scheduling retained=\(events.count) dropped=\(totalEvents - events.count); capture mapping retained=\(captureSequences.count) omitted_attempts=\(captureMappingOmittedAttempts)"
-        }
+        // These are the exact headers written above, not a later live-state read.
+        let summary = lines.filter {
+            $0.hasPrefix("retained=") || $0.hasPrefix("gate retained=")
+                || $0.hasPrefix("owner retained=") || $0.hasPrefix("capture mapping retained=")
+        }.joined(separator: " | ")
         print("Fanout diagnostic exported \(destination.path) bytes=\(data.count); \(summary). Instrumented evidence, not a CI-cause or overhead proof.")
     }
     func dump(label: String) {
