@@ -5,6 +5,22 @@ import ALOIdentity
 @testable import ALONetworking
 
 struct DeviceMessagingReviewTests {
+    @Test func continuousDeadlineTaskAndRenewalGeneration() async throws {
+        let f = try CodexDeviceMessageServiceTests.Fixture()
+        let native = NWConnection(host: "127.0.0.1", port: 9, using: .tcp)
+        let transport = NetworkDeviceTextTransport(accepted: native, service: f.service,
+            pins: MemoryPeerPinStore(), queue: DispatchQueue(label: "deadline-test")) { _ in }
+        transport.armDeadlineForTesting(20)
+        let old = transport.deadlineGenerationForTesting
+        transport.armDeadlineForTesting(20)
+        #expect(transport.deadlineGenerationForTesting != old)
+        transport.fireDeadlineForTesting(old)
+        #expect(!transport.closedForTesting)
+        transport.armDeadlineForTesting(0.01)
+        let deadline = ContinuousClock.now + .seconds(1)
+        while !transport.closedForTesting, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(5)) }
+        #expect(transport.closedForTesting)
+    }
     @Test func queryClockRegressionPermanentlyDisablesService() throws {
         let f = try CodexDeviceMessageServiceTests.Fixture()
         try f.service.setEnabled(true)
@@ -17,6 +33,14 @@ struct DeviceMessagingReviewTests {
         f.clock.set(30)
         #expect(throws: CodexDeviceMessagingError.disabled) { try f.service.receive(message, connection: connection) }
         #expect(throws: CodexDeviceMessagingError.disabled) { try f.service.setEnabled(true) }
+        let writes = f.service.journalWritesForTesting
+        #expect(throws: CodexDeviceMessagingError.disabled) { try f.service.revoke(grant: grant) }
+        #expect(throws: CodexDeviceMessagingError.disabled) { try f.service.retireGrant(grant, acknowledgeReceiptLoss: true) }
+        #expect(throws: CodexDeviceMessagingError.disabled) { try f.service.complete(message, result: .queued) }
+        #expect(throws: CodexDeviceMessagingError.disabled) { try f.service.confirmDelivery(message) }
+        #expect(f.service.journalWritesForTesting == writes)
+        #expect(f.service.localGrants().count == 1) // Inspection/connection cleanup remain available.
+        f.service.disconnect(connection)
     }
     @Test func stoppedListenerIgnoresDelayedAuthenticatedCallback() throws {
         let f = try CodexDeviceMessageServiceTests.Fixture()
@@ -89,7 +113,7 @@ struct DeviceMessagingReviewTests {
         _ = try restored.approve(connection: newConnection, localTaskID: UUID(), expiresAt: 100)
         #expect(restored.localGrants().count == 1)
     }
-    @Test func continuousElapsedTimeExpiresAuthorization() throws {
+    @Test func injectedElapsedTimeExpiresAuthorization() throws {
         let f = try CodexDeviceMessageServiceTests.Fixture()
         try f.service.setEnabled(true)
         let connection = try f.connect()
@@ -99,6 +123,17 @@ struct DeviceMessagingReviewTests {
             try f.service.receive(.init(grantID: grant, text: "after suspend"), connection: connection)
         }
         #expect(DeviceMessagingClock.nowNanos() > 0)
+    }
+    @Test func arbitraryGrantQueriesAllocateNoBudget() throws {
+        let f = try CodexDeviceMessageServiceTests.Fixture()
+        try f.service.setEnabled(true)
+        let connection = try f.connect()
+        for _ in 0..<100 {
+            #expect(throws: CodexDeviceMessagingError.unauthorized) {
+                try f.service.receive(.init(grantID: UUID(), text: "guess"), connection: connection)
+            }
+        }
+        #expect(f.service.queryBudgetCountForTesting == 0)
     }
     @Test func exactWireEscapingBoundaryIsValidated() throws {
         let safe = CodexDeviceMessageEnvelope(grantID: UUID(), text: String(repeating: "\u{0001}", count: 4_000))
@@ -141,6 +176,17 @@ struct DeviceMessagingReviewTests {
         print("LISTENER_DROP before=\(native.state) port=\(port)")
         listener = nil
         #expect(weakListener == nil)
+        // cancel() requests asynchronous cancellation. CI observed replacement
+        // EADDRINUSE while the original still reported ready, then cancelled.
+        // Observe that native completion before the ONE rebind attempt, sharing
+        // the original total deadline rather than retrying a failed listener.
+        var cancellationCompleted = false
+        while ContinuousClock.now < deadline {
+            if case .cancelled = native.state { cancellationCompleted = true; break }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        try #require(cancellationCompleted, "Native cancellation must complete within original total deadline")
+        print("LISTENER_DROP cancellationCompletedBeforeSingleRebind=\(native.state)")
         let replacement = try NWListener(using: .tcp, on: port)
         // Network.framework rejects start without an accept handler (EINVAL),
         // independently of port reuse. Reject any unexpected inbound connection.

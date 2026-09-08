@@ -86,11 +86,13 @@ public final class CodexDeviceMessageService: @unchecked Sendable {
     }
     public func revoke(grant: UUID) throws {
         lock.lock(); defer { lock.unlock() }
+        guard !faulted else { throw CodexDeviceMessagingError.disabled }
         try commit { $0.revoke(grantID: grant) }
         invalidateConnections()
     }
     public func retireGrant(_ grant: UUID, acknowledgeReceiptLoss: Bool) throws {
         lock.lock(); defer { lock.unlock() }
+        guard !faulted else { throw CodexDeviceMessagingError.disabled }
         let now = nowNanos()
         try commit { try $0.retireGrant(grantID: grant, now: now, acknowledgeReceiptLoss: acknowledgeReceiptLoss) }
         queryBudgets.removeValue(forKey: grant)
@@ -98,6 +100,7 @@ public final class CodexDeviceMessageService: @unchecked Sendable {
     var journalWritesForTesting: Int {
         lock.lock(); defer { lock.unlock() }; return journal.committedWrites
     }
+    var queryBudgetCountForTesting: Int { lock.lock(); defer { lock.unlock() }; return queryBudgets.count }
     public func receive(_ envelope: CodexDeviceMessageEnvelope, connection: UUID) throws -> CodexDeviceMessagingPolicy.Receipt {
         try current(connection, queryGrant: envelope.grantID) { context, now in
             try commit { try $0.receive(envelope, context: context, now: now) }
@@ -116,10 +119,12 @@ public final class CodexDeviceMessageService: @unchecked Sendable {
     }
     public func complete(_ envelope: CodexDeviceMessageEnvelope, result: CodexDeviceMessagingPolicy.DispatchResult) throws {
         lock.lock(); defer { lock.unlock() }
+        guard !faulted else { throw CodexDeviceMessagingError.disabled }
         try commit { try $0.completeDispatch(grantID: envelope.grantID, messageID: envelope.messageID, result: result) }
     }
     public func confirmDelivery(_ envelope: CodexDeviceMessageEnvelope) throws {
         lock.lock(); defer { lock.unlock() }
+        guard !faulted else { throw CodexDeviceMessagingError.disabled }
         try commit { try $0.confirmDelivery(grantID: envelope.grantID, messageID: envelope.messageID) }
     }
     func checkpointForTesting() throws -> CodexDeviceMessagingPolicy.Checkpoint? {

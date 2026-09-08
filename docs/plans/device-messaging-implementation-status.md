@@ -3,7 +3,7 @@
 This isolated transport/consent branch is not an enabled application feature.
 No Codex command, local task discovery, app launch, or audio wire modification is
 implemented. Tests were written before their corresponding implementation where
-possible. The main-based focused seven-suite run now passes 39 tests; this is service-layer
+possible. The main-based focused eight-suite run now passes 45 tests; this is service-layer
 validation, not an end-user feature or physical two-Mac delivery result.
 
 ## Implemented boundaries
@@ -49,7 +49,8 @@ validation, not an end-user feature or physical two-Mac delivery result.
   identity is available. Network/interface access controls and actual deployment
   load testing remain necessary; established connections are not evicted.
 - Exact framed-wire validation emits a local rejected event without disconnecting
-  or inserting an awaiting receipt. Dropped owners cancel native resources and
+  or inserting an awaiting receipt.
+- Dropped owners cancel native resources and
   remove policy observers without requiring explicit `stop()`.
 
 All six review resolutions above passed the seven-suite 39-test run in
@@ -67,6 +68,49 @@ become ready with a handler (`listener-handler-results.log`). Adding that missin
 handler corrected the fixture; no production cleanup behavior was changed to
 make this test pass. All original deadlines and assertions remain, with no
 disabled cases or timing relaxation. Previous failure logs are preserved.
+
+CI at `6034f5e` subsequently exposed a distinct cancellation-ordering fixture
+race: replacement failed EADDRINUSE while the original still reported ready;
+the original reached cancelled later (`/tmp/alo-ci-6034f5e-failed.log`). Unlike
+the earlier EINVAL, this proves the test attempted reuse before asynchronous
+cancellation completed. The test now observes native cancelled before its single
+rebind, within the same original three-second total budget (passed in the 45-test run).
+There is no retry or deadline increase. Production `stop()`/owner destruction
+requests cancellation; it does not promise synchronous port reuse. Future app
+wiring that requires ordered same-port restart needs an explicit cancellation
+completion contract. No such public completion API is claimed or added here.
+
+## Second review follow-up validation
+
+- Canonically sorted wire encoding feeds a 32-byte pending digest. Identical
+  in-flight sends coalesce; different content with the same key rejects locally.
+  Pending digests are bounded to 32 entries, not 32 retained payload frames.
+- A receiver rate limit returns only a solicited `rateLimited` wire rejection.
+  It consumes the sender's pending key, preserves the connection and never retries.
+  Unknown rejection reasons or unsolicited keys still fail closed.
+- Transport timers capture an absolute `ContinuousClock` deadline on the owner
+  queue before starting a cancellable weak-owner task. Renewed generation checks
+  occur back on that same queue. System-sleep inclusion is the Swift clock's
+  documented contract, not a claim that tests suspended the real Mac.
+- Faulted service mutations all reject; read-only grant inspection and connection
+  cleanup remain available, but journal retirement requires a healthy service.
+- Received grants are unique and capped at 32 before application callbacks.
+
+New coverage includes a real TLS blocked-receiver duplicate/conflict test and
+six-message rate-limit burst; pure production response-ledger rejection/grant
+limits; arbitrary grant IDs allocating zero query buckets; and real continuous
+timer expiry plus stale-generation rejection. Admission threshold helpers are
+tested directly, not a claim of real socket-flood robustness. The 100-challenge
+churn test exercises service cancellation directly; transport-close wiring is
+currently verified by inspection, not a controlled 100-connection churn test.
+
+All 45 tests in eight suites passed in 0.547 s, including actual TLS duplicate,
+conflict and authoritative rate-limit behavior (0.127 s):
+`/tmp/alo-device-messaging.ktdBQI/second-review-green.log`. A subsequent warning-only
+fixture correction replaced async-context semaphore waiting with lock-backed
+async polling, preserving the two-second entry and three-second release limits.
+The affected two-test TLS suite passed separately in 0.230 s (actual TLS 0.169 s):
+`/tmp/alo-device-messaging.ktdBQI/async-prerequisite-green.log`.
 
 ## Focused validation
 

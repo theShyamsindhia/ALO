@@ -25,6 +25,10 @@ struct NetworkDeviceTextTransportTests {
         var authenticated = false
         var grant: UUID?
         var receipt: CodexDeviceMessagingPolicy.Receipt?
+        var receiptCount = 0
+        var rateRejections = 0
+        var conflicts = 0
+        var holdEntered = false
         var closed = false
         var rejected = false
         func mutate(_ body: (State) -> Void) { lock.lock(); defer { lock.unlock() }; body(self) }
@@ -64,12 +68,14 @@ struct NetworkDeviceTextTransportTests {
         let port = try #require(state.read { $0.port })
         let client = try NetworkDeviceTextTransport(endpoint: .hostPort(host: "127.0.0.1", port: port),
             identity: senderTLS, user: sender, binding: senderBinding, policy: policy,
-            pins: MemoryPeerPinStore(), queue: queue) { event in
+            pins: MemoryPeerPinStore(), queue: DispatchQueue(label: "alo.test.device-text.sender")) { event in
                 state.mutate {
                     if case .grant(let grant) = event { $0.grant = grant }
-                    if case .receipt(_, _, let receipt) = event { $0.receipt = receipt }
+                    if case .receipt(_, _, let receipt) = event { $0.receipt = receipt; $0.receiptCount += 1 }
                     if case .closed = event { $0.closed = true }
                     if case .rejected = event { $0.rejected = true }
+                    if case .rejected(_, _, .rateLimited) = event { $0.rateRejections += 1 }
+                    if case .rejected(_, _, .duplicateConflict) = event { $0.conflicts += 1 }
                 }
             }
         client.start(); defer { client.stop() }
@@ -82,9 +88,25 @@ struct NetworkDeviceTextTransportTests {
         client.send(.init(grantID: grant, text: String(repeating: "\u{0001}", count: 4_077)))
         try await wait { state.read { $0.rejected } }
         #expect(state.read { !$0.closed && $0.receipt == nil })
-        client.send(.init(grantID: grant, text: "Attributed remote text; not local authority"))
+        let release = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            service.holdSerializationForTesting { state.mutate { $0.holdEntered = true }; _ = release.wait(timeout: .now() + 3) }
+        }
+        defer { release.signal() }
+        try await wait(timeout: .seconds(2)) { state.read { $0.holdEntered } }
+        let message = CodexDeviceMessageEnvelope(grantID: grant, text: "Attributed remote text; not local authority")
+        client.send(message)
+        client.send(message) // Receiver is blocked: both local sends are in-flight.
+        client.send(.init(grantID: grant, messageID: message.messageID, text: "conflicting payload"))
+        #expect(client.pendingReceiptsForTesting == 1)
+        #expect(state.read { $0.conflicts == 1 })
+        release.signal()
         try await wait { state.read { $0.receipt != nil } }
         #expect(state.read { $0.receipt == .received }) // Not Codex delivery.
+        for index in 0..<5 { client.send(.init(grantID: grant, text: "burst \(index)")) }
+        try await wait { state.read { $0.receiptCount == 5 && $0.rateRejections == 1 } }
+        #expect(state.read { !$0.closed })
+        #expect(client.pendingReceiptsForTesting == 0)
         try service.revoke(grant: grant)
         try await wait { state.read { $0.closed } }
         client.stop()
@@ -93,8 +115,8 @@ struct NetworkDeviceTextTransportTests {
         try await wait { state.read { $0.rejected } }
         #expect(client.pendingReceiptsForTesting == 0)
     }
-    private func wait(_ predicate: () -> Bool) async throws {
-        let deadline = ContinuousClock.now + .seconds(5)
+    private func wait(timeout: Duration = .seconds(5), _ predicate: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + timeout
         while !predicate(), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
         try #require(predicate(), "Bounded actual TLS operation must complete")
     }

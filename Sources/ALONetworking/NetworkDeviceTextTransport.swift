@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import Network
 import ALOIdentity
 import ALOCore
@@ -12,12 +13,12 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
         case grant(UUID)
         case receipt(grantID: UUID, messageID: UUID, CodexDeviceMessagingPolicy.Receipt)
         case messageAccepted(UUID, CodexDeviceMessageEnvelope)
-        /// Local send validation failed; no receipt is pending and connection stays usable.
+        /// Local validation or a solicited receiver rate rejection. No automatic retry.
         case rejected(grantID: UUID, messageID: UUID, CodexDeviceMessagingError)
         case closed
     }
     private struct Wire: Codable {
-        enum Kind: String, Codable { case challenge, claim, authenticated, grant, text, receipt }
+        enum Kind: String, Codable { case challenge, claim, authenticated, grant, text, receipt, rejected }
         let kind: Kind
         var challenge: NetworkDeviceAuthorization.Challenge?
         var claim: NetworkDeviceAuthorization.Claim?
@@ -25,6 +26,7 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
         var message: CodexDeviceMessageEnvelope?
         var messageID: UUID?
         var receipt: CodexDeviceMessagingPolicy.Receipt?
+        var rejection: String?
     }
     private enum Mode {
         case receiver(CodexDeviceMessageService)
@@ -44,9 +46,9 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
     private var sending = false
     private var outgoing: [Data] = []
     private var queuedBytes = 0
-    private struct ReceiptKey: Hashable { let grant: UUID; let message: UUID }
-    private var awaitingReceipts = Set<ReceiptKey>()
-    private var timeout: DispatchWorkItem?
+    private var responses = NetworkDeviceResponseLedger()
+    private var timeout: Task<Void, Never>?
+    private var deadlineGeneration = UUID()
     private var policyObserver: UUID?
     private let lifetime: TimeInterval = 300
 
@@ -106,12 +108,20 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
                 self.event(.rejected(grantID: envelope.grantID, messageID: envelope.messageID, .invalidEnvelope))
                 return
             }
-            let key = ReceiptKey(grant: envelope.grantID, message: envelope.messageID)
-            guard (self.awaitingReceipts.contains(key) || self.awaitingReceipts.count < 32),
-                  self.outgoing.count < 32, self.queuedBytes + frame.count <= 256 * 1024 else {
+            let key = NetworkDeviceResponseLedger.Key(grant: envelope.grantID, message: envelope.messageID)
+            // Keep one 32-byte digest per pending request, not a second copy of
+            // up to 32 frames beyond the existing output-byte budget.
+            var next = self.responses
+            do {
+                guard try next.reserve(key, digest: Data(SHA256.hash(data: frame))) else { return }
+            } catch {
+                self.event(.rejected(grantID: envelope.grantID, messageID: envelope.messageID,
+                                     error as? CodexDeviceMessagingError ?? .invalidEnvelope)); return
+            }
+            guard self.outgoing.count < 32, self.queuedBytes + frame.count <= 256 * 1024 else {
                 self.event(.rejected(grantID: envelope.grantID, messageID: envelope.messageID, .capacity)); return
             }
-            self.awaitingReceipts.insert(key)
+            self.responses = next
             self.outgoing.append(frame); self.queuedBytes += frame.count; self.drain()
         }
     }
@@ -119,9 +129,14 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
         guard !envelope.text.isEmpty, envelope.text.utf8.count <= CodexDeviceMessagingPolicy.maximumTextBytes else {
             throw CodexDeviceMessagingError.invalidEnvelope
         }
-        return try NetworkDeviceMessageFraming.encode(JSONEncoder().encode(Wire(kind: .text, message: envelope)))
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        return try NetworkDeviceMessageFraming.encode(encoder.encode(Wire(kind: .text, message: envelope)))
     }
-    var pendingReceiptsForTesting: Int { queue.sync { awaitingReceipts.count } }
+    var pendingReceiptsForTesting: Int { queue.sync { responses.pendingCount } }
+    func armDeadlineForTesting(_ seconds: TimeInterval) { queue.async { self.armDeadline(seconds) } }
+    var deadlineGenerationForTesting: UUID { queue.sync { deadlineGeneration } }
+    func fireDeadlineForTesting(_ generation: UUID) { queue.async { self.deadlineElapsed(generation) } }
+    var closedForTesting: Bool { queue.sync { closed } }
     private func startOnQueue() {
         guard timeout == nil, !closed else { return }
         if case .sender(_, _, let policy, _) = mode {
@@ -185,16 +200,26 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
             admitted = true; armDeadline(lifetime)
         case (.sender, .grant):
             guard admitted, let grant = wire.grantID else { throw CodexDeviceMessagingError.unauthorized }
+            try responses.receivedGrant(grant)
             event(.grant(grant))
         case (.receiver(let service), .text):
             guard admitted, let id = localSession, let message = wire.message else { throw CodexDeviceMessagingError.unauthorized }
-            let receipt = try service.receive(message, connection: id)
+            let receipt: CodexDeviceMessagingPolicy.Receipt
+            do { receipt = try service.receive(message, connection: id) }
+            catch CodexDeviceMessagingError.rateLimited {
+                send(Wire(kind: .rejected, grantID: message.grantID, messageID: message.messageID, rejection: "rateLimited"))
+                return
+            }
             send(Wire(kind: .receipt, grantID: message.grantID, messageID: message.messageID, receipt: receipt))
             if receipt == .received { event(.messageAccepted(id, message)) }
         case (.sender, .receipt):
-            guard admitted, let id = wire.messageID, let grant = wire.grantID, let receipt = wire.receipt,
-                  awaitingReceipts.remove(ReceiptKey(grant: grant, message: id)) != nil else { throw CodexDeviceMessagingError.unauthorized }
+            guard admitted, let id = wire.messageID, let grant = wire.grantID, let receipt = wire.receipt else { throw CodexDeviceMessagingError.unauthorized }
+            try responses.resolve(.init(grant: grant, message: id))
             event(.receipt(grantID: grant, messageID: id, receipt))
+        case (.sender, .rejected):
+            guard admitted, let id = wire.messageID, let grant = wire.grantID else { throw CodexDeviceMessagingError.unauthorized }
+            try responses.reject(.init(grant: grant, message: id), reason: wire.rejection)
+            event(.rejected(grantID: grant, messageID: id, .rateLimited))
         default: throw CodexDeviceMessagingError.invalidEnvelope
         }
     }
@@ -216,17 +241,29 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
     }
     private func armDeadline(_ seconds: TimeInterval) {
         timeout?.cancel()
-        let task = DispatchWorkItem { [weak self] in self?.close() }
-        timeout = task; queue.asyncAfter(deadline: .now() + seconds, execute: task)
+        let generation = UUID(); deadlineGeneration = generation
+        let deadline = ContinuousClock.now.advanced(by: .seconds(seconds))
+        timeout = Task { [weak self] in
+            do { try await ContinuousClock().sleep(until: deadline) }
+            catch { return }
+            guard !Task.isCancelled else { return }
+            self?.queue.async { [weak self] in
+                self?.deadlineElapsed(generation)
+            }
+        }
+    }
+    private func deadlineElapsed(_ generation: UUID) {
+        guard deadlineGeneration == generation else { return }
+        close()
     }
     private func close() {
         guard !closed else { return }; closed = true
-        timeout?.cancel(); timeout = nil
+        timeout?.cancel(); timeout = nil; deadlineGeneration = UUID()
         if case .receiver(let service) = mode, let localSession { service.disconnect(localSession) }
         if case .receiver(let service) = mode, let expectedChallenge { service.cancelChallenge(expectedChallenge) }
         if case .sender(_, _, let policy, _) = mode, let policyObserver { policy.removeObserver(policyObserver) }
         connection.stateUpdateHandler = nil; connection.cancel()
-        outgoing.removeAll(); awaitingReceipts.removeAll(); queuedBytes = 0; event(.closed)
+        outgoing.removeAll(); responses = .init(); queuedBytes = 0; event(.closed)
     }
 }
 
@@ -269,14 +306,15 @@ public final class NetworkDeviceTextListener: @unchecked Sendable {
                 // Separate preauthorization capacity cannot evict admitted peers.
                 // Before TLS identity exists, eight slots remain susceptible to
                 // connection occupation; deadlines bound duration, not availability.
-                guard let self, !self.stopped, self.connections.count - self.admitted.count < 8,
-                      self.connections.count < 24 else { connection.cancel(); return }
+                guard let self, !self.stopped,
+                      NetworkDeviceAdmissionLimits.acceptsConnection(total: self.connections.count, admitted: self.admitted.count)
+                else { connection.cancel(); return }
                 let id = UUID()
                 let transport = NetworkDeviceTextTransport(accepted: connection, service: self.service,
                     pins: self.pins, queue: self.queue, admitTLS: { [weak self] peer in
                         guard let self, !self.stopped else { return false }
                         let known = (try? self.pins.pin(for: peer.nodeID)) == peer.publicKeyHash
-                        guard known || self.unknownTLS.count < 4 else { return false }
+                        guard NetworkDeviceAdmissionLimits.acceptsTLS(known: known, unknownCount: self.unknownTLS.count) else { return false }
                         if !known { self.unknownTLS.insert(id) }
                         return true
                     }) { [weak self] event in
