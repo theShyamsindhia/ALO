@@ -116,7 +116,7 @@ Final external corrective review and combined CI remain separate release gates.
   duplicates remain protected until expiry, and stopped probes reject work.
 - Exact shell quoting, Dev/release endpoint mapping and bounded CLI rejection.
 
-These boundaries and the two-owner outbound flow passed in the 61-test
+These boundaries and the two-owner outbound flow passed in the 63-test
 checkpoint, including PR8's corrected competing socket-lock creation path.
 Independent reviews, full CI and explicitly authorized physical app/real-task
 testing remain required.

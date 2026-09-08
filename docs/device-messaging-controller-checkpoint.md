@@ -1,9 +1,13 @@
 # Pure controller/parser checkpoint — not app wiring
 
-Source-only checkpoint originally based on PR8 `1c29a599df3b7f3f02a84b8e816d3227e10c2bba`,
-now rebased onto `f680ab29c51a1928e62f89f9303f0bfa8988f943` (includes PR7 `8a3a596`).
-PR8's independent follow-up review is still pending. No compile or runtime
-evidence exists for this checkpoint; no dependent PR has been opened.
+Historical pure-component design, originally based on PR8
+`1c29a599df3b7f3f02a84b8e816d3227e10c2bba` and then
+`f680ab29c51a1928e62f89f9303f0bfa8988f943` (including PR7 `8a3a596`).
+The pure checkpoint subsequently passed 25 tests in four suites. App wiring is
+now published in PR9 on PR8's final `07e3650` base; the latest corrective
+checkpoint passed 63 tests in 11 suites. See `device-messaging-app-integration.md`
+for current evidence and outstanding release gates. The component boundaries
+below describe what this pure layer does, not missing app integration.
 
 `DeviceMessagingCommand` parses register/status/send/receipt with exact named
 flags and the existing local request schema. Send accepts text through a bounded
