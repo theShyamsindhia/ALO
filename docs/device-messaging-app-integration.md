@@ -21,6 +21,19 @@ focused checkpoint passed **60 tests in ten suites** (160.33-second build,
 spawn/receipt regressions. Installed-app, two-owner outbound and physical
 two-Mac delivery validation are not claimed by that result.
 
+A subsequent actual two-owner test initially searched for the wrong public
+status name (`received` instead of the existing `authenticatedReceipt`). The
+source mapping established a test-oracle error, not dropped receipt evidence;
+all task/body attribution, final queued and reconnect/no-resend assertions had
+already passed. Using the actual status enum names preserved those assertions.
+The resulting checkpoint passed **61 tests in ten suites** (84.32-second build,
+11.077-second runtime). Two real local owners exercised socket registration,
+harmless capability helpers/manual nonce confirmation, TLS/grant consent,
+opaque destination binding, live intermediate→queued status without a query,
+exact receiver task/sender root/message/body argv, duplicate no-extra-execution,
+and explicit close→fresh authenticated status query with no text resend.
+This remains local ephemeral validation, not installed-app or real-task proof.
+
 ## Explicit workflow
 
 1. Open Settings → Device messaging; approve a local executable and explicitly
@@ -69,6 +82,7 @@ retire the captured discovery/receiver instance and require explicit re-enable.
   duplicates remain protected until expiry, and stopped probes reject work.
 - Exact shell quoting, Dev/release endpoint mapping and bounded CLI rejection.
 
-These boundaries passed in the 60-test checkpoint, including PR8's corrected
-competing socket-lock creation path. Two-owner outbound validation, independent
-reviews, full CI and explicitly authorized physical app testing remain required.
+These boundaries and the two-owner outbound flow passed in the 61-test
+checkpoint, including PR8's corrected competing socket-lock creation path.
+Independent reviews, full CI and explicitly authorized physical app/real-task
+testing remain required.
