@@ -17,6 +17,8 @@ struct MacDeviceMessageReceiverTests {
         var receipts: [Int: [CodexDeviceMessagingPolicy.Receipt]] = [:]
         var closed = Set<Int>()
         var ready = Set<Int>()
+        var heldDispatch: (() -> Void)?
+        var reviews: [(UUID, UUID, CodexDeviceMessagingPolicy.Receipt)] = []
         func mutate(_ body: (State) -> Void) { lock.lock(); defer { lock.unlock() }; body(self) }
         func read<T>(_ body: (State) -> T) -> T { lock.lock(); defer { lock.unlock() }; return body(self) }
     }
@@ -26,15 +28,18 @@ struct MacDeviceMessageReceiverTests {
         let admission = ReceiverDispatchAdmission()
         try admission.setEnabled(true, service: f.service)
         let key = ReceiverDispatchAdmission.Key(grant: UUID(), message: UUID())
-        let first = try #require(admission.acquire(key))
-        #expect(admission.acquire(key) == nil)
+        let firstAdmission = admission.acquire(key)
+        #expect(firstAdmission.outcome == .scheduled)
+        let first = try #require(firstAdmission.permit)
+        #expect(admission.acquire(key).outcome == .alreadyScheduled)
         var held = [first]
-        for _ in 1..<32 { held.append(try #require(admission.acquire(.init(grant: UUID(), message: UUID())))) }
+        for _ in 1..<32 { held.append(try #require(admission.acquire(.init(grant: UUID(), message: UUID())).permit)) }
         #expect(admission.countForTesting == 32)
-        #expect(admission.acquire(.init(grant: UUID(), message: UUID())) == nil)
+        #expect(admission.acquire(.init(grant: UUID(), message: UUID())).outcome == .capacity)
+        #expect(admission.acquire(key).outcome == .alreadyScheduled)
         first.release()
         #expect(admission.countForTesting == 31)
-        let replacement = try #require(admission.acquire(key))
+        let replacement = try #require(admission.acquire(key).permit)
         first.release() // Old release cannot consume the replacement token.
         #expect(admission.countForTesting == 32)
         let group = DispatchGroup()
@@ -47,15 +52,16 @@ struct MacDeviceMessageReceiverTests {
         #expect(!admission.isOpen)
         #expect(throws: CodexDeviceMessagingError.disabled) { try admission.setEnabled(true, service: f.service) }
         #expect(throws: CodexDeviceMessagingError.disabled) { try f.service.challenge() }
-        #expect(admission.acquire(.init(grant: UUID(), message: UUID())) == nil)
+        #expect(admission.acquire(.init(grant: UUID(), message: UUID())).outcome == .stopped)
         replacement.release(); held.removeAll()
         #expect(admission.countForTesting == 0)
     }
 
     /// Actual TLS + a local harmless executable exercise the public facade.
     /// No Codex installation, task queue, audio graph, or user process is used.
-    @Test(arguments: [false, true])
-    func actualTLSStoredDispatchPublishesFinalStatusAndReconnectDoesNotResend(disconnect: Bool) async throws {
+    @Test(arguments: [0, 1, 2])
+    func actualTLSStoredDispatchPublishesFinalStatusAndReconnectDoesNotResend(mode: Int) async throws {
+        let disconnect = mode == 1
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -91,10 +97,14 @@ struct MacDeviceMessageReceiverTests {
                     case .received(let connection, _, _): $0.events[connection, default: []].append("received")
                     case .completion(let connection, _, _, _): $0.events[connection, default: []].append("completion")
                     case .dispatchFailed(let connection, _, _): $0.events[connection, default: []].append("failed")
+                    case .reviewNeeded(let grant, let message, let receipt, _): $0.reviews.append((grant, message, receipt))
                     case .closed(let connection): $0.events[connection, default: []].append("closed")
                     }
                 }
             }
+        if mode == 2 {
+            facade.setDispatchDeliveryForTesting { callback in state.mutate { $0.heldDispatch = callback } }
+        }
         try facade.setEnabled(true)
         facade.start { port in state.mutate { $0.port = port } }
         defer { facade.stop() }
@@ -121,6 +131,27 @@ struct MacDeviceMessageReceiverTests {
         let grant = try #require(state.read { $0.grants.first })
         let message = CodexDeviceMessageEnvelope(grantID: grant, text: "Remote text is data, not local authority")
         first.send(message)
+        if mode == 2 {
+            try await wait { state.read { $0.receipts[0]?.first == .received && $0.heldDispatch != nil } }
+            #expect(facade.dispatchStored(connection: original, grantID: grant, messageID: message.messageID) == .alreadyScheduled)
+            first.stop()
+            try await wait { state.read { $0.events[original]?.last == "closed" } }
+            let releaseDispatch = try #require(state.read { $0.heldDispatch })
+            state.mutate { $0.heldDispatch = nil }
+            releaseDispatch()
+            try await wait { state.read { !$0.reviews.isEmpty } }
+            let review = try #require(state.read { $0.reviews.first })
+            #expect(review.0 == grant && review.1 == message.messageID && review.2 == .received)
+            #expect(facade.localReceipt(grantID: grant, messageID: message.messageID) == .received)
+            #expect(state.read { $0.events[original] == ["authenticated", "received", "closed"] })
+            #expect(!FileManager.default.fileExists(atPath: marker.path))
+            #expect(service.nativeWorkerCountForTesting == 0)
+            try facade.setEnabled(false)
+            #expect(facade.localReceipt(grantID: grant, messageID: message.messageID) == .cancelled)
+            facade.stop()
+            #expect(facade.dispatchStored(connection: original, grantID: grant, messageID: message.messageID) == .stopped)
+            return
+        }
         try await wait { state.read { $0.receipts[0]?.first == .received } && FileManager.default.fileExists(atPath: marker.path) }
         var fresh: NetworkDeviceTextTransport?
         defer { fresh?.stop() }

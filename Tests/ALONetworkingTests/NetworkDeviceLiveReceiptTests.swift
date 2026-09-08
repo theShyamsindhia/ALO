@@ -18,7 +18,7 @@ struct NetworkDeviceLiveReceiptTests {
         let key = NetworkDeviceResponseLedger.Key(grant: UUID(), message: UUID())
         #expect(try ledger.reserveQuery(key))
         #expect(!(try ledger.reserveQuery(key)))
-        #expect(try ledger.resolve(key, receipt: .received))
+        #expect(try ledger.resolveQuery(key, receipt: .received))
         #expect(!(try ledger.resolve(key, receipt: .received)))
         #expect(try ledger.resolve(key, receipt: .dispatching))
         #expect(throws: CodexDeviceMessagingError.unauthorized) { try ledger.resolve(key, receipt: .received) }
@@ -33,7 +33,7 @@ struct NetworkDeviceLiveReceiptTests {
         #expect(ledger.pendingCount == 31)
         #expect(throws: CodexDeviceMessagingError.unauthorized) { try ledger.resolve(key, receipt: .delivered) }
         #expect(try ledger.reserveQuery(key))
-        #expect(try ledger.resolve(key, receipt: .delivered))
+        #expect(try ledger.resolveQuery(key, receipt: .delivered))
     }
     @Test func authenticatedQueriesReuseGrantBudgetAcrossReconnectWithoutJournalWrites() throws {
         let f = try CodexDeviceMessageServiceTests.Fixture()
@@ -56,8 +56,13 @@ struct NetworkDeviceLiveReceiptTests {
         }
         #expect(f.service.queryBudgetCountForTesting == 1)
         try f.service.revoke(grant: grant)
+        #expect(f.service.localReceipt(grantID: grant, messageID: message.messageID) == .cancelled)
+        let afterRevoke = try f.connect()
         #expect(throws: CodexDeviceMessagingError.unauthorized) {
-            try f.service.currentReceipt(grantID: grant, messageID: message.messageID, connection: fresh)
+            try f.service.currentReceipt(grantID: grant, messageID: message.messageID, connection: afterRevoke)
         }
+        try f.service.setEnabled(false)
+        #expect(f.service.localReceipt(grantID: grant, messageID: message.messageID) == .cancelled)
+        #expect(f.service.localReceipt(grantID: grant, messageID: UUID()) == nil)
     }
 }

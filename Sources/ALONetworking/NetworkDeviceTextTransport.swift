@@ -8,19 +8,31 @@ import ALOCore
 /// a fake Main channel, or execute messages. Local application consent controls
 /// listener creation and service enablement independently.
 public final class NetworkDeviceTextTransport: @unchecked Sendable {
+    public enum QueryResult {
+        case receipt(CodexDeviceMessagingPolicy.Receipt)
+        /// No record was found in the current own grant. Not proof of non-execution.
+        case statusUnknown
+        case grantExpired
+        /// Only the query failed; previous message evidence is unchanged.
+        case unavailable(CodexDeviceMessagingError)
+    }
     public enum Event {
         /// Sender proof was accepted. This is not a task grant or dispatch permission.
         case ready
         case authenticated(UUID, NetworkDeviceAuthorization.Context)
         case grant(UUID)
         case receipt(grantID: UUID, messageID: UUID, CodexDeviceMessagingPolicy.Receipt)
+        case queryResult(grantID: UUID, messageID: UUID, QueryResult)
+        /// Ends only this live observation, not other grants or the message.
+        case subscriptionExpired(grantID: UUID, messageID: UUID)
         case messageAccepted(UUID, CodexDeviceMessageEnvelope)
         /// Local validation or a solicited receiver rate rejection. No automatic retry.
         case rejected(grantID: UUID, messageID: UUID, CodexDeviceMessagingError)
         case closed
     }
     private struct Wire: Codable {
-        enum Kind: String, Codable { case challenge, claim, authenticated, grant, text, receiptQuery, receipt, rejected }
+        enum Kind: String, Codable { case challenge, claim, authenticated, grant, text, receiptQuery, queryResult, subscriptionExpired, receipt, rejected }
+        enum QueryStatus: String, Codable { case statusUnknown, grantExpired, rateLimited }
         let kind: Kind
         var challenge: NetworkDeviceAuthorization.Challenge?
         var claim: NetworkDeviceAuthorization.Claim?
@@ -29,6 +41,7 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
         var messageID: UUID?
         var receipt: CodexDeviceMessagingPolicy.Receipt?
         var rejection: String?
+        var queryStatus: QueryStatus?
     }
     private enum Mode {
         case receiver(CodexDeviceMessageService)
@@ -96,13 +109,13 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
     public func queryReceipt(grantID: UUID, messageID: UUID) {
         queue.async {
             guard case .sender = self.mode, self.admitted, !self.closed else {
-                self.event(.rejected(grantID: grantID, messageID: messageID, .unauthorized)); return
+                self.event(.queryResult(grantID: grantID, messageID: messageID, .unavailable(.unauthorized))); return
             }
             do {
                 guard try self.responses.reserveQuery(.init(grant: grantID, message: messageID)) else { return }
                 self.send(Wire(kind: .receiptQuery, grantID: grantID, messageID: messageID))
             } catch {
-                self.event(.rejected(grantID: grantID, messageID: messageID, error as? CodexDeviceMessagingError ?? .capacity))
+                self.event(.queryResult(grantID: grantID, messageID: messageID, .unavailable(error as? CodexDeviceMessagingError ?? .capacity)))
             }
         }
     }
@@ -117,13 +130,16 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
                 let receipt = try service.currentReceipt(grantID: grantID, messageID: messageID, connection: session)
                 guard self.subscriptions[key] != receipt else { return }
                 self.publish(key, receipt: receipt)
+            } catch CodexDeviceMessagingError.grantExpired {
+                self.subscriptions.removeValue(forKey: key)
+                self.send(Wire(kind: .subscriptionExpired, grantID: grantID, messageID: messageID))
             } catch { self.close() }
         }
     }
-    private func publish(_ key: NetworkDeviceResponseLedger.Key, receipt: CodexDeviceMessagingPolicy.Receipt) {
+    private func publish(_ key: NetworkDeviceResponseLedger.Key, receipt: CodexDeviceMessagingPolicy.Receipt, queryResponse: Bool = false) {
         if receipt == .received || receipt == .dispatching { subscriptions[key] = receipt }
         else { subscriptions.removeValue(forKey: key) }
-        send(Wire(kind: .receipt, grantID: key.grant, messageID: key.message, receipt: receipt))
+        send(Wire(kind: queryResponse ? .queryResult : .receipt, grantID: key.grant, messageID: key.message, receipt: receipt))
     }
     /// Receiver-local approval only: callers obtain localTaskID from their local
     /// consent UI. No incoming wire message can invoke this method.
@@ -294,10 +310,41 @@ public final class NetworkDeviceTextTransport: @unchecked Sendable {
             guard subscriptions[key] != nil || subscriptions.count < 32 else {
                 throw CodexDeviceMessagingError.capacity
             }
-            do { publish(key, receipt: try service.queryReceipt(grantID: grant, messageID: message, connection: session)) }
+            do { publish(key, receipt: try service.queryReceipt(grantID: grant, messageID: message, connection: session), queryResponse: true) }
             catch CodexDeviceMessagingError.rateLimited {
-                send(Wire(kind: .rejected, grantID: grant, messageID: message, rejection: "rateLimited"))
+                send(Wire(kind: .queryResult, grantID: grant, messageID: message, queryStatus: .rateLimited))
             }
+            catch CodexDeviceMessagingError.statusUnknown {
+                send(Wire(kind: .queryResult, grantID: grant, messageID: message, queryStatus: .statusUnknown))
+            }
+            catch CodexDeviceMessagingError.grantExpired {
+                subscriptions.removeValue(forKey: key)
+                send(Wire(kind: .queryResult, grantID: grant, messageID: message, queryStatus: .grantExpired))
+            }
+        case (.sender, .queryResult):
+            guard admitted, let id = wire.messageID, let grant = wire.grantID,
+                  (wire.receipt != nil) != (wire.queryStatus != nil) else { throw CodexDeviceMessagingError.unauthorized }
+            let key = NetworkDeviceResponseLedger.Key(grant: grant, message: id)
+            if let receipt = wire.receipt {
+                if try responses.resolveQuery(key, receipt: receipt) {
+                    event(.receipt(grantID: grant, messageID: id, receipt))
+                }
+                event(.queryResult(grantID: grant, messageID: id, .receipt(receipt)))
+            } else if let status = wire.queryStatus {
+                let reason: CodexDeviceMessagingError
+                let result: QueryResult
+                switch status {
+                case .statusUnknown: reason = .statusUnknown; result = .statusUnknown
+                case .grantExpired: reason = .grantExpired; result = .grantExpired
+                case .rateLimited: reason = .rateLimited; result = .unavailable(.rateLimited)
+                }
+                try responses.queryUnavailable(key, reason: reason)
+                event(.queryResult(grantID: grant, messageID: id, result))
+            }
+        case (.sender, .subscriptionExpired):
+            guard admitted, let id = wire.messageID, let grant = wire.grantID else { throw CodexDeviceMessagingError.unauthorized }
+            try responses.endSubscription(.init(grant: grant, message: id))
+            event(.subscriptionExpired(grantID: grant, messageID: id))
         case (.sender, .receipt):
             guard admitted, let id = wire.messageID, let grant = wire.grantID, let receipt = wire.receipt else { throw CodexDeviceMessagingError.unauthorized }
             if try responses.resolve(.init(grant: grant, message: id), receipt: receipt) {

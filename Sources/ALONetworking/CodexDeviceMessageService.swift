@@ -66,6 +66,12 @@ public final class CodexDeviceMessageService: @unchecked Sendable {
     public func localGrants() -> [CodexDeviceMessagingPolicy.LocalGrant] {
         lock.lock(); defer { lock.unlock() }; return state.localGrants
     }
+    /// Receiver-local immutable evidence, including after disable/revocation.
+    /// This is not peer authorization and cannot start or mutate a dispatch.
+    public func localReceipt(grantID: UUID, messageID: UUID) -> CodexDeviceMessagingPolicy.Receipt? {
+        lock.lock(); defer { lock.unlock() }
+        return state.receipt(grantID: grantID, messageID: messageID)
+    }
     private struct QueryBudget { var tokens = 5.0; var last: UInt64 }
     private var queryBudgets: [UUID: QueryBudget] = [:]
     /// Only transport invokes this with the SPKI extracted from its actual TLS
