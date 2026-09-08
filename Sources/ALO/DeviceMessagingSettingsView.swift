@@ -141,6 +141,7 @@ struct DeviceMessagingSettingsView: View {
                     }
                 }
                 Text("Up to 32 local statuses are retained. Clearing one frees local capacity only; the receiver's stored receipts and duplicate protection remain.").font(.caption)
+                Text("Re-testing a task or a network authority change retires its routes. Earlier statuses become historical and cannot be queried here; the receiver remains authoritative.").font(.caption)
                 if let command {
                     Text("\(command) receipt --registration UUID --message UUID")
                         .font(.caption).textSelection(.enabled)

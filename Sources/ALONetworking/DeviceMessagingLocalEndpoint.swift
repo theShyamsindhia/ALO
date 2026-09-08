@@ -16,7 +16,7 @@ public enum DeviceMessagingLocalEndpoint {
         return try directory(bundleID: bundleID, development: bundleID.hasSuffix(".dev"), owner: owner)
     }
     public static func directory(bundleID: String, development: Bool, owner: uid_t = geteuid()) throws -> URL {
-        let scope = bundleID + (development ? "\ndevelopment" : "\nproduction")
+        let scope = bundleID + "\n" + String(owner) + (development ? "\ndevelopment" : "\nproduction")
         let suffix = SHA256.hash(data: Data(scope.utf8)).prefix(10).map { String(format: "%02x", $0) }.joined()
         // Ask Darwin, not an inherited TMPDIR supplied by an invoking shell.
         // Another UID cannot pre-create the deterministic child in this parent.
@@ -32,7 +32,7 @@ public enum DeviceMessagingLocalEndpoint {
         var info = stat()
         guard lstat(parent.path, &info) == 0, info.st_uid == geteuid(),
               info.st_mode & S_IFMT == S_IFDIR, info.st_mode & 0o077 == 0 else { throw Failure.unsafeTemporaryDirectory }
-        let result = parent.appendingPathComponent("alo-\(owner)-\(suffix)", isDirectory: true)
+        let result = parent.appendingPathComponent("alo-\(suffix)", isDirectory: true)
         guard result.appendingPathComponent("ingress.sock").path.utf8.count < 104 else { throw Failure.unsafeTemporaryDirectory }
         return result
     }

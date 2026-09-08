@@ -17,10 +17,10 @@ struct DeviceMessagingOwnerTests {
         #expect(throws: DeviceMessagingCommand.Failure.invalidArguments) { try DeviceMessagingCommandRunner.run(["unknown"]) }
         #expect(DeviceMessagingCommand.Failure.invalidInput.localizedDescription.contains("UTF-8"))
         #expect(DeviceMessagingCommand.Failure.inputTooLarge.localizedDescription.contains("16 KiB"))
-        for status: LocalDeviceMessageProtocol.Response.Status in [.disabled, .revoked, .rejected, .unavailable] {
+        for status: LocalDeviceMessageProtocol.Response.Status in [.disabled, .revoked, .rejected, .unavailable, .definitelyNotQueued] {
             #expect(throws: (any Error).self) { try DeviceMessagingCommandRunner.requireAcceptedResponse(.init(status: status)) }
         }
-        for status: LocalDeviceMessageProtocol.Response.Status in [.ready, .pending, .codexQueued, .uncertain, .statusUnknown] {
+        for status: LocalDeviceMessageProtocol.Response.Status in [.pendingApproval, .capabilityPending, .ready, .authenticatedReceipt, .codexQueued, .deliveredConfirmed, .uncertain, .pending, .statusUnknown] {
             #expect(throws: Never.self) { try DeviceMessagingCommandRunner.requireAcceptedResponse(.init(status: status)) }
         }
     }
@@ -322,6 +322,13 @@ struct DeviceMessagingOwnerTests {
             try await wait("explicit revocation failed before ordinary message arrives") {
                 received.read { $0.view.error?.contains("Grant revocation did not complete") == true }
             }
+            #expect(try MacOwnerSocket.request(.init(operation: .status, registration: receiverRegistration),
+                directory: f.directory.appendingPathComponent("socket")).status == .revoked)
+            #expect(try MacOwnerSocket.request(.init(operation: .register, taskID: receiverTask, title: "Same receiver task"),
+                directory: f.directory.appendingPathComponent("socket")).status == .revoked)
+            receiver.approve(UUID(), registration: receiverRegistration)
+            try await wait("ordinary invalid action is separately reported") { received.read { $0.view.notice?.contains("Approval unavailable") == true } }
+            #expect(received.read { $0.view.error?.contains("Grant revocation did not complete") == true })
         }
         let message = UUID(), body = "Peer data: exact two-owner text; never a task selector."
         let request = try LocalDeviceMessageProtocol.Request(operation: .send, registration: senderRegistration,
@@ -394,11 +401,18 @@ struct DeviceMessagingOwnerTests {
         #expect(receiverService.localReceipt(grantID: grant, messageID: message) == .codexQueued)
         #expect(try MacOwnerSocket.request(overflow, directory: senderDirectory.appendingPathComponent("socket")).status == .pending,
             "Local capacity was reclaimed. This is not evidence of receiver capacity or delivery.")
-        sender.testCapability(senderRegistration)
-        try await wait("fresh capability test invalidated the previous local capability") {
-            sent.read { $0.view.registrations.contains { $0.id == senderRegistration && $0.state == .capabilityPending } }
+        if failedRevocation {
+            sender.testCapability(senderRegistration)
+            try await wait("fresh capability test invalidated the previous local capability") {
+                sent.read { $0.view.registrations.contains { $0.id == senderRegistration && $0.state == .capabilityPending } }
+            }
+        } else {
+            try f.policy.receive(f.policy.snapshot().removingMember(userID: f.sender.publicIdentity.userID, signedBy: f.user))
+            try await wait("actual policy revision retired old destinations") {
+                sent.read { $0.view.destinations.isEmpty && $0.view.error?.contains("Network authority changed") == true }
+            }
         }
-        #expect(sender.routeCountForTesting == 0, "Reverification must retire the old owner's routes as well as reducer destinations.")
+        #expect(sender.routeCountForTesting == 0, "Network retirement and reverification must retire the owner's routes.")
         #expect(sent.read { $0.view.destinations.isEmpty }, "Settings must not offer unusable old destination commands.")
     }
 }

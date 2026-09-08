@@ -62,6 +62,24 @@ struct DeviceMessagingControllerStateTests {
         }
         #expect(state.pendingCount == 0)
     }
+    @Test func retiringPeerDestinationsFreesTheirBudgetWithoutRetiringOtherPeers() throws {
+        var (state, registration, destination) = try ready()
+        let other = try state.bindAuthenticatedDestination(registration: registration, approvedDigest: digest)
+        let request = try LocalDeviceMessageProtocol.Request(operation: .send, registration: registration,
+            destination: destination, messageID: UUID(), text: "retired peer")
+        let first = try #require(try state.admit(request))
+        let second = try #require(try state.admit(.init(operation: .send, registration: registration,
+            destination: other, messageID: UUID(), text: "remaining peer")))
+        state.retireDestinations([destination])
+        #expect(!state.isCurrent(first.ticket) && state.isCurrent(second.ticket))
+        #expect(state.pendingCount == 1)
+        #expect(state.snapshot(registration: registration, messageID: request.messageID!)?.status == .unavailable)
+        #expect(throws: DeviceMessagingControllerState.Failure.unavailable) { try state.admit(request) }
+        for _ in 0..<31 { _ = try state.bindAuthenticatedDestination(registration: registration, approvedDigest: digest) }
+        #expect(throws: DeviceMessagingControllerState.Failure.capacity) {
+            try state.bindAuthenticatedDestination(registration: registration, approvedDigest: digest)
+        }
+    }
     @Test func explicitRetirementRecoversPresentationCapacityWithoutClaimingDurableDeletion() throws {
         var (state, registration, destination) = try ready()
         let request = try LocalDeviceMessageProtocol.Request(operation: .send, registration: registration, destination: destination, messageID: UUID(), text: "one")

@@ -105,6 +105,15 @@ public struct DeviceMessagingControllerState: Sendable {
         destinations = destinations.filter { $0.value != registration }
         records = records.filter { $0.key.registration != registration }
     }
+    /// Actual owner retires unusable peer routes after authority changes. Keep
+    /// historical receipts for explicit acknowledgement, not send/query access.
+    public mutating func retireDestinations(_ retired: Set<UUID>) {
+        destinations = destinations.filter { !retired.contains($0.key) }
+        for key in Array(records.keys) where records[key].map({ retired.contains($0.destination) }) == true {
+            records[key]?.ticket = nil
+            records[key]?.unavailable = true
+        }
+    }
     /// Returns one bounded work intention; nil means coalesced, never sent.
     /// Existing text IDs never automatically create another send, even after an
     /// unavailable result. Only explicit receipt requests create query work.

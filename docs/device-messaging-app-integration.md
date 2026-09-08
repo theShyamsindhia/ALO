@@ -91,7 +91,8 @@ This does not establish receipt in an actual Codex task or two-Mac acceptance.
   protected per-user temporary directory, with canonical ownership/mode checks;
   they do not trust an inherited TMPDIR or guess a release bundle identity.
 - CLI responses are JSON. Refusals (`disabled`, `revoked`, `rejected`,
-  `unavailable`) print that response and exit 1; valid status responses exit 0.
+  `unavailable`, `definitelyNotQueued`) print that response and exit 1; other
+  defined status responses exit 0. The switch is exhaustive for new statuses.
   Neither exit 0 nor `codexQueued` proves task delivery. Never blindly retry text.
 - Enabling a network explicitly advertises device/network discovery metadata,
   including for networks owned by someone else. Authentication and receiver-local
@@ -104,6 +105,15 @@ messages to queue, contradicting the existing rate limit; its expectation was
 corrected without changing any production rate or capacity threshold.
 
 Final external corrective review and combined CI remain separate release gates.
+
+The subsequent review-edge checkpoint passed 64 tests in 11 suites (13.616
+seconds). It adds constant-length endpoint naming even for the largest UID,
+exhaustive CLI status classification, revoked status while forgetting, ordinary
+action notices that preserve authority errors, and per-network destination
+retirement that also frees the reducer's destination budget. Actual policy
+revision and re-test branches both clear stale Settings commands. Historical
+statuses are explicitly described as no longer queryable after route retirement;
+they do not authorize replay or replace the receiver's durable evidence.
 
 - Actual held receiver construction then disable cannot enable/publish late.
 - Actual hashed executable approval cannot cross identity/choice generation.

@@ -245,7 +245,7 @@ final class DeviceMessagingOwner: @unchecked Sendable {
         stateLock.withLock { snapshot.error = "Device messaging operation unavailable; no automatic retry." }; emit()
     }
     private func actionFailed(_ message: String) {
-        stateLock.withLock { snapshot.error = message }; emit()
+        stateLock.withLock { snapshot.notice = message }; emit()
     }
     func addNetwork(_ id: UUID, user: UserIdentity, identity: MacSecureRoomIdentity, access: NetworkDeviceAccess, token: UUID) {
         addNetwork(id, user: user, identity: identity.identity, pins: identity.pins, access: access, token: token)
@@ -313,6 +313,12 @@ final class DeviceMessagingOwner: @unchecked Sendable {
         approvals = approvals.filter { $0.value.network != id }
         grants = grants.filter { $0.value.0 != id }
         for registration in affected { finishForgetIfSettled(registration) }
+        let retiredDestinations = Set(routes.filter { $0.value.remote.networkID == id }.map(\.key))
+        routes = routes.filter { !retiredDestinations.contains($0.key) }
+        stateLock.withLock {
+            state.retireDestinations(retiredDestinations)
+            snapshot.destinations.removeAll { retiredDestinations.contains($0.id) }
+        }
         lifecycleFence.withLock { liveReceivers.removeAll { $0 === context.receiver } }
         for peer in outbound.values where peer.network == id { peer.transport.stop() }
         let retired = incoming.filter { $0.value.0 == id }.map(\.key)
@@ -389,10 +395,10 @@ final class DeviceMessagingOwner: @unchecked Sendable {
                     guard let task = request.taskID, let title = request.title else { return (.init(status: .rejected), nil) }
                     let id = try state.register(taskID: task, title: title)
                     let entry = state.registrations.first { $0.id == id }
-                    return (.init(status: Self.registrationStatus(entry), registration: id), nil)
+                    return (.init(status: Self.registrationStatus(entry, forgetting: forgetting.contains(id)), registration: id), nil)
                 case .status:
                     let entry = state.registrations.first { $0.id == request.registration }
-                    let status = Self.registrationStatus(entry)
+                    let status = Self.registrationStatus(entry, forgetting: request.registration.map { forgetting.contains($0) } ?? false)
                     return (.init(status: status, registration: request.registration), nil)
                 case .send, .receipt:
                     guard let registration = request.registration, !forgetting.contains(registration) else { return (.init(status: .revoked), nil) }
@@ -417,7 +423,8 @@ final class DeviceMessagingOwner: @unchecked Sendable {
         }
     }
     private func key(_ peer: UUID, _ grant: UUID, _ message: UUID) -> String { "\(peer)/\(grant)/\(message)" }
-    private static func registrationStatus(_ entry: DeviceMessageRegistration.Entry?) -> LocalDeviceMessageProtocol.Response.Status {
+    private static func registrationStatus(_ entry: DeviceMessageRegistration.Entry?, forgetting: Bool) -> LocalDeviceMessageProtocol.Response.Status {
+        guard !forgetting else { return .revoked }
         switch entry?.state {
         case .pendingApproval?: return .pendingApproval
         case .capabilityPending?: return .capabilityPending
