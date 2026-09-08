@@ -45,6 +45,9 @@ jobs:
           flavor: tests
           mode: save
       - name: Run tests without installing or signing an app
+        env:
+          ALO_TEST_FANOUT_GATE_TRACE: "1"
+          ALO_TEST_FANOUT_TRACE_DIR: ${{ runner.temp }}/alo-fanout-traces
         # Same optimized test-only entrypoint workaround and strict live timing
         # gates as the release workflow; packaging flags remain unchanged.
         run: |
@@ -56,6 +59,15 @@ jobs:
           grep -Eq 'Test run with [1-9][0-9]* tests?( in [0-9]+ suites)? passed' "$RUNNER_TEMP/alo-tests.log"
       - name: Run repeatable room scenarios
         run: bash Scripts/test_room_scenarios.sh
+      - name: Export test log and bounded fanout diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: alo-test-and-fanout-evidence
+          path: |
+            ${{ runner.temp }}/alo-tests.log
+            ${{ runner.temp }}/alo-fanout-traces
+          if-no-files-found: warn
       - name: Export native UI renders
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

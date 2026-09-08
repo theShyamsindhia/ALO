@@ -39,6 +39,31 @@ final class HostServer {
         let replaced: UInt64
         let discardedBoundary: UInt64
     }
+    /// Numeric-only observation of actual owner-queue processing. It changes
+    /// neither timestamps nor gate decisions and is disabled by default.
+    struct AudioCompletionObservation {
+        let port: UInt16
+        let entryNanos: UInt64
+        let ownerNanos: UInt64
+    }
+    /// Optional numeric evidence of the actual gate, never a second gate implementation.
+    struct AudioAdmissionObservation {
+        enum Decision: Int { case admitted, deferred, rejected }
+        let port: UInt16
+        let ownerNanos: UInt64
+        let captureNanos: UInt64
+        let captureAge: UInt64
+        let queueResidence: UInt64
+        let admissionBudget: UInt64
+        let estimatedDuration: UInt64
+        let recentInterval: UInt64
+        let unfinishedInterval: UInt64
+        let lastCompletion: UInt64?
+        let inFlight: Int
+        let pending: Int
+        let fanoutIdle: Bool
+        let decision: Decision
+    }
     typealias OutboundSend = (
         _ connection: NWConnection,
         _ data: Data,
@@ -100,6 +125,8 @@ final class HostServer {
     private let listenerReadyHandler: ((NWEndpoint.Port) -> Void)?
     private let outboundSend: OutboundSend?
     private let audioSendNowNanos: () -> UInt64
+    private let audioCompletionObservationForTesting: ((AudioCompletionObservation) -> Void)?
+    private let audioAdmissionObservationForTesting: ((AudioAdmissionObservation) -> Void)?
     private let audioBackpressurePolicy: AudioBackpressurePolicy
     private let playbackRequestHandler: ((RoomMediaCommand) -> Bool)?
     private let localParticipantID: String?
@@ -142,6 +169,8 @@ final class HostServer {
         outboundSend: OutboundSend? = nil,
         // Must be thread-safe: read on the owning queue and at send-callback entry.
         audioSendNowNanos: @escaping () -> UInt64 = MonotonicClock.nowNanos,
+        audioCompletionObservationForTesting: ((AudioCompletionObservation) -> Void)? = nil,
+        audioAdmissionObservationForTesting: ((AudioAdmissionObservation) -> Void)? = nil,
         audioBackpressurePolicy: AudioBackpressurePolicy = .boundedLatest(maxInFlight: 8),
         playbackRequestHandler: ((RoomMediaCommand) -> Bool)? = nil,
         localParticipantID: String? = nil
@@ -154,6 +183,8 @@ final class HostServer {
         self.listenerReadyHandler = listenerReadyHandler
         self.outboundSend = outboundSend
         self.audioSendNowNanos = audioSendNowNanos
+        self.audioCompletionObservationForTesting = audioCompletionObservationForTesting
+        self.audioAdmissionObservationForTesting = audioAdmissionObservationForTesting
         self.audioBackpressurePolicy = audioBackpressurePolicy
         self.playbackRequestHandler = playbackRequestHandler
         self.localParticipantID = localParticipantID
@@ -1160,6 +1191,17 @@ final class HostServer {
                 ? client.lastAudioCompletionNanos.map { submittedAt >= $0 ? submittedAt - $0 : 0 } ?? 0
                 : 0
             let completionInterval = max(recentCompletionInterval, unfinishedCompletionInterval)
+            func observeAdmission(_ decision: AudioAdmissionObservation.Decision) {
+                guard let observe = audioAdmissionObservationForTesting,
+                      case .hostPort(_, let port) = connection.endpoint else { return }
+                observe(.init(port: port.rawValue, ownerNanos: submittedAt,
+                    captureNanos: packet.captureTimeNanos, captureAge: captureAge,
+                    queueResidence: submittedAt >= packet.enqueuedAtNanos ? submittedAt - packet.enqueuedAtNanos : 0,
+                    admissionBudget: admissionBudget, estimatedDuration: estimatedLocalCompletion,
+                    recentInterval: recentCompletionInterval, unfinishedInterval: unfinishedCompletionInterval,
+                    lastCompletion: client.lastAudioCompletionNanos, inFlight: client.audioSendsInFlight,
+                    pending: client.pendingAudio.count, fanoutIdle: fanoutIsIdle, decision: decision))
+            }
             // Queue wait alone ignores capture acquisition age and work already
             // occupying this path. Preserve fresh FIFO packets, but do not admit
             // one whose observed local service estimate consumes its remaining
@@ -1186,12 +1228,15 @@ final class HostServer {
                    acquisitionAge < Self.maximumPendingAudioSpanNanos,
                    queueResidence < Self.maximumPendingAudioWaitNanos,
                    captureAge < admissionBudget {
+                    observeAdmission(.deferred)
                     client.pendingAudio.insert(packet, at: 0)
                     break
                 }
                 client.audioAdmissionRejected &+= 1
+                observeAdmission(.rejected)
                 continue
             }
+            observeAdmission(.admitted)
             client.audioSendsInFlight += 1
             client.audioSent &+= 1
             send(packet.data, over: connection, isComplete: true) { [weak self, weak client] error in
@@ -1226,6 +1271,11 @@ final class HostServer {
                         }
                     }
                     client.lastAudioCompletionNanos = completedAt
+                    if let observe = self.audioCompletionObservationForTesting,
+                       case .hostPort(_, let port) = connection.endpoint {
+                        observe(.init(port: port.rawValue, entryNanos: completedAt,
+                            ownerNanos: self.audioSendNowNanos()))
+                    }
                     self.drainAudioAfterCompletion(of: client, maxInFlight: maxInFlight)
                 }
             }

@@ -71,6 +71,50 @@ struct LoopbackRoomScaleTests {
         #expect(evidence.takeDump(label: "second") == nil, "Only one dump is permitted per run")
     }
 
+    @Test func schedulingEvidenceExportsBoundedArtifactAndReportsWriteFailure() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("alo-gate-export-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let evidence = LoopbackSchedulingEvidence(capacity: 1)
+        evidence.register(port: 61_234, transport: .udp, peer: 2)
+        for time in [UInt64(100), 200] {
+            evidence.completionOwner(.init(port: 61_234, entryNanos: time,
+                ownerNanos: time + 10))
+        }
+        #expect(evidence.takeDump(label: "console first") != nil)
+        try evidence.export(directory: directory, filename: "trace.csv", label: "bounded test")
+        let text = try String(contentsOf: directory.appendingPathComponent("trace.csv"), encoding: .utf8)
+        #expect(text.contains("owner retained=1 dropped=1"))
+        #expect(text.contains("owner,2,100,110,10"))
+        #expect(!text.contains("61234"))
+        #expect(evidence.takeDump(label: "console remains suppressed") == nil)
+        let artifactFirst = LoopbackSchedulingEvidence()
+        try artifactFirst.export(directory: directory, filename: "artifact-first.csv", label: "artifact first")
+        #expect(artifactFirst.takeDump(label: "later console") != nil,
+            "Artifact export must not consume the independent one-time console dump")
+        #expect(artifactFirst.takeDump(label: "duplicate console") == nil)
+        // A regular file cannot serve as the export directory. Failure must
+        // propagate instead of producing a success summary or a validated claim.
+        let failing = LoopbackSchedulingEvidence()
+        var failed = false
+        do {
+            try failing.export(directory: directory.appendingPathComponent("trace.csv"),
+                filename: "impossible.csv", label: "failure control")
+        } catch { failed = true }
+        #expect(failed)
+    }
+
+    @Test func schedulingEvidenceReportsMappingOmittedAttemptsWithoutUnboundedKeys() throws {
+        let evidence = LoopbackSchedulingEvidence(capacity: 1)
+        let connection = NWConnection(host: "127.0.0.1", port: 61_234, using: .udp)
+        _ = evidence.admitted(connection: connection, audioSequence: 0, byteCount: 992, captureNanos: 100)
+        _ = evidence.admitted(connection: connection, audioSequence: 1, byteCount: 992, captureNanos: 200)
+        _ = evidence.admitted(connection: connection, audioSequence: 1, byteCount: 992, captureNanos: 200)
+        _ = evidence.admitted(connection: connection, audioSequence: 0, byteCount: 992, captureNanos: 100)
+        let lines = try #require(evidence.takeDump(label: "mapping cap"))
+        #expect(lines.contains("capture mapping retained=1 omitted_attempts=2; omissions count attempts, not unique timestamps"))
+        #expect(lines.filter { $0.hasPrefix("capture_sequence,") } == ["capture_sequence,100,0"])
+    }
+
     @Test func schedulingEvidenceSeparatesTransportsAndRetainsCaptureIndex() {
         let evidence = LoopbackSchedulingEvidence()
         evidence.register(port: 61_234, transport: .udp, peer: 2)
@@ -637,7 +681,7 @@ struct LoopbackRoomScaleTests {
         let directBoundedEight = try runRoom(peerCount: 8, linkBitsPerSecond: nil, policy: boundedPolicy, schedulerOversleep: schedulerOversleep)
         let shapedOne = try runRoom(peerCount: 1, linkBitsPerSecond: 4_000_000, policy: boundedPolicy, schedulerOversleep: schedulerOversleep)
         let unboundedEight = try runRoom(peerCount: 8, linkBitsPerSecond: 4_000_000, policy: .unbounded, schedulerOversleep: schedulerOversleep)
-        let boundedEight = try runRoom(peerCount: 8, linkBitsPerSecond: 4_000_000, policy: boundedPolicy, schedulerOversleep: schedulerOversleep)
+        let boundedEight = try runRoom(peerCount: 8, linkBitsPerSecond: 4_000_000, policy: boundedPolicy, schedulerOversleep: schedulerOversleep, gateTraceCandidate: true)
 
         print("Injected capture wake oversleep: \(schedulerOversleep * 1_000) ms")
         print("Direct 8-peer final packet age: \(directEight.maximumFinalAgeNanos / 1_000_000) ms")
@@ -1495,7 +1539,8 @@ struct LoopbackRoomScaleTests {
         linkBitsPerSecond: UInt64?,
         policy: HostServer.AudioBackpressurePolicy,
         schedulerOversleep: TimeInterval,
-        deferredPCM: Bool = false
+        deferredPCM: Bool = false,
+        gateTraceCandidate: Bool = false
     ) throws -> RoomMeasurements {
         // This headless fixture has no active audio device. Request precise
         // scheduling only while measuring live capture/transport, as a real
@@ -1510,6 +1555,21 @@ struct LoopbackRoomScaleTests {
         let state = PortState()
         let shaper = linkBitsPerSecond.map(FluidLinkShaper.init(bitsPerSecond:))
         let schedulingEvidence = LoopbackSchedulingEvidence()
+        let gateTraceEnabled = gateTraceCandidate
+            && ProcessInfo.processInfo.environment["ALO_TEST_FANOUT_GATE_TRACE"] == "1"
+        defer {
+            if gateTraceEnabled {
+                do {
+                    guard let directory = ProcessInfo.processInfo.environment["ALO_TEST_FANOUT_TRACE_DIR"],
+                          !directory.isEmpty else { throw LoopbackTraceExportError.missingDirectory }
+                    try schedulingEvidence.export(directory: URL(fileURLWithPath: directory, isDirectory: true),
+                        filename: "bounded-eight-wake-\(Int(schedulerOversleep * 1_000)).csv",
+                        label: "bounded-eight 4000000 bits/s injectedWake=\(schedulerOversleep)")
+                } catch {
+                    Issue.record("Fanout diagnostic export failed (not a timing result): \(error)")
+                }
+            }
+        }
         let completionLatencies = AudioCompletionLatencies()
         let captureCallbackAges = AudioCompletionLatencies()
         let captureToAdmissionAges = AudioCompletionLatencies()
@@ -1528,7 +1588,8 @@ struct LoopbackRoomScaleTests {
                 let header = AudioProbeHeader.read(in: data)
                 let sequence = header?.sequence
                 let evidenceSend = schedulingEvidence.admitted(connection: connection,
-                    audioSequence: sequence, byteCount: data.count)
+                    audioSequence: sequence, byteCount: data.count,
+                    captureNanos: gateTraceEnabled ? header?.captureTimeNanos : nil)
                 if let header {
                     let admittedAt = MonotonicClock.nowNanos()
                     captureToAdmissionAges.record(admittedAt > header.captureTimeNanos
@@ -1576,6 +1637,8 @@ struct LoopbackRoomScaleTests {
                         isComplete: isComplete, completion: .contentProcessed(measuredCompletion))
                 }
             },
+            audioCompletionObservationForTesting: gateTraceEnabled ? { schedulingEvidence.completionOwner($0) } : nil,
+            audioAdmissionObservationForTesting: gateTraceEnabled ? { schedulingEvidence.admission($0) } : nil,
             audioBackpressurePolicy: policy
         )
         try host.start()
@@ -2687,6 +2750,8 @@ private final class FluidLinkShaper: @unchecked Sendable {
 /// Failure-only numeric evidence. Never retains PCM, control bodies, addresses,
 /// identities, or keys. The cap covers this fixture's 1,600 audio submissions
 /// plus control traffic; overflow is explicit rather than silently losing data.
+private enum LoopbackTraceExportError: Error { case missingDirectory, byteLimitExceeded }
+
 private final class LoopbackSchedulingEvidence: @unchecked Sendable {
     enum Phase: String { case admitted, scheduled, dispatch, completed, capture }
     enum Transport: Hashable { case tcp, udp, other }
@@ -2713,14 +2778,57 @@ private final class LoopbackSchedulingEvidence: @unchecked Sendable {
     private var origin: UInt64?
     private var dumped = false
     private var peers: [Endpoint: Int] = [:]
+    private var admissions: [HostServer.AudioAdmissionObservation] = []
+    private var completions: [HostServer.AudioCompletionObservation] = []
+    private var admissionTotal = 0
+    private var completionTotal = 0
+    private var captureSequences: [UInt64: UInt32] = [:]
+    private var captureMappingOmittedAttempts = 0
     init(capacity: Int = 12_000) {
         self.capacity = max(1, capacity)
         events.reserveCapacity(self.capacity)
+        admissions.reserveCapacity(self.capacity)
+        completions.reserveCapacity(self.capacity)
+    }
+    func admission(_ value: HostServer.AudioAdmissionObservation) {
+        lock.withLock {
+            admissionTotal += 1
+            if admissions.count < capacity { admissions.append(value) }
+        }
+    }
+    func completionOwner(_ value: HostServer.AudioCompletionObservation) {
+        lock.withLock {
+            completionTotal += 1
+            if completions.count < capacity { completions.append(value) }
+        }
+    }
+    private func gateLines() -> [String] {
+        let (gates, owners, gateCount, ownerCount, registered, start, sequences, mappingOmissions) = lock.withLock {
+            (admissions, completions, admissionTotal, completionTotal, peers, origin ?? 0, captureSequences, captureMappingOmittedAttempts)
+        }
+        func relative(_ value: UInt64) -> UInt64 { value >= start ? value - start : 0 }
+        func peer(_ port: UInt16) -> Int { registered[Endpoint(transport: .udp, port: port)] ?? -1 }
+        // Absolute capture time is retained numerically: the first packet can precede
+        // trace origin. It joins gate retries to actual admitted packet timestamps.
+        var result = ["gate retained=\(gates.count) dropped=\(gateCount - gates.count); decision 0=admit 1=requeue 2=reject; pending excludes current candidate",
+            "gate,owner_relative_ns,peer,capture_absolute_ns,capture_age_ns,residence_ns,budget_ns,duration_ns,recent_interval_ns,unfinished_interval_ns,in_flight,pending,idle,last_completion_absolute_ns,decision"]
+        result.append("capture mapping retained=\(sequences.count) omitted_attempts=\(mappingOmissions); omissions count attempts, not unique timestamps")
+        for (capture, sequence) in sequences.sorted(by: { $0.key < $1.key }) {
+            result.append("capture_sequence,\(capture),\(sequence)")
+        }
+        for gate in gates {
+            result.append("gate,\(relative(gate.ownerNanos)),\(peer(gate.port)),\(gate.captureNanos),\(gate.captureAge),\(gate.queueResidence),\(gate.admissionBudget),\(gate.estimatedDuration),\(gate.recentInterval),\(gate.unfinishedInterval),\(gate.inFlight),\(gate.pending),\(gate.fanoutIdle ? 1 : 0),\(gate.lastCompletion.map(String.init) ?? "-"),\(gate.decision.rawValue)")
+        }
+        result.append("owner retained=\(owners.count) dropped=\(ownerCount - owners.count); owner,peer,entry_relative_ns,owner_relative_ns,extra_hop_ns")
+        for owner in owners {
+            result.append("owner,\(peer(owner.port)),\(relative(owner.entryNanos)),\(relative(owner.ownerNanos)),\(owner.ownerNanos >= owner.entryNanos ? owner.ownerNanos - owner.entryNanos : 0)")
+        }
+        return result
     }
     func register(port: UInt16, transport: Transport, peer: Int) {
         lock.withLock { peers[Endpoint(transport: transport, port: port)] = peer }
     }
-    func admitted(connection: NWConnection, audioSequence: UInt32?, byteCount: Int) -> Send {
+    func admitted(connection: NWConnection, audioSequence: UInt32?, byteCount: Int, captureNanos: UInt64? = nil) -> Send {
         let transport: Transport = connection.parameters.defaultProtocolStack.transportProtocol is NWProtocolUDP.Options
             ? .udp : (connection.parameters.defaultProtocolStack.transportProtocol is NWProtocolTCP.Options ? .tcp : .other)
         let endpoint: Endpoint?
@@ -2728,6 +2836,13 @@ private final class LoopbackSchedulingEvidence: @unchecked Sendable {
             endpoint = .init(transport: transport, port: value.rawValue)
         } else { endpoint = nil }
         return lock.withLock {
+            if let captureNanos, let audioSequence {
+                if captureSequences[captureNanos] != nil || captureSequences.count < capacity {
+                    captureSequences[captureNanos] = audioSequence
+                } else {
+                    captureMappingOmittedAttempts += 1
+                }
+            }
             let send = Send(id: nextSend, endpoint: endpoint, sequence: audioSequence, byteCount: byteCount)
             nextSend += 1
             append(send: send, phase: .admitted, at: MonotonicClock.nowNanos(), detail: 0)
@@ -2763,8 +2878,23 @@ private final class LoopbackSchedulingEvidence: @unchecked Sendable {
     }
     func takeDump(label: String) -> [String]? {
         guard lock.withLock({ if dumped { return false }; dumped = true; return true }) else { return nil }
+        return renderLines(label: label)
+    }
+    private func renderLines(label: String) -> [String] {
         return ["BEGIN loopback scheduling evidence: \(label); ordinal,time,peer,send,sequence,callback,kind,bytes,phase,detail"]
-            + lines() + ["END loopback scheduling evidence"]
+            + lines() + gateLines() + ["END loopback scheduling evidence"]
+    }
+    func export(directory: URL, filename: String, label: String) throws {
+        let lines = renderLines(label: label)
+        let data = Data((lines.joined(separator: "\n") + "\n").utf8)
+        guard data.count <= 8 * 1_024 * 1_024 else { throw LoopbackTraceExportError.byteLimitExceeded }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let destination = directory.appendingPathComponent(filename)
+        try data.write(to: destination, options: .atomic)
+        let summary = lock.withLock {
+            "gate retained=\(admissions.count) dropped=\(admissionTotal - admissions.count); owner retained=\(completions.count) dropped=\(completionTotal - completions.count); scheduling retained=\(events.count) dropped=\(totalEvents - events.count); capture mapping retained=\(captureSequences.count) omitted_attempts=\(captureMappingOmittedAttempts)"
+        }
+        print("Fanout diagnostic exported \(destination.path) bytes=\(data.count); \(summary). Instrumented evidence, not a CI-cause or overhead proof.")
     }
     func dump(label: String) {
         guard let lines = takeDump(label: label) else { return }
