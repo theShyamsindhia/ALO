@@ -130,6 +130,8 @@ final class HostServer {
     private let audioAdmissionObservationForTesting: ((AudioAdmissionObservation) -> Void)?
     private let audioBackpressurePolicy: AudioBackpressurePolicy
     private let playbackRequestHandler: ((RoomMediaCommand) -> Bool)?
+    private let acceptedDeliveryForTesting: ((@escaping () -> Void) -> Void)?
+    private let controlDeliveryForTesting: ((Data?, @escaping () -> Void) -> Void)?
     private let localParticipantID: String?
     private let packetizer = AudioPacketizer()
     /// Rotate first submission on every packet so a shared outbound link cannot
@@ -174,6 +176,8 @@ final class HostServer {
         audioAdmissionObservationForTesting: ((AudioAdmissionObservation) -> Void)? = nil,
         audioBackpressurePolicy: AudioBackpressurePolicy = .boundedLatest(maxInFlight: 8),
         playbackRequestHandler: ((RoomMediaCommand) -> Bool)? = nil,
+        acceptedDeliveryForTesting: ((@escaping () -> Void) -> Void)? = nil,
+        controlDeliveryForTesting: ((Data?, @escaping () -> Void) -> Void)? = nil,
         localParticipantID: String? = nil
     ) {
         self.mediaSecurity = mediaSecurity
@@ -188,6 +192,8 @@ final class HostServer {
         self.audioAdmissionObservationForTesting = audioAdmissionObservationForTesting
         self.audioBackpressurePolicy = audioBackpressurePolicy
         self.playbackRequestHandler = playbackRequestHandler
+        self.acceptedDeliveryForTesting = acceptedDeliveryForTesting
+        self.controlDeliveryForTesting = controlDeliveryForTesting
         self.localParticipantID = localParticipantID
     }
 
@@ -196,7 +202,8 @@ final class HostServer {
         if advertise {
             listener.service = NWListener.Service(name: roomName, type: Self.serviceType)
         }
-        listener.stateUpdateHandler = { state in
+        listener.stateUpdateHandler = { [weak self, weak listener] state in
+            guard let self, let listener, self.listener === listener else { return }
             switch state {
             case .ready:
                 print("Channel \"\(self.roomName)\" is visible on the local network.")
@@ -211,11 +218,25 @@ final class HostServer {
                 break
             }
         }
-        listener.newConnectionHandler = { [weak self] connection in
-            self?.accept(connection)
+        listener.newConnectionHandler = { [weak self, weak listener] connection in
+            guard let self else { connection.cancel(); return }
+            let accept = { [weak self, weak listener] in
+                guard let self, let listener, self.listener === listener else {
+                    connection.cancel(); return
+                }
+                self.accept(connection)
+            }
+            if let delivery = self.acceptedDeliveryForTesting {
+                delivery { [weak self] in
+                    guard let self else { connection.cancel(); return }
+                    self.queue.async { accept() }
+                }
+            } else { accept() }
         }
-        listener.start(queue: queue)
-        self.listener = listener
+        queue.sync {
+            self.listener = listener
+            listener.start(queue: queue)
+        }
     }
 
     func stop() {
@@ -272,6 +293,7 @@ final class HostServer {
             )
         }
     }
+    var clientCountForTesting: Int { queue.sync { clients.count } }
 
     /// A queue-barrier snapshot, never a drain request or an expiry sweep.
     func audioSenderSnapshot() -> [AudioSenderSnapshot] {
@@ -542,20 +564,28 @@ final class HostServer {
     private func receiveControl(for client: Client, identifier: ObjectIdentifier) {
         client.control.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [weak self] data, _, isComplete, error in
             guard let self else { return }
-            if let data {
-                for message in client.decoder.append(data) {
-                    self.handle(message, for: client)
+            let process = { [weak self] in
+                guard let self, self.clients[identifier] === client else { return }
+                if let data {
+                    for message in client.decoder.append(data) {
+                        guard self.clients[identifier] === client else { return }
+                        self.handle(message, for: client)
+                    }
+                    if client.decoder.isOverflowed {
+                        self.removeClient(identifier)
+                        return
+                    }
                 }
-                if client.decoder.isOverflowed {
+                guard self.clients[identifier] === client else { return }
+                if isComplete || error != nil {
                     self.removeClient(identifier)
                     return
                 }
+                self.receiveControl(for: client, identifier: identifier)
             }
-            if isComplete || error != nil {
-                self.removeClient(identifier)
-                return
-            }
-            self.receiveControl(for: client, identifier: identifier)
+            if let delivery = self.controlDeliveryForTesting {
+                delivery(data) { [weak self] in self?.queue.async { process() } }
+            } else { process() }
         }
     }
 

@@ -3007,3 +3007,100 @@ private enum LoopbackTestError: Error {
     case noAudioReceived
     case missingCommonPacket(UInt32)
 }
+
+/// Held native callback lifecycle regressions sharing the real loopback peer.
+/// Active, stopped, replaced, and restarted owners exercise the delivered guards
+/// without audio samples or transport parameter alterations.
+@Suite(.serialized)
+struct HostServerCallbackLifecycleTests {
+    private final class Held: @unchecked Sendable {
+        let lock = NSLock()
+        var callback: (() -> Void)?
+        var armed = false
+        var commands = 0
+        let captured = DispatchSemaphore(value: 0)
+        func arm() { lock.lock(); armed = true; lock.unlock() }
+        func receive(_ data: Data?, callback: @escaping () -> Void) {
+            // Require a complete real pause frame. A fragmented completion is
+            // a prerequisite miss, not evidence that a retired command was safe.
+            let message = data.flatMap { try? JSONDecoder().decode(ControlMessage.self, from: $0) }
+            lock.lock()
+            let shouldHold = armed && message?.type == "media_command" && message?.mediaCommand == .pause
+            if shouldHold { armed = false; self.callback = callback }
+            lock.unlock()
+            if shouldHold { captured.signal() } else { callback() }
+        }
+        func accept(_ callback: @escaping () -> Void) {
+            lock.lock(); self.callback = callback; lock.unlock(); captured.signal()
+        }
+        func release() {
+            lock.lock(); let callback = self.callback; self.callback = nil; lock.unlock()
+            callback?()
+        }
+        func command() -> Bool { lock.lock(); commands += 1; lock.unlock(); return true }
+        var count: Int { lock.lock(); defer { lock.unlock() }; return commands }
+    }
+
+    @Test(arguments: [0, 1, 2])
+    func heldActualControlCannotActAfterStopOrReplacement(retirement: Int) throws {
+        let held = Held(), ready = DispatchSemaphore(value: 0), port = PortState()
+        let host = HostServer(roomName: "Held real control", advertise: false,
+            listenerReadyHandler: { port.set($0); ready.signal() },
+            playbackRequestHandler: { _ in held.command() },
+            controlDeliveryForTesting: { data, callback in held.receive(data, callback: callback) })
+        try host.start(); defer { held.release(); host.stop() }
+        try #require(ready.wait(timeout: .now() + 3) == .success)
+        let endpoint = try #require(port.port)
+        let peer = HeadlessLoopbackPeer(index: 820, participantID: "held-lifecycle-peer")
+        defer { peer.stop() }
+        try peer.start(hostPort: endpoint)
+        try #require(peer.waitUntilJoined(timeout: 3))
+        held.arm(); peer.sendMediaCommand(.pause)
+        try #require(held.captured.wait(timeout: .now() + 3) == .success, "Actual NWConnection completion containing pause must be held")
+        try #require(held.count == 0)
+        var replacement: HeadlessLoopbackPeer?
+        defer { replacement?.stop() }
+        if retirement == 1 {
+            host.stop(); try #require(host.clientCountForTesting == 0)
+        } else if retirement == 2 {
+            let next = HeadlessLoopbackPeer(index: 821, participantID: "held-lifecycle-peer")
+            replacement = next
+            try next.start(hostPort: endpoint)
+            try #require(next.waitUntilJoined(timeout: 3))
+            try #require(host.clientCountForTesting == 1)
+        }
+        held.release()
+        _ = host.clientCountForTesting // Barrier behind the released owner-queue completion.
+        #expect(held.count == (retirement == 0 ? 1 : 0), "Only the still-current real Client may issue playback commands")
+    }
+
+    @Test(arguments: [0, 1, 2])
+    func heldActualAcceptedConnectionCannotRepopulateStoppedHost(retirement: Int) throws {
+        let held = Held(), ready = DispatchSemaphore(value: 0), port = PortState()
+        let host = HostServer(roomName: "Held real accept", advertise: false,
+            listenerReadyHandler: { port.set($0); ready.signal() },
+            acceptedDeliveryForTesting: { held.accept($0) })
+        try host.start(); defer { held.release(); host.stop() }
+        try #require(ready.wait(timeout: .now() + 3) == .success)
+        let endpoint = try #require(port.port)
+        let peer = NWConnection(host: "127.0.0.1", port: endpoint, using: .tcp)
+        peer.start(queue: DispatchQueue(label: "alo.test.held-accept.peer")); defer { peer.cancel() }
+        try #require(held.captured.wait(timeout: .now() + 3) == .success, "NWListener must supply an actual accepted connection")
+        try #require(host.clientCountForTesting == 0)
+        if retirement != 0 { host.stop() }
+        if retirement == 2 {
+            try host.start()
+            try #require(ready.wait(timeout: .now() + 3) == .success, "Replacement listener must really be ready")
+        }
+        held.release()
+        #expect(host.clientCountForTesting == (retirement == 0 ? 1 : 0), "A captured old listener callback must not recreate a Client")
+        if retirement == 2 {
+            let replacementPort = try #require(port.port)
+            let fresh = NWConnection(host: "127.0.0.1", port: replacementPort, using: .tcp)
+            fresh.start(queue: DispatchQueue(label: "alo.test.held-accept.fresh")); defer { fresh.cancel() }
+            try #require(held.captured.wait(timeout: .now() + 3) == .success)
+            held.release()
+            #expect(host.clientCountForTesting == 1, "Current listener must still accept its actual fresh connection")
+        }
+    }
+}
