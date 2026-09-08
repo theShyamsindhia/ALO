@@ -15,6 +15,14 @@ struct DeviceMessagingOwnerTests {
     enum Injected: Error { case revocationUnavailable }
     @Test func explicitCLIRunnerRejectsMalformedInputWithoutAppOrSocketBootstrap() {
         #expect(throws: DeviceMessagingCommand.Failure.invalidArguments) { try DeviceMessagingCommandRunner.run(["unknown"]) }
+        #expect(DeviceMessagingCommand.Failure.invalidInput.localizedDescription.contains("UTF-8"))
+        #expect(DeviceMessagingCommand.Failure.inputTooLarge.localizedDescription.contains("16 KiB"))
+        for status: LocalDeviceMessageProtocol.Response.Status in [.disabled, .revoked, .rejected, .unavailable] {
+            #expect(throws: (any Error).self) { try DeviceMessagingCommandRunner.requireAcceptedResponse(.init(status: status)) }
+        }
+        for status: LocalDeviceMessageProtocol.Response.Status in [.ready, .pending, .codexQueued, .uncertain, .statusUnknown] {
+            #expect(throws: Never.self) { try DeviceMessagingCommandRunner.requireAcceptedResponse(.init(status: status)) }
+        }
     }
     final class Captured: @unchecked Sendable {
         let lock = NSLock()
@@ -248,7 +256,7 @@ struct DeviceMessagingOwnerTests {
         #expect(service.localGrants().contains { $0.id == grant && $0.revoked })
         try await stop(owner, captured)
     }
-    @Test func twoActualOwnersSendAttributedTextAndReconnectForStatusWithoutResend() async throws {
+    @Test(arguments: [false, true]) func twoActualOwnersSendAttributedTextAndReconnectForStatusWithoutResend(failedRevocation: Bool) async throws {
         let f = try Fixture(); defer { f.clean() }
         let senderDirectory = f.directory.appendingPathComponent("sender")
         try FileManager.default.createDirectory(at: senderDirectory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
@@ -261,6 +269,7 @@ struct DeviceMessagingOwnerTests {
         let received = Captured(), sent = Captured()
         let receiver = DeviceMessagingOwner(testing: .init(directory: f.directory,
             beforeNetworkPublication: { _, service in received.update { $0.service = service } },
+            beforeRevoke: { if received.read({ $0.failRevoke }) { throw Injected.revocationUnavailable } },
             networkReady: { port in received.update { $0.port = port } })) { received.accept($0) }
         let sender = DeviceMessagingOwner(testing: .init(directory: senderDirectory,
             networkReady: { port in sent.update { $0.port = port } },
@@ -307,6 +316,13 @@ struct DeviceMessagingOwnerTests {
         sender.bind(remote.id, grant: grant, registration: senderRegistration)
         try await wait("opaque destination bound locally") { sent.read { !$0.view.destinations.isEmpty } }
         let destination = try #require(sent.read { $0.view.destinations.first?.id })
+        if failedRevocation {
+            received.update { $0.failRevoke = true }
+            receiver.forget(receiverRegistration)
+            try await wait("explicit revocation failed before ordinary message arrives") {
+                received.read { $0.view.error?.contains("Grant revocation did not complete") == true }
+            }
+        }
         let message = UUID(), body = "Peer data: exact two-owner text; never a task selector."
         let request = try LocalDeviceMessageProtocol.Request(operation: .send, registration: senderRegistration,
             destination: destination, messageID: message, text: body)
@@ -316,6 +332,11 @@ struct DeviceMessagingOwnerTests {
         let queuedStatus = "\(message.uuidString): \(LocalDeviceMessageProtocol.Response.Status.codexQueued.rawValue)"
         try await wait("live queued receipt reached actual sender owner without query") { sent.read { $0.messageHistory.contains(queuedStatus) } }
         #expect(sent.read { $0.messageHistory.contains(receivedStatus) })
+        if failedRevocation {
+            #expect(received.read { $0.view.error?.contains("Grant revocation did not complete") == true },
+                "Ordinary incoming receipts must not hide a failed authority revocation.")
+        }
+        try await wait("incoming receipt is presented separately") { received.read { $0.view.notice?.contains(message.uuidString) == true } }
         #expect(sender.pendingCountForTesting == 0)
         #expect(sent.read { $0.queryResults.isEmpty })
         let args = try Data(contentsOf: f.helper.appendingPathExtension("args")).split(separator: 0).map { String(decoding: $0, as: UTF8.self) }
@@ -348,6 +369,31 @@ struct DeviceMessagingOwnerTests {
         #expect(!sent.read { $0.messageHistory.contains("\(message.uuidString): \(LocalDeviceMessageProtocol.Response.Status.deliveredConfirmed.rawValue)") })
         let receiverService = try #require(received.read { $0.service })
         #expect(receiverService.localReceipt(grantID: grant, messageID: message) == .codexQueued)
+        // Fill the actual local presentation table through the socket. Clearing
+        // one status must not delete the receiver's durable duplicate evidence.
+        for _ in 0..<31 {
+            let next = UUID()
+            let accepted = try MacOwnerSocket.request(.init(operation: .send, registration: senderRegistration,
+                destination: destination, messageID: next, text: "Bounded status capacity test"),
+                directory: senderDirectory.appendingPathComponent("socket"))
+            #expect(accepted.status == .pending)
+            // The real receiver intentionally rate-limits this rapid sequence.
+            // Both queued and rejected attempts retain local presentation slots;
+            // this checks that bound, not permission to bypass receiver limits.
+            try await wait("settled local status for capacity control") {
+                sent.read { $0.view.messages.contains { $0.message == next && ($0.status == "codexQueued" || $0.status == "unavailable") } }
+            }
+        }
+        let overflow = try LocalDeviceMessageProtocol.Request(operation: .send, registration: senderRegistration,
+            destination: destination, messageID: UUID(), text: "New local presentation slot")
+        #expect(try MacOwnerSocket.request(overflow, directory: senderDirectory.appendingPathComponent("socket")).status == .unavailable)
+        sender.retireMessage(registration: senderRegistration, message: message)
+        try await wait("explicit Settings action removed local status") {
+            sent.read { !$0.view.messages.contains { $0.message == message } }
+        }
+        #expect(receiverService.localReceipt(grantID: grant, messageID: message) == .codexQueued)
+        #expect(try MacOwnerSocket.request(overflow, directory: senderDirectory.appendingPathComponent("socket")).status == .pending,
+            "Local capacity was reclaimed. This is not evidence of receiver capacity or delivery.")
         sender.testCapability(senderRegistration)
         try await wait("fresh capability test invalidated the previous local capability") {
             sent.read { $0.view.registrations.contains { $0.id == senderRegistration && $0.state == .capabilityPending } }

@@ -458,7 +458,7 @@ public final class NetworkDeviceTextListener: @unchecked Sendable {
     func advertise(networkID: UUID) {
         queue.async {
             guard !self.started, !self.stopped else { return }
-            self.listener.service = NWListener.Service(name: nil, type: "_alo-codex._tcp",
+            self.listener.service = NWListener.Service(name: nil, type: NetworkDeviceMessagingDiscovery.serviceType,
                 txtRecord: NWTXTRecord(["v": "1", "id": networkID.uuidString]))
         }
     }

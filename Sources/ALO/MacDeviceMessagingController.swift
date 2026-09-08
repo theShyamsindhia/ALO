@@ -22,6 +22,10 @@ final class MacDeviceMessagingController: ObservableObject {
     struct StoredGrant: Identifiable {
         let id: UUID; let network: UUID; let task: UUID; let revoked: Bool; let records: Int
     }
+    struct Message: Identifiable {
+        let registration: UUID; let message: UUID; let status: String
+        var id: String { "\(registration)/\(message)" }
+    }
     struct ViewState {
         var revision: UInt64 = 0
         var enabled = false
@@ -34,8 +38,10 @@ final class MacDeviceMessagingController: ObservableObject {
         var destinations: [Destination] = []
         var storedGrants: [StoredGrant] = []
         var messageStatuses: [String] = []
+        var messages: [Message] = []
         var capabilityStatuses: [UUID: String] = [:]
         var error: String?
+        var notice: String?
     }
     @Published private(set) var view = ViewState()
     let account: NetworkAccountModel
@@ -72,6 +78,7 @@ final class MacDeviceMessagingController: ObservableObject {
     func test(_ registration: UUID) { core.testCapability(registration) }
     func confirm(_ registration: UUID, response: String) { core.confirm(registration, response: response) }
     func forget(_ registration: UUID) { core.forget(registration) }
+    func retireMessage(_ message: Message) { core.retireMessage(registration: message.registration, message: message.message) }
     func retireGrant(_ grant: UUID, network: UUID) { core.retireGrant(grant, network: network) }
     func connect(_ candidate: NetworkDeviceMessagingDiscovery.Candidate) { core.connect(candidate) }
     func approve(_ incoming: UUID, registration: UUID) { core.approve(incoming, registration: registration) }
@@ -157,6 +164,11 @@ final class DeviceMessagingOwner: @unchecked Sendable {
             snapshot.messageStatuses = messageKeys.prefix(32).compactMap { registration, message in
                 state.snapshot(registration: registration, messageID: message).map { "\(message.uuidString): \($0.status.rawValue)" }
             }
+            snapshot.messages = messageKeys.prefix(32).compactMap { registration, message in
+                state.snapshot(registration: registration, messageID: message).map {
+                    UI.Message(registration: registration, message: message, status: $0.status.rawValue)
+                }
+            }
             return snapshot
         }
         publish(value)
@@ -232,14 +244,21 @@ final class DeviceMessagingOwner: @unchecked Sendable {
         guard current(token) else { return }
         stateLock.withLock { snapshot.error = "Device messaging operation unavailable; no automatic retry." }; emit()
     }
+    private func actionFailed(_ message: String) {
+        stateLock.withLock { snapshot.error = message }; emit()
+    }
     func addNetwork(_ id: UUID, user: UserIdentity, identity: MacSecureRoomIdentity, access: NetworkDeviceAccess, token: UUID) {
         addNetwork(id, user: user, identity: identity.identity, pins: identity.pins, access: access, token: token)
     }
     /// Both app and ephemeral test fixtures execute this actual construction path.
     func addNetwork(_ id: UUID, user: UserIdentity, identity: InstallationIdentity, pins: PeerPinStore, access: NetworkDeviceAccess, token: UUID) {
         worker.async { [weak self] in
-            guard let self, self.current(token), self.networks[id] == nil,
-                  self.networks.count < 8, let executable = self.stateLock.withLock({ self.approval }) else { return }
+            guard let self, self.current(token) else { return }
+            guard self.networks[id] == nil else {
+                self.stateLock.withLock { self.snapshot.notice = "Messaging is already enabled in this network." }; self.emit(); return
+            }
+            guard self.networks.count < 8 else { self.actionFailed("Messaging is limited to eight enabled networks. Disable messaging before changing the enabled set."); return }
+            guard let executable = self.stateLock.withLock({ self.approval }) else { self.actionFailed("Approve a local executable before enabling network messaging."); return }
             do {
                 let journalRoot = self.testing?.directory.appendingPathComponent("journal") ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
                 let base = journalRoot
@@ -314,10 +333,32 @@ final class DeviceMessagingOwner: @unchecked Sendable {
     /// Only the explicit Settings confirmation invokes receipt-loss retirement.
     func retireGrant(_ grant: UUID, network: UUID) {
         worker.async { [weak self] in
-            guard let self, let receiver = self.networks[network]?.receiver else { return }
+            guard let self else { return }
+            guard let receiver = self.networks[network]?.receiver else {
+                self.stateLock.withLock { self.snapshot.error = "Network is no longer enabled. Stored receipts were not discarded." }; self.emit(); return
+            }
             do { try receiver.retire(grant: grant, acknowledgeReceiptLoss: true) }
             catch { self.stateLock.withLock { self.snapshot.error = "Grant retirement failed. Its recorded evidence has not been acknowledged as removed." } }
             self.refreshStoredGrants()
+        }
+    }
+    /// Explicit Settings acknowledgement only. Never retires receiver authority
+    /// or durable dedupe receipts, and never starts a send/query.
+    func retireMessage(registration: UUID, message: UUID) {
+        worker.async { [weak self] in
+            guard let self else { return }
+            do {
+                try self.stateLock.withLock {
+                    try self.state.retirePresentation(registration: registration, messageID: message)
+                    self.messageKeys.removeAll { $0 == (registration, message) }
+                }
+                self.observations = self.observations.filter {
+                    $0.value.registration != registration || !$0.key.hasSuffix("/" + message.uuidString)
+                }
+            } catch {
+                self.stateLock.withLock { self.snapshot.error = "Status cannot be cleared while an operation is pending, or after it has already been cleared." }
+            }
+            self.emit()
         }
     }
     private func refreshDiscovery(_ token: UUID) {
@@ -436,8 +477,10 @@ final class DeviceMessagingOwner: @unchecked Sendable {
     }
     func connect(_ candidate: NetworkDeviceMessagingDiscovery.Candidate) {
         worker.async { [weak self] in
-            guard let self, self.stateLock.withLock({ self.enabled }), self.outbound.count < 8,
-                  let context = self.networks[candidate.networkHint] else { return }
+            guard let self else { return }
+            guard self.stateLock.withLock({ self.enabled }),
+                  let context = self.networks[candidate.networkHint] else { self.actionFailed("Enable messaging in this network before authenticating a device."); return }
+            guard self.outbound.count < 8 else { self.actionFailed("Eight device connections are already open. Disable messaging to close them before connecting again."); return }
             let id = UUID(), token = self.currentGeneration
             do {
                 let transport = try NetworkDeviceTextTransport(endpoint: candidate.endpoint, identity: context.identity,
@@ -467,15 +510,20 @@ final class DeviceMessagingOwner: @unchecked Sendable {
                     self.snapshot.destinations.append(.init(id: id, registration: registration, root: descriptor.root.userID,
                         spki: descriptor.fullSPKIHash.map { String(format: "%02x", $0) }.joined()))
                 }
+            } catch DeviceMessagingControllerState.Failure.capacity {
+                self.actionFailed("The 32-destination limit is full. Re-test or forget a registration to remove its destinations.")
             } catch { self.stateLock.withLock { self.snapshot.error = "Confirm the local task capability before choosing a destination." } }
             self.emit()
         }
     }
     func approve(_ incomingID: UUID, registration: UUID) {
         worker.async { [weak self] in
-            guard let self, let (network, connection) = self.incoming[incomingID], let context = self.networks[network],
-                  let task = self.stateLock.withLock({ self.forgetting.contains(registration) ? nil : self.state.registrations.first { $0.id == registration && $0.state == .verified }?.taskID }),
-                  self.approvals.count < 32 else { return }
+            guard let self else { return }
+            guard let (network, connection) = self.incoming[incomingID], let context = self.networks[network],
+                  let task = self.stateLock.withLock({ self.forgetting.contains(registration) ? nil : self.state.registrations.first { $0.id == registration && $0.state == .verified }?.taskID }) else {
+                self.actionFailed("Approval unavailable. Select a verified local task and a currently authenticated device."); return
+            }
+            guard self.approvals.count < 32 else { self.actionFailed("Too many pending approvals. Wait for them to finish before approving another device."); return }
             let request = UUID(); self.approvals[request] = PendingApproval(registration: registration, task: task, token: self.currentGeneration, network: network)
             context.receiver.approve(connection: connection, receiverChosenTask: task, lifetime: 3600, requestID: request)
         }
@@ -492,7 +540,10 @@ final class DeviceMessagingOwner: @unchecked Sendable {
             do {
                 for (grant, value) in self.grants where value.1 == registration {
                     try self.testing?.beforeRevoke?()
-                    try self.networks[value.0]?.receiver.revoke(grant: grant)
+                    // Policy retirement removes tracking only after synchronous
+                    // revoke-all. An unexpected missing context must fail closed.
+                    guard let receiver = self.networks[value.0]?.receiver else { throw ALOError("Missing revocation context") }
+                    try receiver.revoke(grant: grant)
                 }
                 self.grants = self.grants.filter { $0.value.1 != registration }
                 self.routes = self.routes.filter { $0.value.registration != registration }
@@ -543,10 +594,10 @@ final class DeviceMessagingOwner: @unchecked Sendable {
             refreshStoredGrants()
         case .received(_, let grant, let message), .completion(_, let grant, let message, _), .dispatchFailed(_, let grant, let message):
             let receipt = context.receiver.localReceipt(grantID: grant, messageID: message)
-            stateLock.withLock { snapshot.error = receipt.map { "Incoming message \(message.uuidString): \($0.rawValue)" } ?? "Incoming status unavailable; do not assume it was unqueued." }
+            stateLock.withLock { snapshot.notice = receipt.map { "Incoming message \(message.uuidString): \($0.rawValue)" } ?? "Incoming status unavailable; do not assume it was unqueued." }
         case .reviewNeeded(let grant, let message, _, _):
             let receipt = context.receiver.localReceipt(grantID: grant, messageID: message)
-            stateLock.withLock { snapshot.error = receipt.map { "Local review needed for \(message.uuidString): \($0.rawValue)" } ?? "Local review needed; status unavailable." }
+            stateLock.withLock { snapshot.notice = receipt.map { "Local review needed for \(message.uuidString): \($0.rawValue)" } ?? "Local review needed; status unavailable." }
         case .closed(let connection):
             let ids = incoming.filter { $0.value.0 == network && $0.value.1 == connection }.map(\.key)
             for id in ids { incoming.removeValue(forKey: id) }
@@ -643,6 +694,7 @@ final class DeviceMessagingOwner: @unchecked Sendable {
                     self.snapshot.destinations = []
                     self.snapshot.storedGrants = []
                     self.snapshot.capabilityStatuses = [:]
+                    self.snapshot.notice = nil
                 }
                 self.emit()
             }

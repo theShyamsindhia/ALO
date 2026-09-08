@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import Darwin
 @testable import ALONetworking
 
 struct DeviceMessagingVerticalSliceTests {
@@ -12,14 +13,17 @@ struct DeviceMessagingVerticalSliceTests {
         #expect(DeviceMessagingLocalEndpoint.shellArgument("/Applications/Raj's ALO Dev.app/Contents/MacOS/alo")
             == "'/Applications/Raj'\"'\"'s ALO Dev.app/Contents/MacOS/alo'")
     }
-    @Test func ingressPathIsShortAndSeparatedWithoutFilesystemActions() {
-        let release = DeviceMessagingLocalEndpoint.directory(bundleID: "in.werai.audio", development: false, owner: 501)
-        let dev = DeviceMessagingLocalEndpoint.directory(bundleID: "in.werai.audio.dev", development: true, owner: 501)
-        let other = DeviceMessagingLocalEndpoint.directory(bundleID: "in.werai.audio", development: false, owner: 502)
+    @Test func ingressPathIsShortAndSeparatedWithoutFilesystemActions() throws {
+        let release = try DeviceMessagingLocalEndpoint.directory(bundleID: "in.werai.audio", development: false, owner: 501)
+        let dev = try DeviceMessagingLocalEndpoint.directory(bundleID: "in.werai.audio.dev", development: true, owner: 501)
+        let other = try DeviceMessagingLocalEndpoint.directory(bundleID: "in.werai.audio", development: false, owner: 502)
         #expect(release != dev && release != other)
-        #expect(release.path.hasPrefix("/private/tmp/alo-msg-501-"))
+        #expect(!release.path.hasPrefix("/private/tmp/"))
+        var parent = stat()
+        #expect(lstat(release.deletingLastPathComponent().path, &parent) == 0)
+        #expect(parent.st_uid == geteuid() && parent.st_mode & 0o077 == 0)
         #expect(release.appendingPathComponent("ingress.sock").path.utf8.count < 104)
-        #expect(DeviceMessagingLocalEndpoint.directory(bundleID: String(repeating: "x", count: 10000), development: false, owner: 501).appendingPathComponent("ingress.sock").path.utf8.count < 104)
+        #expect(try DeviceMessagingLocalEndpoint.directory(bundleID: String(repeating: "x", count: 10000), development: false, owner: 501).appendingPathComponent("ingress.sock").path.utf8.count < 104)
     }
     #if os(macOS)
     final class ClockAndCompletion: @unchecked Sendable {

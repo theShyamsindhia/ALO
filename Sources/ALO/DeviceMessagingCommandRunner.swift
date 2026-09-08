@@ -18,11 +18,15 @@ enum DeviceMessagingCommandRunner {
             input = bounded
         }
         let request = try parsed.request(input: input)
+        guard Bundle.main.bundleIdentifier != nil else {
+            throw ALOError("Run this command using the exact ALO app executable shown in Settings. An unbundled binary cannot choose a Dev or release endpoint.")
+        }
         let response: LocalDeviceMessageProtocol.Response
         do { response = try MacOwnerSocket.request(request, directory: endpointDirectory) }
         catch MacOwnerSocket.Failure.timeout { throw ALOError("ALO device messaging timed out. Check its status in Settings; text was not automatically retried.") }
         catch MacOwnerSocket.Failure.unsafePath { throw ALOError("ALO's local messaging endpoint failed its ownership/path checks. No connection was trusted.") }
         catch MacOwnerSocket.Failure.unauthorized { throw ALOError("ALO's local messaging endpoint did not match the current user.") }
+        catch DeviceMessagingLocalEndpoint.Failure.unsafeTemporaryDirectory { throw ALOError("The protected per-user messaging directory is unavailable or unsafe. No endpoint was used.") }
         catch LocalDeviceMessageProtocol.Failure.invalidFrame { throw ALOError("ALO returned an invalid local protocol frame. No receipt status was trusted.") }
         catch LocalDeviceMessageProtocol.Failure.invalidRequest { throw ALOError("The local messaging request was rejected as invalid.") }
         catch let error as MacOwnerSocket.Failure {
@@ -39,6 +43,16 @@ enum DeviceMessagingCommandRunner {
         let frame = try LocalDeviceMessageProtocol.encode(response)
         FileHandle.standardOutput.write(frame.dropFirst(4))
         FileHandle.standardOutput.write(Data([10]))
+        try requireAcceptedResponse(response)
+    }
+    /// The JSON is emitted first, then Command.main converts this refusal to
+    /// exit 1. A successful exit still never proves task delivery.
+    static func requireAcceptedResponse(_ response: LocalDeviceMessageProtocol.Response) throws {
+        switch response.status {
+        case .disabled, .revoked, .rejected, .unavailable:
+            throw ALOError("ALO did not accept the request (\(response.status.rawValue)). Inspect Settings or query existing status before resending; no automatic retry was attempted.")
+        default: break
+        }
     }
     static var endpointDirectory: URL {
         get throws {
