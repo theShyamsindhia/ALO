@@ -462,6 +462,7 @@ enum NetworkSetupWindowPresentation {
         window.titlebarAppearsTransparent = !identityReady
         window.titleVisibility = identityReady ? .visible : .hidden
         window.titlebarSeparatorStyle = identityReady ? .automatic : .none
+        window.toolbarStyle = .unifiedCompact
         window.backgroundColor = identityReady ? .windowBackgroundColor : .clear
         window.isOpaque = identityReady
         window.isMovableByWindowBackground = !identityReady
