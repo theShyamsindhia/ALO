@@ -3,7 +3,7 @@
 This isolated transport/consent branch is not an enabled application feature.
 No Codex command, local task discovery, app launch, or audio wire modification is
 implemented. Tests were written before their corresponding implementation where
-possible. The focused six-suite run now passes 28 tests; this is service-layer
+possible. The main-based focused six-suite run now passes 29 tests; this is service-layer
 validation, not an end-user feature or physical two-Mac delivery result.
 
 ## Implemented boundaries
@@ -32,6 +32,14 @@ validation, not an end-user feature or physical two-Mac delivery result.
 
 ## Focused validation
 
+- The branch is independently based on main `c07a605`; its diff contains only
+  this transport/consent feature, tests and plans, not the separate audio/UI work.
+- Main-based validation passed 29 tests in six suites in
+  `/tmp/alo-device-messaging.ktdBQI/main-base-green.log` (0.363 s tests).
+  An exact executor-helper probe first demonstrated overlapping work with the
+  prior caller-queue assignment (`queue-red.log`); private serial target queues
+  passed the same probe (`queue-green.log`) and a permanent ordering regression.
+  Transport and listener both use that executor regardless of caller queue type.
 - Initial compile-only failure (three missing throwing test reads) is preserved
   separately in `/tmp/alo-device-messaging.ktdBQI/revision-fence-red.log`; it is not
   a behavioral reproduction.
