@@ -559,3 +559,98 @@ This bounded local validation does not establish the original CI 48 cause,
 arbitrary-load fairness, or two-device acoustic correctness. At this checkpoint,
 independent reviews and required integrated CI for the corrected PR4 candidate
 are pending; this is not a release or merge claim.
+
+### Legacy fanout: cadence-aware backlog and eligible-younger recovery
+
+This follow-up changes `HostServer`, not the secure publisher: `SecureMacMediaHost`
+uses `MediaHostSession` and does not construct `HostServer`. These results concern
+legacy transport correctness and its required CI coverage, not a demonstrated
+cause or resolution of current secure-room acoustic symptoms.
+
+The fixed-latency pipeline regression demonstrated that inter-completion spacing
+could reflect admission cadence rather than additional path delay: a path with
+100 ms admission-to-completion time delivered only six of seven paced packets
+under the prior estimator. The candidate combines observed sojourn/oldest
+outstanding age with positive unexplained completion growth. A bounded submission
+ticket ledger prevents duplicate callbacks from releasing another send's credit;
+non-FIFO observations use a conservative raw-spacing fallback. Checked arithmetic
+fails closed. Existing packet, residence, capture-age and deadline limits remain.
+
+A blocked head may be superseded only when an earlier retained younger candidate
+passes the same canonical admission assessment and freshness guards. The earliest
+eligible candidate is dispatched, the retained suffix stays FIFO, and discarded
+prefix packets count as replacements, not expiry. Direct positive/negative tests
+assert actual wire sequences and complete accounting. Original conservative-burst
+and cross-peer-refill workloads remain as history controls; their policy-specific
+eligibility assertions were migrated to the new calculated projection, alongside
+new genuinely eligible controls. Delivery floors and deadline workloads were not
+weakened.
+
+`RecordedFairRoundTiming.failed` retains the finite 541-sample trace from failed CI
+34187286270. The integrated candidate consumes 536 samples, with no exhaustion.
+The prior successful 536-sample *research* replay could not supply all candidate
+sends and remains inconclusive; it was never a shipped regression and is not
+silently skipped or repeated with cycled samples.
+
+`RecordedExtendedFanoutTiming.swift` supplies a separate measured counterfactual
+dataset, not an exact CI replay. One original-policy four-second headless capture
+at 4,000,000 bit/s produced 2,033 complete FIFO timing pairs with zero trace drops
+or mapping omissions. Its source CSV SHA-256 is
+`07ba9c32193eab0af038358793c1cf8a2bbd9d1a0a6009f125d4930130f1845f`.
+Import validation matched admission/dispatch/completion records, byte counts,
+per-peer FIFO and capture deadlines. The static arrays equal the validated import:
+the first 50 actual capture wakes, all 2,033 timing pairs, and 80 actual control
+events from the one-second window. No runtime environment/file loader is required.
+The original-policy one-second control consumed 543 samples with minimum delivery
+62; the candidate consumes 567, minimum 67, maximum packet age 210.815 ms, no
+deadline misses and complete accounting. Neither run exhausts the dataset.
+
+Selective integration onto `bfad30b` retains the newer listener/client lifecycle,
+restart and video-reset guards. Local validation passed 30 tests in three suites
+(2.061 s), including the full fixed seed set `0..<32` plus `41`, the original
+controls, seven healthy independent paths delivering all 200 packets, serialized
+slow-path protection, callback lifecycle and private-media rejection checks:
+
+```sh
+nice -n 19 swift test -c release --jobs 1 --no-parallel \
+  -Xswiftc -num-threads -Xswiftc 1 \
+  -Xswiftc -Xllvm -Xswiftc -sil-disable-pass=CapturePropagation \
+  -Xswiftc -Xllvm -Xswiftc -sil-disable-pass-only-function=main \
+  --filter 'DeterministicAudioFanoutTests|HostServerCallbackLifecycleTests|PrivateMediaIntegrationTests'
+```
+
+The same binary then passed the separate headless network-only check (both
+0 ms and 35 ms injected oversleep), minimum deliveries 63/61 against the unchanged
+50 floor, maximum packet ages 210.491/220.251 ms and zero bounded lateness:
+
+```sh
+nice -n 19 swift test -c release --skip-build --jobs 1 --no-parallel \
+  --filter 'LoopbackRoomScaleTests/boundedFanoutPreventsRoomScaleDelay'
+```
+
+No installed app, audio device, microphone or physical listening was exercised.
+Independent review and required integrated CI remain pending; these local passes
+are not a release, merge or universal congestion-safety claim.
+
+The initial independent review found a real recovery-prefix edge case, reproduced
+by `recoveryDoesNotSkipAdmissibleAcquisitionDelayedIntermediate`: with an actual
+fixed 130 ms transport and two credits, the no-tail control passed, but adding a
+fresh tail caused wire sequence `[0, 1, 4]`, replacing an intermediate packet that
+passed the admission gate but failed the stricter recovery acquisition guard.
+All timing/credit prerequisites passed; seven behavioral assertions failed only
+in the tail case. Recovery now stops at the first canonically admissible packet
+if it fails recovery-specific freshness. It never scans past that barrier to
+discard it for a later packet. No freshness guard or delivery limit was loosened.
+
+The corrected matrix passed 31 tests in three suites (2.020 s), including both
+new prefix cases; finite consumption remains 536/541 and 567/2,033 with no
+exhaustion. The same binary's separate headless fanout cases passed (16.280 s),
+minimum deliveries 65/66 and maximum ages 222.659/194.438 ms. The commands above
+remain applicable. The accepted test-only follow-ups make callback extraction
+atomic and validate the failed trace's paired-array shape. The existing zero-HOL
+invariant is retained: restoring the original deferral branch exposes eligible
+younger witnesses again, as the preserved baseline did; actual wire/prefix
+assertions independently cover recovery. The request to raise the extended-trace
+floor to a particular observed result was rejected in favor of the predeclared
+50-packet contract. Initial review is not described as clean: the correction's
+final independent review and required integrated CI are still pending.

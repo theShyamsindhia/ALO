@@ -26,6 +26,10 @@ final class HostServer {
         let value: UInt64
         let observedAtNanos: UInt64
     }
+    private struct AudioSubmission: Sendable {
+        let id: UUID
+        let nanos: UInt64
+    }
     struct AudioSenderSnapshot {
         let participantID: String
         let udpPort: UInt16
@@ -48,6 +52,12 @@ final class HostServer {
     }
     /// Optional numeric evidence of the actual gate, never a second gate implementation.
     struct AudioAdmissionObservation {
+        struct YoungerCandidate {
+            let captureNanos: UInt64
+            let enqueuedNanos: UInt64
+            let pendingIndex: Int
+            let pendingCount: Int
+        }
         enum Decision: Int { case admitted, deferred, rejected }
         let port: UInt16
         let ownerNanos: UInt64
@@ -64,6 +74,12 @@ final class HostServer {
         let fanoutIdle: Bool
         let decision: Decision
         var completionRound: Int? = nil
+        var youngerCandidate: YoungerCandidate? = nil
+        var supersededPrefixCount: Int = 0
+        var projectedCompletion: UInt64 = 0
+        var completionGrowth: UInt64 = 0
+        var submissionLedgerCount: Int = 0
+        var cadenceOrderValid: Bool = true
     }
     typealias OutboundSend = (
         _ connection: NWConnection,
@@ -104,6 +120,10 @@ final class HostServer {
         var audioCompletionDurations: [AudioCompletionSample] = []
         var audioCompletionIntervals: [AudioCompletionSample] = []
         var lastAudioCompletionNanos: UInt64?
+        var lastAudioCompletedSubmissionNanos: UInt64?
+        var audioCompletionGrowth: [AudioCompletionSample] = []
+        var audioSubmissions: [AudioSubmission] = []
+        var audioCadenceOrderValid = true
         var audioReplaced: UInt64 = 0
         var audioDiscardedBoundary: UInt64 = 0
         var lastAudioAgeWarningNanos: UInt64?
@@ -635,6 +655,10 @@ final class HostServer {
             client.audioCompletionDurations.removeAll()
             client.audioCompletionIntervals.removeAll()
             client.lastAudioCompletionNanos = nil
+            client.lastAudioCompletedSubmissionNanos = nil
+            client.audioCompletionGrowth.removeAll()
+            client.audioSubmissions.removeAll()
+            client.audioCadenceOrderValid = true
             discardPendingAudio(for: client)
             client.audioBacklogCongested = false
             let connection = NWConnection(
@@ -1199,9 +1223,10 @@ final class HostServer {
         // expire old audio even if capture has stopped.
         while admittedCount < admissionQuantum,
               client.audioSendsInFlight < max(1, maxInFlight), !client.pendingAudio.isEmpty {
-            let packet = client.pendingAudio.removeFirst()
+            var packet = client.pendingAudio.removeFirst()
             let submittedAt = audioSendNowNanos()
-            let captureAge = submittedAt >= packet.captureTimeNanos ? submittedAt - packet.captureTimeNanos : 0
+            var captureAge = submittedAt >= packet.captureTimeNanos ? submittedAt - packet.captureTimeNanos : 0
+            var supersededPrefixCount = 0
             let schedulingHeadroom = RoomTiming.renderSchedulingHeadroomNanos
             let admissionBudget = groupPlayoutDelayNanos > schedulingHeadroom
                 ? groupPlayoutDelayNanos - schedulingHeadroom : 0
@@ -1217,6 +1242,9 @@ final class HostServer {
                 client.audioCompletionDurations.removeAll()
                 client.audioCompletionIntervals.removeAll()
                 client.lastAudioCompletionNanos = nil
+                client.lastAudioCompletedSubmissionNanos = nil
+                client.audioCompletionGrowth.removeAll()
+                client.audioCadenceOrderValid = true
             }
             // Pending audio itself may wait for at most 80ms. Older completed
             // evidence cannot describe its remaining queue residence, while an
@@ -1242,9 +1270,66 @@ final class HostServer {
                 ? client.lastAudioCompletionNanos.map { submittedAt >= $0 ? submittedAt - $0 : 0 } ?? 0
                 : 0
             let completionInterval = max(recentCompletionInterval, unfinishedCompletionInterval)
+            client.audioCompletionGrowth.removeAll {
+                submittedAt >= $0.observedAtNanos && submittedAt - $0.observedAtNanos >= completionSampleHorizon
+            }
+            let oldestSubmission = client.audioSubmissions.map(\.nanos).min()
+            let oldestAge = oldestSubmission.map { submittedAt >= $0 ? submittedAt - $0 : UInt64.max } ?? 0
+            var unfinishedGrowth = unfinishedCompletionInterval
+            if client.audioCadenceOrderValid, let oldestSubmission,
+               let priorSubmission = client.lastAudioCompletedSubmissionNanos,
+               oldestSubmission >= priorSubmission {
+                let cadence = oldestSubmission - priorSubmission
+                unfinishedGrowth = unfinishedGrowth > cadence ? unfinishedGrowth - cadence : 0
+            }
+            let growth = client.audioCadenceOrderValid
+                ? max(client.audioCompletionGrowth.map(\.value).max() ?? 0, unfinishedGrowth)
+                : completionInterval
+            // Full observed sojourn already includes existing queue delay.
+            // Add unexplained growth, not source/admission cadence a second time.
+            // Equal-admission bursts retain their complete interval contribution.
+            let base = max(estimatedLocalCompletion, oldestAge)
+            let (growthProjection, multiplyOverflow) = growth.multipliedReportingOverflow(by: UInt64(client.audioSendsInFlight) + 1)
+            let (projection, addOverflow) = base.addingReportingOverflow(growthProjection)
+            let projectedCompletion = multiplyOverflow || addOverflow ? UInt64.max : projection
+            // One canonical assessment for the real head and optional read-only
+            // retained-packet observation. Same time, credit and sample snapshot.
+            // Early completions understate a growing in-flight backlog. Budget
+            // the recent slowest interval without treating completion as an ACK.
+            func canAdmit(_ candidate: PendingAudio) -> Bool {
+                let age = submittedAt >= candidate.captureTimeNanos
+                    ? submittedAt - candidate.captureTimeNanos : 0
+                return age < admissionBudget
+                    && projectedCompletion < admissionBudget - age
+            }
+            func firstAdmissibleYoungerIndex() -> Int? {
+                for (index, candidate) in client.pendingAudio.enumerated() {
+                    guard canAdmit(candidate) else { continue }
+                    // Only canonically infeasible packets may be superseded.
+                    // An admissible intermediate excluded by recovery freshness
+                    // is a barrier, not permission to discard it for a later one.
+                    guard candidate.captureTimeNanos > packet.captureTimeNanos,
+                          candidate.captureTimeNanos <= submittedAt,
+                          candidate.enqueuedAtNanos <= submittedAt else { return nil }
+                    let acquisition = candidate.enqueuedAtNanos >= candidate.captureTimeNanos
+                        ? candidate.enqueuedAtNanos - candidate.captureTimeNanos : 0
+                    guard acquisition < Self.maximumPendingAudioSpanNanos
+                        && submittedAt - candidate.enqueuedAtNanos < Self.maximumPendingAudioWaitNanos
+                    else { return nil }
+                    return index
+                }
+                return nil
+            }
             func observeAdmission(_ decision: AudioAdmissionObservation.Decision) {
                 guard let observe = audioAdmissionObservationForTesting,
                       case .hostPort(_, let port) = connection.endpoint else { return }
+                var younger: AudioAdmissionObservation.YoungerCandidate?
+                if decision == .deferred, let index = firstAdmissibleYoungerIndex() {
+                    let candidate = client.pendingAudio[index]
+                    younger = .init(captureNanos: candidate.captureTimeNanos,
+                        enqueuedNanos: candidate.enqueuedAtNanos, pendingIndex: index,
+                        pendingCount: client.pendingAudio.count)
+                }
                 observe(.init(port: port.rawValue, ownerNanos: submittedAt,
                     captureNanos: packet.captureTimeNanos, captureAge: captureAge,
                     queueResidence: submittedAt >= packet.enqueuedAtNanos ? submittedAt - packet.enqueuedAtNanos : 0,
@@ -1252,19 +1337,17 @@ final class HostServer {
                     recentInterval: recentCompletionInterval, unfinishedInterval: unfinishedCompletionInterval,
                     lastCompletion: client.lastAudioCompletionNanos, inFlight: client.audioSendsInFlight,
                     pending: client.pendingAudio.count, fanoutIdle: fanoutIsIdle, decision: decision,
-                    completionRound: completionRound))
+                    completionRound: completionRound,
+                    youngerCandidate: younger, supersededPrefixCount: supersededPrefixCount,
+                    projectedCompletion: projectedCompletion, completionGrowth: growth,
+                    submissionLedgerCount: client.audioSubmissions.count,
+                    cadenceOrderValid: client.audioCadenceOrderValid))
             }
             // Queue wait alone ignores capture acquisition age and work already
             // occupying this path. Preserve fresh FIFO packets, but do not admit
             // one whose observed local service estimate consumes its remaining
             // room budget. Subtraction avoids overflowing unsigned timestamps.
-            guard captureAge < admissionBudget,
-                  estimatedLocalCompletion < admissionBudget - captureAge,
-                  // Early completions understate a growing in-flight backlog.
-                  // Budget its recent slowest service interval too, without multiplying
-                  // timestamps or treating local completion as a remote ACK.
-                  completionInterval < (admissionBudget - captureAge)
-                    / UInt64(client.audioSendsInFlight + 1) else {
+            if !canAdmit(packet) {
                 // A busy path is not a permanent rejection of fresh capture.
                 // Keep it in the existing bounded FIFO until a completion frees
                 // capacity, even if capture ends before another callback arrives.
@@ -1280,15 +1363,30 @@ final class HostServer {
                    acquisitionAge < Self.maximumPendingAudioSpanNanos,
                    queueResidence < Self.maximumPendingAudioWaitNanos,
                    captureAge < admissionBudget {
-                    observeAdmission(.deferred)
-                    client.pendingAudio.insert(packet, at: 0)
-                    break
+                    if let index = firstAdmissibleYoungerIndex() {
+                        // Supersede only the infeasible prefix, not all pending
+                        // audio. The earliest younger packet passes the SAME
+                        // gate at this time/credit snapshot; remaining FIFO stays.
+                        // These are replacement drops, not expiry or admission.
+                        supersededPrefixCount = index + 1
+                        client.audioReplaced &+= UInt64(supersededPrefixCount)
+                        client.pendingAudio.removeFirst(index)
+                        packet = client.pendingAudio.removeFirst()
+                        captureAge = submittedAt - packet.captureTimeNanos
+                    } else {
+                        observeAdmission(.deferred)
+                        client.pendingAudio.insert(packet, at: 0)
+                        break
+                    }
+                } else {
+                    client.audioAdmissionRejected &+= 1
+                    observeAdmission(.rejected)
+                    continue
                 }
-                client.audioAdmissionRejected &+= 1
-                observeAdmission(.rejected)
-                continue
             }
             observeAdmission(.admitted)
+            let submission = AudioSubmission(id: UUID(), nanos: submittedAt)
+            client.audioSubmissions.append(submission)
             client.audioSendsInFlight += 1
             client.audioSent &+= 1
             admittedCount += 1
@@ -1300,11 +1398,23 @@ final class HostServer {
                 self.queue.async { [weak self, weak client] in
                     guard let self, let client, client.audio === connection,
                           self.clients[ObjectIdentifier(client.control)] === client else { return }
+                    guard let submissionIndex = client.audioSubmissions.firstIndex(where: { $0.id == submission.id }) else {
+                        client.audioCadenceOrderValid = false
+                        return // Duplicate completion cannot release another send's credit.
+                    }
+                    if submissionIndex != 0 || completedAt < submittedAt
+                        || client.lastAudioCompletionNanos.map({ completedAt < $0 }) == true
+                        || client.lastAudioCompletedSubmissionNanos.map({ submittedAt < $0 }) == true {
+                        client.audioCadenceOrderValid = false
+                    }
+                    client.audioSubmissions.remove(at: submissionIndex)
                     client.audioSendsInFlight = max(0, client.audioSendsInFlight - 1)
                     if let error {
                         fputs("Audio send failed: \(error)\n", stderr)
                         connection.cancel()
                         client.audio = nil
+                        client.audioSubmissions.removeAll()
+                        client.audioSendsInFlight = 0
                         self.discardPendingAudio(for: client)
                         self.drainAudioAfterCompletion(of: client, maxInFlight: maxInFlight)
                         return
@@ -1317,13 +1427,23 @@ final class HostServer {
                         }
                     }
                     if let previous = client.lastAudioCompletionNanos, completedAt >= previous {
+                        let interval = completedAt - previous
+                        if client.audioCadenceOrderValid, let priorSubmission = client.lastAudioCompletedSubmissionNanos {
+                            let cadence = submittedAt - priorSubmission
+                            client.audioCompletionGrowth.append(AudioCompletionSample(
+                                value: interval > cadence ? interval - cadence : 0, observedAtNanos: completedAt))
+                            if client.audioCompletionGrowth.count > Self.maximumAudioCompletionSamples {
+                                client.audioCompletionGrowth.removeFirst()
+                            }
+                        }
                         client.audioCompletionIntervals.append(AudioCompletionSample(
                             value: completedAt - previous, observedAtNanos: completedAt))
                         if client.audioCompletionIntervals.count > Self.maximumAudioCompletionSamples {
                             client.audioCompletionIntervals.removeFirst()
                         }
                     }
-                    client.lastAudioCompletionNanos = completedAt
+                    client.lastAudioCompletionNanos = max(client.lastAudioCompletionNanos ?? completedAt, completedAt)
+                    client.lastAudioCompletedSubmissionNanos = max(client.lastAudioCompletedSubmissionNanos ?? submittedAt, submittedAt)
                     if let observe = self.audioCompletionObservationForTesting,
                        case .hostPort(_, let port) = connection.endpoint {
                         observe(.init(port: port.rawValue, entryNanos: completedAt,
