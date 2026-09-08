@@ -147,6 +147,20 @@ found no actionable gap. Required final-head integration CI remains separate.
 The earlier `b3ecf9a` CI passed adapter tests but failed the room-scale fanout
 minimum (45 versus 50); this focused pass does not resolve or conceal that failure.
 
+Exact fence checkpoint `9a891be` later passed 382 XCTest tests, 1,160 Swift tests
+in 182 suites, seven repeatable scenarios in three suites and both app builds
+([run 34188316212](https://github.com/theShyamsindhia/ALO/actions/runs/34188316212)).
+Its external review found two concrete behavioral issues: NUL could be admitted
+despite native invocation rejection, and legacy caller-supplied completion could
+overwrite a native-attempt receipt. The follow-up baseline recorded six issues
+in eleven tests; strengthened retained-abandonment and actual-wait service/policy
+access controls already passed. Admission now rejects NUL and legacy completion
+requires a nil native attempt. Production finish has no callback parameter; its
+separate test observer runs only outside service/policy locks. Follow-up validation
+passed 63 tests in seven suites, including actual TLS cases (4.241 seconds total).
+Required final-head CI and external follow-up review remain pending; the earlier
+CI is not evidence for these later changes.
+
 The following design checklist records the intended ordering and remaining
 review/test opportunities; it does not claim every proposed adversarial case
 below has been exercised.

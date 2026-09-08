@@ -320,10 +320,19 @@ extension CodexDeviceMessageService {
 
     /// Wait immediately after start, OUTSIDE service/policy locks. Completion is
     /// derived from the bound native handle, never a caller-asserted outcome.
-    func finishStarted(_ native: StartedDispatch,
-                       afterRunningCheckForTesting: ((Process) -> Void)? = nil) throws -> NativeCompletion {
+    func finishStarted(_ native: StartedDispatch) throws -> NativeCompletion {
+        try finishStartedImpl(native, afterRunningCheck: nil)
+    }
+    /// Test observation only. Called outside service/policy locks; observers
+    /// must not reenter the adapter's wait or mutate the owned child.
+    func finishStartedForTesting(_ native: StartedDispatch,
+                                 afterRunningCheck: @escaping (Process) -> Void) throws -> NativeCompletion {
+        try finishStartedImpl(native, afterRunningCheck: afterRunningCheck)
+    }
+    private func finishStartedImpl(_ native: StartedDispatch,
+                                   afterRunningCheck: ((Process) -> Void)?) throws -> NativeCompletion {
         guard native.candidate.issuer == nativeIssuer else { throw CodexDeviceMessagingError.unauthorized }
-        let result = native.started.waitForOutcome(afterRunningCheckForTesting: afterRunningCheckForTesting)
+        let result = native.started.waitForOutcome(afterRunningCheckForTesting: afterRunningCheck)
         defer { native.permit.release() }
         lock.lock(); defer { lock.unlock() }
         guard !faulted else { throw CodexDeviceMessagingError.disabled }

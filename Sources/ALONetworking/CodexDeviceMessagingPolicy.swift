@@ -210,7 +210,7 @@ public struct CodexDeviceMessagingPolicy: Sendable {
         try advance(now)
         var grant = try authorized(envelope.grantID, context: context, now: now)
         let size = envelope.text.utf8.count
-        guard size > 0, size <= Self.maximumTextBytes,
+        guard size > 0, size <= Self.maximumTextBytes, !envelope.text.utf8.contains(0),
               try JSONEncoder().encode(envelope).count <= Self.maximumFrameBytes else {
             throw CodexDeviceMessagingError.invalidEnvelope
         }
@@ -258,7 +258,9 @@ public struct CodexDeviceMessagingPolicy: Sendable {
 
     public mutating func completeDispatch(grantID: UUID, messageID: UUID, result: DispatchResult) throws {
         let key = Key(grantID: grantID, messageID: messageID)
-        guard records[key]?.receipt == .dispatching else { throw CodexDeviceMessagingError.invalidTransition }
+        guard records[key]?.receipt == .dispatching, records[key]?.nativeAttempt == nil else {
+            throw CodexDeviceMessagingError.invalidTransition
+        }
         switch result {
         case .queued: records[key]?.receipt = .codexQueued
         case .definitelyNotQueued: records[key]?.receipt = .cancelled

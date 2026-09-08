@@ -62,6 +62,33 @@ struct DeviceMessageSpawnFenceTests {
         return try CodexDeviceMessagingPolicy(restoring: saved).receipt(grantID: message.grantID, messageID: message.messageID)
     }
 
+    @Test func nulIsRejectedBeforeDurableAdmission() throws {
+        let f = try CodexDeviceMessageServiceTests.Fixture()
+        let (connection, accepted) = try received(f)
+        let message = CodexDeviceMessageEnvelope(grantID: accepted.grantID, text: "not\u{0000}native argv")
+        let writes = f.service.journalWritesForTesting
+        #expect(throws: CodexDeviceMessagingError.invalidEnvelope) { try f.service.receive(message, connection: connection) }
+        #expect(f.service.journalWritesForTesting == writes)
+        #expect(try receipt(f, message) == nil)
+    }
+
+    @Test func legacyCompletionCannotOverwriteNativeAttempt() throws {
+        try withHelper { runner, marker in
+            let f = try CodexDeviceMessageServiceTests.Fixture()
+            let (connection, message) = try received(f)
+            let native = try prepare(f, connection, message, runner)
+            let started = try f.service.startPrepared(native)
+            #expect(throws: CodexDeviceMessagingError.invalidTransition) {
+                try f.service.complete(message, result: .definitelyNotQueued)
+            }
+            if case .recorded(let result) = try f.service.finishStarted(started) {
+                #expect(result.outcome == .codexQueued)
+            } else { Issue.record("Caller-asserted legacy completion displaced the bound native result") }
+            #expect(try String(contentsOf: marker) == "started")
+            #expect(try receipt(f, message) == .codexQueued)
+        }
+    }
+
     @Test(arguments: [0, 1, 2, 3])
     func preparedStartRejectsRevocationDisableExpiryAndPublishedRemoval(change: Int) throws {
         try withHelper { runner, marker in
@@ -137,8 +164,10 @@ struct DeviceMessageSpawnFenceTests {
             for _ in 0..<32 { pending.append(try prepare(f, connection, message, runner)) }
             #expect(f.service.nativeWorkerCountForTesting == 32)
             #expect(throws: CodexDeviceMessagingError.capacity) { try prepare(f, connection, message, runner) }
-            pending.removeLast().abandon()
+            pending[31].abandon()
             #expect(f.service.nativeWorkerCountForTesting == 31)
+            #expect(throws: CodexDeviceMessagingError.invalidTransition) { try f.service.startPrepared(pending[31]) }
+            pending.removeLast()
             pending.append(try prepare(f, connection, message, runner))
             pending.removeAll()
             #expect(f.service.nativeWorkerCountForTesting == 0)
@@ -271,11 +300,14 @@ struct DeviceMessageSpawnFenceTests {
             let entered = DispatchSemaphore(value: 0), done = DispatchSemaphore(value: 0)
             DispatchQueue.global().async {
                 do {
-                    if case .superseded = try f.service.finishStarted(started, afterRunningCheckForTesting: { _ in entered.signal() }) {} else { Issue.record("Revoke was not preserved") }
+                    if case .superseded = try f.service.finishStartedForTesting(started, afterRunningCheck: { _ in entered.signal() }) {} else { Issue.record("Revoke was not preserved") }
                 } catch { Issue.record("Unexpected finish error: \(error)") }
                 done.signal()
             }
             try #require(entered.wait(timeout: .now() + 1) == .success)
+            let peerBegan = ContinuousClock.now
+            _ = try f.service.peer(connection: connection)
+            #expect(peerBegan.duration(to: .now) < .seconds(1), "Stable policy access must not wait for child completion")
             let began = ContinuousClock.now
             try f.service.revoke(grant: message.grantID)
             #expect(began.duration(to: .now) < .seconds(1), "Revoke must not wait for the bounded child lifetime")
