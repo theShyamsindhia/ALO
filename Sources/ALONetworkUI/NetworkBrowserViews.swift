@@ -18,15 +18,14 @@ public struct ALONativeNetworkColumns<Sidebar: View, Detail: View>: View {
     }
 
     public var body: some View {
-        GeometryReader { geometry in
-        HStack(spacing: 0) {
-            sidebar.frame(minWidth: ALONativeNetworkLayout.minimumSidebarWidth, idealWidth: 230,
-                          maxWidth: ALONativeNetworkLayout.maximumSidebarWidth)
-            Divider()
+        NavigationSplitView {
+            sidebar
+                .navigationSplitViewColumnWidth(min: ALONativeNetworkLayout.minimumSidebarWidth,
+                                                ideal: 230, max: ALONativeNetworkLayout.maximumSidebarWidth)
+        } detail: {
             detail.frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(width: geometry.size.width, height: geometry.size.height, alignment: .leading)
-        }
+        .navigationSplitViewStyle(.balanced)
     }
 }
 #endif
@@ -241,19 +240,6 @@ public struct ALONetworkSidebar: View {
     #if os(macOS)
     private var desktopSidebar: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("Networks").font(.headline).accessibilityAddTraits(.isHeader)
-                Spacer()
-                Menu {
-                    Button("Create network…", systemImage: "plus", action: onCreateNetwork)
-                        .accessibilityIdentifier("ALO.Network.Create")
-                    Button("Import invitation…", systemImage: "square.and.arrow.down", action: onImportNetwork)
-                        .accessibilityIdentifier("ALO.Network.Import")
-                } label: { Image(systemName: "plus").frame(width: 24, height: 24) }
-                .menuStyle(.borderlessButton).fixedSize()
-                .help("Add a network").accessibilityLabel("Add a network")
-            }.padding(.horizontal, 16).padding(.vertical, 12)
-
             List(selection: $selectedNetworkID) {
                 Section("Your networks") {
                     ForEach(networks) { network in
@@ -263,8 +249,12 @@ public struct ALONetworkSidebar: View {
                                 Text("\(network.memberCount) \(network.memberCount == 1 ? "member" : "members")\(network.isOwner ? " · Owner" : "")")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
-                        } icon: { Image(systemName: "person.2").foregroundStyle(.secondary) }
-                        .padding(.vertical, 3).tag(network.id)
+                        } icon: {
+                            Image(systemName: selectedNetworkID == network.id ? "person.2.fill" : "person.2")
+                                .foregroundStyle(Color.accentColor)
+                                .frame(width: 28, height: 28)
+                        }
+                        .padding(.vertical, 5).tag(network.id)
                         .help(network.name)
                         .accessibilityElement(children: .combine)
                         .accessibilityIdentifier("ALO.Network.\(network.id)")
@@ -328,9 +318,9 @@ public struct ALONetworkSidebar: View {
                     }
                 }
             }.listStyle(.sidebar)
-            Divider()
+                .scrollContentBackground(.hidden)
             HStack {
-                Label(identityName, systemImage: "person.crop.circle").lineLimit(1).help(identityName)
+                Label(identityName, systemImage: "person.crop.circle.fill").lineLimit(1).help(identityName)
                 Spacer(minLength: 4)
                 Menu {
                     Button("Share public identity…", systemImage: "square.and.arrow.up", action: onExportPublicIdentity)
@@ -344,9 +334,21 @@ public struct ALONetworkSidebar: View {
                 } label: { Image(systemName: "ellipsis.circle").frame(width: 24, height: 24) }
                 .menuStyle(.borderlessButton).fixedSize()
                 .help("Identity options").accessibilityLabel("Identity options")
-            }.padding(12)
+            }.padding(.horizontal, 16).padding(.vertical, 12)
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(.regularMaterial)
+        .navigationTitle("Networks")
+        .toolbar {
+            ToolbarItem {
+                Menu {
+                    Button("Create network…", systemImage: "plus", action: onCreateNetwork)
+                        .accessibilityIdentifier("ALO.Network.Create")
+                    Button("Import invitation…", systemImage: "square.and.arrow.down", action: onImportNetwork)
+                        .accessibilityIdentifier("ALO.Network.Import")
+                } label: { Label("Add a network", systemImage: "plus") }
+                .help("Add a network")
+            }
+        }
         .sheet(item: $reviewingRequest) { request in
             VStack(alignment: .leading, spacing: 20) {
                 Text("Request to join").font(.title2.weight(.semibold))
@@ -412,15 +414,18 @@ public struct ALOChannelList: View {
     public var body: some View {
         VStack(spacing: 0) {
             #if os(macOS)
-            HStack(alignment: .center, spacing: 12) {
+            HStack(alignment: .center, spacing: 16) {
+                Image(systemName: "person.2.fill")
+                    .font(.title2)
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 48, height: 48)
+                    .background(Color.accentColor.opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
+                    .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(network.name).font(.title3.weight(.semibold)).lineLimit(2)
+                    Text(network.name).font(.title2.weight(.semibold)).lineLimit(2)
                         .help(network.name).accessibilityAddTraits(.isHeader)
                     Text("\(network.memberCount) \(network.memberCount == 1 ? "member" : "members") · \(channels.count) \(channels.count == 1 ? "channel" : "channels")")
                         .font(.callout).foregroundStyle(.secondary)
-                    Text("Public channels are visible only to network members.")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)
                 Menu {
@@ -432,7 +437,8 @@ public struct ALOChannelList: View {
                 } label: { Image(systemName: "ellipsis.circle").frame(width: 24, height: 24) }
                 .menuStyle(.borderlessButton).fixedSize().disabled(isBusy)
                 .help("Network actions").accessibilityLabel("Network actions")
-            }.padding(20)
+            }.padding(24)
+                .help("Public channels are visible only to network members.")
             #else
             VStack(alignment: .leading, spacing: 8) {
                 Text(network.name).font(.title2.weight(.semibold)).accessibilityAddTraits(.isHeader)
@@ -450,6 +456,8 @@ public struct ALOChannelList: View {
                         HStack(spacing: 10) {
                             Image(systemName: channel.isPrivate ? "lock" : "number")
                                 .font(.body.weight(.medium))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 28)
                                 .accessibilityHidden(true)
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(channel.name).fontWeight(.medium)
@@ -505,11 +513,16 @@ public struct ALOChannelList: View {
             }
             #if os(macOS)
             .listStyle(.inset)
+            .scrollContentBackground(.hidden)
+            .padding(.horizontal, 12)
             #else
             .listStyle(.sidebar)
             #endif
             .frame(minHeight: 0, maxHeight: .infinity)
         }
+        #if os(macOS)
+        .background(Color(nsColor: .controlBackgroundColor))
+        #endif
         .navigationTitle(network.name)
     }
 

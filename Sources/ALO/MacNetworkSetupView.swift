@@ -178,7 +178,6 @@ struct MacNetworkSetupView: View {
                     }, selectedChannelID: $selectedChannelID, errorMessage: nearbyJoinFeedback.errorMessage ?? error ?? account.errorMessage ?? model.errorMessage,
                     onCreateChannel: { present(.createChannel) }, onAddMember: { present(.addMember) },
                     onImportInvitation: { present(.importNetwork) })
-                    Divider()
                     HStack {
                         Button("Members", systemImage: "person.2") { present(.members) }
                         Spacer()
@@ -188,7 +187,9 @@ struct MacNetworkSetupView: View {
                             Button("Join channel", systemImage: "arrow.right.circle.fill") { model.joinChannel(id) }
                                 .buttonStyle(.borderedProminent).keyboardShortcut(.return, modifiers: [])
                         }
-                    }.padding(16)
+                    }.controlSize(.large)
+                        .padding(.horizontal, 24).padding(.vertical, 16)
+                        .background(Color(nsColor: .controlBackgroundColor))
                 } else {
                     ContentUnavailableView {
                         Label("Your networks live here", systemImage: "network")
