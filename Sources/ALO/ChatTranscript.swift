@@ -10,6 +10,7 @@ struct ChatTranscript<Row: View>: View {
     let isPresented: Bool
     let accent: Color
     let onLatestVisibilityChanged: (UUID, Bool) -> Void
+    var usesNativeLayout = false
     @ViewBuilder var row: (RoomMessage, Bool) -> Row
 
     @State private var viewportID = UUID()
@@ -28,25 +29,26 @@ struct ChatTranscript<Row: View>: View {
                             VStack(spacing: 6) {
                                 if message.id == unreadBoundary {
                                     HStack(spacing: 8) {
-                                        Rectangle().frame(height: 0.5)
-                                        Text("New messages")
-                                            .font(.system(size: 9, weight: .medium))
+                                        Rectangle().frame(height: 0.5).opacity(usesNativeLayout ? 0.18 : 1)
+                                        Text(usesNativeLayout && unreadCount > 0 ? "\(unreadCount) new messages" : "New messages")
+                                            .font(.system(size: usesNativeLayout ? 11 : 9, weight: .medium))
                                             .fixedSize()
-                                        Rectangle().frame(height: 0.5)
+                                        Rectangle().frame(height: 0.5).opacity(usesNativeLayout ? 0.18 : 1)
                                     }
                                     .foregroundStyle(accent)
                                     .padding(.vertical, 6)
                                 }
                                 row(message, index == 0 || messages[index - 1].senderID != message.senderID)
                             }
+                            .padding(.top, usesNativeLayout && index > 0 && messages[index - 1].senderID != message.senderID ? 10 : 0)
                             .id(ChatScrollState.Target.message(message.id))
                         }
                         Color.clear
                             .frame(height: 11)
                             .id(ChatScrollState.Target.latest)
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.top, 10)
+                    .padding(.horizontal, usesNativeLayout ? 28 : 14)
+                    .padding(.top, usesNativeLayout ? 28 : 10)
                     .background {
                         GeometryReader { content in
                             Color.clear.preference(
@@ -102,7 +104,7 @@ struct ChatTranscript<Row: View>: View {
                     onLatestVisibilityChanged(viewportID, false)
                 }
                 .overlay(alignment: .bottomTrailing) {
-                    if !messages.isEmpty, !scrollState.followsLatest {
+                    if !messages.isEmpty, !scrollState.followsLatest, !usesNativeLayout || !scrollState.isAtLatest {
                         Button {
                             scroll(scrollState.jumpToLatest(), proxy: proxy)
                         } label: {

@@ -24,6 +24,7 @@ jobs:
     timeout-minutes: 30
     env:
       ALO_UI_RENDER_DIR: /tmp/alo-ui-renders
+      ALO_NETWORKS_SNAPSHOT_DIR: /tmp/alo-ui-renders
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Verify pinned toolchain
