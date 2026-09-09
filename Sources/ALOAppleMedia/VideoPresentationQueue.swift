@@ -40,6 +40,9 @@ public struct VideoPresentationTimingSnapshot: Sendable, Equatable {
 /// including frames whose remote timestamp would otherwise retain them for years.
 final class VideoPresentationQueue<Image> {
     static var maximumLeadNanos: UInt64 { 2_000_000_000 }
+    // Cover 30 fps through the room's maximum negotiated delay, plus scheduling
+    // headroom. The independent byte budget still bounds larger decoded images.
+    static var maximumFrames: Int { Int(RoomTiming.maximumPlayoutDelayNanos * 30 / 1_000_000_000) + 2 }
     private struct Frame { let image: Image; let deadline: UInt64; let bytes: Int; let isCurrent: () -> Bool }
     private let lock = NSLock()
     private let queue: DispatchQueue
@@ -47,6 +50,7 @@ final class VideoPresentationQueue<Image> {
     private var timer: DispatchSourceTimer?
     private let handler: (Image) -> Void
     private let now: () -> UInt64
+    private let automaticScheduling: Bool
     private var latestHandoffAtNanos: UInt64?
     private var latestDeadlineMissNanos: UInt64?
     private var maximumDeadlineMissNanos: UInt64 = 0
@@ -68,8 +72,10 @@ final class VideoPresentationQueue<Image> {
     // The clock must be thread-safe. Deliver directly on the UI executor so a
     // blocked main thread retains bounded frames here, not unbounded UI closures.
     init(now: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
-         deliveryQueue: DispatchQueue = .main, handler: @escaping (Image) -> Void) {
+         deliveryQueue: DispatchQueue = .main, automaticScheduling: Bool = true,
+         handler: @escaping (Image) -> Void) {
         self.now = now; self.queue = deliveryQueue; self.handler = handler
+        self.automaticScheduling = automaticScheduling
     }
     deinit { timer?.cancel() }
 
@@ -96,12 +102,17 @@ final class VideoPresentationQueue<Image> {
             guard bytes >= 0, bytes <= 64 * 1_024 * 1_024,
                   deadline <= time || deadline - time <= Self.maximumLeadNanos, isCurrent() else { return }
             frames.removeAll { !$0.isCurrent() }
-            while !frames.isEmpty && (frames.count >= 8 || frames.reduce(0, { $0 + $1.bytes }) + bytes > 64 * 1_024 * 1_024) {
-                frames.removeFirst()
-            }
             frames.append(Frame(image: image, deadline: deadline, bytes: bytes, isCurrent: isCurrent))
             frames.sort { $0.deadline < $1.deadline }
-            if timer == nil {
+            // Only coalesce frames already due. Evicting the earliest *future*
+            // frame on every arrival can prevent any frame ever reaching display.
+            if let latestDue = frames.lastIndex(where: { $0.deadline <= time }), latestDue > 0 {
+                frames.removeFirst(latestDue)
+            }
+            while frames.count > Self.maximumFrames || frames.reduce(0, { $0 + $1.bytes }) > 64 * 1_024 * 1_024 {
+                frames.removeLast()
+            }
+            if timer == nil, automaticScheduling {
                 let timer = DispatchSource.makeTimerSource(queue: queue)
                 timer.schedule(deadline: .now(), repeating: .milliseconds(4))
                 timer.setEventHandler { [weak self] in self?.drain() }
@@ -121,7 +132,8 @@ final class VideoPresentationQueue<Image> {
         }
     }
 
-    private func drain() {
+    // Internal deterministic scheduling seam; production uses the timer above.
+    func drain() {
         let extracted: (frames: [Frame], generation: UInt64) = lock.withLock {
             let time = now()
             let due = frames.filter { $0.deadline <= time }

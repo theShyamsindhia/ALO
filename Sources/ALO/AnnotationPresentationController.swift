@@ -28,6 +28,7 @@ final class AnnotationPresentationController {
     private let makeOverlay: @MainActor (AnnotationSceneModel) -> any AnnotationOverlayPresenting
     private var overlay: (any AnnotationOverlayPresenting)?
     private var closed = false
+    private var overlayMetadata: CapturedFrameMetadata?
 
     @MainActor private final class Relay {
         var active = false
@@ -71,6 +72,7 @@ final class AnnotationPresentationController {
         guard let snapshot else {
             relay.active = false
             overlay?.hide()
+            overlayMetadata = nil
             scene.reset()
             return
         }
@@ -78,6 +80,7 @@ final class AnnotationPresentationController {
         if scene.snapshot?.sessionID != snapshot.sessionID {
             relay.active = false
             overlay?.hide()
+            overlayMetadata = nil
             scene.reset()
             scene.inputUnavailableReason = "Waiting for shared-screen geometry"
         }
@@ -103,6 +106,10 @@ final class AnnotationPresentationController {
         if let previous = scene.captureMetadata, metadata.captureTimeNanos < previous.captureTimeNanos { return }
         scene.updateCaptureMetadata(metadata, frameSize: frameSize)
         if scene.isPresenter {
+            var previous = overlayMetadata
+            previous?.captureTimeNanos = metadata.captureTimeNanos
+            guard previous != metadata else { return }
+            overlayMetadata = metadata
             if overlay == nil { overlay = makeOverlay(scene) }
             overlay?.update(metadata: metadata)
         }

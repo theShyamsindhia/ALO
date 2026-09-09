@@ -6,6 +6,26 @@ import ALOCore
 
 @MainActor
 struct AnnotationPresentationControllerTests {
+    @Test("Unchanged capture geometry never repositions the presenter windows")
+    func timestampOnlyMetadataDoesNotUpdateOverlay() {
+        let overlay = Overlay()
+        let controller = AnnotationPresentationController(localActorID: "host", presenterID: "host",
+            send: { _ in }, requestSnapshot: {}, makeOverlay: { _ in overlay })
+        let snapshot = AnnotationAuthority(presenterID: "host").snapshot(nowNanos: 1)
+        controller.apply(snapshot: snapshot)
+        for time in 1...120 {
+            controller.apply(metadata: metadata(time: UInt64(time)), sessionID: snapshot.sessionID,
+                             frameSize: CGSize(width: 800, height: 600))
+        }
+        #expect(overlay.updates.count == 1)
+        #expect(controller.scene.videoCaptureTimeNanos == 120)
+        controller.apply(metadata: metadata(time: 121, status: .suspended), sessionID: snapshot.sessionID,
+                         frameSize: CGSize(width: 800, height: 600))
+        #expect(overlay.updates.count == 2)
+        #expect(!controller.scene.inputAvailable)
+        controller.close()
+    }
+
     private final class Overlay: AnnotationOverlayPresenting {
         var updates: [CapturedFrameMetadata] = []
         var hides = 0

@@ -1,10 +1,41 @@
 import CoreGraphics
+import Combine
 import Testing
 @testable import ALO
 import ALOCore
 
 @MainActor
 struct AnnotationSceneModelTests {
+    @Test("Timestamp-only capture updates stay silent while commands retain fresh timing")
+    func idleCaptureDoesNotInvalidateViews() {
+        let model = AnnotationSceneModel(localActorID: "presenter") { _ in }
+        model.apply(snapshot: AnnotationAuthority(presenterID: "presenter").snapshot(nowNanos: 1))
+        var metadata = CapturedFrameMetadata(captureTimeNanos: 1,
+            contentRect: CGRect(x: 0, y: 0, width: 1280, height: 720),
+            screenRect: CGRect(x: 0, y: 0, width: 1280, height: 720),
+            contentScale: 1, scaleFactor: 1, status: .complete)
+        let size = CGSize(width: 1280, height: 720)
+        model.updateCaptureMetadata(metadata, frameSize: size)
+        var changes = 0
+        let observation = model.objectWillChange.sink { changes += 1 }
+        for time in 2...121 {
+            metadata.captureTimeNanos = UInt64(time)
+            model.updateCaptureMetadata(metadata, frameSize: size)
+        }
+        #expect(changes == 0)
+        #expect(model.captureMetadata?.captureTimeNanos == 121)
+        #expect(model.videoCaptureTimeNanos == 121)
+        metadata.contentRect.size.width = 1000
+        model.updateCaptureMetadata(metadata, frameSize: size)
+        #expect(changes > 0)
+        model.annotationEnabled = true
+        metadata.status = .suspended
+        model.updateCaptureMetadata(metadata, frameSize: size)
+        #expect(!model.inputAvailable && !model.annotationEnabled)
+        observation.cancel()
+        model.reset()
+    }
+
     @Test("Rejected drawing updates send cleanup so the host can accept another gesture")
     func rejectedDrawingCleanup() {
         var commands: [AnnotationCommand] = []

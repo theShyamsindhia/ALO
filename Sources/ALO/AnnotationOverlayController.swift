@@ -19,12 +19,13 @@ final class AnnotationOverlayController: AnnotationOverlayPresenting {
     private var subscriptions = Set<AnyCancellable>()
     private var keyboardMonitor: Any?
     private var palettePlaced = false
+    private var visibilityUpdatePending = false
 
     init(model: AnnotationSceneModel) {
         self.model = model
         overlay = AnnotationPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
                                   backing: .buffered, defer: true)
-        palette = AnnotationPanel(contentRect: CGRect(x: 0, y: 0, width: 550, height: 120),
+        palette = AnnotationPanel(contentRect: CGRect(x: 0, y: 0, width: 120, height: 40),
                                   styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
         for panel in [overlay, palette] {
             panel.isOpaque = false
@@ -44,9 +45,16 @@ final class AnnotationOverlayController: AnnotationOverlayPresenting {
         overlay.setAccessibilityLabel("Shared-screen annotations")
         palette.setAccessibilityLabel("Screen annotation tools")
         overlay.contentView = NSHostingView(rootView: DesktopAnnotationSurface(model: model))
-        palette.contentView = NSHostingView(rootView: AnnotationToolbarView(model: model))
+        palette.contentView = NSHostingView(rootView: AnnotationControlsView(model: model,
+            onExpansionChanged: { [weak self] expanded in self?.resizePalette(expanded: expanded) }))
         model.objectWillChange.sink { [weak self] _ in
-            Task { @MainActor [weak self] in self?.refreshVisibility() }
+            guard let self, !self.visibilityUpdatePending else { return }
+            self.visibilityUpdatePending = true
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.visibilityUpdatePending = false
+                self.refreshVisibility()
+            }
         }.store(in: &subscriptions)
         keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             let handled = MainActor.assumeIsolated { self?.handleKey(event) ?? false }
@@ -68,7 +76,6 @@ final class AnnotationOverlayController: AnnotationOverlayPresenting {
             model.inputUnavailableReason = unavailable
             if unavailable != nil { model.escape() }
         }
-        model.videoCaptureTimeNanos = metadata.captureTimeNanos
         refreshVisibility()
     }
 
@@ -100,9 +107,13 @@ final class AnnotationOverlayController: AnnotationOverlayPresenting {
             palette.orderOut(nil)
             return
         }
-        overlay.setFrame(frame, display: true)
+        let needsOverlay = model.acceptsInput || !(model.snapshot?.objects.isEmpty ?? true)
+            || !model.optimisticStickers.isEmpty
+        if needsOverlay, overlay.frame != frame { overlay.setFrame(frame, display: true) }
         overlay.ignoresMouseEvents = !model.acceptsInput
-        overlay.orderFrontRegardless()
+        if needsOverlay {
+            if !overlay.isVisible { overlay.orderFrontRegardless() }
+        } else if overlay.isVisible { overlay.orderOut(nil) }
         if !palettePlaced {
             let screen = NSScreen.screens.first(where: { $0.frame.intersects(frame) }) ?? primary
             let safe = screen.visibleFrame
@@ -111,7 +122,17 @@ final class AnnotationOverlayController: AnnotationOverlayPresenting {
                                            y: safe.maxY - size.height - 20))
             palettePlaced = true
         }
-        palette.orderFrontRegardless()
+        if !palette.isVisible { palette.orderFrontRegardless() }
+    }
+
+    private func resizePalette(expanded: Bool) {
+        let size = expanded ? CGSize(width: 550, height: 120) : CGSize(width: 120, height: 40)
+        let previous = palette.frame
+        guard previous.size != size else { return }
+        let safe = palette.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? previous
+        let origin = CGPoint(x: min(max(previous.minX, safe.minX), safe.maxX - size.width),
+                             y: max(safe.minY, previous.maxY - size.height))
+        palette.setFrame(CGRect(origin: origin, size: size), display: true)
     }
 
     private func handleKey(_ event: NSEvent) -> Bool {

@@ -55,7 +55,7 @@ final class AnnotationSceneModel: ObservableObject {
     @Published private(set) var notice: String?
     @Published var inputUnavailableReason: String?
     @Published var authorNames: [String: String] = [:]
-    @Published private(set) var captureMetadata: CapturedFrameMetadata?
+    private(set) var captureMetadata: CapturedFrameMetadata?
     private var captureFrameSize: CGSize?
     var videoCaptureTimeNanos: UInt64?
     var requestSnapshot: () -> Void = {}
@@ -208,21 +208,30 @@ final class AnnotationSceneModel: ObservableObject {
     }
 
     func updateCaptureMetadata(_ metadata: CapturedFrameMetadata, frameSize: CGSize) {
+        // Timestamps must stay fresh for commands, but do not invalidate every
+        // SwiftUI annotation view for an otherwise unchanged captured frame.
+        var previous = captureMetadata
+        previous?.captureTimeNanos = metadata.captureTimeNanos
+        let presentationChanged = previous != metadata || captureFrameSize != frameSize
+        if presentationChanged { objectWillChange.send() }
         captureMetadata = metadata
         captureFrameSize = frameSize
         videoCaptureTimeNanos = metadata.captureTimeNanos
+        guard presentationChanged else { return }
         let validGeometry = AnnotationGeometry.isUsable(CGRect(origin: .zero, size: frameSize))
             && AnnotationGeometry.isUsable(metadata.contentRect)
             && CGRect(origin: .zero, size: frameSize).contains(metadata.contentRect)
             && metadata.contentScale.isFinite && metadata.contentScale > 0
             && metadata.scaleFactor.isFinite && metadata.scaleFactor > 0
+        let unavailable: String?
         if isPresenter && !metadata.desktopOverlaySupported {
-            inputUnavailableReason = "Desktop annotations are unavailable for this display selection. Share a single window, or update macOS."
+            unavailable = "Desktop annotations are unavailable for this display selection. Share a single window, or update macOS."
         } else if !metadata.status.isVisible || !validGeometry || (isPresenter && !metadata.isInteractive) {
-            inputUnavailableReason = "The shared content is unavailable. Restore the shared window to annotate."
+            unavailable = "The shared content is unavailable. Restore the shared window to annotate."
         } else {
-            inputUnavailableReason = nil
+            unavailable = nil
         }
+        if inputUnavailableReason != unavailable { inputUnavailableReason = unavailable }
         if inputUnavailableReason != nil { escape() }
     }
 
@@ -582,6 +591,7 @@ private func annotationColor(_ token: String) -> Color {
 @MainActor
 struct AnnotationToolbarView: View {
     @ObservedObject var model: AnnotationSceneModel
+    var onClose: (() -> Void)? = nil
     @State private var showsStickers = false
     @State private var search = ""
     private var buttonSide: CGFloat {
@@ -622,7 +632,7 @@ struct AnnotationToolbarView: View {
                 Button { model.deleteSelection() } label: { Image(systemName: "trash").frame(width: buttonSide, height: buttonSide) }
                     .help("Remove selected annotation (Delete)").accessibilityLabel("Remove selected annotation")
                     .keyboardShortcut(.delete, modifiers: []).disabled(model.selectedObjectID == nil || !model.canAnnotate)
-                Button { model.escape() } label: { Image(systemName: "xmark").frame(width: buttonSide, height: buttonSide) }
+                Button { model.escape(); onClose?() } label: { Image(systemName: "xmark").frame(width: buttonSide, height: buttonSide) }
                     .help("Stop annotating (Escape)").accessibilityLabel("Stop annotating")
                     .keyboardShortcut(.escape, modifiers: [])
             }

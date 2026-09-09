@@ -75,10 +75,10 @@ struct VideoPresentationTimingTests {
         }
         fixture.advance(to: 1_150_000_000)
         let blockedSnapshot = queue.timingSnapshot
-        #expect(blockedSnapshot.pendingCount == 8)
+        #expect(blockedSnapshot.pendingCount == 1)
         #expect(blockedSnapshot.presentedCount == 0)
         #expect(blockedSnapshot.latestDeadlineMissNanos == nil)
-        #expect(blockedSnapshot.oldestPendingDeadlineNanos == 930_000_000)
+        #expect(blockedSnapshot.oldestPendingDeadlineNanos == 1_000_000_000)
         release.signal()
         try #require(presented.wait(timeout: .now() + 1) == .success)
         #expect(fixture.delivered == [19])
@@ -104,6 +104,53 @@ struct VideoPresentationTimingTests {
         queue.reset()
         #expect(queue.timingSnapshot.latestHandoffAtNanos == nil)
         #expect(queue.timingSnapshot.maximumDeadlineMissNanos == 0)
+    }
+
+    @Test(arguments: [250_000_000, 350_000_000, 600_000_000] as [UInt64])
+    func continuous720pFramesSurviveNegotiatedDelay(_ delay: UInt64) {
+        let fixture = Fixture()
+        let queue = VideoPresentationQueue<Int>(now: { fixture.now }, automaticScheduling: false) {
+            fixture.accept($0)
+        }
+        let interval: UInt64 = 33_333_334
+        for index in 0..<120 {
+            let capture = 1_000_000_000 + UInt64(index) * interval
+            fixture.advance(to: capture + 10_000_000)
+            queue.drain()
+            queue.enqueue(index, deadline: capture + delay, bytes: 1280 * 720 * 4, isCurrent: { true })
+            #expect(queue.pendingCount <= VideoPresentationQueue<Int>.maximumFrames)
+        }
+        // No network or scheduler stalls: every due frame must be delivered,
+        // including when the audio clock asks video to wait 600 ms.
+        let expected = (0..<120).filter {
+            1_000_000_000 + UInt64($0) * interval + delay <= fixture.now
+        }
+        #expect(!expected.isEmpty)
+        #expect(fixture.delivered == expected)
+        queue.reset()
+        fixture.advance(to: fixture.now + delay)
+        queue.drain()
+        #expect(fixture.delivered == expected)
+    }
+
+    @Test
+    func bytePressurePreservesNextDueFrameInsteadOfStarvingDisplay() {
+        let fixture = Fixture()
+        let queue = VideoPresentationQueue<Int>(now: { fixture.now }, automaticScheduling: false) {
+            fixture.accept($0)
+        }
+        for index in 0..<120 {
+            let capture = 1_000_000_000 + UInt64(index) * 33_333_334
+            fixture.advance(to: capture + 10_000_000)
+            queue.drain()
+            queue.enqueue(index, deadline: capture + 600_000_000,
+                          bytes: 3840 * 2160 * 4, isCurrent: { true })
+            #expect(queue.pendingCount <= 2, "Decoded images remain inside the 64 MiB bound")
+        }
+        #expect(fixture.delivered.first == 0)
+        #expect(fixture.delivered.count >= 10)
+        #expect(fixture.delivered == fixture.delivered.sorted())
+        queue.reset()
     }
 
     @Test

@@ -111,7 +111,7 @@ struct ReviewRegressionTests {
         frame = nil
         #expect(retained.value != nil)
         for _ in 0..<20 { scheduler.enqueue(Frame(), deadline: 1_000 + 1_000_000_000, bytes: 1) { true } }
-        #expect(scheduler.pendingCount == 8)
+        #expect(scheduler.pendingCount == VideoPresentationQueue<Frame>.maximumFrames)
         scheduler.reset()
         #expect(retained.value == nil && scheduler.pendingCount == 0)
         scheduler.enqueue(Frame(), deadline: .max, bytes: 1) { true }

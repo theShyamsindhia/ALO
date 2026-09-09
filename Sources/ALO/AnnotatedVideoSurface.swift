@@ -21,8 +21,42 @@ struct AnnotatedVideoSurface: View {
                 }
             }
             .overlay(alignment: .topLeading) {
-                if let scene { AnnotationToolbarView(model: scene).padding(12) }
+                if let scene { AnnotationControlsView(model: scene).padding(12) }
             }
+        }
+    }
+}
+
+/// Inspect permissions without mounting the full tool palette over every video.
+/// Closing tools stops input, but never removes other participants' annotations.
+@MainActor
+struct AnnotationControlsView: View {
+    @ObservedObject var model: AnnotationSceneModel
+    var onExpansionChanged: ((Bool) -> Void)? = nil
+    @State private var expanded = false
+
+    var body: some View {
+        Group {
+            if expanded || model.annotationEnabled {
+                AnnotationToolbarView(model: model, onClose: { expanded = false })
+            } else {
+                Button { expanded = true } label: {
+                    Label("Annotate", systemImage: model.inputAvailable ? "pencil.tip" : "lock")
+                        .font(.system(size: 12, weight: .medium))
+                        .padding(.horizontal, 12).padding(.vertical, 8)
+                        .background(.regularMaterial, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .help(model.inputAvailable ? "Show annotation tools" : model.disabledReason)
+                .accessibilityLabel("Show annotation tools")
+            }
+        }
+        .onChange(of: model.annotationEnabled) { _, enabled in
+            if !enabled { expanded = false }
+        }
+        .onChange(of: model.snapshot?.sessionID) { _, _ in expanded = false }
+        .onChange(of: expanded || model.annotationEnabled, initial: true) { _, visible in
+            onExpansionChanged?(visible)
         }
     }
 }
