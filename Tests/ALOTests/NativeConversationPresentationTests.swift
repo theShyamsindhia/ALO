@@ -40,7 +40,7 @@ extension NativePresentationTests {
                          NSSize(width: 900, height: 600), NSSize(width: 880, height: 600),
                          NSSize(width: 960, height: 580),
                          NSSize(width: 640, height: 440)] {
-                let window = NSWindow(contentRect: NSRect(origin: NSPoint(x: -2000, y: 0), size: size),
+                let window = NativeConversationRenderWindow(contentRect: NSRect(origin: NSPoint(x: -2000, y: 0), size: size),
                                       styleMask: [.titled, .closable], backing: .buffered, defer: false)
                 window.isReleasedWhenClosed = false
                 NetworkSetupWindowPresentation.configure(window, identityReady: true)
@@ -74,6 +74,13 @@ extension NativePresentationTests {
             }
         }
     }
+}
+
+/// Render requested layouts even when CI's virtual display is smaller. Real
+/// window screen-fitting remains covered by NetworkWindowPresentationTests.
+@MainActor
+private final class NativeConversationRenderWindow: NSWindow {
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 }
 
 /// Real production views, public sample content, no live account or media sessions.
