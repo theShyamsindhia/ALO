@@ -196,12 +196,6 @@ struct MacNetworkSetupView: View {
         } detail: {
             channelConversation
         }
-        .safeAreaInset(edge: .bottom) {
-            if account.selectedNetwork == nil, let message = nearbyJoinFeedback.errorMessage ?? error ?? account.errorMessage ?? model.errorMessage {
-                Label(message, systemImage: "exclamationmark.triangle")
-                    .font(.callout).padding().frame(maxWidth: .infinity, alignment: .leading)
-            }
-        }
     }
 
     private func openChannel(_ id: String) {
