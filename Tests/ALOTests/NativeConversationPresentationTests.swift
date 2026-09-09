@@ -9,20 +9,41 @@ extension NativePresentationTests {
     @Suite(.serialized) @MainActor
     struct NativeConversationPresentationTests {
         @Test func referenceLayoutDimensions() {
-            #expect(ALONativeNetworkLayout.sidebarWidth(for: 1120) == 356)
+            #expect(ALONativeNetworkLayout.sidebarWidth(for: 1120) == 280)
             #expect(ALONativeNetworkLayout.sidebarWidth(for: 640) == 210)
-            #expect(ALONativeNetworkLayout.sidebarWidth(for: 1600) == 356)
+            #expect(ALONativeNetworkLayout.sidebarWidth(for: 1600) == 280)
             #expect(ALONativeNetworkLayout.panelInset == 8)
-            #expect(ALONativeNetworkLayout.panelRadius == 28)
+            #expect(ALONativeNetworkLayout.panelRadius == 12)
+        }
+
+        @Test func nowPlayingKeepsTheSameTypeScaleInCompactLayout() throws {
+            _ = NSApplication.shared
+            func render(compact: Bool) throws -> Data {
+                let view = NSHostingView(rootView: NetworkNowPlayingCard(title: "Selfless", artist: "The Strokes",
+                    channel: "Music", artwork: nil, isPlaying: true, openChannel: {})
+                    .environment(\.aloCompactNetworkLayout, compact)
+                    .environment(\.colorScheme, .dark)
+                    .frame(width: 186, height: 80))
+                view.frame = NSRect(x: 0, y: 0, width: 186, height: 80)
+                view.layoutSubtreeIfNeeded()
+                let bitmap = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+                view.cacheDisplay(in: view.bounds, to: bitmap)
+                return try #require(bitmap.representation(using: .png, properties: [:]))
+            }
+            #expect(try render(compact: true) == render(compact: false))
         }
 
         @Test(arguments: [false, true], ["conversation", "long", "empty"])
         func populatedConversationRenders(dark: Bool, state: String) async throws {
             _ = NSApplication.shared
-            for size in [NSSize(width: 1120, height: 860), NSSize(width: 640, height: 440)] {
+            for size in [NSSize(width: 1120, height: 860), NSSize(width: 960, height: 700),
+                         NSSize(width: 900, height: 600), NSSize(width: 880, height: 600),
+                         NSSize(width: 960, height: 580),
+                         NSSize(width: 640, height: 440)] {
                 let window = NSWindow(contentRect: NSRect(origin: NSPoint(x: -2000, y: 0), size: size),
-                                      styleMask: .borderless, backing: .buffered, defer: false)
+                                      styleMask: [.titled, .closable], backing: .buffered, defer: false)
                 window.isReleasedWhenClosed = false
+                NetworkSetupWindowPresentation.configure(window, identityReady: true)
                 window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
                 let imageURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["ALO_UI_PREVIEW_IMAGE"]
                     ?? URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
@@ -33,19 +54,22 @@ extension NativePresentationTests {
                     .environment(\.controlActiveState, .active)
                     .transaction { $0.disablesAnimations = true })
                 window.contentView = view
+                window.setContentSize(size)
                 window.orderBack(nil)
                 defer { window.close() }
                 try await Task.sleep(for: .milliseconds(350))
                 view.layoutSubtreeIfNeeded()
                 #expect(view.bounds.size == size)
-                let bitmap = try #require(view.bitmapImageRepForCachingDisplay(in: view.bounds))
-                view.cacheDisplay(in: view.bounds, to: bitmap)
+                try NetworkShellAssertions.verify(view, in: window)
+                let frameView = try #require(view.superview)
+                let bitmap = try #require(frameView.bitmapImageRepForCachingDisplay(in: frameView.bounds))
+                frameView.cacheDisplay(in: frameView.bounds, to: bitmap)
                 let data = try #require(bitmap.representation(using: .png, properties: [:]))
                 #expect(data.count > 1000)
                 if let directory = ProcessInfo.processInfo.environment["ALO_NETWORKS_SNAPSHOT_DIR"] {
                     try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
                     try data.write(to: URL(fileURLWithPath: directory).appendingPathComponent(
-                        "chat-\(state)-\(dark ? "dark" : "light")-\(Int(size.width)).png"))
+                        "chat-\(state)-\(dark ? "dark" : "light")-\(Int(size.width))x\(Int(size.height)).png"))
                 }
             }
         }

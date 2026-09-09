@@ -3,9 +3,11 @@ import AppKit
 import ImageIO
 import UniformTypeIdentifiers
 import ALOCore
+import ALONetworkUI
 
 /// The complete chat surface is independent of room navigation and playback.
 struct RoomChatPanel: View {
+    @Environment(\.aloCompactNetworkLayout) private var compactLayout
     let messages: [RoomChatMessage]
     let currentParticipantID: String?
     let roomTitle: String
@@ -125,8 +127,8 @@ struct RoomChatPanel: View {
             HStack(alignment: .center, spacing: 8) {
                 Button { choosesAttachment = true } label: {
                     Image(systemName: "plus")
-                        .font(.system(size: usesNativeLayout ? 18 : 12, weight: .medium))
-                        .frame(width: usesNativeLayout ? 36 : 24, height: usesNativeLayout ? 36 : 24)
+                        .font(.system(size: usesNativeLayout ? 16 : 12, weight: .medium))
+                        .frame(width: usesNativeLayout ? 32 : 24, height: usesNativeLayout ? 32 : 24)
                         .background(.primary.opacity(usesNativeLayout ? 0.045 : 0), in: Circle())
                 }
                 .buttonStyle(.plain)
@@ -158,7 +160,7 @@ struct RoomChatPanel: View {
                 if draft.count > 600 { Text("\(draft.count)/700").font(.caption2).foregroundStyle(draft.count > 700 ? .red : .secondary) }
                 Button(action: submit) {
                     Image(systemName: editing == nil ? "arrow.up.circle.fill" : "checkmark.circle.fill")
-                        .font(.system(size: usesNativeLayout ? 32 : 22)).foregroundStyle(accent)
+                        .font(.system(size: usesNativeLayout ? 28 : 22)).foregroundStyle(accent)
                 }.buttonStyle(.plain).disabled(!validDraft).help(editing == nil ? "Send message" : "Save edit")
                     .accessibilityLabel(editing == nil ? "Send message" : "Save edit")
                 }
@@ -166,8 +168,9 @@ struct RoomChatPanel: View {
                 .padding(.vertical, usesNativeLayout ? 7 : 0)
                 .background(.primary.opacity(usesNativeLayout ? 0.035 : 0), in: RoundedRectangle(cornerRadius: 23))
                 .overlay(RoundedRectangle(cornerRadius: 23).strokeBorder(.primary.opacity(usesNativeLayout ? 0.1 : 0)))
-            }.font(.system(size: usesNativeLayout ? 16 : 12))
-                .padding(.horizontal, usesNativeLayout ? 28 : 10).padding(.vertical, usesNativeLayout ? 18 : 7)
+            }.font(usesNativeLayout ? ALONetworkTypography.body : .system(size: 12))
+                .padding(.horizontal, usesNativeLayout ? (compactLayout ? 16 : 24) : 10)
+                .padding(.vertical, usesNativeLayout ? (compactLayout ? 10 : 14) : 7)
                 .background(.primary.opacity(usesNativeLayout ? 0 : 0.045), in: RoundedRectangle(cornerRadius: 12))
                 .padding(.horizontal, usesNativeLayout ? 0 : 10).padding(.vertical, usesNativeLayout ? 0 : 6)
 
@@ -312,7 +315,7 @@ struct RoomChatPanel: View {
             for name in mentionNames {
                 if let range = result.range(of: "@" + name) {
                     result[range].foregroundColor = accent
-                    result[range].font = .system(size: 16, weight: .semibold)
+                    result[range].font = ALONetworkTypography.label
                 }
             }
         }
@@ -322,15 +325,15 @@ struct RoomChatPanel: View {
     private func messageRow(_ message: RoomChatMessage, showsSender: Bool) -> some View {
         let own = message.senderID == currentParticipantID
         let localAttachmentURL = message.attachment == nil ? nil : attachmentURL(message)
-        return HStack(alignment: .bottom, spacing: usesNativeLayout ? 16 : 8) {
+        return HStack(alignment: .bottom, spacing: usesNativeLayout ? (compactLayout ? 10 : 16) : 8) {
             if own { Spacer(minLength: 36) }
             else {
-                messageAvatar(id: message.senderID, name: message.sender, size: usesNativeLayout ? 34 : 24)
+                messageAvatar(id: message.senderID, name: message.sender, size: usesNativeLayout ? 32 : 24)
                     .opacity(showsSender ? 1 : 0).accessibilityHidden(true)
             }
             VStack(alignment: own ? .trailing : .leading, spacing: 6) {
             if usesNativeLayout && showsSender && !own {
-                Text(message.sender).font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
+                Text(message.sender).font(ALONetworkTypography.caption).foregroundStyle(.secondary)
                     .padding(.leading, 2)
             }
             VStack(alignment: .leading, spacing: 5) {
@@ -338,11 +341,12 @@ struct RoomChatPanel: View {
                 if let id = message.replyTo {
                     let original = messages.first { $0.id == id }
                     Label(original.map { "\($0.sender): \($0.text)" } ?? "Earlier message unavailable", systemImage: "arrowshape.turn.up.left")
-                        .font(.system(size: usesNativeLayout ? 12 : 10))
+                        .font(usesNativeLayout ? ALONetworkTypography.caption : .system(size: 10))
                         .foregroundStyle(usesNativeLayout && own ? Color.white.opacity(0.85) : .secondary).lineLimit(2)
                 }
                 if !message.text.isEmpty || message.deleted {
-                    Text(displayText(message.text, own: own)).font(.system(size: usesNativeLayout ? 16 : 12)).textSelection(.enabled)
+                    Text(displayText(message.text, own: own))
+                        .font(usesNativeLayout ? ALONetworkTypography.body : .system(size: 12)).textSelection(.enabled)
                         .foregroundStyle(usesNativeLayout && own ? Color.white : message.deleted ? .secondary : .primary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -393,8 +397,8 @@ struct RoomChatPanel: View {
                     }
                 }
             }
-            .padding(.horizontal, usesNativeLayout ? (message.text.isEmpty && message.attachment != nil ? 0 : 16) : 11)
-            .padding(.vertical, usesNativeLayout ? (message.text.isEmpty && message.attachment != nil ? 0 : 11) : 8)
+            .padding(.horizontal, usesNativeLayout ? (message.text.isEmpty && message.attachment != nil ? 0 : compactLayout ? 12 : 16) : 11)
+            .padding(.vertical, usesNativeLayout ? (message.text.isEmpty && message.attachment != nil ? 0 : compactLayout ? 8 : 11) : 8)
             .background(usesNativeLayout && message.text.isEmpty && message.attachment != nil ? .clear :
                 own ? accent.opacity(usesNativeLayout ? 1 : 0.2) : Color.primary.opacity(usesNativeLayout ? 0.055 : 0.07),
                 in: RoundedRectangle(cornerRadius: usesNativeLayout ? 18 : 13))
@@ -503,11 +507,11 @@ struct RoomChatPanel: View {
                     filePreview(url: localURL, contentType: attachment.contentType,
                                 allowsImagePreview: false)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(attachment.fileName).font(.system(size: usesNativeLayout ? 14 : 11, weight: .semibold)).lineLimit(1)
+                        Text(attachment.fileName).font(usesNativeLayout ? ALONetworkTypography.label : .system(size: 11, weight: .semibold)).lineLimit(1)
                         Text(localURL == nil
                              ? "Waiting for file…"
                              : ByteCountFormatter.string(fromByteCount: Int64(attachment.byteCount), countStyle: .file))
-                            .font(.system(size: usesNativeLayout ? 12 : 9)).foregroundStyle(.secondary)
+                            .font(usesNativeLayout ? ALONetworkTypography.caption : .system(size: 9)).foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 0)
                     Image(systemName: localURL == nil ? "arrow.down.circle" : "arrow.up.right.square")

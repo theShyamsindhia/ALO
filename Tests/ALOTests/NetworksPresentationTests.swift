@@ -61,6 +61,7 @@ extension NativePresentationTests {
                         URL(fileURLWithPath: path).appendingPathComponent("join-error-\(long ? "long" : "short")-\(dark ? "dark" : "light")-\(Int(size.width)).png"))
                 }
                 #expect(hosting.bounds.size == size)
+                try NetworkShellAssertions.verify(hosting, in: window)
                 #expect(window.styleMask.contains(.fullSizeContentView))
                 #expect(window.contentRect(forFrameRect: window.frame).size == size)
                 #expect(window.contentLayoutRect.width == size.width)

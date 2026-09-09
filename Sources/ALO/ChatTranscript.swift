@@ -1,8 +1,10 @@
 import AppKit
 import SwiftUI
+import ALONetworkUI
 
 /// Keeps scroll behavior local to each visible chat surface.
 struct ChatTranscript<Row: View>: View {
+    @Environment(\.aloCompactNetworkLayout) private var compactLayout
     let messages: [RoomMessage]
     let currentParticipantID: String?
     let firstUnreadMessageID: UUID?
@@ -47,8 +49,8 @@ struct ChatTranscript<Row: View>: View {
                             .frame(height: 11)
                             .id(ChatScrollState.Target.latest)
                     }
-                    .padding(.horizontal, usesNativeLayout ? 28 : 14)
-                    .padding(.top, usesNativeLayout ? 28 : 10)
+                    .padding(.horizontal, usesNativeLayout ? (compactLayout ? 16 : 24) : 14)
+                    .padding(.top, usesNativeLayout ? (compactLayout ? 16 : 24) : 10)
                     .background {
                         GeometryReader { content in
                             Color.clear.preference(

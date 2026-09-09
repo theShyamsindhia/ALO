@@ -442,8 +442,17 @@ func toggleALOSetupWindow(_ window: NSWindow) {
 
 @MainActor
 enum NetworkSetupWindowPresentation {
-    static let initialContentSize = NSSize(width: 1120, height: 860)
+    static let initialContentSize = NSSize(width: 960, height: 700)
     static let minimumContentSize = NSSize(width: 640, height: 440)
+
+    static func browserFrame(center: NSPoint, visibleFrame: NSRect) -> NSRect {
+        let available = visibleFrame.insetBy(dx: 24, dy: 24)
+        let size = NSSize(width: min(initialContentSize.width, available.width),
+                          height: min(initialContentSize.height, available.height))
+        return NSRect(x: min(max(center.x - size.width / 2, available.minX), available.maxX - size.width),
+                      y: min(max(center.y - size.height / 2, available.minY), available.maxY - size.height),
+                      width: size.width, height: size.height)
+    }
 
     static func shouldApplyIdentityUpdate(_ queuedReady: Bool, currentReady: Bool) -> Bool {
         queuedReady == currentReady
@@ -475,9 +484,13 @@ enum NetworkSetupWindowPresentation {
     static func enterBrowserPreservingCenter(_ window: NSWindow) {
         let center = NSPoint(x: window.frame.midX, y: window.frame.midY)
         configure(window, identityReady: true)
-        window.setContentSize(initialContentSize)
-        window.setFrameOrigin(NSPoint(x: center.x - window.frame.width / 2,
-                                      y: center.y - window.frame.height / 2))
+        if let screen = window.screen ?? NSScreen.main {
+            window.setFrame(browserFrame(center: center, visibleFrame: screen.visibleFrame), display: false)
+        } else {
+            window.setContentSize(initialContentSize)
+            window.setFrameOrigin(NSPoint(x: center.x - window.frame.width / 2,
+                                          y: center.y - window.frame.height / 2))
+        }
     }
 }
 
@@ -571,7 +584,11 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
                 self?.updater.checkForUpdates(userInitiated: true)
             }
         ))
-        window.center()
+        if model.account.identityReady, let screen = window.screen ?? NSScreen.main {
+            window.setFrame(NetworkSetupWindowPresentation.browserFrame(
+                center: NSPoint(x: screen.visibleFrame.midX, y: screen.visibleFrame.midY),
+                visibleFrame: screen.visibleFrame), display: false)
+        } else { window.center() }
         setupWindowFrame = window.frame
         window.isReleasedWhenClosed = false
         window.makeKeyAndOrderFront(nil)
@@ -4217,7 +4234,7 @@ struct ALOView: View {
     var body: some View {
         ZStack {
             if model.account.identityReady {
-                Color(nsColor: .windowBackgroundColor)
+                Color.clear
             } else if model.phase == .idle {
                 Color.clear
             } else {

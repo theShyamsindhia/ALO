@@ -39,16 +39,33 @@ struct NetworkWindowPresentationTests {
         #expect(window.frame == resized)
     }
 
-    @Test func nativeIdentityTransitionPreservesTheCurrentWindowCenter() {
+    @Test func nativeIdentityTransitionFitsTheScreenWhilePreservingCenterWhenPossible() throws {
         let window = makeWindow()
         NetworkSetupWindowPresentation.configure(window, identityReady: false)
         window.setContentSize(NSSize(width: 800, height: 640))
         window.setFrameOrigin(NSPoint(x: 173, y: 217))
         let center = NSPoint(x: window.frame.midX, y: window.frame.midY)
+        let screen = try #require(window.screen ?? NSScreen.main)
+        let expected = NetworkSetupWindowPresentation.browserFrame(center: center, visibleFrame: screen.visibleFrame)
         NetworkSetupWindowPresentation.enterBrowserPreservingCenter(window)
-        #expect(abs(window.frame.midX - center.x) < 0.5)
-        #expect(abs(window.frame.midY - center.y) < 0.5)
+        #expect(window.frame == expected)
         window.close()
+    }
+
+    @Test func initialFrameFitsShortAndOffsetDisplays() {
+        for visible in [NSRect(x: 0, y: 25, width: 1280, height: 650),
+                        NSRect(x: -1440, y: 40, width: 1440, height: 860),
+                        NSRect(x: 100, y: -700, width: 800, height: 600)] {
+            for center in [NSPoint(x: visible.midX, y: visible.midY), NSPoint(x: visible.maxX, y: visible.maxY)] {
+                let frame = NetworkSetupWindowPresentation.browserFrame(center: center, visibleFrame: visible)
+                #expect(visible.insetBy(dx: 24, dy: 24).contains(frame))
+                #expect(frame.width <= 960 && frame.height <= 700)
+                #expect(frame.width >= 640 && frame.height >= 440)
+            }
+        }
+        let screen = NSRect(x: 0, y: 0, width: 1600, height: 1000)
+        let centered = NetworkSetupWindowPresentation.browserFrame(center: NSPoint(x: 800, y: 500), visibleFrame: screen)
+        #expect(centered.midX == 800 && centered.midY == 500)
     }
 
     @Test func onboardingChromeRemainsCustomUntilIdentityReady() {
