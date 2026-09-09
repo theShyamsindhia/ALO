@@ -47,9 +47,9 @@ extension NativePresentationTests {
                 window.contentView = hosting
                 window.orderBack(nil)
                 try await Task.sleep(for: .milliseconds(300))
-                // Native toolbar attachment changes AppKit's content rect.
-                // Apply the requested size after attachment, retaining exact
-                // geometry and account-state assertions below.
+                // Apply the requested size after hosting attachment. Full-size
+                // content includes the transparent title bar; contentLayoutRect
+                // describes the smaller title-bar-safe area, not the UI bounds.
                 window.setContentSize(size)
                 hosting.layoutSubtreeIfNeeded()
                 let bitmap = try #require(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
@@ -61,7 +61,9 @@ extension NativePresentationTests {
                         URL(fileURLWithPath: path).appendingPathComponent("join-error-\(long ? "long" : "short")-\(dark ? "dark" : "light")-\(Int(size.width)).png"))
                 }
                 #expect(hosting.bounds.size == size)
-                #expect(window.contentLayoutRect.size == size)
+                #expect(window.styleMask.contains(.fullSizeContentView))
+                #expect(window.contentRect(forFrameRect: window.frame).size == size)
+                #expect(window.contentLayoutRect.width == size.width)
                 #expect(model.errorMessage == message)
                 #expect(account.identityReady)
                 #expect(model.phase == .idle)
