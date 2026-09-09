@@ -1,5 +1,5 @@
 ---
-status: verifying
+status: resolved
 trigger: "okay fix this and push them in the release"
 ---
 
@@ -14,7 +14,7 @@ Expected: all strict gates pass without retries or altered timing thresholds.
 
 hypothesis: both blockers are test-fixture mismatches, not changes required to
 production audio or networking.
-next_action: run all strict CI gates for the 0.15.6 candidate before stable publication.
+next_action: none; both strict pipelines passed for the 0.15.6 candidate.
 
 ## Evidence
 
@@ -35,6 +35,21 @@ next_action: run all strict CI gates for the 0.15.6 candidate before stable publ
 - Chromium fixture now uses the adjacent TransferObservation, closes before
   teardown and asserts exact captured bytes/progress in its own test body.
   Repeated, late and early-teardown callback coverage was added.
+- Verification 34379536430 and release 34379535849 both passed at
+  0f89e554df5500f57b417d3f711e052e5839bd72: 385 XCTest cases, 1,393 Swift tests,
+  seven room scenarios, Mac/iOS builds, signing, notarization and clean package
+  checks. No rerun or weakened threshold was needed for this candidate.
+- Local downloaded ZIP passed codesign and Gatekeeper; DMG passed codesign and
+  hdiutil checksums. Published asset SHA-256 values match the verified artifacts.
+
+## Resolution
+
+The headless peer now uses the production TCP profile; the deterministic
+reserved-source test joins while the non-reusable collision test still rejects.
+The Chromium fixture uses the existing one-shot observation with exact progress
+assertions in the test body, safely closed before removing its History database.
+Production networking/audio and the monitor's multiple-snapshot contract were
+not modified. A physical two-Mac video session remains outside this validation.
 
 ## Constraints
 
