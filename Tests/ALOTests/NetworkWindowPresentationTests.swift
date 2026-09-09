@@ -20,9 +20,11 @@ struct NetworkWindowPresentationTests {
         let window = makeWindow()
         NetworkSetupWindowPresentation.configure(window, identityReady: true)
         #expect(window.styleMask.contains([.titled, .closable, .miniaturizable, .resizable]))
-        #expect(!window.styleMask.contains(.fullSizeContentView))
-        #expect(window.titleVisibility == .visible)
-        #expect(window.isOpaque)
+        #expect(window.styleMask.contains(.fullSizeContentView))
+        #expect(window.titleVisibility == .hidden)
+        #expect(window.titlebarAppearsTransparent)
+        #expect(!window.isOpaque)
+        #expect(window.isMovableByWindowBackground)
         #expect(window.collectionBehavior.contains(.fullScreenNone))
         #expect(window.standardWindowButton(.closeButton)?.isHidden == false)
         #expect(window.contentMinSize == NSSize(width: 640, height: 440))
@@ -122,7 +124,7 @@ struct NetworkWindowPresentationTests {
                 window.contentView?.layoutSubtreeIfNeeded()
                 let frameView = try #require(window.contentView?.superview)
                 #expect(window.contentView?.bounds.size == size)
-                #expect(window.contentLayoutRect.size == size)
+                #expect(window.contentLayoutRect.width == size.width)
                 // Render/layout before reading native geometry, including runs
                 // without PNG export. Pixel dimensions alone missed a centered
                 // intrinsic-width empty HStack with an unwanted leading strip.
@@ -135,11 +137,10 @@ struct NetworkWindowPresentationTests {
                 #expect(bounds.width <= ALONativeNetworkLayout.maximumSidebarWidth)
                 let detail = try #require(detailProbe)
                 let detailBounds = detail.convert(detail.bounds, to: window.contentView)
-                let dividerWidth = detailBounds.minX - bounds.maxX
-                #expect(dividerWidth > 0 && dividerWidth <= 1)
-                #expect(abs(detailBounds.maxX - size.width) < 0.5)
-                #expect(abs(detailBounds.minY - bounds.minY) < 0.5)
-                #expect(abs(detailBounds.height - bounds.height) < 0.5)
+                #expect(abs(detailBounds.minX - bounds.maxX) < 0.5)
+                #expect(abs(detailBounds.maxX - (size.width - ALONativeNetworkLayout.panelInset)) < 0.5)
+                #expect(abs(detailBounds.minY - bounds.minY - ALONativeNetworkLayout.panelInset) < 0.5)
+                #expect(abs(detailBounds.height - (bounds.height - 2 * ALONativeNetworkLayout.panelInset)) < 0.5)
                 if let directory = ProcessInfo.processInfo.environment["ALO_NETWORKS_SNAPSHOT_DIR"] {
                     try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
                     let data = try #require(bitmap.representation(using: .png, properties: [:]))

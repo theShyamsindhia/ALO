@@ -38,6 +38,10 @@ struct RoomChatPanel: View {
     @FocusState private var searchFocused: Bool
     var avatar: ((String, String, CGFloat) -> AnyView)? = nil
     var mentionMembers: [RoomMentionMember] = []
+    var usesNativeLayout = false
+    var subtitle = ""
+    var headerActions: AnyView? = nil
+    var channelMenu: AnyView? = nil
 
     private var mentionToken: RoomMentionCompletion.Token? {
         guard focused, dismissedMentionDraft != draft else { return nil }
@@ -62,6 +66,13 @@ struct RoomChatPanel: View {
     }
     var body: some View {
         VStack(spacing: 0) {
+            if usesNativeLayout {
+                NetworkConversationHeader(title: roomTitle, subtitle: subtitle) {
+                    headerActions
+                    chatMenu
+                }
+            }
+            if !usesNativeLayout || showsSearch || onlyPins {
             HStack(spacing: 8) {
                 if showsSearch {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -78,15 +89,17 @@ struct RoomChatPanel: View {
                 } else {
                     Spacer(minLength: 0)
                 }
-                chatMenu
+                if !usesNativeLayout { chatMenu }
             }
             .font(.system(size: 11))
             .padding(.horizontal, 14)
             .frame(height: showsSearch || onlyPins ? 32 : 24)
+            }
             ChatTranscript(messages: filtered, currentParticipantID: currentParticipantID,
                 firstUnreadMessageID: query.isEmpty && !onlyPins ? firstUnreadMessageID : nil,
                 unreadCount: unreadCount, isPresented: isPresented && query.isEmpty && !onlyPins,
-                accent: accent, onLatestVisibilityChanged: onLatestVisibilityChanged) { message, showsSender in
+                accent: accent, onLatestVisibilityChanged: onLatestVisibilityChanged,
+                usesNativeLayout: usesNativeLayout) { message, showsSender in
                     messageRow(message, showsSender: showsSender)
                 }
                 .overlay {
@@ -112,15 +125,18 @@ struct RoomChatPanel: View {
             HStack(alignment: .center, spacing: 8) {
                 Button { choosesAttachment = true } label: {
                     Image(systemName: "plus")
-                        .font(.system(size: 12, weight: .semibold))
-                        .frame(width: 24, height: 24)
+                        .font(.system(size: usesNativeLayout ? 18 : 12, weight: .medium))
+                        .frame(width: usesNativeLayout ? 36 : 24, height: usesNativeLayout ? 36 : 24)
+                        .background(.primary.opacity(usesNativeLayout ? 0.045 : 0), in: Circle())
                 }
                 .buttonStyle(.plain)
                 .disabled(editing != nil)
                 .help("Attach a file up to 8 MB")
                 .accessibilityLabel("Attach file")
-                messageAvatar(id: currentParticipantID ?? "", name: "You", size: 22)
+                if !usesNativeLayout { messageAvatar(id: currentParticipantID ?? "", name: "You", size: 22)
                     .accessibilityHidden(true)
+                }
+                HStack(spacing: 8) {
                 TextField("Message \(roomTitle)", text: $draft, axis: .vertical)
                     .lineLimit(1...3).textFieldStyle(.plain).focused($focused)
                     .onSubmit(submit)
@@ -142,10 +158,18 @@ struct RoomChatPanel: View {
                 if draft.count > 600 { Text("\(draft.count)/700").font(.caption2).foregroundStyle(draft.count > 700 ? .red : .secondary) }
                 Button(action: submit) {
                     Image(systemName: editing == nil ? "arrow.up.circle.fill" : "checkmark.circle.fill")
-                        .font(.system(size: 22)).foregroundStyle(accent)
+                        .font(.system(size: usesNativeLayout ? 32 : 22)).foregroundStyle(accent)
                 }.buttonStyle(.plain).disabled(!validDraft).help(editing == nil ? "Send message" : "Save edit")
-            }.font(.system(size: 12)).padding(.horizontal, 10).padding(.vertical, 7)
-                .background(.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 12)).padding(.horizontal, 10).padding(.vertical, 6)
+                    .accessibilityLabel(editing == nil ? "Send message" : "Save edit")
+                }
+                .padding(.leading, usesNativeLayout ? 16 : 0).padding(.trailing, usesNativeLayout ? 7 : 0)
+                .padding(.vertical, usesNativeLayout ? 7 : 0)
+                .background(.primary.opacity(usesNativeLayout ? 0.035 : 0), in: RoundedRectangle(cornerRadius: 23))
+                .overlay(RoundedRectangle(cornerRadius: 23).strokeBorder(.primary.opacity(usesNativeLayout ? 0.1 : 0)))
+            }.font(.system(size: usesNativeLayout ? 16 : 12))
+                .padding(.horizontal, usesNativeLayout ? 28 : 10).padding(.vertical, usesNativeLayout ? 18 : 7)
+                .background(.primary.opacity(usesNativeLayout ? 0 : 0.045), in: RoundedRectangle(cornerRadius: 12))
+                .padding(.horizontal, usesNativeLayout ? 0 : 10).padding(.vertical, usesNativeLayout ? 0 : 6)
 
         }
         .dropDestination(for: URL.self) { urls, _ in
@@ -231,6 +255,7 @@ struct RoomChatPanel: View {
 
     private var chatMenu: some View {
         Menu {
+            if let channelMenu { channelMenu; Divider() }
             Button("Search messages", systemImage: "magnifyingglass", action: openSearch)
                 .keyboardShortcut("k", modifiers: .command).disabled(!isPresented)
             Button(onlyPins ? "Show all messages" : "Pinned messages", systemImage: "pin") {
@@ -252,7 +277,8 @@ struct RoomChatPanel: View {
             Button("History", systemImage: "info.circle") { showsHistory = true }
         } label: {
             Image(systemName: "ellipsis").font(.system(size: 13, weight: .medium))
-                .foregroundStyle(.secondary).frame(width: 24, height: 22)
+                .foregroundStyle(usesNativeLayout ? accent : .secondary)
+                .frame(width: usesNativeLayout ? 28 : 24, height: usesNativeLayout ? 32 : 22)
         }
         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
         .help("Chat options").accessibilityLabel("Chat options")
@@ -280,28 +306,55 @@ struct RoomChatPanel: View {
         }
     }
 
+    private func displayText(_ text: String, own: Bool) -> AttributedString {
+        var result = AttributedString(text)
+        if usesNativeLayout && !own {
+            for name in mentionNames {
+                if let range = result.range(of: "@" + name) {
+                    result[range].foregroundColor = accent
+                    result[range].font = .system(size: 16, weight: .semibold)
+                }
+            }
+        }
+        return result
+    }
+
     private func messageRow(_ message: RoomChatMessage, showsSender: Bool) -> some View {
         let own = message.senderID == currentParticipantID
         let localAttachmentURL = message.attachment == nil ? nil : attachmentURL(message)
-        return HStack(alignment: .bottom) {
+        return HStack(alignment: .bottom, spacing: usesNativeLayout ? 16 : 8) {
             if own { Spacer(minLength: 36) }
             else {
-                messageAvatar(id: message.senderID, name: message.sender, size: 24)
+                messageAvatar(id: message.senderID, name: message.sender, size: usesNativeLayout ? 34 : 24)
                     .opacity(showsSender ? 1 : 0).accessibilityHidden(true)
             }
+            VStack(alignment: own ? .trailing : .leading, spacing: 6) {
+            if usesNativeLayout && showsSender && !own {
+                Text(message.sender).font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
+                    .padding(.leading, 2)
+            }
             VStack(alignment: .leading, spacing: 5) {
-                if showsSender { Text(own ? "You" : message.sender).font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary) }
+                if showsSender && !usesNativeLayout { Text(own ? "You" : message.sender).font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary) }
                 if let id = message.replyTo {
                     let original = messages.first { $0.id == id }
                     Label(original.map { "\($0.sender): \($0.text)" } ?? "Earlier message unavailable", systemImage: "arrowshape.turn.up.left")
-                        .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
+                        .font(.system(size: usesNativeLayout ? 12 : 10))
+                        .foregroundStyle(usesNativeLayout && own ? Color.white.opacity(0.85) : .secondary).lineLimit(2)
                 }
                 if !message.text.isEmpty || message.deleted {
-                    Text(message.text).font(.system(size: 12)).textSelection(.enabled)
-                        .foregroundStyle(message.deleted ? .secondary : .primary)
+                    Text(displayText(message.text, own: own)).font(.system(size: usesNativeLayout ? 16 : 12)).textSelection(.enabled)
+                        .foregroundStyle(usesNativeLayout && own ? Color.white : message.deleted ? .secondary : .primary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if !message.deleted, let attachment = message.attachment {
-                    attachmentCard(attachment, localURL: localAttachmentURL)
+                    if usesNativeLayout, let localAttachmentURL,
+                       attachment.contentType.flatMap(UTType.init)?.conforms(to: .image) == true {
+                        ChatInlineImage(url: localAttachmentURL, name: attachment.fileName) {
+                            attachmentCard(attachment, localURL: localAttachmentURL)
+                        }
+                    } else {
+                        attachmentCard(attachment, localURL: localAttachmentURL)
+                    }
                 }
                 if !message.deleted {
                     ForEach(RoomChatPresentation.links(in: message.text), id: \.absoluteString) { url in
@@ -317,7 +370,7 @@ struct RoomChatPanel: View {
                                 }
                                 Spacer(minLength: 0)
                                 Image(systemName: "arrow.up.right").font(.system(size: 9))
-                            }.foregroundStyle(accent).padding(8)
+                            }.foregroundStyle(usesNativeLayout && own ? Color.white : accent).padding(8)
                                 .background(accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
                         }.buttonStyle(.plain).help("Open \(url.absoluteString) in your browser. Preview uses only the URL; the website has not been fetched.")
                     }
@@ -326,7 +379,7 @@ struct RoomChatPanel: View {
                     HStack(spacing: 6) {
                         if message.edited { Text("edited") }
                         if message.pinned { Label("Pinned", systemImage: "pin.fill") }
-                    }.font(.system(size: 9)).foregroundStyle(.secondary)
+                    }.font(.system(size: 9)).foregroundStyle(usesNativeLayout && own ? Color.white.opacity(0.8) : .secondary)
                 }
                 if !message.deleted {
                     HStack(spacing: 4) {
@@ -340,8 +393,12 @@ struct RoomChatPanel: View {
                     }
                 }
             }
-            .padding(.horizontal, 11).padding(.vertical, 8)
-            .background(own ? accent.opacity(0.2) : Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 13))
+            .padding(.horizontal, usesNativeLayout ? (message.text.isEmpty && message.attachment != nil ? 0 : 16) : 11)
+            .padding(.vertical, usesNativeLayout ? (message.text.isEmpty && message.attachment != nil ? 0 : 11) : 8)
+            .background(usesNativeLayout && message.text.isEmpty && message.attachment != nil ? .clear :
+                own ? accent.opacity(usesNativeLayout ? 1 : 0.2) : Color.primary.opacity(usesNativeLayout ? 0.055 : 0.07),
+                in: RoundedRectangle(cornerRadius: usesNativeLayout ? 18 : 13))
+            }
             .contextMenu {
                 if !message.deleted {
                     Button("Reply", systemImage: "arrowshape.turn.up.left") { replyTo = message.id; editing = nil; focused = true }
@@ -446,11 +503,11 @@ struct RoomChatPanel: View {
                     filePreview(url: localURL, contentType: attachment.contentType,
                                 allowsImagePreview: false)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(attachment.fileName).font(.system(size: 11, weight: .semibold)).lineLimit(1)
+                        Text(attachment.fileName).font(.system(size: usesNativeLayout ? 14 : 11, weight: .semibold)).lineLimit(1)
                         Text(localURL == nil
                              ? "Waiting for file…"
                              : ByteCountFormatter.string(fromByteCount: Int64(attachment.byteCount), countStyle: .file))
-                            .font(.system(size: 9)).foregroundStyle(.secondary)
+                            .font(.system(size: usesNativeLayout ? 12 : 9)).foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 0)
                     Image(systemName: localURL == nil ? "arrow.down.circle" : "arrow.up.right.square")
@@ -475,8 +532,9 @@ struct RoomChatPanel: View {
                 .accessibilityLabel("Show \(attachment.fileName) in Finder")
             }
         }
-        .padding(8).frame(minWidth: 190)
-        .background(accent.opacity(0.09), in: RoundedRectangle(cornerRadius: 9))
+        .padding(usesNativeLayout ? 12 : 8).frame(minWidth: 190)
+        .background(usesNativeLayout ? Color(nsColor: .controlBackgroundColor) : accent.opacity(0.09),
+                    in: RoundedRectangle(cornerRadius: usesNativeLayout ? 14 : 9))
     }
 
     @ViewBuilder
@@ -494,7 +552,7 @@ struct RoomChatPanel: View {
         }
     }
 
-    private static func boundedThumbnail(at url: URL) -> NSImage? {
+    fileprivate static func boundedThumbnail(at url: URL, maximumPixelSize: Int = 96) -> NSImage? {
         guard let source = CGImageSourceCreateWithURL(
             url as CFURL,
             [kCGImageSourceShouldCache: false] as CFDictionary
@@ -505,7 +563,7 @@ struct RoomChatPanel: View {
         width > 0, height > 0, width <= 8_192, height <= 8_192,
         let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceThumbnailMaxPixelSize: 96,
+            kCGImageSourceThumbnailMaxPixelSize: maximumPixelSize,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceShouldCacheImmediately: true
         ] as CFDictionary) else { return nil }
@@ -516,4 +574,29 @@ struct RoomChatPanel: View {
 private struct PendingChatAttachment {
     let url: URL
     let metadata: RoomChatAttachment
+}
+
+/// Decode once per local file, never fetch a remote preview or decode full-size media.
+private struct ChatInlineImage<Fallback: View>: View {
+    let url: URL
+    let name: String
+    @ViewBuilder var fallback: () -> Fallback
+    @State private var thumbnail: NSImage?
+
+    var body: some View {
+        Group {
+            if let thumbnail {
+                Button { NSWorkspace.shared.open(url) } label: {
+                    Image(nsImage: thumbnail).resizable().scaledToFit()
+                        .clipShape(RoundedRectangle(cornerRadius: 18))
+                        .frame(maxWidth: 350, maxHeight: 210, alignment: .leading)
+                }
+                .buttonStyle(.plain).accessibilityLabel("Open image: \(name)")
+                .help(name)
+            } else { fallback() }
+        }
+        .task(id: url) {
+            thumbnail = RoomChatPanel.boundedThumbnail(at: url, maximumPixelSize: 700)
+        }
+    }
 }

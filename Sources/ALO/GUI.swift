@@ -442,7 +442,7 @@ func toggleALOSetupWindow(_ window: NSWindow) {
 
 @MainActor
 enum NetworkSetupWindowPresentation {
-    static let initialContentSize = NSSize(width: 760, height: 520)
+    static let initialContentSize = NSSize(width: 1120, height: 860)
     static let minimumContentSize = NSSize(width: 640, height: 440)
 
     static func shouldApplyIdentityUpdate(_ queuedReady: Bool, currentReady: Bool) -> Bool {
@@ -452,20 +452,20 @@ enum NetworkSetupWindowPresentation {
     static func configure(_ window: NSWindow, identityReady: Bool) {
         let managedFullScreen = window.styleMask.intersection(.fullScreen)
         let presentation: NSWindow.StyleMask = identityReady
-            ? [.titled, .closable, .miniaturizable, .resizable]
+            ? [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
             : [.titled, .closable, .fullSizeContentView]
         window.styleMask = presentation.union(managedFullScreen)
         // Networks is a utility browser. Keep ordinary zoom/resizing without
         // creating a full-screen Space that channel handoff would abandon.
         window.collectionBehavior.insert(.fullScreenNone)
         window.title = identityReady ? "Networks — \(ALOAppFlavor.displayName)" : ALOAppFlavor.displayName
-        window.titlebarAppearsTransparent = !identityReady
-        window.titleVisibility = identityReady ? .visible : .hidden
-        window.titlebarSeparatorStyle = identityReady ? .automatic : .none
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
+        window.titlebarSeparatorStyle = .none
         window.toolbarStyle = .unifiedCompact
-        window.backgroundColor = identityReady ? .windowBackgroundColor : .clear
-        window.isOpaque = identityReady
-        window.isMovableByWindowBackground = !identityReady
+        window.backgroundColor = .clear
+        window.isOpaque = false
+        window.isMovableByWindowBackground = true
         window.contentMinSize = identityReady ? minimumContentSize : .zero
         for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
             window.standardWindowButton(button)?.isHidden = !identityReady

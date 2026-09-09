@@ -6,9 +6,9 @@ import Testing
 extension NativePresentationTests {
     @Suite(.serialized) @MainActor
     struct ChatTranscriptLayoutTests {
-        @Test("Sent messages stay inside the transcript viewport after long bubbles and rapid replies")
-        func sentMessageIsVisible() async throws {
-            let fixture = TranscriptFixture()
+        @Test("Sent messages stay inside the transcript viewport after long bubbles and rapid replies", arguments: [false, true])
+        func sentMessageIsVisible(nativeLayout: Bool) async throws {
+            let fixture = TranscriptFixture(nativeLayout: nativeLayout)
             let window = makeWindow(fixture)
             defer { window.close() }
             let scrollView = try await waitForScrollView(in: window)
@@ -32,9 +32,9 @@ extension NativePresentationTests {
             try await waitUntil { abs(scrollView.contentView.bounds.height - 180) < 2 && atBottom(scrollView) }
         }
 
-        @Test("Receiving a message while reading history does not move the native scroll position")
-        func incomingPreservesHistory() async throws {
-            let fixture = TranscriptFixture()
+        @Test("Receiving a message while reading history does not move the native scroll position", arguments: [false, true])
+        func incomingPreservesHistory(nativeLayout: Bool) async throws {
+            let fixture = TranscriptFixture(nativeLayout: nativeLayout)
             let window = makeWindow(fixture)
             defer { window.close() }
             let scrollView = try await waitForScrollView(in: window)
@@ -52,9 +52,9 @@ extension NativePresentationTests {
             #expect(!fixture.atLatest)
         }
 
-        @Test("Reopening a hidden chat lands at unread history without marking the latest as seen")
-        func reopenUnreadHistory() async throws {
-            let fixture = TranscriptFixture()
+        @Test("Reopening a hidden chat lands at unread history without marking the latest as seen", arguments: [false, true])
+        func reopenUnreadHistory(nativeLayout: Bool) async throws {
+            let fixture = TranscriptFixture(nativeLayout: nativeLayout)
             fixture.isPresented = false
             fixture.firstUnreadMessageID = fixture.messages[30].id
             let window = makeWindow(fixture)
@@ -110,6 +110,8 @@ extension NativePresentationTests {
 
 @MainActor
 private final class TranscriptFixture: ObservableObject {
+    let nativeLayout: Bool
+    init(nativeLayout: Bool) { self.nativeLayout = nativeLayout }
     @Published var messages = (0..<60).map {
         RoomMessage(senderID: "friend", sender: "Friend", text: "Earlier message \($0)", sentNanos: UInt64($0))
     }
@@ -129,7 +131,8 @@ private struct TranscriptFixtureView: View {
             unreadCount: 0,
             isPresented: fixture.isPresented,
             accent: .blue,
-            onLatestVisibilityChanged: { _, value in fixture.atLatest = value }
+            onLatestVisibilityChanged: { _, value in fixture.atLatest = value },
+            usesNativeLayout: fixture.nativeLayout
         ) { message, _ in
             Text(message.text)
                 .font(.system(size: 12))

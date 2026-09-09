@@ -5,6 +5,7 @@ import ALOIdentity
 import ALORooms
 import ALOAppModel
 import ALONetworkUI
+import ALOCore
 
 @MainActor
 struct MacNetworkSetupView: View {
@@ -189,7 +190,8 @@ struct MacNetworkSetupView: View {
                 onExportRecovery: exportRecovery,
                 channels: account.channels.map { .init(id: $0.id.uuidString, name: $0.name, isPrivate: $0.isPrivate, isMain: $0.isMain) },
                 selectedChannelID: selectedChannelID,
-                onOpenChannel: openChannel)
+                onOpenChannel: openChannel,
+                nowPlaying: model.phase == .live && !model.nowPlaying.isEmpty ? AnyView(nowPlayingCard) : nil)
                 .disabled(model.phase == .starting)
         } detail: {
             channelConversation
@@ -219,16 +221,27 @@ struct MacNetworkSetupView: View {
         VStack(spacing: 0) {
             if model.phase == .live, selectedChannelID == model.selectedRoomID {
                 RoomChatPanel(messages: model.messages, currentParticipantID: model.currentParticipantID,
-                    roomTitle: model.roomTitle, firstUnreadMessageID: model.firstUnreadMessageID,
-                    unreadCount: model.unreadMessageCount, isPresented: controlActiveState == .active, accent: .accentColor,
+                    roomTitle: selectedChannelTitle, firstUnreadMessageID: model.firstUnreadMessageID,
+                    unreadCount: model.unreadMessageCount, isPresented: controlActiveState == .active, accent: .blue,
                     onLatestVisibilityChanged: model.setChatViewportAtLatest, send: model.sendChatOperation,
                     sendAttachment: model.sendChatAttachment, attachmentURL: model.chatAttachmentURL,
                     draft: $model.draftMessage, notificationMode: $model.chatNotificationMode,
-                    mentionNames: model.participants.map(\.name))
+                    mentionNames: model.participants.map(\.name),
+                    mentionMembers: model.participants.filter { $0.id != model.currentParticipantID }
+                        .map { RoomMentionMember(id: $0.id, name: $0.name) },
+                    usesNativeLayout: true, subtitle: channelSubtitle,
+                    headerActions: AnyView(channelActions), channelMenu: AnyView(channelMenu))
                     .id(model.selectedRoomID)
             } else if model.phase == .starting {
+                NetworkConversationHeader(title: selectedChannelTitle, subtitle: "Opening channel…") { channelActions }
                 ProgressView("Opening channel…").frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
+                NetworkConversationHeader(title: selectedChannelTitle, subtitle: channelSubtitle) {
+                    channelActions
+                    Menu { channelMenu } label: { Image(systemName: "ellipsis") }
+                        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+                        .accessibilityLabel("Channel options")
+                }
                 ContentUnavailableView("Choose a channel", systemImage: "bubble.left.and.bubble.right",
                     description: Text("Open a channel in the sidebar to join the conversation."))
             }
@@ -236,35 +249,54 @@ struct MacNetworkSetupView: View {
                 Text(message).foregroundStyle(.secondary).padding()
             }
         }
-        .navigationTitle(account.channels.first(where: { $0.id.uuidString == selectedChannelID })?.name ?? account.selectedNetwork?.name ?? "Networks")
-        .toolbar {
-            ToolbarItem(placement: .principal) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(account.channels.first(where: { $0.id.uuidString == selectedChannelID })?.name ?? account.selectedNetwork?.name ?? "Networks")
-                        .font(.headline).lineLimit(1)
-                    if model.phase == .live, selectedChannelID == model.selectedRoomID {
-                        Text("Connected").font(.caption2).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            ToolbarItemGroup {
-                if account.selectedNetwork != nil {
-                    Button("Members", systemImage: "person.2") { present(.members) }.help("Members")
-                    if model.phase == .live, selectedChannelID == model.selectedRoomID {
-                        Button("Voice controls", systemImage: "mic") { model.showWalkieBar() }.help("Voice controls")
-                        Button("Share screen", systemImage: "rectangle.on.rectangle") { model.toggleVideoFromFloatingBar() }.help("Share screen")
-                    }
-                    Menu {
-                        if account.selectedNetwork?.owner.userID == account.identity?.publicIdentity.userID {
-                            Button("Create channel…") { present(.createChannel) }
-                            Button("Add member…") { present(.addMember) }
-                        }
-                        Button("Import invitation…") { present(.importNetwork) }
-                        if model.phase == .live { Button("Leave channel") { model.stop() } }
-                    } label: { Label("Channel options", systemImage: "ellipsis.circle") }
-                }
+    }
+
+    private var selectedChannelTitle: String {
+        account.channels.first(where: { $0.id.uuidString == selectedChannelID })?.name
+            ?? account.selectedNetwork?.name ?? "Spaces"
+    }
+
+    private var channelSubtitle: String {
+        if model.phase == .live, selectedChannelID == model.selectedRoomID {
+            return "\(account.selectedNetwork?.name ?? "") · \(model.participants.count) people connected"
+        }
+        return account.selectedNetwork == nil ? "Your people, nearby." : "Choose a channel to connect"
+    }
+
+    @ViewBuilder private var channelActions: some View {
+        if account.selectedNetwork != nil {
+            Button { present(.members) } label: { Image(systemName: "person.2").frame(width: 28, height: 32) }
+                .help("Members").accessibilityLabel("Members")
+            if model.phase == .live, selectedChannelID == model.selectedRoomID {
+                Button { model.showWalkieBar() } label: { Image(systemName: "mic").frame(width: 28, height: 32) }
+                    .help("Voice controls").accessibilityLabel("Voice controls")
+                Button { model.toggleVideoFromFloatingBar() } label: {
+                    Image(systemName: "display").frame(width: 28, height: 32)
+                }.help("Share screen").accessibilityLabel("Share screen")
             }
         }
+    }
+
+    @ViewBuilder private var channelMenu: some View {
+        if account.selectedNetwork?.owner.userID == account.identity?.publicIdentity.userID,
+           account.selectedNetwork != nil {
+            Button("Create channel…") { present(.createChannel) }
+            Button("Add member…") { present(.addMember) }
+        }
+        Button("Import invitation…") { present(.importNetwork) }
+        if model.phase == .live { Button("Leave channel") { model.stop() } }
+    }
+
+    private var nowPlayingCard: some View {
+        NetworkNowPlayingCard(title: model.nowPlaying.title ?? "Shared audio", artist: model.nowPlaying.artist,
+            channel: account.channels.first(where: { $0.id.uuidString == model.selectedRoomID })?.name ?? model.roomTitle,
+            artwork: model.nowPlaying.artworkData, isPlaying: model.nowPlaying.isPlaying != false) {
+                if let id = model.selectedRoomID,
+                   let network = account.networks.first(where: { $0.channels.contains(where: { $0.id.uuidString == id }) }) {
+                    account.selectedNetworkID = network.id.uuidString
+                    openChannel(id)
+                }
+            }
     }
 
     @ViewBuilder private func sheetView(_ selection: Sheet) -> some View {
