@@ -78,19 +78,19 @@ final class ChromiumDownloadMetadataReaderTests: XCTestCase {
         XCTAssertNil(info)
     }
 
-    func testFolderFileDownloadMonitorCalculatesExactProgressUsingChromiumMetadata() async {
+    func testFolderFileDownloadMonitorCalculatesExactProgressUsingChromiumMetadata() async throws {
         let tempDir = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let dbURL = tempDir.appendingPathComponent("History")
-        try? createChromiumDownloadsDatabase(at: dbURL)
+        try createChromiumDownloadsDatabase(at: dbURL)
 
         let crdownloadURL = tempDir.appendingPathComponent("dataset.zip.crdownload")
         let targetPath = tempDir.appendingPathComponent("dataset.zip").path
         let totalBytes: Int64 = 100_000
         let currentBytes = 25_000
 
-        try? insertDownloadRow(
+        try insertDownloadRow(
             in: dbURL,
             currentPath: crdownloadURL.path,
             targetPath: targetPath,
@@ -112,19 +112,17 @@ final class ChromiumDownloadMetadataReaderTests: XCTestCase {
 
         let expectation = expectation(description: "publishes exact chromium download progress")
 
-        monitor.onSnapshotChange = { transfers in
-            guard let transfer = transfers.first else { return }
-            XCTAssertEqual(transfer.displayName, "dataset.zip")
-            XCTAssertEqual(transfer.estimatedTotalByteCount, totalBytes)
-            XCTAssertEqual(transfer.byteCount, Int64(currentBytes))
-            // 25,000 / 100,000 = 0.25 (25%)
-            XCTAssertEqual(transfer.progress, 0.25, accuracy: 0.001)
-            expectation.fulfill()
-        }
+        let observation = TransferObservation(expectation: expectation, name: "dataset.zip")
+        monitor.onSnapshotChange = { observation.record($0) }
+        defer { observation.close(); monitor.stopMonitoring() }
 
         monitor.startMonitoring()
         await fulfillment(of: [expectation], timeout: 3.0)
-        monitor.stopMonitoring()
+        let transfer = try XCTUnwrap(observation.close())
+        XCTAssertEqual(transfer.displayName, "dataset.zip")
+        XCTAssertEqual(transfer.estimatedTotalByteCount, totalBytes)
+        XCTAssertEqual(transfer.byteCount, Int64(currentBytes))
+        XCTAssertEqual(transfer.progress, 0.25, accuracy: 0.001)
     }
 }
 

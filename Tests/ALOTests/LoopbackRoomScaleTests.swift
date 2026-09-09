@@ -7,6 +7,42 @@ import Testing
 
 @Suite("Single-Mac room integration", .serialized)
 struct LoopbackRoomScaleTests {
+    @Test func reusableSourceEndpointUsesTheProductionRoomProfile() throws {
+        let queue = DispatchQueue(label: "test.loopback.reserved-source")
+        let sourceReady = DispatchSemaphore(value: 0)
+        let sourceCancelled = DispatchSemaphore(value: 0)
+        let source = try NWListener(using: LocalNetworkParameters.tcp(), on: .any)
+        source.newConnectionHandler = { $0.cancel() }
+        source.stateUpdateHandler = { state in
+            if case .ready = state { sourceReady.signal() }
+            if case .cancelled = state { sourceCancelled.signal() }
+        }
+        source.start(queue: queue)
+        defer {
+            source.cancel()
+            #expect(sourceCancelled.wait(timeout: .now() + 3) == .success)
+        }
+        try #require(sourceReady.wait(timeout: .now() + 3) == .success)
+        let sourcePort = try #require(source.port)
+
+        let ready = DispatchSemaphore(value: 0)
+        let ports = PortState()
+        let host = HostServer(roomName: "Reusable source", advertise: false,
+            listenerReadyHandler: { ports.set($0); ready.signal() })
+        try host.start()
+        defer { host.stop() }
+        try #require(ready.wait(timeout: .now() + 3) == .success)
+        let port = try #require(ports.port)
+        let peer = HeadlessLoopbackPeer(index: 601)
+        defer { peer.stop() }
+        // Force a native source-port collision instead of relying on the OS
+        // to happen to pick a listener/retiring endpoint during the full suite.
+        try peer.start(hostPort: port, controlSourcePort: sourcePort)
+        try #require(peer.waitUntilJoined(timeout: 3))
+        #expect(peer.controlLocalPort == sourcePort.rawValue)
+        #expect(host.clientCountForTesting == 1)
+    }
+
     @Test func boundedControlConnectionLifecycleEvidence() throws {
         // Fixed-count diagnosis, not retry-until-green. No audio is produced.
         for iteration in 0..<32 {
@@ -1966,12 +2002,16 @@ private final class HeadlessLoopbackPeer {
     /// same queue that is still receiving the packets being timed.
     func receivedSequencesForDrain() -> Set<UInt32> { queue.sync { Set(arrivals.keys) } }
 
-    func start(hostPort: NWEndpoint.Port, controlParameters: NWParameters = .tcp) throws {
+    func start(hostPort: NWEndpoint.Port, controlParameters: NWParameters = LocalNetworkParameters.tcp(),
+               controlSourcePort: NWEndpoint.Port? = nil) throws {
         // Reserve the outbound control endpoint before opening either media
         // listener. Network.framework can otherwise select a just-opened local
         // listener port for this loopback flow and leave it in EADDRINUSE.
         let controlReady = DispatchSemaphore(value: 0)
         let setupBegan = MonotonicClock.nowNanos()
+        if let controlSourcePort {
+            controlParameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: controlSourcePort)
+        }
         let control = NWConnection(host: "127.0.0.1", port: hostPort, using: controlParameters)
         self.control = control
         receiveControl(from: control)

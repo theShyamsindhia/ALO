@@ -2,6 +2,33 @@ import XCTest
 @testable import ALONotchRuntime
 
 final class FolderFileDownloadMonitorIntegrationTests: XCTestCase {
+    func testObservationIgnoresRepeatedAndPostTeardownSnapshots() async throws {
+        let expectation = expectation(description: "first populated snapshot")
+        let observation = TransferObservation(expectation: expectation, name: "dataset.zip")
+        let url = URL(fileURLWithPath: "/tmp/dataset.zip.crdownload")
+        let now = Date()
+        let exact = DownloadModel(url: url, displayName: "dataset.zip", directoryName: "tmp",
+            byteCount: 25_000, estimatedTotalByteCount: 100_000, progress: 0.25,
+            startedAt: now, lastUpdatedAt: now, isTemporaryFile: true, bytesPerSecond: 0)
+        let fallback = DownloadModel(url: url, displayName: "dataset.zip", directoryName: "tmp",
+            byteCount: 25_000, estimatedTotalByteCount: 312_500, progress: 0.08,
+            startedAt: now, lastUpdatedAt: now, isTemporaryFile: true, bytesPerSecond: 0)
+        observation.record([exact])
+        observation.record([exact])
+        await fulfillment(of: [expectation], timeout: 1)
+        XCTAssertEqual(observation.close(), exact)
+        observation.record([fallback])
+        XCTAssertEqual(observation.close(), exact)
+
+        let never = self.expectation(description: "no callback after early teardown")
+        never.isInverted = true
+        let closed = TransferObservation(expectation: never, name: "dataset.zip")
+        closed.close()
+        closed.record([exact])
+        await fulfillment(of: [never], timeout: 0.05)
+        XCTAssertNil(closed.close())
+    }
+
     func testSafariStyleDownloadPackagePublishesActiveTransfer() async throws {
         let tempDirectory = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: tempDirectory) }
@@ -60,7 +87,7 @@ final class FolderFileDownloadMonitorIntegrationTests: XCTestCase {
 /// the first populated transfer, not the legitimate empty package in between.
 /// Queued callbacks may outlive stopMonitoring(), so assertions belong to the
 /// test body and fulfillment must be both one-shot and closed at teardown.
-private final class TransferObservation: @unchecked Sendable {
+final class TransferObservation: @unchecked Sendable {
     private let lock = NSLock()
     private let expectation: XCTestExpectation
     private let name: String
