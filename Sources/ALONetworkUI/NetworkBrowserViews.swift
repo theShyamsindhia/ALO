@@ -15,7 +15,8 @@ public enum ALONativeNetworkLayout {
     public static let minimumSidebarWidth: CGFloat = 210
     public static let maximumSidebarWidth: CGFloat = 280
     public static let panelInset: CGFloat = 8
-    public static let panelRadius: CGFloat = 12
+    public static let windowRadius: CGFloat = 34
+    public static let panelRadius: CGFloat = 28
 
     public static func sidebarWidth(for width: CGFloat) -> CGFloat {
         min(maximumSidebarWidth, max(minimumSidebarWidth, (width * 0.28).rounded()))
@@ -33,7 +34,7 @@ public extension EnvironmentValues {
     }
 }
 
-/// AppKit owns the outer contour; no second rounded mask or painted backing.
+/// The window frame owns the outer contour; no second content mask or painted backing.
 public struct ALONetworkWindowBackground: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     public init() {}
@@ -47,10 +48,12 @@ public struct ALONetworkWindowBackground: View {
 private struct NetworkWindowVisualEffect: NSViewRepresentable {
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
-        view.material = .sidebar
+        view.material = .underWindowBackground
         view.blendingMode = .behindWindow
-        view.state = .followsWindowActiveState
+        view.state = .active
         view.identifier = NSUserInterfaceItemIdentifier("ALO.Network.WindowBlur")
+        // Keep the native backdrop intact: fading its alpha exposes sharp content
+        // behind the window instead of progressively blurring that content.
         return view
     }
     func updateNSView(_ view: NSVisualEffectView, context: Context) {}
@@ -345,7 +348,7 @@ public struct ALONetworkSidebar: View {
                 .help("Add a network").accessibilityLabel("Add a network")
             }
             .padding(.horizontal, compactLayout ? 20 : 24)
-            .padding(.top, compactLayout ? 36 : 44).padding(.bottom, compactLayout ? 12 : 16)
+            .padding(.top, compactLayout ? 52 : 60).padding(.bottom, compactLayout ? 12 : 16)
             HStack(spacing: 9) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Search spaces", text: $search).textFieldStyle(.plain)

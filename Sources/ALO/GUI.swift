@@ -5,6 +5,7 @@ import CoreGraphics
 import ImageIO
 import QuartzCore
 import SwiftUI
+import ALONetworkUI
 import UniformTypeIdentifiers
 import ALOCore
 import ALOAppModel
@@ -441,6 +442,33 @@ func toggleALOSetupWindow(_ window: NSWindow) {
 }
 
 @MainActor
+final class NetworkBrowserWindow: NSWindow {
+    var usesNetworkCorners = false
+
+    override func setFrame(_ frameRect: NSRect, display flag: Bool) {
+        super.setFrame(frameRect, display: flag)
+        insetWindowControls()
+    }
+
+    func insetWindowControls() {
+        guard usesNetworkCorners,
+              let close = standardWindowButton(.closeButton),
+              let titlebar = close.superview?.superview,
+              titlebar.superview === contentView?.superview else { return }
+        // Move the native titlebar with its buttons so their hit targets stay
+        // inside their parent. Figma centers the first light at (30, 31).
+        let closeBounds = close.convert(close.bounds, to: nil)
+        titlebar.setFrameOrigin(NSPoint(x: titlebar.frame.minX,
+            y: titlebar.frame.minY + frame.height - 31 - closeBounds.midY))
+        let inset = 30 - closeBounds.midX
+        for type in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            guard let button = standardWindowButton(type) else { continue }
+            button.setFrameOrigin(NSPoint(x: button.frame.minX + inset, y: button.frame.minY))
+        }
+    }
+}
+
+@MainActor
 enum NetworkSetupWindowPresentation {
     static let initialContentSize = NSSize(width: 960, height: 700)
     static let minimumContentSize = NSSize(width: 640, height: 440)
@@ -476,8 +504,21 @@ enum NetworkSetupWindowPresentation {
         window.isOpaque = false
         window.isMovableByWindowBackground = true
         window.contentMinSize = identityReady ? minimumContentSize : .zero
+        // Clip the complete frame, including native chrome and the blur, once.
+        // A content-only mask leaves the system frame visible as a second edge.
+        if let frameView = window.contentView?.superview {
+            frameView.wantsLayer = true
+            frameView.layer?.cornerRadius = identityReady ? ALONativeNetworkLayout.windowRadius : 0
+            frameView.layer?.cornerCurve = .continuous
+            frameView.layer?.masksToBounds = identityReady
+            window.invalidateShadow()
+        }
         for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
             window.standardWindowButton(button)?.isHidden = !identityReady
+        }
+        if let browserWindow = window as? NetworkBrowserWindow {
+            browserWindow.usesNetworkCorners = identityReady
+            browserWindow.insetWindowControls()
         }
     }
 
@@ -552,7 +593,7 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
         shortcutManager = GlobalShortcutManager { [weak self] action, pressed in
             self?.model.handleGlobalShortcut(action, pressed: pressed)
         }
-        let window = NSWindow(
+        let window = NetworkBrowserWindow(
             contentRect: NSRect(
                 x: 0,
                 y: 0,

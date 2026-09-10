@@ -10,7 +10,7 @@ extension NativePresentationTests {
 struct NetworkWindowPresentationTests {
     private func makeWindow() -> NSWindow {
         _ = NSApplication.shared
-        let window = NSWindow(contentRect: NSRect(origin: .zero, size: NetworkSetupWindowPresentation.initialContentSize),
+        let window = NetworkBrowserWindow(contentRect: NSRect(origin: .zero, size: NetworkSetupWindowPresentation.initialContentSize),
                               styleMask: [.titled, .closable], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         return window
@@ -52,6 +52,35 @@ struct NetworkWindowPresentationTests {
         window.close()
     }
 
+    @Test func conceptCornersClipTheWholeFrameAndSurviveResize() throws {
+        let window = makeWindow()
+        defer { window.close() }
+        NetworkSetupWindowPresentation.configure(window, identityReady: true)
+        window.contentView = NSHostingView(rootView: NetworkBrowserFixture(state: "empty"))
+        for size in [NetworkSetupWindowPresentation.minimumContentSize,
+                     NetworkSetupWindowPresentation.initialContentSize] {
+            window.setContentSize(size)
+            window.contentView?.layoutSubtreeIfNeeded()
+            let frame = try #require(window.contentView?.superview?.layer)
+            #expect(frame.cornerRadius == 34)
+            #expect(frame.cornerCurve == .continuous)
+            #expect(frame.masksToBounds)
+            #expect(ALONativeNetworkLayout.panelRadius == 28)
+            #expect(window.standardWindowButton(.closeButton)?.isHidden == false)
+            let frameView = try #require(window.contentView?.superview)
+            for (index, type) in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].enumerated() {
+                let button = try #require(window.standardWindowButton(type))
+                let bounds = button.convert(button.bounds, to: frameView)
+                #expect(bounds.midX == 30 + CGFloat(index) * 20)
+                #expect(frameView.bounds.height - bounds.midY == 31)
+                #expect(frameView.hitTest(NSPoint(x: bounds.midX, y: bounds.midY)) === button)
+            }
+        }
+        NetworkSetupWindowPresentation.configure(window, identityReady: false)
+        #expect(window.contentView?.superview?.layer?.masksToBounds == false)
+        #expect(window.contentView?.superview?.layer?.cornerRadius == 0)
+    }
+
     @Test func initialFrameFitsShortAndOffsetDisplays() {
         for visible in [NSRect(x: 0, y: 25, width: 1280, height: 650),
                         NSRect(x: -1440, y: 40, width: 1440, height: 860),
@@ -66,6 +95,33 @@ struct NetworkWindowPresentationTests {
         let screen = NSRect(x: 0, y: 0, width: 1600, height: 1000)
         let centered = NetworkSetupWindowPresentation.browserFrame(center: NSPoint(x: 800, y: 500), visibleFrame: screen)
         #expect(centered.midX == 800 && centered.midY == 500)
+    }
+
+    @Test func nativeBackdropRemainsUnmaskedAndRespectsReduceTransparency() async throws {
+        let window = makeWindow()
+        defer { window.close() }
+        NetworkSetupWindowPresentation.configure(window, identityReady: true)
+        func backdrop(in view: NSView) -> NSVisualEffectView? {
+            if view.identifier?.rawValue == "ALO.Network.WindowBlur" {
+                return view as? NSVisualEffectView
+            }
+            return view.subviews.lazy.compactMap { backdrop(in: $0) }.first
+        }
+        let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+        let host = NSHostingView(rootView: ALONetworkWindowBackground())
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        try await Task.sleep(for: .milliseconds(50))
+        if reduced {
+            #expect(backdrop(in: host) == nil)
+        } else {
+            let effect = try #require(backdrop(in: host))
+            #expect(effect.material == .underWindowBackground)
+            #expect(effect.blendingMode == .behindWindow)
+            #expect(effect.state == .active)
+            #expect(effect.maskImage == nil)
+            #expect(effect.alphaValue == 1)
+        }
     }
 
     @Test func onboardingChromeRemainsCustomUntilIdentityReady() {
