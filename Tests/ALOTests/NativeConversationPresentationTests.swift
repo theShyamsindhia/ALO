@@ -13,7 +13,7 @@ extension NativePresentationTests {
             #expect(ALONativeNetworkLayout.sidebarWidth(for: 640) == 210)
             #expect(ALONativeNetworkLayout.sidebarWidth(for: 1600) == 280)
             #expect(ALONativeNetworkLayout.panelInset == 8)
-            #expect(ALONativeNetworkLayout.panelRadius == 12)
+            #expect(ALONativeNetworkLayout.panelRadius == 28)
         }
 
         @Test func nowPlayingKeepsTheSameTypeScaleInCompactLayout() throws {
