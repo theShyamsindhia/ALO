@@ -1,16 +1,62 @@
 import SwiftUI
 
 #if os(macOS)
+/// Stable reading sizes; available space changes layout, not the type hierarchy.
+public enum ALONetworkTypography {
+    public static let title = Font.system(size: 22, weight: .bold)
+    public static let heading = Font.system(size: 17, weight: .semibold)
+    public static let body = Font.system(size: 14)
+    public static let label = Font.system(size: 14, weight: .semibold)
+    public static let caption = Font.system(size: 11)
+    public static let section = Font.system(size: 11, weight: .medium)
+}
+
 public enum ALONativeNetworkLayout {
     public static let minimumSidebarWidth: CGFloat = 210
-    public static let maximumSidebarWidth: CGFloat = 356
+    public static let maximumSidebarWidth: CGFloat = 280
     public static let panelInset: CGFloat = 8
-    public static let panelRadius: CGFloat = 28
     public static let windowRadius: CGFloat = 34
+    public static let panelRadius: CGFloat = 28
 
     public static func sidebarWidth(for width: CGFloat) -> CGFloat {
-        min(maximumSidebarWidth, max(minimumSidebarWidth, width * 356 / 1120))
+        min(maximumSidebarWidth, max(minimumSidebarWidth, (width * 0.28).rounded()))
     }
+}
+
+private struct CompactNetworkLayoutKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+public extension EnvironmentValues {
+    var aloCompactNetworkLayout: Bool {
+        get { self[CompactNetworkLayoutKey.self] }
+        set { self[CompactNetworkLayoutKey.self] = newValue }
+    }
+}
+
+/// The window frame owns the outer contour; no second content mask or painted backing.
+public struct ALONetworkWindowBackground: View {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    public init() {}
+
+    public var body: some View {
+        if reduceTransparency { Color(nsColor: .windowBackgroundColor) }
+        else { NetworkWindowVisualEffect() }
+    }
+}
+
+private struct NetworkWindowVisualEffect: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        view.material = .underWindowBackground
+        view.blendingMode = .behindWindow
+        view.state = .active
+        view.identifier = NSUserInterfaceItemIdentifier("ALO.Network.WindowBlur")
+        // Keep the native backdrop intact: fading its alpha exposes sharp content
+        // behind the window instead of progressively blurring that content.
+        return view
+    }
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {}
 }
 
 /// The same window-owned columns are used by the account adapter and public
@@ -28,16 +74,16 @@ public struct ALONativeNetworkColumns<Sidebar: View, Detail: View>: View {
         GeometryReader { geometry in
             HStack(spacing: 0) {
                 sidebar.frame(width: ALONativeNetworkLayout.sidebarWidth(for: geometry.size.width))
-                detail.frame(maxWidth: .infinity, maxHeight: .infinity)
+                detail.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                     .background(Color(nsColor: .textBackgroundColor),
-                                in: RoundedRectangle(cornerRadius: ALONativeNetworkLayout.panelRadius))
-                    .clipShape(RoundedRectangle(cornerRadius: ALONativeNetworkLayout.panelRadius))
+                                in: RoundedRectangle(cornerRadius: ALONativeNetworkLayout.panelRadius, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: ALONativeNetworkLayout.panelRadius, style: .continuous))
                     .padding([.top, .trailing, .bottom], ALONativeNetworkLayout.panelInset)
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
+            .environment(\.aloCompactNetworkLayout, geometry.size.width < 900 || geometry.size.height < 600)
         }
-        .background(.regularMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: ALONativeNetworkLayout.windowRadius))
+        .background(ALONetworkWindowBackground())
         .ignoresSafeArea()
         .tint(.blue)
     }
@@ -70,6 +116,9 @@ public struct ALONetworkSidebar: View {
     @State private var showingIdentity = false
     @State private var search = ""
     private let nowPlaying: AnyView?
+    #if os(macOS)
+    @Environment(\.aloCompactNetworkLayout) private var compactLayout
+    #endif
 
     public init(
         networks: [ALONetworkSummary],
@@ -266,7 +315,7 @@ public struct ALONetworkSidebar: View {
 
     #if os(macOS)
     private func sidebarHeading(_ title: String) -> some View {
-        Text(title.uppercased()).font(.system(size: 12, weight: .semibold)).tracking(0.6)
+        Text(title.uppercased()).font(ALONetworkTypography.section).tracking(0.6)
             .foregroundStyle(.secondary).padding(.horizontal, 8).padding(.bottom, 6)
             .accessibilityAddTraits(.isHeader)
     }
@@ -283,7 +332,7 @@ public struct ALONetworkSidebar: View {
     private var desktopSidebar: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("Spaces").font(.system(size: 30, weight: .bold)).tracking(-0.7)
+                Text("Spaces").font(ALONetworkTypography.title).tracking(-0.4)
                     .accessibilityAddTraits(.isHeader)
                 Spacer()
                 Menu {
@@ -292,13 +341,14 @@ public struct ALONetworkSidebar: View {
                     Button("Import invitation…", systemImage: "square.and.arrow.down", action: onImportNetwork)
                         .accessibilityIdentifier("ALO.Network.Import")
                 } label: {
-                    Image(systemName: "plus").font(.system(size: 21, weight: .regular))
+                    Image(systemName: "plus").font(.system(size: 16, weight: .regular))
                         .frame(width: 32, height: 32).foregroundStyle(Color.blue)
                 }
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
                 .help("Add a network").accessibilityLabel("Add a network")
             }
-            .padding(.horizontal, 28).padding(.top, 64).padding(.bottom, 16)
+            .padding(.horizontal, compactLayout ? 20 : 24)
+            .padding(.top, compactLayout ? 52 : 60).padding(.bottom, compactLayout ? 12 : 16)
             HStack(spacing: 9) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Search spaces", text: $search).textFieldStyle(.plain)
@@ -308,30 +358,30 @@ public struct ALONetworkSidebar: View {
                         .buttonStyle(.plain).foregroundStyle(.secondary).accessibilityLabel("Clear search")
                 }
             }
-            .font(.system(size: 15)).padding(.horizontal, 12).frame(height: 38)
+            .font(ALONetworkTypography.body).padding(.horizontal, 12).frame(height: compactLayout ? 34 : 38)
             .background(.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 11))
-            .padding(.horizontal, 20).padding(.bottom, 20)
+            .padding(.horizontal, compactLayout ? 12 : 16).padding(.bottom, compactLayout ? 12 : 20)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
                     sidebarHeading("Your networks")
                     ForEach(visibleNetworks) { network in
                         Button { selectedNetworkID = network.id } label: {
-                            HStack(spacing: 12) {
+                            HStack(spacing: 8) {
                                 Image(systemName: "person.2.fill")
-                                    .font(.system(size: 19, weight: .medium)).foregroundStyle(.white)
-                                    .frame(width: 38, height: 38)
-                                    .background(Color.blue, in: RoundedRectangle(cornerRadius: 11))
+                                    .font(.system(size: 16)).foregroundStyle(Color.blue)
+                                    .frame(width: 32, height: 32)
+                                    .background(Color.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
                                 VStack(alignment: .leading, spacing: 3) {
-                                    Text(network.name).font(.system(size: 17, weight: .semibold)).lineLimit(2)
+                                    Text(network.name).font(ALONetworkTypography.label).lineLimit(2)
                                     Text("\(network.memberCount) \(network.memberCount == 1 ? "person" : "people")\(network.isOwner ? " · Your network" : "")")
-                                        .font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(2)
+                                        .font(ALONetworkTypography.caption).foregroundStyle(.secondary).lineLimit(2)
                                 }
                                 Spacer(minLength: 0)
                                 Image(systemName: selectedNetworkID == network.id ? "chevron.down" : "chevron.right")
                                     .font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
                             }
-                            .padding(.horizontal, 4).padding(.vertical, 6).contentShape(Rectangle())
+                            .padding(.horizontal, 8).padding(.vertical, 6).contentShape(Rectangle())
                         }
                         .buttonStyle(.plain).disabled(isBusy).help(network.name)
                         .accessibilityIdentifier("ALO.Network.\(network.id)")
@@ -341,19 +391,16 @@ public struct ALONetworkSidebar: View {
                                     || $0.name.localizedCaseInsensitiveContains(search)
                             }) { channel in
                                 Button { onOpenChannel(channel.id) } label: {
-                                    HStack(spacing: 14) {
+                                    HStack(spacing: 8) {
                                         Image(systemName: channel.isPrivate ? "lock" : "number")
-                                            .font(.system(size: 20)).frame(width: 26)
-                                        Text(channel.name).font(.system(size: 16,
-                                            weight: selectedChannelID == channel.id ? .semibold : .regular))
+                                            .font(.system(size: 16)).frame(width: 32)
+                                        Text(channel.name).font(selectedChannelID == channel.id
+                                            ? ALONetworkTypography.label : ALONetworkTypography.body)
                                             .lineLimit(2)
                                         Spacer(minLength: 0)
-                                        if selectedChannelID == channel.id {
-                                            Circle().fill(Color.blue).frame(width: 7, height: 7)
-                                        }
                                     }
                                     .foregroundStyle(selectedChannelID == channel.id ? Color.blue : .primary)
-                                    .padding(.horizontal, 18).frame(minHeight: 46)
+                                    .padding(.horizontal, 8).frame(minHeight: compactLayout ? 36 : 40)
                                     .background(selectedChannelID == channel.id ? Color.blue.opacity(0.11) : .clear,
                                                 in: RoundedRectangle(cornerRadius: 12))
                                     .contentShape(Rectangle())
@@ -388,17 +435,17 @@ public struct ALONetworkSidebar: View {
                             .accessibilityLabel("Review \(request.name)'s request to join \(request.networkName)")
                         }
                     }
-                    Divider().opacity(0.5).padding(.vertical, 16)
+                    Divider().opacity(0.5).padding(.vertical, compactLayout ? 8 : 16)
                     sidebarHeading("Nearby")
                     ForEach(nearbyNetworks.filter { search.isEmpty || $0.name.localizedCaseInsensitiveContains(search) }) { network in
-                        HStack(spacing: 12) {
-                            Image(systemName: "person.2").font(.system(size: 18))
-                                .foregroundStyle(.secondary).frame(width: 34, height: 34)
-                                .background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 10))
+                        HStack(spacing: 8) {
+                            Image(systemName: "person.2").font(.system(size: 16))
+                                .foregroundStyle(.secondary).frame(width: 32, height: 32)
+                                .background(.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
                             VStack(alignment: .leading, spacing: 4) {
-                                Text(network.name).font(.system(size: 16, weight: .medium)).lineLimit(2).help(network.name)
+                                Text(network.name).font(ALONetworkTypography.body).lineLimit(2).help(network.name)
                                 if let status = network.status {
-                                    Text(status.message).font(.caption).foregroundStyle(.secondary)
+                                    Text(status.message).font(ALONetworkTypography.caption).foregroundStyle(.secondary)
                                         .fixedSize(horizontal: false, vertical: true)
                                 }
                             }
@@ -412,7 +459,7 @@ public struct ALONetworkSidebar: View {
                             }
                         }
                         .buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small)
-                        .padding(.vertical, 4)
+                        .padding(.horizontal, 8).padding(.vertical, 4)
                     }
                     if nearbyNetworks.isEmpty {
                         Text("No nearby networks").font(.callout).foregroundStyle(.secondary)
@@ -427,17 +474,20 @@ public struct ALONetworkSidebar: View {
                         Button("Try again", action: onRetryNearby)
                     }
                 }
-                .padding(.horizontal, 20).padding(.bottom, 16)
+                .padding(.horizontal, compactLayout ? 12 : 16).padding(.bottom, 12)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .scrollIndicators(.hidden)
-            if let nowPlaying { nowPlaying.padding(.horizontal, 20).padding(.bottom, 18) }
-            Divider().opacity(0.5).padding(.horizontal, 28)
-            HStack(spacing: 12) {
+            .scrollIndicators(.automatic)
+            if let nowPlaying {
+                Divider().opacity(0.5).padding(.horizontal, compactLayout ? 20 : 24)
+                nowPlaying.padding(.horizontal, compactLayout ? 12 : 16).padding(.vertical, 8)
+            }
+            Divider().opacity(0.5).padding(.horizontal, compactLayout ? 20 : 24)
+            HStack(spacing: 8) {
                 Text(String(identityName.prefix(1)).uppercased())
-                    .font(.system(size: 14, weight: .semibold)).foregroundStyle(Color.blue)
-                    .frame(width: 36, height: 36).background(Color.blue.opacity(0.09), in: Circle())
-                Text(identityName).font(.system(size: 15, weight: .semibold)).lineLimit(1).help(identityName)
+                    .font(ALONetworkTypography.label).foregroundStyle(Color.blue)
+                    .frame(width: 32, height: 32).background(Color.blue.opacity(0.09), in: Circle())
+                Text(identityName).font(ALONetworkTypography.label).lineLimit(1).help(identityName)
                 Spacer(minLength: 4)
                 Menu {
                     Button("Share public identity…", systemImage: "square.and.arrow.up", action: onExportPublicIdentity)
@@ -451,7 +501,7 @@ public struct ALONetworkSidebar: View {
                 } label: { Image(systemName: "ellipsis").frame(width: 24, height: 24) }
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
                 .help("Identity options").accessibilityLabel("Identity options")
-            }.padding(.horizontal, 26).padding(.vertical, 16)
+            }.padding(.horizontal, compactLayout ? 20 : 24).padding(.vertical, compactLayout ? 10 : 16)
         }
         .sheet(item: $reviewingRequest) { request in
             VStack(alignment: .leading, spacing: 20) {

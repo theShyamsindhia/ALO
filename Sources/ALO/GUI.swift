@@ -5,6 +5,7 @@ import CoreGraphics
 import ImageIO
 import QuartzCore
 import SwiftUI
+import ALONetworkUI
 import UniformTypeIdentifiers
 import ALOCore
 import ALOAppModel
@@ -441,9 +442,45 @@ func toggleALOSetupWindow(_ window: NSWindow) {
 }
 
 @MainActor
+final class NetworkBrowserWindow: NSWindow {
+    var usesNetworkCorners = false
+
+    override func setFrame(_ frameRect: NSRect, display flag: Bool) {
+        super.setFrame(frameRect, display: flag)
+        insetWindowControls()
+    }
+
+    func insetWindowControls() {
+        guard usesNetworkCorners,
+              let close = standardWindowButton(.closeButton),
+              let titlebar = close.superview?.superview,
+              titlebar.superview === contentView?.superview else { return }
+        // Move the native titlebar with its buttons so their hit targets stay
+        // inside their parent. Figma centers the first light at (30, 31).
+        let closeBounds = close.convert(close.bounds, to: nil)
+        titlebar.setFrameOrigin(NSPoint(x: titlebar.frame.minX,
+            y: titlebar.frame.minY + frame.height - 31 - closeBounds.midY))
+        let inset = 30 - closeBounds.midX
+        for type in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            guard let button = standardWindowButton(type) else { continue }
+            button.setFrameOrigin(NSPoint(x: button.frame.minX + inset, y: button.frame.minY))
+        }
+    }
+}
+
+@MainActor
 enum NetworkSetupWindowPresentation {
-    static let initialContentSize = NSSize(width: 1120, height: 860)
+    static let initialContentSize = NSSize(width: 960, height: 700)
     static let minimumContentSize = NSSize(width: 640, height: 440)
+
+    static func browserFrame(center: NSPoint, visibleFrame: NSRect) -> NSRect {
+        let available = visibleFrame.insetBy(dx: 24, dy: 24)
+        let size = NSSize(width: min(initialContentSize.width, available.width),
+                          height: min(initialContentSize.height, available.height))
+        return NSRect(x: min(max(center.x - size.width / 2, available.minX), available.maxX - size.width),
+                      y: min(max(center.y - size.height / 2, available.minY), available.maxY - size.height),
+                      width: size.width, height: size.height)
+    }
 
     static func shouldApplyIdentityUpdate(_ queuedReady: Bool, currentReady: Bool) -> Bool {
         queuedReady == currentReady
@@ -467,17 +504,34 @@ enum NetworkSetupWindowPresentation {
         window.isOpaque = false
         window.isMovableByWindowBackground = true
         window.contentMinSize = identityReady ? minimumContentSize : .zero
+        // Clip the complete frame, including native chrome and the blur, once.
+        // A content-only mask leaves the system frame visible as a second edge.
+        if let frameView = window.contentView?.superview {
+            frameView.wantsLayer = true
+            frameView.layer?.cornerRadius = identityReady ? ALONativeNetworkLayout.windowRadius : 0
+            frameView.layer?.cornerCurve = .continuous
+            frameView.layer?.masksToBounds = identityReady
+            window.invalidateShadow()
+        }
         for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
             window.standardWindowButton(button)?.isHidden = !identityReady
+        }
+        if let browserWindow = window as? NetworkBrowserWindow {
+            browserWindow.usesNetworkCorners = identityReady
+            browserWindow.insetWindowControls()
         }
     }
 
     static func enterBrowserPreservingCenter(_ window: NSWindow) {
         let center = NSPoint(x: window.frame.midX, y: window.frame.midY)
         configure(window, identityReady: true)
-        window.setContentSize(initialContentSize)
-        window.setFrameOrigin(NSPoint(x: center.x - window.frame.width / 2,
-                                      y: center.y - window.frame.height / 2))
+        if let screen = window.screen ?? NSScreen.main {
+            window.setFrame(browserFrame(center: center, visibleFrame: screen.visibleFrame), display: false)
+        } else {
+            window.setContentSize(initialContentSize)
+            window.setFrameOrigin(NSPoint(x: center.x - window.frame.width / 2,
+                                          y: center.y - window.frame.height / 2))
+        }
     }
 }
 
@@ -539,7 +593,7 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
         shortcutManager = GlobalShortcutManager { [weak self] action, pressed in
             self?.model.handleGlobalShortcut(action, pressed: pressed)
         }
-        let window = NSWindow(
+        let window = NetworkBrowserWindow(
             contentRect: NSRect(
                 x: 0,
                 y: 0,
@@ -571,7 +625,11 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
                 self?.updater.checkForUpdates(userInitiated: true)
             }
         ))
-        window.center()
+        if model.account.identityReady, let screen = window.screen ?? NSScreen.main {
+            window.setFrame(NetworkSetupWindowPresentation.browserFrame(
+                center: NSPoint(x: screen.visibleFrame.midX, y: screen.visibleFrame.midY),
+                visibleFrame: screen.visibleFrame), display: false)
+        } else { window.center() }
         setupWindowFrame = window.frame
         window.isReleasedWhenClosed = false
         window.makeKeyAndOrderFront(nil)
@@ -4217,7 +4275,7 @@ struct ALOView: View {
     var body: some View {
         ZStack {
             if model.account.identityReady {
-                Color(nsColor: .windowBackgroundColor)
+                Color.clear
             } else if model.phase == .idle {
                 Color.clear
             } else {

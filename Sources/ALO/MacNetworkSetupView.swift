@@ -40,6 +40,7 @@ struct MacNetworkSetupView: View {
                 GeometryReader { geometry in
                     networkBrowser.frame(width: geometry.size.width, height: geometry.size.height)
                 }
+                .ignoresSafeArea()
             } else {
                 onboardingContainer
             }
@@ -238,11 +239,13 @@ struct MacNetworkSetupView: View {
                 }
                 ContentUnavailableView("Choose a channel", systemImage: "bubble.left.and.bubble.right",
                     description: Text("Open a channel in the sidebar to join the conversation."))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             if let message = nearbyJoinFeedback.errorMessage ?? error ?? account.errorMessage ?? model.errorMessage {
                 Text(message).foregroundStyle(.secondary).padding()
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     private var selectedChannelTitle: String {
