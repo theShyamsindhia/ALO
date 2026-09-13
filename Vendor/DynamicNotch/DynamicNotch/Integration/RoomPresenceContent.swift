@@ -2,6 +2,9 @@ import SwiftUI
 
 @MainActor
 final class RoomPresenceModel: ObservableObject {
+    // This view owner has only ARC cleanup, like RoomInteractionModel.
+    nonisolated deinit {}
+
     @Published var title = "Room"
     @Published var people = 0
 }

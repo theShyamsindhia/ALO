@@ -16,6 +16,18 @@ final class RoomInteractionTests: XCTestCase {
         XCTAssertNil(retained)
     }
 
+    func testRoomPresenceModelReleasesFromSynchronousBackgroundCallback() async {
+        let payload = RoomModelReleasePayload(RoomPresenceModel())
+        weak var retained = payload.object
+        let released = expectation(description: "Room presence released outside a Swift task")
+        DispatchQueue.global(qos: .utility).async {
+            payload.object = nil
+            released.fulfill()
+        }
+        await fulfillment(of: [released], timeout: 2)
+        XCTAssertNil(retained)
+    }
+
     func testQuickActionsHaveCompactBoundsAndResizeKeepsExpansion() async throws {
         let model = RoomInteractionModel()
         let display = CGSize(width: 1440, height: 900)
