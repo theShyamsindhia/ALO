@@ -7,11 +7,15 @@ internal import AppKit
 /// the host's master switch; construction and disabled settings stay inert.
 @MainActor
 final class FeatureActivation {
+    // Shutdown stays in setEnabled(false); callback disposal only releases ARC.
+    nonisolated deinit {}
+
     private let container: AppContainer
     private var observation: AnyCancellable?
     private var activationObservation: AnyCancellable?
     private(set) var isEnabled = false
     private(set) var running: Set<String> = []
+    private var roomToolTimerStarted = false
     private var mediaPanel: LockScreenPanelManager?
     private(set) var roomLockScreenMedia: NowPlayingViewModel?
     var lockScreenMediaViewModel: NowPlayingViewModel { roomLockScreenMedia ?? container.nowPlayingViewModel }
@@ -57,7 +61,16 @@ final class FeatureActivation {
 
     func setEnabled(_ enabled: Bool) {
         isEnabled = enabled
+        if !enabled {
+            roomToolTimerStarted = false
+            TimerSoundPlayer.shared.stop()
+        }
         reconcile()
+    }
+
+    func retainRoomToolTimer() {
+        guard isEnabled else { return }
+        roomToolTimerStarted = true
     }
 
     private func transition(_ key: String, _ requested: Bool, start: () -> Void, stop: () -> Void) {
@@ -92,7 +105,7 @@ final class FeatureActivation {
                    start: { c.downloadViewModel.startMonitoring() }, stop: { c.downloadViewModel.stopMonitoring() })
         transition("timer", files.isTimerLiveActivityEnabled,
                    start: { c.timerViewModel.startMonitoring() }, stop: { c.timerViewModel.stopMonitoring() })
-        if !isEnabled || !pages.isHomePageLiveActivityEnabled || pages.homePageDisabled.contains(.localTimer) {
+        if !isEnabled || (!roomToolTimerStarted && (!pages.isHomePageLiveActivityEnabled || pages.homePageDisabled.contains(.localTimer))) {
             c.localTimerViewModel.stop()
         }
         transition("calendar", s.calendar.isCalendarLiveActivityEnabled,

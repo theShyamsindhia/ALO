@@ -20,12 +20,14 @@ class LocalTimerViewModel: ObservableObject {
     var endDate: Date?
     var pausedRemaining: TimeInterval?
     var onTimerFinished: (() -> Void)?
+    private(set) var repeatsCompletionSound = true
     
     private var timer: AnyCancellable?
     
-    func start(hours: Int, minutes: Int, seconds: Int) {
+    func start(hours: Int, minutes: Int, seconds: Int, repeatsCompletionSound: Bool = true) {
         totalTime = TimeInterval(hours * 3600 + minutes * 60 + seconds)
         guard totalTime > 0 else { return }
+        self.repeatsCompletionSound = repeatsCompletionSound
         remainingTime = totalTime
         pausedRemaining = nil
         endDate = Date().addingTimeInterval(totalTime)

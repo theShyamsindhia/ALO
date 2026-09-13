@@ -45,7 +45,8 @@ struct NotchInteractiveBodyView: View {
         
         return !(
             notchViewModel.isDisplayingExpandedLiveActivity &&
-            (notchViewModel.displayedContent?.id == NotchContentRegistry.DragAndDrop.trayActive.id ||
+            (notchViewModel.displayedContent?.id == RoomInteractionContent.activityID ||
+             notchViewModel.displayedContent?.id == NotchContentRegistry.DragAndDrop.trayActive.id ||
              (notchViewModel.displayedContent?.id == NotchContentRegistry.HomePage.active.id && settingsViewModel.homePage.homePageScrollAxis == .vertical))
         )
     }

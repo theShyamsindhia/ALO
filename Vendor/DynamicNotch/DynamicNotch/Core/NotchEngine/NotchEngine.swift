@@ -30,6 +30,7 @@ final class NotchEngine: ObservableObject {
     private var lastDismissedContent: RestorableDismissedContent?
     private var currentTemporaryNotificationDuration: TimeInterval?
     private var eventQueue: [NotchState] = []
+    private var deferredNotifications: [NotchState] = []
     private var isProcessingQueue = false
     private var isTransitioning = false
     private(set) var acceptsActivityEvents = true
@@ -97,6 +98,16 @@ final class NotchEngine: ObservableObject {
         }
         switch notchState {
         case .showTemporaryNotification(let content, let duration):
+            if notchModel.isLiveActivityExpanded,
+               notchModel.liveActivityContent?.protectsExpandedInteraction == true {
+                deferredNotifications.removeAll {
+                    if case .showTemporaryNotification(let previous, _) = $0 { return previous.id == content.id }
+                    return false
+                }
+                deferredNotifications.append(notchState)
+                deferredNotifications = Array(deferredNotifications.suffix(5))
+                return
+            }
             if notchModel.temporaryNotificationContent?.id == content.id {
                 currentTemporaryNotificationDuration = duration
 
@@ -163,6 +174,7 @@ final class NotchEngine: ObservableObject {
         case .hide:
             // A master-disable must also discard restoration history, otherwise
             // a subsequent gesture can reopen a disabled page (including camera).
+            deferredNotifications.removeAll()
             activeLiveActivities.removeAll()
             dismissedLiveActivityIDs.removeAll()
             lastDismissedContent = nil
@@ -317,6 +329,7 @@ final class NotchEngine: ObservableObject {
                 withAnimation(self.animations.contentShow) {
                     self.notchModel.liveActivityContent = liveActivityContent
                 }
+                self.flushDeferredNotifications()
             }
         )
     }
@@ -332,6 +345,12 @@ final class NotchEngine: ObservableObject {
                 self.showNotch = false
             }
         }
+    }
+
+    private func flushDeferredNotifications() {
+        let pending = deferredNotifications
+        deferredNotifications.removeAll()
+        for event in pending { send(event) }
     }
 
     private var highestPriorityVisibleActivity: NotchContentProtocol? {
@@ -410,6 +429,7 @@ final class NotchEngine: ObservableObject {
                 } else {
                     await showLiveContentTransition(nil)
                 }
+                flushDeferredNotifications()
             }
 
         case .dismissLiveActivity(let id):

@@ -14,6 +14,8 @@ struct TrayExpandedActiveNotchView: View {
     @Environment(\.isDynamicIsland) private var isDynamicIsland
     @ObservedObject var fileTrayViewModel: FileTrayViewModel
     @ObservedObject var mediaSettings: MediaAndFilesSettingsStore
+    var isEmbedded = false
+    @State private var pendingRemoval: [String] = []
 
     var body: some View {
         ZStack {
@@ -21,8 +23,8 @@ struct TrayExpandedActiveNotchView: View {
                 header
                 Spacer()
             }
-            .padding(.top, isDynamicIsland ? 8.scaled(by: scale) : 4.scaled(by: scale))
-            .padding(.horizontal, isDynamicIsland ? 30 : 42)
+            .padding(.top, isEmbedded ? 0 : isDynamicIsland ? 8.scaled(by: scale) : 4.scaled(by: scale))
+            .padding(.horizontal, isEmbedded ? 0 : isDynamicIsland ? 30 : 42)
             
             VStack(alignment: .leading) {
                 Spacer()
@@ -35,13 +37,22 @@ struct TrayExpandedActiveNotchView: View {
                     ScrollFadeMask(cornerRadius: 24, maskType: .all)
                 }
             }
-            .padding(.horizontal, isDynamicIsland ? 20 : 34)
-            .padding(.bottom, isDynamicIsland ? 7 : 14)
+            .padding(.horizontal, isEmbedded ? 0 : isDynamicIsland ? 20 : 34)
+            .padding(.bottom, isEmbedded ? 0 : isDynamicIsland ? 7 : 14)
         }
+        .confirmationDialog("Remove from the room shelf?", isPresented: Binding(
+            get: { !pendingRemoval.isEmpty }, set: { if !$0 { pendingRemoval = [] } })) {
+                Button("Remove for everyone", role: .destructive) {
+                    let items = fileTrayViewModel.items.filter { pendingRemoval.contains($0.id) }
+                    items.forEach { fileTrayViewModel.remove($0) }
+                    pendingRemoval = []
+                }
+                Button("Cancel", role: .cancel) { pendingRemoval = [] }
+            } message: { Text("Saved copies stay untouched. The shared items and cached room copies are removed.") }
     }
 
     private var scrollDirection: FileTrayScrollDirection {
-        mediaSettings.fileTrayScrollDirection
+        isEmbedded ? .horizontal : mediaSettings.fileTrayScrollDirection
     }
 
     private var header: some View {
@@ -66,6 +77,12 @@ struct TrayExpandedActiveNotchView: View {
             Spacer()
             
             Button {
+                if isEmbedded {
+                    pendingRemoval = fileTrayViewModel.items.filter {
+                        !fileTrayViewModel.hasSelection || fileTrayViewModel.selectedItemIDs.contains($0.id)
+                    }.map(\.id)
+                    return
+                }
                 withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                     if fileTrayViewModel.hasSelection {
                         fileTrayViewModel.removeSelectedItems()
@@ -137,6 +154,7 @@ struct TrayExpandedActiveNotchView: View {
                     }
                 },
                 onRemove: {
+                    if isEmbedded { pendingRemoval = [item.id]; return }
                     withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                         fileTrayViewModel.remove(item)
                     }

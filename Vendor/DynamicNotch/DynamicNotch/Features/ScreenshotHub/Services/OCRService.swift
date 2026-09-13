@@ -16,7 +16,8 @@ final class OCRService: Sendable {
             let request = VNRecognizeTextRequest()
             request.recognitionLevel = .accurate
             request.usesLanguageCorrection = true
-            request.recognitionLanguages = languages
+            if languages.isEmpty { request.automaticallyDetectsLanguage = true }
+            else { request.recognitionLanguages = languages }
             
             let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
             do {

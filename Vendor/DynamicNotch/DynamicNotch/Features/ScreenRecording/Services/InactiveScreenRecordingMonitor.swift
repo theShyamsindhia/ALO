@@ -2,6 +2,8 @@ import Foundation
 
 @MainActor
 final class InactiveScreenRecordingMonitor: ScreenRecordingMonitoring {
+    nonisolated deinit {}
+
     var onRecordingStateChange: ((Bool) -> Void)?
     var formattedDuration: String { "00:01" }
 
@@ -12,4 +14,3 @@ final class InactiveScreenRecordingMonitor: ScreenRecordingMonitoring {
     func stopMonitoring() {}
     func stopRecording() {}
 }
-

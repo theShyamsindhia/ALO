@@ -13,6 +13,7 @@ struct ChatTranscript<Row: View>: View {
     let accent: Color
     let onLatestVisibilityChanged: (UUID, Bool) -> Void
     var usesNativeLayout = false
+    var horizontalInset: CGFloat? = nil
     @ViewBuilder var row: (RoomMessage, Bool) -> Row
 
     @State private var viewportID = UUID()
@@ -49,7 +50,7 @@ struct ChatTranscript<Row: View>: View {
                             .frame(height: 11)
                             .id(ChatScrollState.Target.latest)
                     }
-                    .padding(.horizontal, usesNativeLayout ? (compactLayout ? 16 : 24) : 14)
+                    .padding(.horizontal, horizontalInset ?? (usesNativeLayout ? (compactLayout ? 16 : 24) : 14))
                     .padding(.top, usesNativeLayout ? (compactLayout ? 16 : 24) : 10)
                     .background {
                         GeometryReader { content in

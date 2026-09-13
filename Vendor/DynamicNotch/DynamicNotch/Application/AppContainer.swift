@@ -2,6 +2,10 @@ import Foundation
 
 @MainActor
 final class AppContainer {
+    // Tool views can release this ownership graph from an AppKit autorelease
+    // pool. FeatureActivation owns explicit shutdown; destruction is ARC-only.
+    nonisolated deinit {}
+
     let powerService = PowerService()
     let bluetoothViewModel = BluetoothViewModel()
     let focusViewModel = FocusViewModel()

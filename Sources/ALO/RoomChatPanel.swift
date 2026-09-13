@@ -27,23 +27,21 @@ struct RoomChatPanel: View {
     @State private var sendError = "There is no active channel connection. Your draft has been kept."
     @State private var selectedSuggestion = 0
     @State private var dismissedMentionDraft: String?
-    @State private var chosenMentionIDs = Set<String>()
-    @State private var pendingAttachment: PendingChatAttachment?
     @State private var choosesAttachment = false
     @State private var attachmentDropTargeted = false
     @Binding var draft: String
     @Binding var notificationMode: ChatNotificationMode
     let mentionNames: [String]
-    @State private var replyTo: UUID?
-    @State private var editing: UUID?
     @FocusState private var focused: Bool
     @FocusState private var searchFocused: Bool
     var avatar: ((String, String, CGFloat) -> AnyView)? = nil
     var mentionMembers: [RoomMentionMember] = []
     var usesNativeLayout = false
+    var showsHeader = true
     var subtitle = ""
     var headerActions: AnyView? = nil
     var channelMenu: AnyView? = nil
+    @StateObject var composer = RoomChatComposerContext()
 
     private var mentionToken: RoomMentionCompletion.Token? {
         guard focused, dismissedMentionDraft != draft else { return nil }
@@ -63,12 +61,12 @@ struct RoomChatPanel: View {
     }
     private var validDraft: Bool {
         let hasText = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        return (hasText || (editing == nil && pendingAttachment != nil))
+        return (hasText || (composer.editing == nil && composer.pendingAttachment != nil))
             && draft.count <= RoomChatOperation.maximumTextLength
     }
     var body: some View {
         VStack(spacing: 0) {
-            if usesNativeLayout {
+            if usesNativeLayout && showsHeader {
                 NetworkConversationHeader(title: roomTitle, subtitle: subtitle) {
                     headerActions
                     chatMenu
@@ -91,7 +89,7 @@ struct RoomChatPanel: View {
                 } else {
                     Spacer(minLength: 0)
                 }
-                if !usesNativeLayout { chatMenu }
+                if !usesNativeLayout || !showsHeader { chatMenu }
             }
             .font(.system(size: 11))
             .padding(.horizontal, 14)
@@ -101,7 +99,7 @@ struct RoomChatPanel: View {
                 firstUnreadMessageID: query.isEmpty && !onlyPins ? firstUnreadMessageID : nil,
                 unreadCount: unreadCount, isPresented: isPresented && query.isEmpty && !onlyPins,
                 accent: accent, onLatestVisibilityChanged: onLatestVisibilityChanged,
-                usesNativeLayout: usesNativeLayout) { message, showsSender in
+                usesNativeLayout: usesNativeLayout, horizontalInset: isNotch ? 0 : nil) { message, showsSender in
                     messageRow(message, showsSender: showsSender)
                 }
                 .overlay {
@@ -114,17 +112,18 @@ struct RoomChatPanel: View {
                     }
                 }
             Divider().opacity(0.4)
-            if let target = editing ?? replyTo, let message = messages.first(where: { $0.id == target }) {
+            if let target = composer.editing ?? composer.replyTo, let message = messages.first(where: { $0.id == target }) {
                 HStack {
-                    Label(editing == nil ? "Reply to \(message.sender)" : "Editing your message", systemImage: editing == nil ? "arrowshape.turn.up.left" : "pencil")
+                    Label(composer.editing == nil ? "Reply to \(message.sender)" : "Editing your message", systemImage: composer.editing == nil ? "arrowshape.turn.up.left" : "pencil")
                     Text(message.text).lineLimit(1).foregroundStyle(.secondary)
                     Spacer(minLength: 0)
-                    Button { editing = nil; replyTo = nil; draft = "" } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain).help("Cancel")
+                    Button { composer.editing = nil; composer.replyTo = nil; draft = "" } label: { Image(systemName: "xmark.circle.fill") }.buttonStyle(.plain).help("Cancel")
                 }.font(.caption).padding(.horizontal, 14).padding(.top, 8)
             }
             if !mentionSuggestions.isEmpty { mentionPicker }
-            if let pendingAttachment { pendingAttachmentPreview(pendingAttachment) }
+            if let pendingAttachment = composer.pendingAttachment { pendingAttachmentPreview(pendingAttachment) }
             HStack(alignment: .center, spacing: 8) {
+                if usesNativeLayout && !showsHeader { chatMenu }
                 Button { choosesAttachment = true } label: {
                     Image(systemName: "plus")
                         .font(.system(size: usesNativeLayout ? 16 : 12, weight: .medium))
@@ -132,14 +131,15 @@ struct RoomChatPanel: View {
                         .background(.primary.opacity(usesNativeLayout ? 0.045 : 0), in: Circle())
                 }
                 .buttonStyle(.plain)
-                .disabled(editing != nil)
+                .disabled(composer.editing != nil)
                 .help("Attach a file up to 8 MB")
                 .accessibilityLabel("Attach file")
                 if !usesNativeLayout { messageAvatar(id: currentParticipantID ?? "", name: "You", size: 22)
                     .accessibilityHidden(true)
                 }
                 HStack(spacing: 8) {
-                TextField("Message \(roomTitle)", text: $draft, axis: .vertical)
+                TextField(usesNativeLayout && !showsHeader ? "Message…" : "Message \(roomTitle)", text: $draft, axis: .vertical)
+                    .accessibilityLabel("Message \(roomTitle)")
                     .lineLimit(1...3).textFieldStyle(.plain).focused($focused)
                     .onSubmit(submit)
                     .onKeyPress(keys: [.return], phases: .down) { press in
@@ -159,17 +159,17 @@ struct RoomChatPanel: View {
                     }
                 if draft.count > 600 { Text("\(draft.count)/700").font(.caption2).foregroundStyle(draft.count > 700 ? .red : .secondary) }
                 Button(action: submit) {
-                    Image(systemName: editing == nil ? "arrow.up.circle.fill" : "checkmark.circle.fill")
+                    Image(systemName: composer.editing == nil ? "arrow.up.circle.fill" : "checkmark.circle.fill")
                         .font(.system(size: usesNativeLayout ? 28 : 22)).foregroundStyle(accent)
-                }.buttonStyle(.plain).disabled(!validDraft).help(editing == nil ? "Send message" : "Save edit")
-                    .accessibilityLabel(editing == nil ? "Send message" : "Save edit")
+                }.buttonStyle(.plain).disabled(!validDraft).help(composer.editing == nil ? "Send message" : "Save edit")
+                    .accessibilityLabel(composer.editing == nil ? "Send message" : "Save edit")
                 }
                 .padding(.leading, usesNativeLayout ? 16 : 0).padding(.trailing, usesNativeLayout ? 7 : 0)
                 .padding(.vertical, usesNativeLayout ? 7 : 0)
                 .background(.primary.opacity(usesNativeLayout ? 0.035 : 0), in: RoundedRectangle(cornerRadius: 23))
                 .overlay(RoundedRectangle(cornerRadius: 23).strokeBorder(.primary.opacity(usesNativeLayout ? 0.1 : 0)))
-            }.font(usesNativeLayout ? ALONetworkTypography.body : .system(size: 12))
-                .padding(.horizontal, usesNativeLayout ? (compactLayout ? 16 : 24) : 10)
+            }.font(isNotch ? .system(size: 13) : usesNativeLayout ? ALONetworkTypography.body : .system(size: 12))
+                .padding(.horizontal, usesNativeLayout ? (!showsHeader ? 0 : (compactLayout ? 16 : 24)) : 10)
                 .padding(.vertical, usesNativeLayout ? (compactLayout ? 10 : 14) : 7)
                 .background(.primary.opacity(usesNativeLayout ? 0 : 0.045), in: RoundedRectangle(cornerRadius: 12))
                 .padding(.horizontal, usesNativeLayout ? 0 : 10).padding(.vertical, usesNativeLayout ? 0 : 6)
@@ -210,13 +210,14 @@ struct RoomChatPanel: View {
         }
         .onChange(of: draft) { _, value in
             selectedSuggestion = 0
-            if value.isEmpty { chosenMentionIDs = [] }
+            if value.isEmpty { composer.chosenMentionIDs = [] }
         }
         .onKeyPress(keys: ["k"], phases: .down) { press in
             guard isPresented, press.modifiers == .command else { return .ignored }
             openSearch(); return .handled
         }
         .onChange(of: isPresented) { _, visible in if visible { focused = !showsSearch; searchFocused = showsSearch } }
+        .onAppear { if !showsHeader && isPresented { focused = true } }
     }
 
     private var mentionPicker: some View {
@@ -247,7 +248,7 @@ struct RoomChatPanel: View {
             guard proposed.count <= RoomChatOperation.maximumTextLength else { return }
             draft = proposed
         }
-        chosenMentionIDs.insert(member.id); dismissedMentionDraft = draft; focused = true
+        composer.chosenMentionIDs.insert(member.id); dismissedMentionDraft = draft; focused = true
     }
     private func openSearch() {
         guard isPresented else { return }
@@ -322,13 +323,15 @@ struct RoomChatPanel: View {
         return result
     }
 
+    private var isNotch: Bool { usesNativeLayout && !showsHeader }
+
     private func messageRow(_ message: RoomChatMessage, showsSender: Bool) -> some View {
         let own = message.senderID == currentParticipantID
         let localAttachmentURL = message.attachment == nil ? nil : attachmentURL(message)
-        return HStack(alignment: .bottom, spacing: usesNativeLayout ? (compactLayout ? 10 : 16) : 8) {
-            if own { Spacer(minLength: 36) }
+        return HStack(alignment: .bottom, spacing: isNotch ? 8 : usesNativeLayout ? (compactLayout ? 10 : 16) : 8) {
+            if own { Spacer(minLength: isNotch ? 8 : 36) }
             else {
-                messageAvatar(id: message.senderID, name: message.sender, size: usesNativeLayout ? 32 : 24)
+                messageAvatar(id: message.senderID, name: message.sender, size: usesNativeLayout && !isNotch ? 32 : 24)
                     .opacity(showsSender ? 1 : 0).accessibilityHidden(true)
             }
             VStack(alignment: own ? .trailing : .leading, spacing: 6) {
@@ -346,7 +349,7 @@ struct RoomChatPanel: View {
                 }
                 if !message.text.isEmpty || message.deleted {
                     Text(displayText(message.text, own: own))
-                        .font(usesNativeLayout ? ALONetworkTypography.body : .system(size: 12)).textSelection(.enabled)
+                        .font(isNotch ? .system(size: 13) : usesNativeLayout ? ALONetworkTypography.body : .system(size: 12)).textSelection(.enabled)
                         .foregroundStyle(usesNativeLayout && own ? Color.white : message.deleted ? .secondary : .primary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -397,19 +400,19 @@ struct RoomChatPanel: View {
                     }
                 }
             }
-            .padding(.horizontal, usesNativeLayout ? (message.text.isEmpty && message.attachment != nil ? 0 : compactLayout ? 12 : 16) : 11)
-            .padding(.vertical, usesNativeLayout ? (message.text.isEmpty && message.attachment != nil ? 0 : compactLayout ? 8 : 11) : 8)
+            .padding(.horizontal, usesNativeLayout ? (message.text.isEmpty && message.attachment != nil ? 0 : isNotch ? 10 : compactLayout ? 12 : 16) : 11)
+            .padding(.vertical, usesNativeLayout ? (message.text.isEmpty && message.attachment != nil ? 0 : isNotch || compactLayout ? 8 : 11) : 8)
             .background(usesNativeLayout && message.text.isEmpty && message.attachment != nil ? .clear :
                 own ? accent.opacity(usesNativeLayout ? 1 : 0.2) : Color.primary.opacity(usesNativeLayout ? 0.055 : 0.07),
                 in: RoundedRectangle(cornerRadius: usesNativeLayout ? 18 : 13))
             }
             .contextMenu {
                 if !message.deleted {
-                    Button("Reply", systemImage: "arrowshape.turn.up.left") { replyTo = message.id; editing = nil; focused = true }
+                    Button("Reply", systemImage: "arrowshape.turn.up.left") { composer.replyTo = message.id; composer.editing = nil; focused = true }
                     Menu("React") { ForEach(RoomChatOperation.emoji, id: \.self) { emoji in Button(emoji) { react(emoji, to: message) } } }
                     Button(message.pinned ? "Unpin for channel" : "Pin for channel", systemImage: "pin") { _ = send(.init(kind: .pin, target: message.id, enabled: !message.pinned)) }
                     if own {
-                        Button("Edit", systemImage: "pencil") { editing = message.id; replyTo = nil; pendingAttachment = nil; draft = message.text; chosenMentionIDs = Set(message.mentionedParticipantIDs ?? []); focused = true }
+                        Button("Edit", systemImage: "pencil") { composer.editing = message.id; composer.replyTo = nil; composer.pendingAttachment = nil; draft = message.text; composer.chosenMentionIDs = Set(message.mentionedParticipantIDs ?? []); focused = true }
                         Button("Delete message", systemImage: "trash", role: .destructive) { _ = send(.init(kind: .delete, target: message.id)) }
                     }
                     if let localAttachmentURL {
@@ -423,7 +426,7 @@ struct RoomChatPanel: View {
                     }
                 }
             }
-            if !own { Spacer(minLength: 36) }
+            if !own { Spacer(minLength: isNotch ? 8 : 36) }
         }
         .help("Right-click a message to reply, react, or pin it")
     }
@@ -435,24 +438,24 @@ struct RoomChatPanel: View {
         guard validDraft else { return }
         let ids = mentionMembers.filter { member in
             guard RoomChatPresentation.containsMention(of: member.name, in: draft) else { return false }
-            return chosenMentionIDs.contains(member.id) || mentionMembers.filter { $0.name.caseInsensitiveCompare(member.name) == .orderedSame }.count == 1
+            return composer.chosenMentionIDs.contains(member.id) || mentionMembers.filter { $0.name.caseInsensitiveCompare(member.name) == .orderedSame }.count == 1
         }.map(\.id)
-        let operation = RoomChatOperation(kind: editing == nil ? .message : .edit,
-                                          target: editing ?? replyTo,
+        let operation = RoomChatOperation(kind: composer.editing == nil ? .message : .edit,
+                                          target: composer.editing ?? composer.replyTo,
                                           text: draft.trimmingCharacters(in: .whitespacesAndNewlines),
                                           mentionedParticipantIDs: Array(Set(ids)).sorted(),
-                                          attachment: editing == nil ? pendingAttachment?.metadata : nil)
+                                          attachment: composer.editing == nil ? composer.pendingAttachment?.metadata : nil)
         guard operation.encoded != nil else {
             sendError = ids.count > 8 ? "Use at most eight mentions in one message. Your draft has been kept." : "This message is too large to send with its mentions. Shorten it and try again."
             sendFailed = true; return
         }
-        let sent = pendingAttachment.map { sendAttachment(operation, $0.url) } ?? send(operation)
+        let sent = composer.pendingAttachment.map { sendAttachment(operation, $0.url) } ?? send(operation)
         guard sent else { sendError = "The message or attachment could not be sent. Your draft has been kept."; sendFailed = true; return }
-        draft = ""; editing = nil; replyTo = nil; chosenMentionIDs = []; pendingAttachment = nil; focused = true
+        draft = ""; composer.reset(); focused = true
     }
 
     private func selectAttachment(_ url: URL) -> Bool {
-        guard editing == nil, url.isFileURL else { return false }
+        guard composer.editing == nil, url.isFileURL else { return false }
         let accessed = url.startAccessingSecurityScopedResource()
         defer { if accessed { url.stopAccessingSecurityScopedResource() } }
         guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey, .contentTypeKey]),
@@ -474,7 +477,7 @@ struct RoomChatPanel: View {
             sendFailed = true
             return false
         }
-        pendingAttachment = PendingChatAttachment(url: url, metadata: metadata)
+        composer.pendingAttachment = PendingChatAttachment(url: url, metadata: metadata)
         focused = true
         return true
     }
@@ -489,7 +492,7 @@ struct RoomChatPanel: View {
                     .font(.caption2).foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
-            Button { pendingAttachment = nil } label: { Image(systemName: "xmark.circle.fill") }
+            Button { composer.pendingAttachment = nil } label: { Image(systemName: "xmark.circle.fill") }
                 .buttonStyle(.plain).help("Remove attachment").accessibilityLabel("Remove attachment")
         }
         .font(.system(size: 11))
@@ -575,9 +578,26 @@ struct RoomChatPanel: View {
     }
 }
 
-private struct PendingChatAttachment {
+struct PendingChatAttachment {
     let url: URL
     let metadata: RoomChatAttachment
+}
+
+/// The notch owns this context across page changes and collapse. Other chat
+/// hosts retain their own StateObject, preserving their existing lifecycle.
+@MainActor
+final class RoomChatComposerContext: ObservableObject {
+    @Published var chosenMentionIDs = Set<String>()
+    @Published var pendingAttachment: PendingChatAttachment?
+    @Published var replyTo: UUID?
+    @Published var editing: UUID?
+
+    func reset() {
+        chosenMentionIDs = []
+        pendingAttachment = nil
+        replyTo = nil
+        editing = nil
+    }
 }
 
 /// Decode once per local file, never fetch a remote preview or decode full-size media.

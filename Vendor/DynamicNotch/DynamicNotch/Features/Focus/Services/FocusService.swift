@@ -2,6 +2,9 @@ import Foundation
 import Combine
 
 final class FocusService {
+    // stop() owns monitoring cleanup; avoid isolated ARC backdeployment.
+    nonisolated deinit {}
+
     var onEvent: ((FocusEvent) -> Void)?
 
     private var cancellables = Set<AnyCancellable>()

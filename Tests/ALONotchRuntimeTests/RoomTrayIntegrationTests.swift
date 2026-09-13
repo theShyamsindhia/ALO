@@ -4,6 +4,45 @@ import XCTest
 
 @MainActor
 final class RoomTrayIntegrationTests: XCTestCase {
+    func testPrivateShelfRemainsSeparateWhileJoinedAndSurvivesLeaving() throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: fixture.defaultsName))
+        defer { defaults.removePersistentDomain(forName: fixture.defaultsName) }
+        let model = FileTrayViewModel(defaults: defaults)
+        var shared: [[URL]] = []
+        model.onRoomAddRequested = { shared.append($0) }
+        model.applyRoomSnapshot(.init(items: [
+            .init(id: "room-file", fileName: "Room.txt", byteCount: 3, transferState: .unavailable)
+        ]))
+        model.appendLocalShelfCopies([fixture.localFile])
+        XCTAssertEqual(model.items.map(\.id), ["room-file"])
+        XCTAssertEqual(model.localShelfItems.count, 1)
+        XCTAssertTrue(shared.isEmpty, "Keeping a private file must not publish to the room")
+        model.applyRoomSnapshot(.init(items: []))
+        XCTAssertEqual(model.localShelfItems.count, 1)
+        model.applyRoomSnapshot(nil)
+        XCTAssertEqual(model.items.first?.localURL, fixture.localFile.standardizedFileURL)
+    }
+
+    func testRemovingPrivateCopyCannotRemoveRoomMetadataOrOriginal() throws {
+        let fixture = try makeFixture()
+        defer { fixture.cleanup() }
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: fixture.defaultsName))
+        defer { defaults.removePersistentDomain(forName: fixture.defaultsName) }
+        let model = FileTrayViewModel(defaults: defaults)
+        model.add([fixture.localFile])
+        model.applyRoomSnapshot(.init(items: [
+            .init(id: "room-file", fileName: "Room.txt", byteCount: 3, transferState: .unavailable)
+        ]))
+        var removed: [String] = []
+        model.onRoomRemoveRequested = { removed += $0 }
+        model.removeFromLocalShelf(try XCTUnwrap(model.localShelfItems.first))
+        XCTAssertTrue(model.localShelfItems.isEmpty)
+        XCTAssertEqual(model.items.map(\.id), ["room-file"])
+        XCTAssertTrue(removed.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.localFile.path))
+    }
     func testRoomSnapshotUsesStableIDsAndRestoresStandaloneItems() throws {
         let fixture = try makeFixture()
         defer { fixture.cleanup() }

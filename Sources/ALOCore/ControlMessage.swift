@@ -24,6 +24,8 @@ public struct RoomParticipant: Codable, Sendable, Equatable, Identifiable {
     public var playbackTiming: PeerPlaybackTiming? = nil
     /// Learned from the authenticated room handshake and kept out of durable room state.
     public var appVersion: String? = nil
+    /// Direct authenticated availability only; deliberately excluded from identity encoding.
+    public var canvas: RoomCanvasAdvertisement? = nil
 
     public init(
         id: String,

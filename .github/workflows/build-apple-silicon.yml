@@ -58,6 +58,25 @@ jobs:
             ${{ runner.temp }}/alo-fanout-traces
           if-no-files-found: warn
 
+      - name: Show XCTest crash reports on failure
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          directory = Path.home() / "Library/Logs/DiagnosticReports"
+          reports = sorted(
+              [path for path in directory.glob("*")
+               if path.is_file() and path.name.startswith(("ALOPackageTests", "xctest"))
+               and path.suffix in (".ips", ".crash")],
+              key=lambda path: path.stat().st_mtime,
+          )[-3:]
+          if not reports:
+              print("No XCTest crash report was produced by this runner.")
+          for report in reports:
+              print(f"\nXCTest crash report: {report.name}\n")
+              print(report.read_text(errors="replace")[:100_000])
+          PY
+
   build-arm64:
     runs-on: macos-15
     timeout-minutes: 75

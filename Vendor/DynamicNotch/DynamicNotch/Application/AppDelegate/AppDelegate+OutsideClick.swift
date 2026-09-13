@@ -56,8 +56,13 @@ extension AppDelegate {
     }
 
     @MainActor
-    func handleLocalClick(from _: NSWindow?, atScreenLocation screenLocation: NSPoint) {
+    func handleLocalClick(from sourceWindow: NSWindow?, atScreenLocation screenLocation: NSPoint) {
         guard shouldHandleOutsideClick else { return }
+        // A room is an interactive workspace: its menus, pickers and popovers
+        // can live outside the host panel. Keep them mounted until the user
+        // closes the workspace or clicks outside ALO.
+        if notchViewModel.displayedContent?.id == RoomInteractionContent.activityID,
+           sourceWindow !== (hostWindow ?? window) { return }
         guard let activeNotchScreenRect else {
             notchViewModel.handleOutsideClick()
             return
