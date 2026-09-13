@@ -23,6 +23,7 @@ final class MeshSession {
     private var profileImageData: Data?
     private let control: MeshControlPlane
     let fileSharing: DirectFileSharingController
+    let canvas: RoomCanvasController?
     private let statusHandler: (String) -> Void
     private let identityHandler: (String, String) -> Void
     private let mediaStateHandler: (Bool) -> Void
@@ -266,6 +267,10 @@ final class MeshSession {
         let secureMediaAdmission = SecureMediaAdmissionRelay()
         let fileSharing = DirectFileSharingController()
         self.fileSharing = fileSharing
+        if room.transportPolicy == .secureV2, let roomID = UUID(uuidString: room.id), let localID = UUID(uuidString: nodeID) {
+            canvas = RoomCanvasController(roomID: roomID, localID: localID, isPublic: !room.isPrivate)
+        } else { canvas = nil }
+        let canvasBridge = canvas?.bridge
         self.secureMediaAdmission = secureMediaAdmission
         self.room = room
         self.nodeID = nodeID
@@ -362,9 +367,12 @@ final class MeshSession {
             roomStateSyncOverride: roomStateSyncOverride,
             installationIdentity: installationIdentity,
             peerPins: peerPins,
+            secureCapabilities: canvasBridge == nil ? .desktop : [.desktop, .roomCanvas],
             networkAuthorization: networkAuthorization,
-            incomingMediaChannelHandler: { [secureMediaAdmission, fileSharing] channel, peer in
-                if peer.channelRole == .fileTransfer { fileSharing.receive(channel, peer: peer) }
+            incomingMediaChannelHandler: { [secureMediaAdmission, fileSharing, canvasBridge] channel, peer in
+                if peer.channelRole == .roomCanvas {
+                    if let canvasBridge { canvasBridge.receive(channel, peer: peer) } else { channel.cancel() }
+                } else if peer.channelRole == .fileTransfer { fileSharing.receive(channel, peer: peer) }
                 else if peer.channelRole == .voiceControl { secureVoice.admit(channel) }
                 else { secureMediaAdmission.receive(channel, peer: peer) }
             },
@@ -382,6 +390,10 @@ final class MeshSession {
             guard let control else { completion(.failure(DirectFileError.interrupted)); return }
             control.openPeerChannel(to: peer, role: .fileTransfer, completion: completion)
         }
+        canvasBridge?.configure(open: { [weak control] peer, completion in
+            guard let control else { completion(.failure(SecurePeerChannelError.notAuthenticated)); return }
+            control.openPeerChannel(to: peer, role: .roomCanvas, completion: completion)
+        }, advertise: { [weak control] in control?.publishCanvas($0) })
         relay.participants = { [weak self] participants in
             participantsHandler(participants)
             guard let self else { return }
@@ -1063,6 +1075,7 @@ final class MeshSession {
         guard !isStopped else { return }
         isStopped = true
         fileSharing.stop()
+        canvas?.stop()
         DJStudio.endLiveIfCreated()
         endOpenLine()
         endWalkieTalkie()
@@ -1100,6 +1113,7 @@ final class MeshSession {
         guard !isStopped else { return }
         isStopped = true
         fileSharing.stop()
+        canvas?.stop()
         DJStudio.endLiveIfCreated()
         endOpenLine()
         endWalkieTalkie()

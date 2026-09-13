@@ -58,6 +58,32 @@ public final class EmbeddedNotchRuntime: ObservableObject {
     private var roomService: RoomPlaybackService?
     private var roomViewModel: NowPlayingViewModel?
     private var roomContentVisible = false
+    private let roomPresence = RoomPresenceModel()
+    private var roomPresenceVisible = false
+    private let roomInteraction = RoomInteractionModel()
+    private var roomToolStaging = RoomToolStaging()
+    private var roomToolStagingUsed = false
+    private var expandRoomInteractionWhenVisible = false
+    public var onRoomInteractionRequested: (() -> Void)?
+    public var onRoomFilesDragEntered: (() -> Void)?
+    public var onRoomFilesStaged: (([URL]) -> Void)?
+    @Published public private(set) var roomSharingAvailable = false
+    public func updateRoomPresence(title: String?, people: Int) {
+        roomSharingAvailable = title != nil
+        roomPresence.title = title ?? "Room"
+        roomPresence.people = max(0, people)
+        reconcileRoomPresence()
+    }
+    public var canPresentRoomInteraction: Bool {
+        isEnabled && !isLocked && !shouldHideInFullscreen && preferredScreen != nil
+    }
+    public var isRoomInteractionVisible: Bool {
+        delegate.notchViewModel.displayedContent?.id == RoomInteractionContent.activityID
+    }
+    public var isRoomInteractionExpanded: Bool {
+        isRoomInteractionVisible && delegate.notchViewModel.isDisplayingExpandedLiveActivity
+            && !delegate.notchViewModel.isActivityPresentationHidden && !isLocked && !shouldHideInFullscreen
+    }
     public var interactiveScreenRect: CGRect? { delegate.activeNotchScreenRect }
     public var canvasSize: CGSize { OverlayWindowLayout.appCanvasSize }
     public var windowYOffset: CGFloat { 1 }
@@ -116,6 +142,12 @@ public final class EmbeddedNotchRuntime: ObservableObject {
                 guard let self else { return }
                 let active = self.isEnabled && model.content != nil
                 if self.activityActive != active { self.activityActive = active }
+                if self.expandRoomInteractionWhenVisible,
+                   model.content?.id == RoomInteractionContent.activityID,
+                   model.temporaryNotificationContent == nil {
+                    self.expandRoomInteractionWhenVisible = false
+                    if !model.isLiveActivityExpanded { self.delegate.notchViewModel.expandActiveLiveActivity() }
+                }
                 self.refreshPresentationGeometry()
             }
             .store(in: &observations)
@@ -170,6 +202,45 @@ public final class EmbeddedNotchRuntime: ObservableObject {
         delegate.container.fileTrayViewModel.applyRoomSnapshot(snapshot)
     }
 
+    public var localFileShelfView: AnyView {
+        AnyView(LocalFileShelfView(model: delegate.container.fileTrayViewModel))
+    }
+
+    public var roomFileShelfView: AnyView {
+        AnyView(TrayExpandedActiveNotchView(fileTrayViewModel: delegate.container.fileTrayViewModel,
+            mediaSettings: delegate.settingsViewModel.mediaAndFiles, isEmbedded: true))
+    }
+
+    public func roomToolsView(onShare: @escaping ([URL]) -> Void, onTransfers: @escaping () -> Void) -> AnyView {
+        roomToolStagingUsed = true
+        return AnyView(RoomToolsView(container: delegate.container, staging: roomToolStaging,
+            onShare: onShare, onTransfers: onTransfers,
+            onStartTimer: { [weak self] in self?.activation.retainRoomToolTimer() },
+            isPresented: isRoomInteractionExpanded,
+            onSelectionChanged: { [weak self] selected in self?.setRoomInteractionLayout(selected ? .tool : .tray) }))
+    }
+
+    /// Call after leaving the room, once its pending transfers have stopped.
+    public func clearRoomToolCopies() {
+        guard roomToolStagingUsed else { return }
+        roomToolStagingUsed = false
+        let completedRoom = roomToolStaging
+        roomToolStaging = RoomToolStaging()
+        Task { try? await completedRoom.clear() }
+    }
+
+    public func keepFilesLocally(_ urls: [URL]) async throws {
+        try await delegate.container.fileTrayViewModel.addToLocalShelf(urls)
+    }
+
+    public func shareFilesViaAirDrop(_ urls: [URL]) -> Bool {
+        guard !urls.isEmpty else { return false }
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        pasteboard.writeObjects(urls.map { $0 as NSURL })
+        return delegate.airDropController.handlePasteboardDrop(pasteboard)
+    }
+
     /// Feature choices remain persisted when the master switch is turned off.
     public func setEnabled(_ enabled: Bool) {
         guard isEnabled != enabled else { return }
@@ -194,6 +265,8 @@ public final class EmbeddedNotchRuntime: ObservableObject {
             reconcileRoomPlayback()
             activityActive = delegate.notchViewModel.displayedContent != nil
         } else {
+            roomInteraction.content = AnyView(EmptyView())
+            expandRoomInteractionWhenVisible = false
             activation.setEnabled(false)
             reconcileRoomPlayback()
             delegate.stopOutsideClickMonitoring()
@@ -312,7 +385,7 @@ public final class EmbeddedNotchRuntime: ObservableObject {
         _ snapshot: RoomMentionSnapshot,
         onOpen: @escaping @MainActor () -> Void
     ) {
-        guard isEnabled else { return }
+        guard canPresentRoomInteraction, !isRoomInteractionExpanded else { return }
         delegate.notchViewModel.send(
             .showTemporaryNotification(
                 RoomMentionNotchContent(snapshot: snapshot, onOpen: onOpen),
@@ -321,7 +394,52 @@ public final class EmbeddedNotchRuntime: ObservableObject {
         )
     }
 
+    /// Interactive room content stays in the existing panel. ALO passes an
+    /// observed view, not a second copy of conversation or transfer state.
+    @discardableResult
+    public func presentRoomInteraction(title: String, subtitle: String, content: AnyView, expanded: Bool,
+                                       layout: RoomNotchLayout = .tray) -> Bool {
+        guard canPresentRoomInteraction, let screen = preferredScreen else { return false }
+        roomInteraction.title = title
+        roomInteraction.subtitle = subtitle
+        roomInteraction.content = content
+        roomInteraction.open = { [weak self] in self?.delegate.notchViewModel.expandActiveLiveActivity() }
+        roomInteraction.availableSize = layout.size(display: screen.visibleFrame.size)
+        expandRoomInteractionWhenVisible = expanded
+        delegate.notchViewModel.send(.showLiveActivity(RoomInteractionContent(model: roomInteraction)))
+        if expanded && isRoomInteractionVisible {
+            expandRoomInteractionWhenVisible = false
+            if !delegate.notchViewModel.notchModel.isLiveActivityExpanded {
+                delegate.notchViewModel.expandActiveLiveActivity()
+            }
+        }
+        return true
+    }
+
+    public func dismissRoomInteraction() {
+        expandRoomInteractionWhenVisible = false
+        delegate.notchViewModel.send(.hideLiveActivity(id: RoomInteractionContent.activityID))
+        roomInteraction.content = AnyView(EmptyView())
+    }
+
+    public func updateRoomInteractionPreview(title: String, subtitle: String) {
+        guard isRoomInteractionVisible else { return }
+        roomInteraction.title = title
+        roomInteraction.subtitle = subtitle
+    }
+
+    public func setRoomInteractionLayout(_ layout: RoomNotchLayout) {
+        guard isRoomInteractionVisible, let screen = preferredScreen else { return }
+        let size = layout.size(display: screen.visibleFrame.size)
+        guard roomInteraction.availableSize != size else { return }
+        roomInteraction.availableSize = size
+        // Updating the same activity resizes it without collapsing or remounting
+        // the room's draft, file selection or tool state.
+        delegate.notchViewModel.send(.showLiveActivity(RoomInteractionContent(model: roomInteraction)))
+    }
+
     private func reconcileRoomPlayback() {
+        defer { reconcileRoomPresence() }
         guard isEnabled, let snapshot = roomPlaybackSnapshot else {
             activation.setLockScreenMediaSource(nil)
             roomViewModel?.stopMonitoring()
@@ -352,8 +470,24 @@ public final class EmbeddedNotchRuntime: ObservableObject {
             let content = NowPlayingNotchContent(nowPlayingViewModel: viewModel,
                 settings: delegate.settingsViewModel.mediaAndFiles,
                 applicationSettings: delegate.settingsViewModel.application)
-            delegate.notchViewModel.send(.showLiveActivity(RoomNowPlayingNotchContent(original: content)))
+            delegate.notchViewModel.send(.showLiveActivity(RoomNowPlayingNotchContent(original: content,
+                openRoom: { [weak self] in self?.onRoomInteractionRequested?() })))
             roomContentVisible = true
+        }
+    }
+
+    private func reconcileRoomPresence() {
+        let show = isEnabled && roomSharingAvailable && roomPlaybackSnapshot == nil
+        guard show != roomPresenceVisible else { return }
+        roomPresenceVisible = show
+        if show {
+            delegate.notchViewModel.send(.showLiveActivity(RoomPresenceContent(model: roomPresence,
+                open: { [weak self] in
+                    guard self?.canPresentRoomInteraction == true else { return }
+                    self?.onRoomInteractionRequested?()
+                })))
+        } else {
+            delegate.notchViewModel.send(.hideLiveActivity(id: RoomPresenceContent.activityID))
         }
     }
 
@@ -371,6 +505,11 @@ public final class EmbeddedNotchRuntime: ObservableObject {
 
     @discardableResult
     public func openActivity() -> Bool {
+        if delegate.notchViewModel.displayedContent?.id == RoomPresenceContent.activityID {
+            guard canPresentRoomInteraction, let onRoomInteractionRequested else { return false }
+            onRoomInteractionRequested()
+            return true
+        }
         let settings = delegate.settingsViewModel.homePage
         let target = Self.activityOpeningTarget(
             isEnabled: isEnabled,

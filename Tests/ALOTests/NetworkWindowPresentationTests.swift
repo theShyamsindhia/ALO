@@ -16,6 +16,110 @@ struct NetworkWindowPresentationTests {
         return window
     }
 
+    @Test func nativeSidebarToggleResizesAndRestoresWithoutLosingDraft() async throws {
+        let window = makeWindow()
+        defer { window.close() }
+        NetworkSetupWindowPresentation.configure(window, identityReady: true)
+        let state = SidebarFixtureState()
+        var detail: NSView?
+        let host = NSHostingView(rootView: SidebarToggleFixture(state: state, onDetail: { detail = $0 }))
+        window.contentView = host
+        window.orderBack(nil)
+        try await Task.sleep(for: .milliseconds(350))
+        window.setContentSize(NSSize(width: 960, height: 700))
+        host.layoutSubtreeIfNeeded()
+        let split = try #require(NetworkShellAssertions.views(in: host).compactMap { $0 as? NSSplitView }.first)
+        let controller = try #require(split.delegate as? NSSplitViewController)
+        let sidebar = try #require(controller.splitViewItems.first)
+        #expect(sidebar.canCollapse)
+        #expect(window.toolbar == nil)
+        let originalDetail = try #require(detail)
+        let initialWidth = originalDetail.bounds.width
+        split.setPosition(230, ofDividerAt: 0)
+        host.layoutSubtreeIfNeeded()
+        let sidebarWidth = split.arrangedSubviews[0].frame.width
+        #expect(abs(sidebarWidth - 230) < 2)
+        state.draft = "Keep this draft"
+        let menu = makeALOViewMenu()
+        let item = try #require(menu.items.first)
+        #expect(item.action == #selector(NetworkBrowserWindow.toggleNetworkSidebar(_:)))
+        #expect(item.keyEquivalentModifierMask == [.command, .control])
+        // This is the native command used by both the menu and toolbar.
+        window.makeFirstResponder(originalDetail)
+        #expect(window.firstResponder?.tryToPerform(try #require(item.action), with: item) == true)
+        // A sidebar transition must not move or snap the window controls.
+        for _ in 0..<24 {
+            window.update()
+            for (index, type) in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].enumerated() {
+                let button = try #require(window.standardWindowButton(type))
+                let bounds = button.convert(button.bounds, to: nil)
+                #expect(abs(bounds.midX - (30 + CGFloat(index) * 20)) < 0.5)
+                #expect(abs(window.frame.height - bounds.midY - 31) < 0.5)
+            }
+            try await Task.sleep(for: .milliseconds(16))
+        }
+        try await Task.sleep(for: .milliseconds(400))
+        host.layoutSubtreeIfNeeded()
+        #expect(sidebar.isCollapsed)
+        window.update()
+        let light = try #require(window.standardWindowButton(.closeButton))
+        let lightBounds = light.convert(light.bounds, to: nil)
+        #expect(abs(lightBounds.midX - 30) < 0.5)
+        #expect(abs(window.frame.height - lightBounds.midY - 31) < 0.5)
+        #expect(originalDetail.bounds.width > initialWidth + 150)
+        #expect(detail === originalDetail)
+        #expect(state.draft == "Keep this draft")
+        window.setContentSize(NSSize(width: 760, height: 520))
+        controller.toggleSidebar(nil)
+        try await Task.sleep(for: .milliseconds(400))
+        host.layoutSubtreeIfNeeded()
+        #expect(!sidebar.isCollapsed)
+        window.update()
+        #expect(abs(light.convert(light.bounds, to: nil).midX - 30) < 0.5)
+        #expect(abs(split.arrangedSubviews[0].frame.width - sidebarWidth) < 2)
+        #expect(detail === originalDetail)
+        #expect(state.draft == "Keep this draft")
+        try NetworkShellAssertions.verify(host, in: window)
+    }
+
+    @Test func conversationWithSidebarHiddenRendersInBothAppearances() async throws {
+        for dark in [false, true] {
+            let window = makeWindow()
+            defer { window.close() }
+            NetworkSetupWindowPresentation.configure(window, identityReady: true)
+            window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            let host = NSHostingView(rootView: NativeConversationFixture()
+                .environment(\.colorScheme, dark ? .dark : .light))
+            window.contentView = host
+            window.orderBack(nil)
+            try await Task.sleep(for: .milliseconds(350))
+            window.setContentSize(NSSize(width: 760, height: 520))
+            let split = try #require(NetworkShellAssertions.views(in: host).compactMap { $0 as? NSSplitView }.first)
+            let controller = try #require(split.delegate as? NSSplitViewController)
+            controller.toggleSidebar(nil)
+            try await Task.sleep(for: .milliseconds(400))
+            host.layoutSubtreeIfNeeded()
+            #expect(controller.splitViewItems[0].isCollapsed)
+            window.update()
+            let detail = controller.splitViewItems[1].viewController.view
+            // Rendering other fixtures can delay AppKit's animation/layout pass.
+            // Wait for the actual geometry, with a bounded timeout, not just 400 ms.
+            for _ in 0..<40 where detail.bounds.width < 750 {
+                try await Task.sleep(for: .milliseconds(50))
+                host.layoutSubtreeIfNeeded()
+            }
+            #expect(detail.bounds.width >= 750)
+            if let directory = ProcessInfo.processInfo.environment["ALO_NETWORKS_SNAPSHOT_DIR"] {
+                let frame = try #require(host.superview)
+                let bitmap = try #require(frame.bitmapImageRepForCachingDisplay(in: frame.bounds))
+                frame.cacheDisplay(in: frame.bounds, to: bitmap)
+                let data = try #require(bitmap.representation(using: .png, properties: [:]))
+                try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
+                try data.write(to: URL(fileURLWithPath: directory).appendingPathComponent("sidebar-hidden-\(dark ? "dark" : "light").png"))
+            }
+        }
+    }
+
     @Test func nativeChromeAndCloseRetainReusableWindow() throws {
         let window = makeWindow()
         NetworkSetupWindowPresentation.configure(window, identityReady: true)
@@ -118,7 +222,7 @@ struct NetworkWindowPresentationTests {
             let effect = try #require(backdrop(in: host))
             #expect(effect.material == .underWindowBackground)
             #expect(effect.blendingMode == .behindWindow)
-            #expect(effect.state == .active)
+            #expect(effect.state == .followsWindowActiveState)
             #expect(effect.maskImage == nil)
             #expect(effect.alphaValue == 1)
         }
@@ -189,10 +293,7 @@ struct NetworkWindowPresentationTests {
                     .environment(\.controlActiveState, .active)
                     .transaction { $0.disablesAnimations = true })
                 try await Task.sleep(for: .milliseconds(300))
-                // NavigationSplitView installs its native toolbar on attachment.
-                // Size the content after that installation, just as a user resize
-                // does; otherwise AppKit's toolbar insertion adds 28 pt to the
-                // requested content size before this geometry assertion.
+                // Exercise a real window resize before inspecting the shell.
                 window.setContentSize(size)
                 window.contentView?.layoutSubtreeIfNeeded()
                 let frameView = try #require(window.contentView?.superview)
@@ -205,15 +306,17 @@ struct NetworkWindowPresentationTests {
                 frameView.cacheDisplay(in: frameView.bounds, to: bitmap)
                 let probe = try #require(sidebarProbe)
                 let bounds = probe.convert(probe.bounds, to: window.contentView)
-                #expect(abs(bounds.minX) < 0.5)
-                #expect(bounds.width >= ALONativeNetworkLayout.minimumSidebarWidth)
-                #expect(bounds.width <= ALONativeNetworkLayout.maximumSidebarWidth)
+                #expect(abs(bounds.minX - ALONativeNetworkLayout.panelInset) < 0.5)
+                #expect(bounds.width >= ALONativeNetworkLayout.minimumSidebarWidth - 2 * ALONativeNetworkLayout.panelInset)
+                #expect(bounds.width <= ALONativeNetworkLayout.maximumSidebarWidth - 2 * ALONativeNetworkLayout.panelInset)
                 let detail = try #require(detailProbe)
                 let detailBounds = detail.convert(detail.bounds, to: window.contentView)
-                #expect(abs(detailBounds.minX - bounds.maxX) < 0.5)
+                #expect(abs(detailBounds.minX - bounds.maxX - ALONativeNetworkLayout.panelInset) < 0.5)
+                #expect(abs(bounds.minY - detailBounds.minY) < 0.5)
+                #expect(abs(bounds.height - detailBounds.height) < 0.5)
                 #expect(abs(detailBounds.maxX - (size.width - ALONativeNetworkLayout.panelInset)) < 0.5)
-                #expect(abs(detailBounds.minY - bounds.minY - ALONativeNetworkLayout.panelInset) < 0.5)
-                #expect(abs(detailBounds.height - (bounds.height - 2 * ALONativeNetworkLayout.panelInset)) < 0.5)
+                #expect(abs(detailBounds.minY - ALONativeNetworkLayout.panelInset) < 0.5)
+                #expect(abs(detailBounds.height - (size.height - 2 * ALONativeNetworkLayout.panelInset)) < 0.5)
                 if let directory = ProcessInfo.processInfo.environment["ALO_NETWORKS_SNAPSHOT_DIR"] {
                     try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
                     let data = try #require(bitmap.representation(using: .png, properties: [:]))
@@ -224,6 +327,24 @@ struct NetworkWindowPresentationTests {
         }
     }
 }
+}
+
+@MainActor private final class SidebarFixtureState: ObservableObject {
+    @Published var draft = ""
+}
+
+private struct SidebarToggleFixture: View {
+    @ObservedObject var state: SidebarFixtureState
+    let onDetail: (NSView) -> Void
+    var body: some View {
+        ALONativeNetworkColumns {
+            Text("Spaces").frame(maxWidth: .infinity, maxHeight: .infinity)
+        } detail: {
+            TextField("Message", text: $state.draft)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(NetworkSheetProbe(onCreate: onDetail))
+        }
+    }
 }
 
 private struct NetworkSheetFixture: View {

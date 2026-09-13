@@ -432,6 +432,17 @@ func makeALOEditMenu() -> NSMenu {
 }
 
 @MainActor
+func makeALOViewMenu() -> NSMenu {
+    let menu = NSMenu(title: "View")
+    let sidebar = menu.addItem(withTitle: "Show/Hide Sidebar",
+        action: #selector(NetworkBrowserWindow.toggleNetworkSidebar(_:)), keyEquivalent: "s")
+    sidebar.keyEquivalentModifierMask = [.command, .control]
+    // Route through the window so SwiftUI's unrelated navigation handler cannot consume it.
+    sidebar.target = nil
+    return menu
+}
+
+@MainActor
 func toggleALOSetupWindow(_ window: NSWindow) {
     if window.isVisible {
         window.orderOut(nil)
@@ -445,25 +456,42 @@ func toggleALOSetupWindow(_ window: NSWindow) {
 final class NetworkBrowserWindow: NSWindow {
     var usesNetworkCorners = false
 
+    @objc func toggleNetworkSidebar(_ sender: Any?) {
+        toggleALONetworkSidebar(in: self)
+    }
+
+    override func update() {
+        super.update()
+        // The titlebar is stationary: unlike a tracking toolbar, it does not
+        // participate in the split view's collapse animation.
+        insetWindowControls()
+    }
+
     override func setFrame(_ frameRect: NSRect, display flag: Bool) {
         super.setFrame(frameRect, display: flag)
         insetWindowControls()
     }
 
     func insetWindowControls() {
-        guard usesNetworkCorners,
+        // This shell has no tracking toolbar competing for control positions.
+        guard usesNetworkCorners, toolbar == nil,
               let close = standardWindowButton(.closeButton),
               let titlebar = close.superview?.superview,
               titlebar.superview === contentView?.superview else { return }
         // Move the native titlebar with its buttons so their hit targets stay
         // inside their parent. Figma centers the first light at (30, 31).
         let closeBounds = close.convert(close.bounds, to: nil)
-        titlebar.setFrameOrigin(NSPoint(x: titlebar.frame.minX,
-            y: titlebar.frame.minY + frame.height - 31 - closeBounds.midY))
-        let inset = 30 - closeBounds.midX
-        for type in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+        let verticalOffset = frame.height - 31 - closeBounds.midY
+        if abs(verticalOffset) > 0.01 {
+            titlebar.setFrameOrigin(NSPoint(x: titlebar.frame.minX, y: titlebar.frame.minY + verticalOffset))
+        }
+        for (index, type) in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].enumerated() {
             guard let button = standardWindowButton(type) else { continue }
-            button.setFrameOrigin(NSPoint(x: button.frame.minX + inset, y: button.frame.minY))
+            let currentCenter = button.convert(button.bounds, to: nil).midX
+            let offset = 30 + CGFloat(index) * 20 - currentCenter
+            if abs(offset) > 0.01 {
+                button.setFrameOrigin(NSPoint(x: button.frame.minX + offset, y: button.frame.minY))
+            }
         }
     }
 }
@@ -500,6 +528,7 @@ enum NetworkSetupWindowPresentation {
         window.titleVisibility = .hidden
         window.titlebarSeparatorStyle = .none
         window.toolbarStyle = .unifiedCompact
+        window.toolbar = nil
         window.backgroundColor = .clear
         window.isOpaque = false
         window.isMovableByWindowBackground = true
@@ -989,6 +1018,10 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
         let editMenuItem = NSMenuItem()
         mainMenu.addItem(editMenuItem)
         editMenuItem.submenu = makeALOEditMenu()
+
+        let viewMenuItem = NSMenuItem()
+        mainMenu.addItem(viewMenuItem)
+        viewMenuItem.submenu = makeALOViewMenu()
 
         NSApp.mainMenu = mainMenu
     }
@@ -1811,10 +1844,14 @@ final class ALOViewModel: ObservableObject {
     @Published var messages = [RoomMessage]()
     private var chatDocument = RoomChatDocument()
     @Published private(set) var roomTrayItems = [RoomTrayItem]()
-    @Published private(set) var roomTrayDownloadingIDs = Set<String>()
+    let roomTrayDownloads = RoomTrayDownloads()
+    var roomTrayDownloadingIDs: Set<String> { roomTrayDownloads.activeIDs }
+    @Published private(set) var isImportingRoomFiles = false
+    @Published private(set) var roomTrayNotice: String?
     private var roomTrayDocument = RoomTrayDocument()
     private let roomTrayStore = RoomTrayStore()
-    private var roomTrayDownloadTasks = [String: Task<Void, Never>]()
+    private let roomTrayIO = RoomTrayFileIO()
+    private var roomTrayReceivingIDs: [String: UUID] = [:]
     @Published var chatNotificationMode = ChatNotificationMode(rawValue: UserDefaults.standard.string(forKey: "chatNotificationMode") ?? "all") ?? .all {
         didSet { UserDefaults.standard.set(chatNotificationMode.rawValue, forKey: "chatNotificationMode") }
     }
@@ -1899,6 +1936,9 @@ final class ALOViewModel: ObservableObject {
     func sendFile(to participantID: String) {
         meshSession?.fileSharing.chooseFile(to: participantID)
     }
+    var roomFileSharing: DirectFileSharingController? { meshSession?.fileSharing }
+    var roomCanvas: RoomCanvasController? { meshSession?.canvas }
+    @Published var notchChatIsPresented = false
     private var liveSyncTask: Task<Void, Never>?
     private let syncHealthLogger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "in.werai.audio", category: "synchronization")
     private var requestedVideoBroadcast = false
@@ -3287,53 +3327,68 @@ final class ALOViewModel: ObservableObject {
 
     func addRoomTrayFiles(_ urls: [URL]) {
         guard phase == .live, let meshSession, let roomID = activeRoomConfiguration?.id else { return }
+        guard !isImportingRoomFiles else {
+            roomTrayNotice = "Wait for the current files to finish importing, then try again."
+            return
+        }
         let remainingItemSlots = max(0, RoomTrayDocument.maximumActiveItems - roomTrayItems.count)
         var remainingBytes = max(
             0,
             RoomTrayDocument.maximumActiveBytes - roomTrayItems.reduce(0) { $0 + $1.attachment.byteCount }
         )
         guard remainingItemSlots > 0, remainingBytes > 0 else {
-            statusText = "The channel tray is full. Remove a file before adding another."
+            roomTrayNotice = "The room shelf is full. Remove a file before adding another."
             return
         }
-        var shared = 0
-        var skipped = 0
-        for sourceURL in urls.prefix(remainingItemSlots) {
-            let accessed = sourceURL.startAccessingSecurityScopedResource()
-            defer { if accessed { sourceURL.stopAccessingSecurityScopedResource() } }
-            do {
-                let imported = try roomTrayStore.importFile(at: sourceURL, roomID: roomID)
-                guard imported.descriptor.byteCount <= remainingBytes else {
-                    try? roomTrayStore.remove(itemID: imported.descriptor.itemID, roomID: roomID)
-                    skipped += 1
-                    continue
+        isImportingRoomFiles = true
+        roomTrayNotice = nil
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.isImportingRoomFiles = false }
+            var shared = 0
+            var skipped = max(0, urls.count - remainingItemSlots)
+            for sourceURL in urls.prefix(remainingItemSlots) {
+                do {
+                    let (descriptor, _) = try await roomTrayIO.importFile(sourceURL, roomID: roomID)
+                    guard self.phase == .live, self.meshSession === meshSession,
+                          self.activeRoomConfiguration?.id == roomID else {
+                        try? await roomTrayIO.remove(descriptor.itemID, roomID: roomID)
+                        return
+                    }
+                    // Peers can add items while the local import is hashing.
+                    let currentFreeBytes = RoomTrayDocument.maximumActiveBytes
+                        - roomTrayItems.reduce(0) { $0 + $1.attachment.byteCount }
+                    guard roomTrayItems.count < RoomTrayDocument.maximumActiveItems,
+                          descriptor.byteCount <= min(remainingBytes, currentFreeBytes) else {
+                        try? await roomTrayIO.remove(descriptor.itemID, roomID: roomID)
+                        skipped += 1
+                        continue
+                    }
+                    let attachment = RoomChatAttachment(
+                        id: descriptor.itemID.uuidString,
+                        fileName: descriptor.fileName,
+                        contentType: UTType(filenameExtension: sourceURL.pathExtension)?.preferredMIMEType,
+                        byteCount: descriptor.byteCount
+                    )
+                    let metadata = RoomTrayItemMetadata(attachment: attachment, digest: descriptor.sha256)
+                    guard metadata.isValid, let operation = RoomTrayOperation.add(metadata).encoded else {
+                        try? await roomTrayIO.remove(descriptor.itemID, roomID: roomID)
+                        skipped += 1
+                        continue
+                    }
+                    meshSession.sendChat(operation)
+                    shared += 1
+                    remainingBytes -= descriptor.byteCount
+                } catch {
+                    guard self.meshSession === meshSession else { return }
+                    roomTrayNotice = "Could not share \(sourceURL.lastPathComponent). Room files must be regular files up to 8 MB. \(error.localizedDescription)"
                 }
-                let contentType = UTType(filenameExtension: sourceURL.pathExtension)?.preferredMIMEType
-                let attachment = RoomChatAttachment(
-                    id: imported.descriptor.itemID.uuidString,
-                    fileName: imported.descriptor.fileName,
-                    contentType: contentType,
-                    byteCount: imported.descriptor.byteCount
-                )
-                let metadata = RoomTrayItemMetadata(attachment: attachment, digest: imported.descriptor.sha256)
-                guard metadata.isValid, let operation = RoomTrayOperation.add(metadata).encoded,
-                      let data = try? Data(contentsOf: imported.url, options: [.mappedIfSafe]),
-                      let payload = RoomChatAttachmentPayload(attachment: attachment, data: data)
-                else {
-                    try? roomTrayStore.remove(itemID: imported.descriptor.itemID, roomID: roomID)
-                    continue
-                }
-                meshSession.sendChat(operation)
-                meshSession.sendChatAttachment(payload)
-                shared += 1
-                remainingBytes -= imported.descriptor.byteCount
-            } catch {
-                statusText = "Could not add \(sourceURL.lastPathComponent) to the tray: \(error.localizedDescription)"
             }
-        }
-        if shared > 0 {
-            let summary = shared == 1 ? "Shared 1 file in the channel tray" : "Shared \(shared) files in the channel tray"
-            statusText = skipped == 0 ? summary : summary + "; skipped \(skipped) that would exceed the channel limit"
+            if shared > 0 || skipped > 0 {
+                let summary = shared == 1 ? "Shared 1 file in the room shelf" : "Shared \(shared) files in the room shelf"
+                let result = skipped == 0 ? summary : summary + "; skipped \(skipped) that would exceed the room limit"
+                roomTrayNotice = roomTrayNotice.map { $0 + " · " + result } ?? result
+            }
         }
     }
 
@@ -3350,17 +3405,20 @@ final class ALOViewModel: ObservableObject {
         guard phase == .live, let meshSession,
               let item = roomTrayDocument.item(id: itemID),
               roomTrayFileURL(itemID: itemID) == nil else { return }
-        roomTrayDownloadingIDs.insert(itemID)
-        meshSession.requestRoomTrayFile(RoomTrayFileRequest(itemID: itemID, digest: item.digest))
+        roomTrayDownloads.begin(itemID) {
+            meshSession.requestRoomTrayFile(RoomTrayFileRequest(itemID: itemID, digest: item.digest))
+        }
     }
 
     func exportRoomTrayItem(_ itemID: String, to destinationURL: URL) {
         guard let roomID = activeRoomConfiguration?.id, let uuid = UUID(uuidString: itemID) else { return }
-        do {
-            _ = try roomTrayStore.export(itemID: uuid, roomID: roomID, to: destinationURL)
-            statusText = "Saved \(destinationURL.lastPathComponent)"
-        } catch {
-            statusText = "Could not save \(destinationURL.lastPathComponent): \(error.localizedDescription)"
+        Task {
+            do {
+                try await roomTrayIO.export(uuid, roomID: roomID, to: destinationURL)
+                roomTrayNotice = "Saved \(destinationURL.lastPathComponent)"
+            } catch {
+                roomTrayNotice = "Could not save \(destinationURL.lastPathComponent): \(error.localizedDescription)"
+            }
         }
     }
 
@@ -3396,7 +3454,9 @@ final class ALOViewModel: ObservableObject {
             chatAttachmentURLs[chatAttachmentKey(senderID: senderID, attachmentID: payload.attachment.id)] = stored
             return
         }
-        guard let trayItem = roomTrayDocument.item(id: payload.attachment.id),
+        guard let meshSession, let downloadAttempt = roomTrayDownloads.attempt(for: payload.attachment.id),
+              roomTrayReceivingIDs[payload.attachment.id] == nil,
+              let trayItem = roomTrayDocument.item(id: payload.attachment.id),
               trayItem.attachment == payload.attachment,
               let uuid = UUID(uuidString: trayItem.id),
               let descriptor = RoomTrayFileDescriptor(
@@ -3404,22 +3464,42 @@ final class ALOViewModel: ObservableObject {
                 fileName: trayItem.attachment.fileName,
                 byteCount: trayItem.attachment.byteCount,
                 sha256: trayItem.digest
-              ),
-              (try? roomTrayStore.storeIncoming(payload.data, descriptor: descriptor, roomID: roomID)) != nil
+              )
         else { return }
-        roomTrayDownloadTasks.removeValue(forKey: trayItem.id)?.cancel()
-        roomTrayDownloadingIDs.remove(trayItem.id)
+        let receiveAttempt = UUID()
+        roomTrayReceivingIDs[trayItem.id] = receiveAttempt
+        Task { @MainActor in
+            defer {
+                if roomTrayReceivingIDs[trayItem.id] == receiveAttempt { roomTrayReceivingIDs.removeValue(forKey: trayItem.id) }
+            }
+            do {
+                try await roomTrayIO.receive(payload.data, descriptor: descriptor, roomID: roomID)
+                guard self.meshSession === meshSession else { return }
+                guard roomTrayDocument.contains(itemID: trayItem.id, digest: trayItem.digest) else {
+                    try? await roomTrayIO.remove(uuid, roomID: roomID)
+                    return
+                }
+                roomTrayDownloads.finish(trayItem.id, attempt: downloadAttempt)
+            } catch {
+                guard self.meshSession === meshSession else { return }
+                roomTrayDownloads.finish(trayItem.id, attempt: downloadAttempt,
+                    error: "The file could not be verified or saved. Retry to request a fresh copy.")
+            }
+        }
     }
 
     private func receiveRoomTrayFileRequest(_ request: RoomTrayFileRequest, senderID: String) {
         guard let meshSession, request.isValid,
               roomTrayDocument.contains(itemID: request.itemID, digest: request.digest),
               let item = roomTrayDocument.item(id: request.itemID),
-              let url = roomTrayFileURL(itemID: request.itemID),
-              let data = try? Data(contentsOf: url, options: [.mappedIfSafe]),
-              let payload = RoomChatAttachmentPayload(attachment: item.attachment, data: data)
+              let roomID = activeRoomConfiguration?.id
         else { return }
-        meshSession.sendChatAttachment(payload, targetID: senderID)
+        Task {
+            guard let payload = try? await roomTrayIO.payload(for: item, roomID: roomID),
+                  self.meshSession === meshSession,
+                  roomTrayDocument.contains(itemID: item.id, digest: item.digest) else { return }
+            meshSession.sendChatAttachment(payload, targetID: senderID)
+        }
     }
 
     private func applyRoomTrayEvent(senderID: String, sender: String, text: String, version: MeshVersion) {
@@ -3427,24 +3507,16 @@ final class ALOViewModel: ObservableObject {
         guard roomTrayDocument.receive(senderID: senderID, sender: sender, text: text, version: version) else { return }
         roomTrayItems = roomTrayDocument.items
         let currentIDs = Set(roomTrayItems.map(\.id))
-        roomTrayDownloadingIDs.formIntersection(currentIDs)
+        roomTrayDownloads.retain(currentIDs)
         if let roomID = activeRoomConfiguration?.id {
             for removedID in previousIDs.subtracting(currentIDs) {
-                roomTrayDownloadTasks.removeValue(forKey: removedID)?.cancel()
                 if let uuid = UUID(uuidString: removedID) {
-                    try? roomTrayStore.remove(itemID: uuid, roomID: roomID)
+                    Task { try? await roomTrayIO.remove(uuid, roomID: roomID) }
                 }
             }
         }
-        for item in roomTrayItems where roomTrayFileURL(itemID: item.id) == nil
-            && roomTrayDownloadTasks[item.id] == nil {
-            roomTrayDownloadTasks[item.id] = Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .milliseconds(700))
-                guard !Task.isCancelled else { return }
-                self?.requestRoomTrayItem(item.id)
-                self?.roomTrayDownloadTasks.removeValue(forKey: item.id)
-            }
-        }
+        // Sharing publishes metadata. Each recipient explicitly downloads a
+        // copy, avoiding an unsolicited fan-out of file bytes into room audio.
     }
 
     static func shouldAcceptChatAttachment(_ payload: RoomChatAttachmentPayload, senderID: String,
@@ -3968,6 +4040,7 @@ final class ALOViewModel: ObservableObject {
                 guard isNewMessage, let receivedMessage = self.messages.first(where: { $0.senderID == senderID && $0.sentNanos == sentNanos }) else { return }
                 let chatIsVisible = (self.floatingSection == .chat && !self.floatingBarHidden && !self.videoFullscreen)
                     || (self.menuBarSection == .chat && self.menuBarPopoverVisible)
+                    || self.notchChatIsPresented
                 let chatIsAtLatest = chatIsVisible && !self.chatViewportsAtLatest.isEmpty
                 if senderID != self.currentParticipantID {
                     let shouldPreview = self.chatNotificationMode.shouldPreview(
@@ -4098,9 +4171,9 @@ final class ALOViewModel: ObservableObject {
         messages = []
         chatAttachmentURLs.removeAll()
         chatDocument = RoomChatDocument()
-        roomTrayDownloadTasks.values.forEach { $0.cancel() }
-        roomTrayDownloadTasks.removeAll()
-        roomTrayDownloadingIDs.removeAll()
+        roomTrayDownloads.reset()
+        roomTrayReceivingIDs.removeAll()
+        roomTrayNotice = nil
         roomTrayItems.removeAll()
         roomTrayDocument = RoomTrayDocument()
         chatViewportsAtLatest.removeAll()

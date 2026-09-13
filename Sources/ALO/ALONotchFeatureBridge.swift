@@ -13,10 +13,16 @@ final class ALONotchFeatureBridge: ObservableObject {
     private weak var model: ALOViewModel?
     private var observations = Set<AnyCancellable>()
     private var roomObservations = Set<AnyCancellable>()
+    private var transferObservation: AnyCancellable?
+    private weak var observedSharing: DirectFileSharingController?
+    private let roomNavigation = NotchRoomNavigation()
 
     func configure(model: ALOViewModel) {
         guard self.model !== model else { return }
         self.model?.lyrics.setExternalDemand(false)
+        runtime?.dismissRoomInteraction()
+        self.model?.roomFileSharing?.presentInNotch = nil
+        roomNavigation.composer.reset()
         self.model = model
         roomObservations.removeAll()
         let changes: [AnyPublisher<Void, Never>] = [
@@ -25,8 +31,9 @@ final class ALONotchFeatureBridge: ObservableObject {
             model.$audioIsRendering.map { _ in () }.eraseToAnyPublisher(),
             model.$statusText.map { _ in () }.eraseToAnyPublisher(),
             model.$roomName.map { _ in () }.eraseToAnyPublisher(),
+            model.$participants.map { _ in () }.eraseToAnyPublisher(),
             model.$roomTrayItems.map { _ in () }.eraseToAnyPublisher(),
-            model.$roomTrayDownloadingIDs.map { _ in () }.eraseToAnyPublisher()
+            model.roomTrayDownloads.$states.map { _ in () }.eraseToAnyPublisher()
         ]
         Publishers.MergeMany(changes)
             .debounce(for: .milliseconds(30), scheduler: RunLoop.main)
@@ -45,6 +52,15 @@ final class ALONotchFeatureBridge: ObservableObject {
                 self?.model?.lyrics.setExternalDemand(demand)
             }
             runtime.onSettingsRequested = { [weak self] in self?.showSettings() }
+            runtime.onRoomInteractionRequested = { [weak self] in self?.openRoomInteraction(page: .home) }
+            runtime.onRoomFilesDragEntered = { [weak self] in
+                self?.roomNavigation.choosingRecipient = true
+                self?.openRoomInteraction(page: .files)
+            }
+            runtime.onRoomFilesStaged = { [weak self] urls in
+                self?.roomNavigation.stage(urls)
+                self?.openRoomInteraction(page: .files)
+            }
             runtime.onRoomTrayAddRequested = { [weak self] urls in self?.model?.addRoomTrayFiles(urls) }
             runtime.onRoomTrayRemoveRequested = { [weak self] ids in self?.model?.removeRoomTrayItems(ids) }
             runtime.onRoomTrayDownloadRequested = { [weak self] id in self?.model?.requestRoomTrayItem(id) }
@@ -53,13 +69,25 @@ final class ALONotchFeatureBridge: ObservableObject {
             self.runtime = runtime
         }
         guard runtime?.isEnabled != enabled else { return }
-        if !enabled { model?.lyrics.setExternalDemand(false) }
+        if !enabled {
+            model?.lyrics.setExternalDemand(false)
+            model?.roomFileSharing?.presentInNotch = nil
+            model?.notchChatIsPresented = false
+        }
         runtime?.setEnabled(enabled)
         updateRoomPlayback()
     }
 
     private func updateRoomPlayback() {
-        guard let runtime, runtime.isEnabled else { return }
+        guard let runtime else { return }
+        // Leaving must release owned screenshot copies even with the notch
+        // disabled, but never while the session is still stopping transfers.
+        if model?.phase != .live, model?.roomFileSharing == nil {
+            runtime.clearRoomToolCopies()
+            roomNavigation.pendingFiles = []
+            roomNavigation.composer.reset()
+        }
+        guard runtime.isEnabled else { return }
         let snapshot = model.flatMap { model in
             Self.roomSnapshot(media: model.nowPlaying, isLive: model.phase == .live,
                 audioIsRendering: model.audioIsRendering, roomName: model.roomName,
@@ -77,6 +105,39 @@ final class ALONotchFeatureBridge: ObservableObject {
         }
         updateRoomLyrics()
         updateRoomTray()
+        runtime.updateRoomPresence(title: model?.phase == .live ? model?.roomTitle : nil,
+                                   people: model?.participants.count ?? 0)
+        if let model, model.phase == .live {
+            if observedSharing !== model.roomFileSharing {
+                observedSharing?.presentInNotch = nil
+                observedSharing = model.roomFileSharing
+                transferObservation = model.roomFileSharing?.$progress
+                    .receive(on: RunLoop.main)
+                    .sink { [weak self] _ in self?.refreshFilePreview() }
+            }
+            model.roomFileSharing?.presentInNotch = { [weak self] in
+                guard let self, self.runtime?.canPresentRoomInteraction == true else { return false }
+                // Do not replace a conversation while the recipient is typing.
+                if self.runtime?.isRoomInteractionExpanded == true { return true }
+                self.roomNavigation.fileSection = 0
+                self.roomNavigation.choosingRecipient = false
+                return self.openRoomInteraction(page: .files, expanded: false)
+            }
+        } else {
+            observedSharing?.presentInNotch = nil
+            observedSharing = nil
+            transferObservation = nil
+            roomNavigation.pendingFiles = []
+            roomNavigation.composer.reset()
+            runtime.dismissRoomInteraction()
+        }
+    }
+
+    private func refreshFilePreview() {
+        guard roomNavigation.page == .files, let model else { return }
+        let transfer = model.roomFileSharing?.progress.last
+        runtime?.updateRoomInteractionPreview(title: "Files · \(model.roomTitle)",
+            subtitle: transfer.map { "\($0.fileName) · \($0.status)" } ?? "Share with people in this room")
     }
 
     private func updateRoomTray() {
@@ -156,12 +217,24 @@ final class ALONotchFeatureBridge: ObservableObject {
     }
 
     func showRoomMention(sender: String, message: String, roomTitle: String) {
-        guard let runtime, let model else { return }
+        guard let runtime, model != nil else { return }
         runtime.showRoomMention(
             RoomMentionSnapshot(sender: sender, message: message, roomTitle: roomTitle)
-        ) { [weak model] in
-            model?.showChatInFloatingBar()
+        ) { [weak self] in
+            self?.openRoomInteraction(page: .conversation)
         }
+    }
+
+    @discardableResult
+    func openRoomInteraction(page: NotchRoomNavigation.Page, expanded: Bool = true) -> Bool {
+        guard let model, model.phase == .live, let runtime else { return false }
+        roomNavigation.page = page
+        let transfer = model.roomFileSharing?.progress.last
+        return runtime.presentRoomInteraction(title: page == .files ? "Files · \(model.roomTitle)" : model.roomTitle,
+            subtitle: page == .files ? (transfer.map { "\($0.fileName) · \($0.status)" } ?? "Share with people in this room") : page.rawValue,
+            content: AnyView(ALONotchRoomWorkspace(model: model, navigation: roomNavigation, runtime: runtime,
+                close: { [weak runtime] in runtime?.dismissRoomInteraction() })), expanded: expanded,
+            layout: roomNavigation.layout)
     }
 }
 

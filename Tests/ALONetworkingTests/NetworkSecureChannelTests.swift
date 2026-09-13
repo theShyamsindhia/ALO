@@ -4,11 +4,21 @@ import Network
 import Testing
 import ALOIdentity
 import ALORooms
+import CryptoKit
 @testable import ALONetworking
 
 /// Actual loopback TLS and generation-4 claim exchange. This does not establish physical audio accuracy.
 @Suite("Network-authorized live TLS channels", .serialized)
 struct NetworkSecureChannelTests {
+    @Test func canvasAdapterTransfersMaximumImageBeforeFollowingMessageOverRealAuthorizedTLS() async throws {
+        let fixture = try NetworkTLSFixture()
+        let pair = try fixture.pair(role: .roomCanvas)
+        defer { pair.cancel() }
+        guard case .delivered = try await pair.run() else { Issue.record("Canvas TLS admission failed"); return }
+        let bytes = Data(repeating: 17, count: RoomCanvasImage.maximumBytes)
+        #expect(try await pair.canvasImageRoundTrip(bytes) == bytes)
+    }
+
     @Test func blockedCompletionQueueDoesNotExhaustVerificationWorkersForOtherTLSChannels() async throws {
         let fixture = try NetworkTLSFixture()
         let pair = try fixture.pair()
@@ -334,7 +344,7 @@ private final class NetworkTLSLoopbackPair: @unchecked Sendable {
             localDevice: DeviceIdentityBinding(user: serverRoot, deviceName: "TLS server", generation: 1,
                                                installationPublicKeyHash: serverIdentity.publicIdentity.publicKeyHash))
         // Current channels authorize private/public visibility through signed network policy.
-        let offer = try ProtocolOffer.current(capabilities: .desktop)
+        let offer = try ProtocolOffer.current(capabilities: role == .roomCanvas ? [.desktop, .roomCanvas] : .desktop)
         clientConfiguration = try SecurePeerConfiguration(roomID: channelID, incarnationID: UUID(), admission: .publicRoom,
             offer: offer, direction: .initiator(role), networkAuthorization: clientAuthorization)
         serverConfiguration = try SecurePeerConfiguration(roomID: channelID, incarnationID: UUID(), admission: .publicRoom,
@@ -404,6 +414,72 @@ private final class NetworkTLSLoopbackPair: @unchecked Sendable {
 
     func snapshot() async -> Snapshot {
         await withCheckedContinuation { continuation in queue.async { continuation.resume(returning: self.state) } }
+    }
+
+    func canvasImageRoundTrip(_ bytes: Data) async throws -> Data {
+        try await withCheckedThrowingContinuation { continuation in
+            queue.async {
+                guard let client = self.client, let server = self.server else {
+                    continuation.resume(throwing: SecurePeerChannelError.notAuthenticated); return
+                }
+                let canvasID = UUID(), roomID = self.clientConfiguration.roomID
+                let local = self.clientIdentity.publicIdentity.nodeID, remote = self.serverIdentity.publicIdentity.nodeID
+                let descriptor = RoomCanvasImage(name: "test.png", byteCount: bytes.count,
+                    sha256: Data(SHA256.hash(data: bytes)), pixelWidth: 800, pixelHeight: 600)
+                var receiver: RoomCanvasChannel?, sender: RoomCanvasChannel?
+                var assembler = RoomCanvasPayloadAssembler(image: descriptor)
+                var restored: Data?
+                var finished = false
+                var timeout: DispatchWorkItem?
+                // All test state is confined to this queue; adapter callbacks
+                // intentionally arrive from their separate canvas executors.
+                let finish: (Result<Data, Error>) -> Void = { result in
+                    guard !finished else { return }
+                    finished = true; timeout?.cancel(); timeout = nil
+                    receiver?.cancel(); sender?.cancel(); receiver = nil; sender = nil
+                    continuation.resume(with: result)
+                }
+                RoomCanvasChannel.attach(client, roomID: roomID, canvasID: canvasID, localID: local, peerID: remote) { result in
+                    do {
+                        receiver = try result.get()
+                        receiver?.onClose = { error in self.queue.async { finish(.failure(error)) } }
+                        receiver?.onMessage = { message in
+                            self.queue.async {
+                                guard !finished else { return }
+                                do {
+                                    switch message {
+                                    case .imageChunk(let chunk):
+                                        restored = try assembler.append(chunk, nowNanos: MonotonicClock.nowNanos())
+                                    case .ended:
+                                        guard let restored else { throw SecureTransportError.invalidState }
+                                        finish(.success(restored))
+                                    default: throw SecureTransportError.invalidState
+                                    }
+                                } catch { finish(.failure(error)) }
+                            }
+                        }
+                    } catch { finish(.failure(error)) }
+                }
+                guard !finished else { return }
+                RoomCanvasChannel.attach(server, roomID: roomID, canvasID: canvasID, localID: remote, peerID: local) { result in
+                    do {
+                        sender = try result.get()
+                        // Explicit finish waits for the viewer's close. A
+                        // missing end/image is still caught by the deadline.
+                        sender?.onClose = { _ in }
+                    } catch { finish(.failure(error)) }
+                }
+                guard !finished else { return }
+                let deadline = DispatchWorkItem { finish(.failure(SecurePeerChannelError.timedOut)) }
+                timeout = deadline
+                self.queue.asyncAfter(deadline: .now() + 12, execute: deadline)
+                sender?.sendImage(bytes, descriptor: descriptor)
+                sender?.finish()
+                // The transport must own its draining lifetime even if the
+                // host has already released this finished canvas session.
+                sender = nil
+            }
+        }
     }
 
     func sharedExecutorIsResponsive() -> Bool {

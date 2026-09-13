@@ -13,31 +13,41 @@ enum NetworkShellAssertions {
         } else {
             let blur = try #require(effect)
             #expect(blur.blendingMode == .behindWindow)
-            #expect(blur.material == .sidebar)
+            #expect(blur.material == .underWindowBackground)
             #expect(blur.state == .followsWindowActiveState)
             #expect(blur.convert(blur.bounds, to: hosting) == hosting.bounds)
         }
         #expect(!window.isOpaque)
         #expect(window.backgroundColor == .clear)
-        // Test rendered header actions, not SwiftUI's lazy accessibility tree
-        // (which can be empty in a test process without an accessibility client).
-        // A vertically centered empty-state stack puts these below this band.
-        let bitmap = try #require(hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds))
-        hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
-        let scale = CGFloat(bitmap.pixelsWide) / hosting.bounds.width
-        let left = Int((ALONativeNetworkLayout.sidebarWidth(for: hosting.bounds.width) + 16) * scale)
-        let right = bitmap.pixelsWide - Int(16 * scale)
-        var bluePixels = 0
-        for y in Int(8 * scale)..<Int(60 * scale) {
-            for x in left..<right {
-                if let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
-                   color.blueComponent > 0.6, color.redComponent < 0.4,
-                   color.blueComponent > color.greenComponent * 1.25 {
-                    bluePixels += 1
-                }
-            }
+        let split = try #require(views(in: hosting).compactMap { $0 as? NSSplitView }.first)
+        #expect(split.isVertical)
+        #expect(split.arrangedSubviews.count == 2)
+        #expect(window.toolbar == nil)
+        #expect(split.dividerColor == .clear)
+        #expect(split.dividerThickness == 0)
+        let nativeController = try #require(split.delegate as? NSSplitViewController)
+        if nativeController.splitViewItems.first?.isCollapsed == false {
+            #expect(nativeController.splitView(split, additionalEffectiveRectOfDividerAt: 0).width >= 6)
         }
-        #expect(bluePixels > 4)
+        if #available(macOS 26.0, *) {
+            #expect(!views(in: hosting).contains { $0.identifier?.rawValue == "ALO.Network.SidebarBlur" })
+            let glass = try #require(views(in: hosting).first {
+                $0.identifier?.rawValue == "ALO.Network.SidebarGlass"
+            } as? NSGlassEffectView)
+            #expect(glass.contentView != nil)
+            #expect(glass.cornerRadius == ALONativeNetworkLayout.panelRadius)
+            if nativeController.splitViewItems.first?.isCollapsed == false {
+                let bounds = glass.convert(glass.bounds, to: hosting)
+                #expect(abs(bounds.minY - ALONativeNetworkLayout.panelInset) < 0.5)
+                #expect(abs(bounds.maxY - (hosting.bounds.height - ALONativeNetworkLayout.panelInset)) < 0.5)
+            }
+        } else if !NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency {
+            let sidebar = try #require(views(in: hosting).compactMap { $0 as? NSVisualEffectView }
+                .first { $0.material == .sidebar })
+            #expect(sidebar.material == .sidebar)
+            #expect(sidebar.state == .followsWindowActiveState)
+            #expect(sidebar.alphaValue == 1)
+        }
     }
 
     static func views(in view: NSView) -> [NSView] {

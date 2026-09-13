@@ -6,6 +6,10 @@ struct NotchContextMenu: View {
     
     var body: some View {
         let locale = settingsViewModel.application.appLanguage.locale
+        if let runtime = EmbeddedNotchRuntime.activeInstance, runtime.roomSharingAvailable {
+            Button("Conversation and files") { runtime.onRoomInteractionRequested?() }
+            Divider()
+        }
         
         if AppDelegate.embeddedInstance == nil {
         Button {

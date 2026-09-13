@@ -117,6 +117,7 @@ final class NotchViewModel: ObservableObject {
 
     var shouldCollapseActiveContentOnHoverLeaves: Bool {
         settings.notchCollapseInteraction == .hoverLeaves &&
+        displayedContent?.protectsExpandedInteraction != true &&
         isDisplayingExpandedLiveActivity
     }
 

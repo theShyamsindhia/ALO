@@ -205,6 +205,7 @@ public final class MeshControlPlane: @unchecked Sendable {
         var chatAttachmentQueuedBytes = 0
         var arenaReceiveWindow: UInt64 = 0
         var arenaReceiveCount = 0
+        var canvas: RoomCanvasAdvertisement?
         var chatAttachmentReceiveAdmission = ChatAttachmentReceiveAdmission()
         var roomTrayRequestWindow: UInt64 = 0
         var roomTrayRequestCount = 0
@@ -324,6 +325,7 @@ public final class MeshControlPlane: @unchecked Sendable {
     private var lastSeenNanos = [String: UInt64]()
     private var remoteParticipants = [String: RoomParticipant]()
     private var lastPublishedParticipants = [RoomParticipant]()
+    private var localCanvas: RoomCanvasAdvertisement?
     private var playbackReports: [String: (timing: PeerPlaybackTiming, received: UInt64, broadcaster: String, epoch: UInt64)] = [:]
     private var lastPlaybackReportSend: UInt64 = 0
     private var reconnectAttempts = [String: Int]()
@@ -554,7 +556,7 @@ public final class MeshControlPlane: @unchecked Sendable {
         completion: @escaping (Result<(SecurePeerChannel, AuthenticatedPeer), Error>) -> Void) {
         queue.async { [weak self] in
             guard let self, !self.isStopped, self.room.transportPolicy == .secureV2,
-                  role == .mediaControl || role == .video || role == .voiceControl || role == .fileTransfer,
+                  role == .mediaControl || role == .video || role == .voiceControl || role == .fileTransfer || role == .roomCanvas,
                   let identity = self.installationIdentity, let pins = self.peerPins,
                   let roomID = UUID(uuidString: self.room.id),
                   let peer = self.peers[peerID.uuidString], peer.authenticated,
@@ -562,6 +564,12 @@ public final class MeshControlPlane: @unchecked Sendable {
                   let host = self.remoteHost(of: peer), let rawPort = peer.listeningPort,
                   let port = NWEndpoint.Port(rawValue: rawPort) else {
                 completion(.failure(SecurePeerChannelError.notAuthenticated)); return
+            }
+            if role == .roomCanvas {
+                guard self.localPermits(.roomCanvas),
+                      self.eventPolicy?.permits(author: peerID.uuidString, capability: .roomCanvas) == true else {
+                    completion(.failure(SecureTransportError.unsupportedProtocol)); return
+                }
             }
             guard self.pendingMediaChannels.count < 16 else {
                 completion(.failure(SecureTransportError.capacity)); return
@@ -595,6 +603,11 @@ public final class MeshControlPlane: @unchecked Sendable {
                     channel.onState = nil; channel.onAuthenticated = nil
                     guard !self.isStopped, authenticated.nodeID == peerID, authenticated.channelRole == role else {
                         channel.cancel(); completion(.failure(SecurePeerChannelError.notAuthenticated)); return
+                    }
+                    if role == .roomCanvas,
+                       !authenticated.negotiated.initiatorCapabilities.contains(.roomCanvas)
+                        || !authenticated.negotiated.responderCapabilities.contains(.roomCanvas) {
+                        channel.cancel(); completion(.failure(SecureTransportError.unsupportedProtocol)); return
                     }
                     completion(.success((channel, authenticated)))
                 }
@@ -781,6 +794,7 @@ public final class MeshControlPlane: @unchecked Sendable {
             secureAdmissions.removeAll()
             peerDirectory.removeAll()
             remoteParticipants.removeAll()
+            localCanvas = nil
             playbackReports.removeAll()
             lastPublishedParticipants.removeAll()
             reconnectWorkItems.removeAll()
@@ -1100,6 +1114,21 @@ public final class MeshControlPlane: @unchecked Sendable {
         }
     }
 
+    /// Availability only. Image bytes and drawing use the separate canvas role.
+    /// A nil advertisement withdraws the canvas without writing a room event.
+    public func publishCanvas(_ advertisement: RoomCanvasAdvertisement?) {
+        queue.async { [self] in
+            guard !isStopped, room.transportPolicy == .secureV2, localPermits(.roomCanvas),
+                  incomingMediaChannelHandler != nil, advertisement?.isValid ?? true else { return }
+            guard localCanvas != advertisement else { return }
+            localCanvas = advertisement
+            for (id, link) in peers where eventPolicy?.permits(author: id, capability: .roomCanvas) == true {
+                send(MeshEnvelope(type: "room_canvas", nodeID: nodeID, roomCanvas: advertisement), to: link)
+            }
+            publishParticipants()
+        }
+    }
+
     public func publishPlayback(_ media: NowPlayingMedia) { publish(kind: .playback, nowPlaying: media) }
     public func publishVideo(_ enabled: Bool, broadcasterID: String, broadcasterEpoch: UInt64) {
         publish(
@@ -1276,7 +1305,8 @@ public final class MeshControlPlane: @unchecked Sendable {
         guard let installationIdentity, let peerPins, let roomID = UUID(uuidString: room.id) else { cancel(link); return }
         do {
             let admission: SecureRoomAdmission = room.isPrivate ? .privateRoom(secret: room.secureJoinSecret ?? Data()) : .publicRoom
-            let roles: Set<ReliableChannelRole> = incomingMediaChannelHandler == nil ? [.roomControl] : [.roomControl, .mediaControl, .video, .voiceControl, .fileTransfer]
+            var roles: Set<ReliableChannelRole> = incomingMediaChannelHandler == nil ? [.roomControl] : [.roomControl, .mediaControl, .video, .voiceControl, .fileTransfer]
+            if incomingMediaChannelHandler != nil, secureCapabilities.contains(.roomCanvas) { roles.insert(.roomCanvas) }
             let configuration = try SecurePeerConfiguration(roomID: roomID, incarnationID: incarnationID, admission: admission,
                 offer: ProtocolOffer.current(capabilities: secureCapabilities),
                 direction: link.initiated ? .initiator(.roomControl) : .responder(allowedChannelRoles: roles),
@@ -1298,6 +1328,9 @@ public final class MeshControlPlane: @unchecked Sendable {
                 link.nodeID = peerID
                 link.lastPayloadNanos = MonotonicClock.nowNanos()
                 if peer.channelRole != .roomControl {
+                    if peer.channelRole == .roomCanvas,
+                       !peer.negotiated.initiatorCapabilities.contains(.roomCanvas)
+                        || !peer.negotiated.responderCapabilities.contains(.roomCanvas) { self.cancel(link); return }
                     guard let handler = self.incomingMediaChannelHandler else { self.cancel(link); return }
                     self.links.removeValue(forKey: ObjectIdentifier(link.connection))
                     channel.onState = nil; channel.onPayload = nil
@@ -1674,6 +1707,13 @@ public final class MeshControlPlane: @unchecked Sendable {
 
         guard link.authenticated, let remoteID = link.nodeID, peers[remoteID] === link else { return }
         switch envelope.type {
+        case "room_canvas":
+            guard room.transportPolicy == .secureV2, secureCapabilities.contains(.roomCanvas),
+                  permitsTransient(envelope, from: link, capability: .roomCanvas),
+                  envelope.roomCanvas?.isValid ?? true else { return }
+            // Keep only the latest value. The 400-ms presence tick coalesces
+            // updates and clears it as soon as this canonical link disappears.
+            link.canvas = envelope.roomCanvas
         case "playback_timing":
             guard envelope.nodeID == remoteID, let timing = envelope.playbackTiming, timing.isValid,
                   let current = replica.broadcaster, envelope.broadcasterID == current.nodeID,
@@ -2346,6 +2386,12 @@ public final class MeshControlPlane: @unchecked Sendable {
             var participant = identity
             // Identity caches are never a source of timing truth.
             participant.playbackTiming = freshPlaybackTiming(for: identity.id, now: now)
+            if identity.id == nodeID {
+                participant.canvas = localPermits(.roomCanvas) ? localCanvas : nil
+            } else {
+                participant.canvas = eventPolicy?.permits(author: identity.id, capability: .roomCanvas) == true
+                    ? peers[identity.id]?.canvas : nil
+            }
             participants.append(participant)
         }
         participants.sort { $0.name < $1.name }
@@ -2657,6 +2703,10 @@ public final class MeshControlPlane: @unchecked Sendable {
             }
         }
         if let roomIcon { send(MeshEnvelope(type: "room_icon", roomIcon: roomIcon), to: link) }
+        if room.transportPolicy == .secureV2, localPermits(.roomCanvas),
+           eventPolicy?.permits(author: remoteID, capability: .roomCanvas) == true {
+            send(MeshEnvelope(type: "room_canvas", nodeID: nodeID, roomCanvas: localCanvas), to: link)
+        }
         if roomStateSyncDisabled, link.roomStateSyncVersion == 1 {
             disableRoomStateSync(
                 for: link,

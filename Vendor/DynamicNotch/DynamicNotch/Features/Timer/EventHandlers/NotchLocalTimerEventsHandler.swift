@@ -67,7 +67,7 @@ final class NotchLocalTimerEventsHandler {
         timerSoundPlayer.play(
             sound: settingsViewModel.mediaAndFiles.timerSound,
             isSoundEnabled: settingsViewModel.mediaAndFiles.isTimerSoundEnabled,
-            loop: true
+            loop: localTimerViewModel.repeatsCompletionSound
         )
 
         notchViewModel.send(
@@ -89,4 +89,3 @@ final class NotchLocalTimerEventsHandler {
         )
     }
 }
-

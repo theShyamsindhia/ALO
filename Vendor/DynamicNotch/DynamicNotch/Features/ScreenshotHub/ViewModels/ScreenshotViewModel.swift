@@ -9,6 +9,9 @@ final class ScreenshotViewModel: ObservableObject {
     nonisolated deinit {}
 
     @Published var activeScreenshot: ScreenshotModel?
+    /// The tools entry keeps the latest preview after its transient activity
+    /// disappears. It is read-only: tool actions never delete the source capture.
+    @Published private(set) var latestScreenshot: ScreenshotModel?
     
     var onScreenshotReady: ((ScreenshotModel) -> Void)?
     var onScreenshotDismissed: (() -> Void)?
@@ -90,6 +93,7 @@ final class ScreenshotViewModel: ObservableObject {
         )
         
         self.activeScreenshot = model
+        self.latestScreenshot = model
         self.onScreenshotReady?(model)
         
         Task { @MainActor [weak self] in
@@ -103,6 +107,13 @@ final class ScreenshotViewModel: ObservableObject {
     
     func markAsDropped() {
         isDropped = true
+    }
+
+    @discardableResult
+    func copyPreviewImage(_ image: NSImage, to pasteboard: NSPasteboard = .general) -> Bool {
+        guard image.tiffRepresentation != nil, pasteboard.writeObjects([image]) else { return false }
+        monitorService.updateLastPasteboardChangeCount()
+        return true
     }
     
     @discardableResult
@@ -207,6 +218,7 @@ final class ScreenshotViewModel: ObservableObject {
     }
     
     func deleteScreenshot() {
+        if latestScreenshot?.id == activeScreenshot?.id { latestScreenshot = nil }
         isDeleted = true
         if let tempURL = activeScreenshot?.tempFileURL {
             try? fileManager.removeItem(at: tempURL)

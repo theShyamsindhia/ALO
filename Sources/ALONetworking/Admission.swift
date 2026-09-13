@@ -12,11 +12,13 @@ public struct PeerCapabilities: OptionSet, Codable, Equatable, Sendable {
     public static let broadcast = Self(rawValue: 1 << 4)
     public static let editQueue = Self(rawValue: 1 << 5)
     public static let playbackControl = Self(rawValue: 1 << 6)
+    // Opt in only when a client has installed its canvas connection handler.
+    public static let roomCanvas = Self(rawValue: 1 << 7)
     public static let mobile: Self = [.receiveAudio, .receiveVideo, .chat, .voice]
     public static let desktop: Self = [.mobile, .broadcast, .editQueue, .playbackControl]
 }
 
-public enum ReliableChannelRole: UInt8, Codable, CaseIterable, Sendable { case roomControl = 1, mediaControl = 2, video = 3, voiceControl = 4, fileTransfer = 5 }
+public enum ReliableChannelRole: UInt8, Codable, CaseIterable, Sendable { case roomControl = 1, mediaControl = 2, video = 3, voiceControl = 4, fileTransfer = 5, roomCanvas = 6 }
 public enum RoomAdmissionKind: UInt8, Codable, Sendable { case publicRoom = 1, privateRoom = 2 }
 
 public struct ProtocolOffer: Equatable, Sendable {

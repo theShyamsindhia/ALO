@@ -37,31 +37,34 @@ public extension EnvironmentValues {
 /// The window frame owns the outer contour; no second content mask or painted backing.
 public struct ALONetworkWindowBackground: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-    public init() {}
+    private let material: NSVisualEffectView.Material
+    public init(material: NSVisualEffectView.Material = .underWindowBackground) { self.material = material }
 
     public var body: some View {
         if reduceTransparency { Color(nsColor: .windowBackgroundColor) }
-        else { NetworkWindowVisualEffect() }
+        else { NetworkWindowVisualEffect(material: material) }
     }
 }
 
 private struct NetworkWindowVisualEffect: NSViewRepresentable {
+    let material: NSVisualEffectView.Material
     func makeNSView(context: Context) -> NSVisualEffectView {
         let view = NSVisualEffectView()
-        view.material = .underWindowBackground
+        view.material = material
         view.blendingMode = .behindWindow
-        view.state = .active
-        view.identifier = NSUserInterfaceItemIdentifier("ALO.Network.WindowBlur")
+        view.state = .followsWindowActiveState
+        view.identifier = NSUserInterfaceItemIdentifier(material == .sidebar ? "ALO.Network.SidebarBlur" : "ALO.Network.WindowBlur")
         // Keep the native backdrop intact: fading its alpha exposes sharp content
         // behind the window instead of progressively blurring that content.
         return view
     }
-    func updateNSView(_ view: NSVisualEffectView, context: Context) {}
+    func updateNSView(_ view: NSVisualEffectView, context: Context) { view.material = material }
 }
 
 /// The same window-owned columns are used by the account adapter and public
 /// render fixtures, so empty detail content cannot recenter an intrinsic HStack.
 public struct ALONativeNetworkColumns<Sidebar: View, Detail: View>: View {
+    @State private var sidebarCollapsed = false
     private let sidebar: Sidebar
     private let detail: Detail
 
@@ -72,20 +75,188 @@ public struct ALONativeNetworkColumns<Sidebar: View, Detail: View>: View {
 
     public var body: some View {
         GeometryReader { geometry in
-            HStack(spacing: 0) {
-                sidebar.frame(width: ALONativeNetworkLayout.sidebarWidth(for: geometry.size.width))
-                detail.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            NetworkSplitColumns(sidebarCollapsed: $sidebarCollapsed,
+                sidebar: AnyView(sidebar
+                    .foregroundStyle(Color(nsColor: .labelColor))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background {
+                        // A legacy material here covers the split view's own
+                        // Liquid Glass on macOS 26 and later.
+                        if #unavailable(macOS 26.0) {
+                            ALONetworkWindowBackground(material: .sidebar)
+                        }
+                    }),
+                detail: AnyView(VStack(spacing: 0) {
+                    if sidebarCollapsed {
+                        HStack {
+                            NetworkSidebarToggle(collapsed: true)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.leading, 112).frame(height: 48)
+                    }
+                    detail.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                }
                     .background(Color(nsColor: .textBackgroundColor),
                                 in: RoundedRectangle(cornerRadius: ALONativeNetworkLayout.panelRadius, style: .continuous))
                     .clipShape(RoundedRectangle(cornerRadius: ALONativeNetworkLayout.panelRadius, style: .continuous))
                     .padding([.top, .trailing, .bottom], ALONativeNetworkLayout.panelInset)
-            }
+                    .padding(.leading, sidebarCollapsed ? ALONativeNetworkLayout.panelInset : 0)))
             .frame(width: geometry.size.width, height: geometry.size.height)
             .environment(\.aloCompactNetworkLayout, geometry.size.width < 900 || geometry.size.height < 600)
         }
         .background(ALONetworkWindowBackground())
         .ignoresSafeArea()
-        .tint(.blue)
+    }
+}
+
+private struct NetworkSidebarToggle: View {
+    var collapsed = false
+    var body: some View {
+        Button {
+            toggleALONetworkSidebar(in: NSApp.keyWindow)
+        } label: {
+            Image(systemName: "sidebar.left").font(.system(size: 15))
+                .frame(width: 28, height: 28)
+        }
+        .buttonStyle(.borderless)
+        .help(collapsed ? "Show sidebar" : "Hide sidebar")
+        .accessibilityLabel(collapsed ? "Show sidebar" : "Hide sidebar")
+        .accessibilityIdentifier("ALO.Network.ToggleSidebar")
+    }
+}
+
+/// Route past NSHostingController's own NavigationSplitView command handler.
+@MainActor @discardableResult
+public func toggleALONetworkSidebar(in window: NSWindow?) -> Bool {
+    func find(in view: NSView) -> NetworkSplitController? {
+        if let split = view as? NetworkSplitView { return split.delegate as? NetworkSplitController }
+        return view.subviews.lazy.compactMap { find(in: $0) }.first
+    }
+    guard let content = window?.contentView, let controller = find(in: content) else { return false }
+    controller.toggleSidebar(nil)
+    return true
+}
+
+/// Own only the divider's drawing; AppKit retains its resize hit area,
+/// accessibility, sidebar material, and animated collapse behavior.
+private final class NetworkSplitView: NSSplitView {
+    override var dividerThickness: CGFloat { 0 }
+    override func drawDivider(in rect: NSRect) {}
+    override var dividerColor: NSColor { .clear }
+}
+
+private final class NetworkSplitController: NSSplitViewController {
+    let sidebarHost = NSHostingController(rootView: AnyView(EmptyView()))
+    let detailHost = NSHostingController(rootView: AnyView(EmptyView()))
+    var onCollapse: ((Bool) -> Void)?
+    private var collapseObservation: NSKeyValueObservation?
+    private var positionedSidebar = false
+
+    override func loadView() {
+        splitView = NetworkSplitView()
+        splitView.isVertical = true
+        splitView.dividerStyle = .thin
+        super.loadView()
+        sidebarHost.sizingOptions = []
+        detailHost.sizingOptions = []
+        let sidebarContainer = NSViewController()
+        sidebarContainer.addChild(sidebarHost)
+        sidebarContainer.view = NSView()
+        let sidebarSurface: NSView
+        if #available(macOS 26.0, *) {
+            let glass = NSGlassEffectView()
+            glass.cornerRadius = ALONativeNetworkLayout.panelRadius
+            glass.contentView = sidebarHost.view
+            glass.identifier = NSUserInterfaceItemIdentifier("ALO.Network.SidebarGlass")
+            sidebarSurface = glass
+        } else {
+            sidebarSurface = sidebarHost.view
+            sidebarSurface.wantsLayer = true
+            sidebarSurface.layer?.cornerRadius = ALONativeNetworkLayout.panelRadius
+            sidebarSurface.layer?.cornerCurve = .continuous
+            sidebarSurface.layer?.masksToBounds = true
+        }
+        sidebarSurface.translatesAutoresizingMaskIntoConstraints = false
+        sidebarContainer.view.addSubview(sidebarSurface)
+        let inset = ALONativeNetworkLayout.panelInset
+        NSLayoutConstraint.activate([
+            sidebarSurface.leadingAnchor.constraint(equalTo: sidebarContainer.view.leadingAnchor, constant: inset),
+            sidebarSurface.trailingAnchor.constraint(equalTo: sidebarContainer.view.trailingAnchor, constant: -inset),
+            sidebarSurface.topAnchor.constraint(equalTo: sidebarContainer.view.topAnchor, constant: inset),
+            sidebarSurface.bottomAnchor.constraint(equalTo: sidebarContainer.view.bottomAnchor, constant: -inset),
+        ])
+        // A regular split item avoids AppKit inserting a second, tracking glass
+        // strip into the titlebar. The sidebar owns one native glass container.
+        let sidebar = NSSplitViewItem(viewController: sidebarContainer)
+        sidebar.minimumThickness = ALONativeNetworkLayout.minimumSidebarWidth
+        sidebar.maximumThickness = ALONativeNetworkLayout.maximumSidebarWidth
+        sidebar.canCollapse = true
+        addSplitViewItem(sidebar)
+        addSplitViewItem(NSSplitViewItem(viewController: detailHost))
+        minimumThicknessForInlineSidebars = 0
+        collapseObservation = sidebar.observe(\.isCollapsed, options: [.new]) { [weak self] _, _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.onCollapse?(self.splitViewItems[0].isCollapsed)
+            }
+        }
+    }
+
+    override func toggleSidebar(_ sender: Any?) {
+        let item = splitViewItems[0]
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.25
+            item.animator().isCollapsed = !item.isCollapsed
+        }
+    }
+
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(toggleSidebar(_:)) { return true }
+        return super.validateUserInterfaceItem(item)
+    }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        if !positionedSidebar, splitView.bounds.width >= 640 {
+            positionedSidebar = true
+            splitView.setPosition(260, ofDividerAt: 0)
+        }
+    }
+
+    override func splitView(_ splitView: NSSplitView, shouldHideDividerAt dividerIndex: Int) -> Bool {
+        _ = super.splitView(splitView, shouldHideDividerAt: dividerIndex)
+        return true
+    }
+
+    override func splitView(_ splitView: NSSplitView, additionalEffectiveRectOfDividerAt dividerIndex: Int) -> NSRect {
+        _ = super.splitView(splitView, additionalEffectiveRectOfDividerAt: dividerIndex)
+        guard !splitViewItems[0].isCollapsed else { return .zero }
+        return NSRect(x: splitView.arrangedSubviews[0].frame.maxX - 3, y: 0, width: 6, height: splitView.bounds.height)
+    }
+}
+
+private struct NetworkSplitColumns: NSViewControllerRepresentable {
+    @Binding var sidebarCollapsed: Bool
+    let sidebar: AnyView
+    let detail: AnyView
+
+    func makeNSViewController(context: Context) -> NetworkSplitController {
+        let controller = NetworkSplitController()
+        _ = controller.view
+        return controller
+    }
+
+    func updateNSViewController(_ controller: NetworkSplitController, context: Context) {
+        controller.onCollapse = { if sidebarCollapsed != $0 { sidebarCollapsed = $0 } }
+        controller.sidebarHost.rootView = AnyView(sidebar
+            .environment(\.colorScheme, context.environment.colorScheme)
+            .environment(\.controlActiveState, context.environment.controlActiveState)
+            .environment(\.aloCompactNetworkLayout, context.environment.aloCompactNetworkLayout)
+            .ignoresSafeArea())
+        controller.detailHost.rootView = AnyView(detail
+            .environment(\.colorScheme, context.environment.colorScheme)
+            .environment(\.aloCompactNetworkLayout, context.environment.aloCompactNetworkLayout)
+            .ignoresSafeArea())
     }
 }
 #endif
@@ -118,6 +289,7 @@ public struct ALONetworkSidebar: View {
     private let nowPlaying: AnyView?
     #if os(macOS)
     @Environment(\.aloCompactNetworkLayout) private var compactLayout
+    @Environment(\.controlActiveState) private var controlActiveState
     #endif
 
     public init(
@@ -334,6 +506,7 @@ public struct ALONetworkSidebar: View {
             HStack {
                 Text("Spaces").font(ALONetworkTypography.title).tracking(-0.4)
                     .accessibilityAddTraits(.isHeader)
+                NetworkSidebarToggle()
                 Spacer()
                 Menu {
                     Button("Create network…", systemImage: "plus", action: onCreateNetwork)
@@ -342,13 +515,13 @@ public struct ALONetworkSidebar: View {
                         .accessibilityIdentifier("ALO.Network.Import")
                 } label: {
                     Image(systemName: "plus").font(.system(size: 16, weight: .regular))
-                        .frame(width: 32, height: 32).foregroundStyle(Color.blue)
+                        .frame(width: 32, height: 32).foregroundStyle(Color.accentColor)
                 }
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
                 .help("Add a network").accessibilityLabel("Add a network")
             }
             .padding(.horizontal, compactLayout ? 20 : 24)
-            .padding(.top, compactLayout ? 52 : 60).padding(.bottom, compactLayout ? 12 : 16)
+            .padding(.top, 60 - ALONativeNetworkLayout.panelInset).padding(.bottom, compactLayout ? 12 : 16)
             HStack(spacing: 9) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Search spaces", text: $search).textFieldStyle(.plain)
@@ -369,9 +542,9 @@ public struct ALONetworkSidebar: View {
                         Button { selectedNetworkID = network.id } label: {
                             HStack(spacing: 8) {
                                 Image(systemName: "person.2.fill")
-                                    .font(.system(size: 16)).foregroundStyle(Color.blue)
+                                    .font(.system(size: 16)).foregroundStyle(Color.accentColor)
                                     .frame(width: 32, height: 32)
-                                    .background(Color.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                                    .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(network.name).font(ALONetworkTypography.label).lineLimit(2)
                                     Text("\(network.memberCount) \(network.memberCount == 1 ? "person" : "people")\(network.isOwner ? " · Your network" : "")")
@@ -399,9 +572,11 @@ public struct ALONetworkSidebar: View {
                                             .lineLimit(2)
                                         Spacer(minLength: 0)
                                     }
-                                    .foregroundStyle(selectedChannelID == channel.id ? Color.blue : .primary)
+                                    .foregroundStyle(selectedChannelID == channel.id
+                                        ? Color(nsColor: controlActiveState == .inactive ? .controlTextColor : .alternateSelectedControlTextColor) : .primary)
                                     .padding(.horizontal, 8).frame(minHeight: compactLayout ? 36 : 40)
-                                    .background(selectedChannelID == channel.id ? Color.blue.opacity(0.11) : .clear,
+                                    .background(selectedChannelID == channel.id
+                                        ? Color(nsColor: controlActiveState == .inactive ? .unemphasizedSelectedContentBackgroundColor : .selectedContentBackgroundColor) : .clear,
                                                 in: RoundedRectangle(cornerRadius: 12))
                                     .contentShape(Rectangle())
                                 }
@@ -415,7 +590,8 @@ public struct ALONetworkSidebar: View {
                     if networks.isEmpty {
                         Text("Join a nearby network or create one for your group.")
                             .font(.callout).foregroundStyle(.secondary)
-                        Button("Create network…", action: onCreateNetwork).buttonStyle(.borderless)
+                        Button("Create network…", action: onCreateNetwork)
+                            .buttonStyle(.borderless).foregroundStyle(Color.accentColor)
                     } else if visibleNetworks.isEmpty {
                         Text("No matching spaces").font(.callout).foregroundStyle(.secondary)
                     }
@@ -452,13 +628,15 @@ public struct ALONetworkSidebar: View {
                             Spacer(minLength: 4)
                             if network.status == .waitingForApproval {
                                 Button("Cancel") { onCancelJoin(network.id) }
+                                    .buttonStyle(.borderless).foregroundStyle(Color.accentColor)
                                     .accessibilityLabel("Cancel request to join \(network.name)")
                             } else if network.status != .joined {
                                 Button("Join") { onJoin(network.id) }.disabled(isBusy)
+                                    .buttonStyle(.borderless).foregroundStyle(Color.accentColor)
                                     .accessibilityLabel("Join \(network.name)")
                             }
                         }
-                        .buttonStyle(.bordered).buttonBorderShape(.capsule).controlSize(.small)
+                        .controlSize(.small)
                         .padding(.horizontal, 8).padding(.vertical, 4)
                     }
                     if nearbyNetworks.isEmpty {
@@ -472,6 +650,7 @@ public struct ALONetworkSidebar: View {
                     if let nearbyError {
                         ALOInlineError(message: nearbyError)
                         Button("Try again", action: onRetryNearby)
+                            .buttonStyle(.borderless).foregroundStyle(Color.accentColor)
                     }
                 }
                 .padding(.horizontal, compactLayout ? 12 : 16).padding(.bottom, 12)
@@ -485,8 +664,8 @@ public struct ALONetworkSidebar: View {
             Divider().opacity(0.5).padding(.horizontal, compactLayout ? 20 : 24)
             HStack(spacing: 8) {
                 Text(String(identityName.prefix(1)).uppercased())
-                    .font(ALONetworkTypography.label).foregroundStyle(Color.blue)
-                    .frame(width: 32, height: 32).background(Color.blue.opacity(0.09), in: Circle())
+                    .font(ALONetworkTypography.label).foregroundStyle(Color.accentColor)
+                    .frame(width: 32, height: 32).background(Color.accentColor.opacity(0.09), in: Circle())
                 Text(identityName).font(ALONetworkTypography.label).lineLimit(1).help(identityName)
                 Spacer(minLength: 4)
                 Menu {

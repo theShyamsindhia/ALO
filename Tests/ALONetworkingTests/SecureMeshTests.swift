@@ -7,6 +7,63 @@ import ALOCore
 
 @Suite("Actual secure mesh runtime", .serialized)
 struct SecureMeshTests {
+    @Test func canvasAvailabilityReachesLateJoinersRejectsSpoofingAndClearsOnDisconnect() async throws {
+        let room = RoomConfiguration.secure(name: "Canvas presence")
+        let host = try SecureMeshNode(room: room, identity: .ephemeral(), capabilities: [.desktop, .roomCanvas],
+            incomingMediaChannelHandler: { channel, _ in channel.cancel() })
+        let viewer = try SecureMeshNode(room: room, identity: .ephemeral(), capabilities: [.desktop, .roomCanvas])
+        defer { host.stop(); viewer.stop() }
+        try host.start(); try viewer.start()
+        let first = RoomCanvasAdvertisement(canvasID: UUID(), imageName: "Sketch.png")
+        host.control.publishCanvas(first)
+        try await meshEventually { host.state.read { $0.participants.first(where: { $0.id == host.id })?.canvas == first } }
+        let port = try await host.readyPort()
+        viewer.control.connectForTesting(to: .hostPort(host: "127.0.0.1", port: port), expectedNodeID: host.id)
+        try await fullMeshEventually([host, viewer])
+        try await meshEventually { viewer.state.read { $0.participants.first(where: { $0.id == host.id })?.canvas == first } }
+        #expect(viewer.state.read { $0.replica.chatEvents.isEmpty })
+        let forged = RoomCanvasAdvertisement(canvasID: UUID(), imageName: "Not their canvas.png")
+        host.control.sendRoomStateSyncEnvelopesForTesting([
+            MeshEnvelope(type: "room_canvas", nodeID: viewer.id, roomCanvas: forged),
+            MeshEnvelope(type: "room_canvas", nodeID: host.id, roomCanvas: .init(canvasID: UUID(), imageName: "invalid/path"))
+        ], peerID: viewer.id)
+        host.control.publishChat("Presence protocol marker")
+        try await meshEventually { viewer.state.read { $0.replica.chatEvents.contains(where: { $0.text == "Presence protocol marker" }) } }
+        #expect(viewer.state.read { $0.participants.first(where: { $0.id == host.id })?.canvas == first })
+        #expect(viewer.state.read { $0.participants.first(where: { $0.id == viewer.id })?.canvas == nil })
+        let next = RoomCanvasAdvertisement(canvasID: UUID(), imageName: "Next image.png")
+        host.control.publishCanvas(next)
+        try await meshEventually { viewer.state.read { $0.participants.first(where: { $0.id == host.id })?.canvas == next } }
+        host.control.publishCanvas(nil)
+        try await meshEventually { viewer.state.read { $0.participants.first(where: { $0.id == host.id })?.canvas == nil } }
+        host.control.publishCanvas(first)
+        try await meshEventually { viewer.state.read { $0.participants.first(where: { $0.id == host.id })?.canvas == first } }
+        host.stop()
+        try await meshEventually { viewer.state.read { $0.participants.first(where: { $0.id == host.id })?.canvas == nil } }
+    }
+
+    @Test(arguments: [true, false])
+    func canvasChannelRequiresCapabilityOnBothRoomPeers(localSupported: Bool) async throws {
+        let room = RoomConfiguration.secure(name: "Canvas capability boundary")
+        let host = try SecureMeshNode(room: room, identity: .ephemeral(),
+            capabilities: localSupported ? .desktop : [.desktop, .roomCanvas])
+        let viewer = try SecureMeshNode(room: room, identity: .ephemeral(),
+            capabilities: localSupported ? [.desktop, .roomCanvas] : .desktop)
+        defer { host.stop(); viewer.stop() }
+        try host.start(); try viewer.start()
+        let port = try await host.readyPort()
+        viewer.control.connectForTesting(to: .hostPort(host: "127.0.0.1", port: port), expectedNodeID: host.id)
+        try await fullMeshEventually([host, viewer])
+        let result: Result<(SecurePeerChannel, AuthenticatedPeer), Error> = await withCheckedContinuation { continuation in
+            viewer.control.openPeerChannel(to: host.identity.publicIdentity.nodeID, role: .roomCanvas) { continuation.resume(returning: $0) }
+        }
+        switch result {
+        case .failure(let error): #expect((error as? SecureTransportError) == .unsupportedProtocol)
+        case .success(let (channel, _)): channel.cancel(); Issue.record("Canvas opened without both capabilities")
+        }
+        #expect(viewer.state.read { $0.participants.count == 2 })
+    }
+
     @Test func mixedSignedHistoryVerifiesDurableProofsOnlyAfterTheWorkerRuns() async throws {
         let room = RoomConfiguration.secure(name: "Durable proof queue boundary")
         let blocked = try RejectOnceRoomStateSync(roomID: room.id, blockFirstChat: true)
@@ -500,15 +557,16 @@ struct SecureMeshTests {
         #expect(server.state.read { $0.participants.count == 1 })
     }
 
-    @Test(arguments: [ReliableChannelRole.mediaControl, .fileTransfer])
+    @Test(arguments: [ReliableChannelRole.mediaControl, .fileTransfer, .roomCanvas])
     func receiverOpensMediaToAnInboundRoomPeersAdvertisedListener(role: ReliableChannelRole) async throws {
         let room = try RoomConfiguration(name: "Migrated private room", isPrivate: true, accessKey: UUID().uuidString).upgradedToCurrentSystem()
         let routed = MeshTestState()
-        let presenter = try SecureMeshNode(room: room, incomingMediaChannelHandler: { channel, peer in
+        let capabilities: PeerCapabilities = role == .roomCanvas ? [.desktop, .roomCanvas] : .desktop
+        let presenter = try SecureMeshNode(room: room, identity: .ephemeral(), capabilities: capabilities, incomingMediaChannelHandler: { channel, peer in
             routed.update { $0.mediaPeer = peer; $0.mediaChannels.append(channel) }
             channel.onPayload = { [weak channel] data in channel?.send(payload: data) }
         })
-        let receiver = try SecureMeshNode(room: room)
+        let receiver = try SecureMeshNode(room: room, identity: .ephemeral(), capabilities: capabilities)
         defer {
             presenter.stop(); receiver.stop()
             routed.read { $0.mediaChannels }.forEach { $0.cancel() }

@@ -158,7 +158,8 @@ final class FileTrayViewModel: ObservableObject {
 
     private static let persistedItemsKey = "settings.live.tray.persistedItems"
     private let defaults: UserDefaults
-    private var localItems: [FileTrayItem] = []
+    @Published private var localItems: [FileTrayItem] = []
+    var localShelfItems: [FileTrayItem] { isRoomBacked ? localItems : items }
     private(set) var isRoomBacked = false
     var onRoomAddRequested: (([URL]) -> Void)?
     var onRoomRemoveRequested: (([String]) -> Void)?
@@ -211,6 +212,37 @@ final class FileTrayViewModel: ObservableObject {
 
     func add(_ urls: [URL]) {
         add(urls, removalPolicy: .deleteCopy)
+    }
+
+    /// The private shelf remains usable while the normal tray is room-backed.
+    /// This operation always copies; it cannot inherit legacy move-originals.
+    func addToLocalShelf(_ urls: [URL]) async throws {
+        activate()
+        let imported = try await Task.detached(priority: .utility) {
+            try FileTrayStorage.importItems(from: urls, moveOriginals: false)
+        }.value
+        appendLocalShelfCopies(imported)
+    }
+
+    func appendLocalShelfCopies(_ urls: [URL]) {
+        let added = urls.filter(\.isFileURL).map { FileTrayItem(url: $0) }
+        if isRoomBacked {
+            localItems += added
+            persistItems(localItems)
+        } else {
+            updateItems(items + added)
+        }
+    }
+
+    func removeFromLocalShelf(_ item: FileTrayItem) {
+        guard localShelfItems.contains(where: { $0.id == item.id }) else { return }
+        if isRoomBacked {
+            localItems.removeAll { $0.id == item.id }
+            persistItems(localItems)
+        } else {
+            updateItems(items.filter { $0.id != item.id })
+        }
+        removeStoredFiles(for: [item])
     }
 
     private func add(_ urls: [URL], removalPolicy: FileTrayRemovalPolicy) {
@@ -392,8 +424,8 @@ final class FileTrayViewModel: ObservableObject {
     }
 
 
-    private func persistItems() {
-        let storedItems: [FileTrayStoredItem] = items.compactMap {
+    private func persistItems(_ explicitItems: [FileTrayItem]? = nil) {
+        let storedItems: [FileTrayStoredItem] = (explicitItems ?? items).compactMap {
             guard let localURL = $0.localURL else { return nil }
             return FileTrayStoredItem(
                 id: $0.id,
@@ -444,7 +476,7 @@ final class FileTrayViewModel: ObservableObject {
     }
 }
 
-private enum FileTrayStorage {
+private nonisolated enum FileTrayStorage {
     static var rootURL: URL {
         NotchStoragePaths.fileTray
     }
