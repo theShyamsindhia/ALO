@@ -7,6 +7,8 @@ protocol LockScreenSoundPlaying: AnyObject {
 }
 
 final class InactiveLockScreenSoundPlayer: LockScreenSoundPlaying {
+    nonisolated deinit {}
+
     func playLock() {}
     func playUnlock() {}
 }

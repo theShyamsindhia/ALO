@@ -2,6 +2,8 @@ import CoreAudio
 import Foundation
 
 final class SystemAudioVolumeService {
+    nonisolated deinit {}
+
     private let candidateElements: [AudioObjectPropertyElement] = [
         kAudioObjectPropertyElementMain,
         AudioObjectPropertyElement(1),

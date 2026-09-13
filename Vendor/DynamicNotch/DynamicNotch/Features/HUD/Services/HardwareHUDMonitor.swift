@@ -3,6 +3,9 @@ import Foundation
 
 @MainActor
 final class HardwareHUDMonitor {
+    // stopMonitoring() owns shutdown; AppContainer releases this ARC-only owner.
+    nonisolated deinit {}
+
     var onEvent: ((HudEvent) -> Void)?
 
     private let mediaKeyTap: SystemMediaKeyTap

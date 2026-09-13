@@ -7,6 +7,8 @@ import Foundation
 /// here — including honoring the "Play feedback when volume is changed" preference
 /// and the Shift override that inverts it.
 final class VolumeFeedbackSoundPlayer {
+    nonisolated deinit {}
+
     private let soundURL: URL?
     private var sound: NSSound?
 

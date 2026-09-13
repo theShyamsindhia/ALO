@@ -7,6 +7,37 @@ import XCTest
 
 @MainActor
 final class RoomToolsTests: XCTestCase {
+    func testStoppedToolOwnershipGraphReleasesFromNativeCallback() async {
+        _ = NSApplication.shared
+        let name = "RoomToolsOwnershipTests.\(UUID())"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async {
+                weak var retainedContainer: AppContainer?
+                weak var retainedActivation: FeatureActivation?
+                weak var retainedFocus: FocusViewModel?
+                weak var retainedHUD: HardwareHUDMonitor?
+                autoreleasepool {
+                    let container = AppContainer(isRunningUITests: true, defaults: defaults)
+                    let activation = FeatureActivation(container: container)
+                    activation.setEnabled(true)
+                    activation.setEnabled(false)
+                    XCTAssertTrue(activation.running.isEmpty)
+                    retainedContainer = container
+                    retainedActivation = activation
+                    retainedFocus = container.focusViewModel
+                    retainedHUD = container.hardwareHUDMonitor
+                }
+                XCTAssertNil(retainedActivation)
+                XCTAssertNil(retainedContainer)
+                XCTAssertNil(retainedFocus)
+                XCTAssertNil(retainedHUD)
+                continuation.resume()
+            }
+        }
+    }
+
     func testEveryToolHasARouteAndOpeningItDoesNotOptIntoMonitoring() async throws {
         _ = NSApplication.shared
         let (container, defaults) = fixture()
@@ -190,6 +221,8 @@ final class RoomToolsTests: XCTestCase {
 
 @MainActor
 private final class ToolTimerSound: TimerSoundPlaying {
+    nonisolated deinit {}
+
     var isPlaying = false
     var loops: [Bool] = []
     func play(sound: TimerSound, isSoundEnabled: Bool, loop: Bool) { loops.append(loop); isPlaying = isSoundEnabled }

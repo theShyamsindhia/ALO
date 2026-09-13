@@ -10,6 +10,9 @@ import Foundation
 ///
 /// Callbacks are always delivered on the main queue.
 final class SystemAudioChangeObserver {
+    // Listener removal stays in stopObserving(), before the owner is released.
+    nonisolated deinit {}
+
     /// Emitted when the volume/mute of the current output device changes from an
     /// external source. `level` is 0…100.
     var onVolumeChange: ((_ level: Int, _ deviceName: String?) -> Void)?

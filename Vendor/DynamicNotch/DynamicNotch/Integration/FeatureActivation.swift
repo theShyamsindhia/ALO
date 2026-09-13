@@ -7,6 +7,9 @@ internal import AppKit
 /// the host's master switch; construction and disabled settings stay inert.
 @MainActor
 final class FeatureActivation {
+    // Shutdown stays in setEnabled(false); callback disposal only releases ARC.
+    nonisolated deinit {}
+
     private let container: AppContainer
     private var observation: AnyCancellable?
     private var activationObservation: AnyCancellable?

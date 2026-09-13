@@ -2,6 +2,8 @@ import SwiftUI
 
 @MainActor
 final class NotchLocalTimerEventsHandler {
+    nonisolated deinit {}
+
     private let notchViewModel: NotchViewModel
     private let localTimerViewModel: LocalTimerViewModel
     private let timerViewModel: TimerViewModel

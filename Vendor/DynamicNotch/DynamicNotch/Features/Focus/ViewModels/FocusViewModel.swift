@@ -14,6 +14,8 @@ enum FocusEvent: Equatable {
 }
 
 final class FocusViewModel: ObservableObject {
+    nonisolated deinit {}
+
     @Published var focusEvent: FocusEvent? = nil
     
     private let service = FocusService()
