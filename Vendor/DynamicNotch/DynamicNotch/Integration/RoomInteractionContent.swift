@@ -55,6 +55,10 @@ public struct RoomNotchTile<Icon: View>: View {
 /// ALO supplies the real room UI; the runtime owns only its presentation.
 @MainActor
 final class RoomInteractionModel: ObservableObject {
+    // ARC-only cleanup must also work outside a Swift task when AppKit or
+    // Dispatch releases a dismissed view on the macOS 15 backdeployment runtime.
+    nonisolated deinit {}
+
     @Published var title = "Room"
     @Published var subtitle = ""
     @Published var content = AnyView(EmptyView())
