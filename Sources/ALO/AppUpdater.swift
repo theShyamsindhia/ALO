@@ -47,15 +47,14 @@ final class AppUpdater: ObservableObject {
         }
 
         var installableAsset: Asset? {
-            assets.first { asset in
-                guard asset.name == "ALO-macos-arm64.zip",
-                      asset.size > 0, asset.size <= 250_000_000,
-                      let digest = asset.digest,
-                      digest.hasPrefix("sha256:")
-                else { return false }
-                let value = digest.dropFirst("sha256:".count)
-                return value.count == 64 && value.allSatisfy(\.isHexDigit)
-            }
+            guard let architecture = AppUpdater.updateArchitecture,
+                  let asset = AppUpdater.compatibleAsset(in: self, for: architecture),
+                  asset.size > 0, asset.size <= 250_000_000,
+                  let digest = asset.digest,
+                  digest.hasPrefix("sha256:")
+            else { return nil }
+            let value = digest.dropFirst("sha256:".count)
+            return value.count == 64 && value.allSatisfy(\.isHexDigit) ? asset : nil
         }
     }
 
@@ -77,13 +76,13 @@ final class AppUpdater: ObservableObject {
         var errorDescription: String? {
             switch self {
             case .invalidResponse: return "GitHub returned an invalid update response."
-            case .noCompatibleAsset: return "This release has no Apple Silicon app archive."
+            case .noCompatibleAsset: return "This release has no app archive for this Mac."
             case .invalidDigest: return "The download did not match GitHub's SHA-256 digest."
             case .invalidArchive: return "The downloaded update archive is invalid."
             case .invalidSignature: return "The update is not signed by ALO's expected Apple Developer team."
             case .notNewer: return "The downloaded app is not newer than this copy of ALO."
             case .cannotInstallDevelopmentBuild: return "Run a packaged ALO.app to install updates automatically."
-            case .unsupportedArchitecture: return "Automatic updates are available only for the Apple Silicon release."
+            case .unsupportedArchitecture: return "Automatic updates are unavailable for this Mac architecture."
             }
         }
     }
@@ -98,11 +97,31 @@ final class AppUpdater: ObservableObject {
     and certificate leaf[subject.OU] = "R9QFK9NM3Y"
     """
     nonisolated static var supportsAutomaticInstallation: Bool {
-        #if arch(arm64)
+        #if arch(arm64) || arch(x86_64)
         return true
         #else
         return false
         #endif
+    }
+    nonisolated static var updateArchitecture: String? {
+        #if arch(arm64)
+        return "arm64"
+        #elseif arch(x86_64)
+        return "x86_64"
+        #else
+        return nil
+        #endif
+    }
+    nonisolated static func compatibleAssetName(for architecture: String) -> String? {
+        switch architecture {
+        case "arm64": return "ALO-macos-arm64.zip"
+        case "x86_64": return "ALO-macos-x86_64.zip"
+        default: return nil
+        }
+    }
+    nonisolated static func compatibleAsset(in release: Release, for architecture: String) -> Release.Asset? {
+        guard let name = compatibleAssetName(for: architecture) else { return nil }
+        return release.assets.first { $0.name == name }
     }
     private static let checkInterval: TimeInterval = 6 * 60 * 60
     private static let lastPresentedVersionKey = "lastPresentedUpdateVersion"
@@ -175,7 +194,7 @@ final class AppUpdater: ObservableObject {
             availableRelease = nil
             scheduleIncompleteReleaseRetry()
             if userInitiated {
-                messageHandler?("ALO \(version) is being prepared. ALO will check again after its signed download finishes uploading.")
+                messageHandler?("ALO \(version) is being prepared for this Mac. ALO will check again after its signed download finishes uploading.")
             }
             return
         }
@@ -254,7 +273,8 @@ final class AppUpdater: ObservableObject {
         guard let releaseVersion = AppVersion(release.tagName), releaseVersion > currentVersion else {
             throw UpdateError.notNewer
         }
-        guard let asset = release.installableAsset else {
+        guard let architecture = updateArchitecture,
+              let asset = release.installableAsset else {
             throw UpdateError.noCompatibleAsset
         }
         guard asset.size > 0, asset.size <= 250_000_000 else { throw UpdateError.invalidArchive }
@@ -288,12 +308,18 @@ final class AppUpdater: ObservableObject {
         try FileManager.default.createDirectory(at: extracted, withIntermediateDirectories: true)
         try run("/usr/bin/ditto", ["-x", "-k", archive.path, extracted.path])
         let app = extracted.appendingPathComponent("ALO.app", isDirectory: true)
+        let executable = app.appendingPathComponent("Contents/MacOS/alo")
         guard FileManager.default.fileExists(atPath: app.path),
               try extractedTreeIsSafe(extracted),
               let bundle = Bundle(url: app), bundle.bundleIdentifier == bundleID,
               let rawVersion = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
               let version = AppVersion(rawVersion), version == releaseVersion, version > currentVersion
         else { throw UpdateError.invalidArchive }
+        do {
+            try run("/usr/bin/lipo", ["-verify_arch", architecture, executable.path])
+        } catch {
+            throw UpdateError.invalidArchive
+        }
         try validateSignature(app)
         try run("/usr/sbin/spctl", ["--assess", "--type", "execute", "--verbose=2", app.path])
         return app

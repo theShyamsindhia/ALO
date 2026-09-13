@@ -18,7 +18,7 @@ struct AppUpdaterTests {
             alerts.append((release.tagName, userInitiated))
         }
         let asset = AppUpdater.Release.Asset(
-            name: "ALO-macos-arm64.zip",
+            name: AppUpdater.compatibleAssetName(for: AppUpdater.updateArchitecture!)!,
             browserDownloadURL: URL(string: "https://example.com/app.zip")!,
             digest: "sha256:" + String(repeating: "a", count: 64),
             size: 123
@@ -71,6 +71,46 @@ struct AppUpdaterTests {
         #expect(availableVersion == nil)
         #expect(updater.availableRelease == nil)
         #expect(message?.contains("being prepared") == true)
+    }
+
+    @MainActor @Test("Only an archive for the current Mac is offered as an update")
+    func incompatibleReleaseIsNotAdvertised() {
+        let updater = AppUpdater()
+        let otherArchitecture = AppUpdater.updateArchitecture == "arm64" ? "x86_64" : "arm64"
+        let asset = AppUpdater.Release.Asset(
+            name: AppUpdater.compatibleAssetName(for: otherArchitecture)!,
+            browserDownloadURL: URL(string: "https://example.com/app.zip")!,
+            digest: "sha256:" + String(repeating: "a", count: 64),
+            size: 123
+        )
+        var message: String?
+        updater.messageHandler = { message = $0 }
+        updater.handleFetchedRelease(AppUpdater.Release(
+            tagName: "v999.0.2",
+            htmlURL: URL(string: "https://example.com/release")!,
+            assets: [asset]
+        ), userInitiated: true)
+        #expect(updater.availableRelease == nil)
+        #expect(message?.contains("being prepared for this Mac") == true)
+    }
+
+    @Test("Update assets are selected by architecture")
+    func compatibleAssetSelection() {
+        let arm = AppUpdater.Release.Asset(
+            name: "ALO-macos-arm64.zip",
+            browserDownloadURL: URL(string: "https://example.com/arm.zip")!,
+            digest: "sha256:" + String(repeating: "a", count: 64), size: 123
+        )
+        let intel = AppUpdater.Release.Asset(
+            name: "ALO-macos-x86_64.zip",
+            browserDownloadURL: URL(string: "https://example.com/intel.zip")!,
+            digest: "sha256:" + String(repeating: "b", count: 64), size: 123
+        )
+        let release = AppUpdater.Release(tagName: "v999.0.3",
+            htmlURL: URL(string: "https://example.com/release")!, assets: [arm, intel])
+        #expect(AppUpdater.compatibleAsset(in: release, for: "arm64")?.name == arm.name)
+        #expect(AppUpdater.compatibleAsset(in: release, for: "x86_64")?.name == intel.name)
+        #expect(AppUpdater.compatibleAsset(in: release, for: "other") == nil)
     }
 
     @Test("GitHub release metadata decodes its signed asset digest")
