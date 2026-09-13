@@ -4,6 +4,26 @@ import XCTest
 
 @MainActor
 final class RoomInteractionTests: XCTestCase {
+    func testRoomDropViewReleasesCapturedModelFromNativeCallback() async {
+        _ = NSApplication.shared
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async {
+                weak var retainedView: RoomEntryDropView?
+                weak var retainedModel: RoomInteractionModel?
+                autoreleasepool {
+                    let model = RoomInteractionModel()
+                    let view = RoomEntryDropView(frame: .zero)
+                    view.entered = { model.open() }
+                    retainedView = view
+                    retainedModel = model
+                }
+                XCTAssertNil(retainedView)
+                XCTAssertNil(retainedModel)
+                continuation.resume()
+            }
+        }
+    }
+
     func testRoomModelReleasesFromSynchronousBackgroundCallback() async {
         let payload = RoomModelReleasePayload(RoomInteractionModel())
         weak var retained = payload.object

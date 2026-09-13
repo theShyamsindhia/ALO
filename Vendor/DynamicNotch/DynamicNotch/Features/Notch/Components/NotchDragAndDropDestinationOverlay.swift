@@ -70,7 +70,10 @@ private struct RoomEntryDropDestination: NSViewRepresentable {
     }
 }
 
-private final class RoomEntryDropView: NSView {
+final class RoomEntryDropView: NSView {
+    // AppKit releases this ARC-only callback owner outside Swift tasks.
+    nonisolated deinit {}
+
     var entered: () -> Void = {}
     var dropped: ([URL]) -> Void = { _ in }
     override init(frame: NSRect) {
