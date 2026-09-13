@@ -6,25 +6,46 @@ import Testing
 struct AppUpdaterTests {
     @MainActor @Test("The update indicator persists independently of the dismissed alert")
     func availabilityPersistsUntilUpToDate() {
-        let updater = AppUpdater()
+        let suiteName = "ALOTests.AppUpdater.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let updater = AppUpdater(defaults: defaults)
         var availableVersion: String?
-        var alerts = [String]()
+        var alerts = [(String, Bool)]()
         updater.updateAvailabilityHandler = { availableVersion = $0 }
         // Returning without installation mirrors choosing Later in the alert.
-        updater.updateAvailableHandler = { alerts.append($0) }
+        updater.updateAvailableHandler = { release, userInitiated in
+            alerts.append((release.tagName, userInitiated))
+        }
+        let asset = AppUpdater.Release.Asset(
+            name: "ALO-macos-arm64.zip",
+            browserDownloadURL: URL(string: "https://example.com/app.zip")!,
+            digest: "sha256:" + String(repeating: "a", count: 64),
+            size: 123
+        )
         let release = AppUpdater.Release(tagName: "v999.0.1",
-            htmlURL: URL(string: "https://example.com/release")!, assets: [])
+            htmlURL: URL(string: "https://example.com/release")!, assets: [asset])
 
         #expect(availableVersion == nil)
         updater.handleFetchedRelease(release, userInitiated: false)
         #expect(availableVersion == "999.0.1")
-        #expect(alerts == ["999.0.1"])
+        #expect(alerts.map(\.0) == ["v999.0.1"])
+        #expect(alerts.map(\.1) == [false])
         updater.handleFetchedRelease(release, userInitiated: false)
         #expect(availableVersion == "999.0.1")
         #expect(alerts.count == 1, "Automatic checks must not repeat a dismissed alert")
         updater.handleFetchedRelease(release, userInitiated: true)
         #expect(alerts.count == 2, "The update button can reopen the alert")
+        #expect(alerts.last?.1 == true)
         #expect(availableVersion == "999.0.1")
+
+        let relaunched = AppUpdater(defaults: defaults)
+        var relaunchedAlerts = 0
+        relaunched.updateAvailableHandler = { _, _ in relaunchedAlerts += 1 }
+        relaunched.handleFetchedRelease(release, userInitiated: false)
+        #expect(relaunchedAlerts == 0, "The same update must not open the popover again after relaunch")
+        relaunched.handleFetchedRelease(release, userInitiated: true)
+        #expect(relaunchedAlerts == 1, "A manual check must still reopen What's New")
 
         updater.handleFetchedRelease(AppUpdater.Release(tagName: updater.currentVersion.description,
             htmlURL: release.htmlURL, assets: []), userInitiated: false)
@@ -32,13 +53,35 @@ struct AppUpdaterTests {
         #expect(updater.availableRelease == nil)
     }
 
+    @MainActor @Test("A release waits for its signed archive before becoming available")
+    func incompleteReleaseDoesNotAdvertiseAnUninstallableUpdate() {
+        let updater = AppUpdater()
+        var availableVersion: String?
+        var message: String?
+        updater.updateAvailabilityHandler = { availableVersion = $0 }
+        updater.messageHandler = { message = $0 }
+
+        updater.handleFetchedRelease(AppUpdater.Release(
+            tagName: "v999.0.2",
+            body: "Still uploading",
+            htmlURL: URL(string: "https://example.com/release")!,
+            assets: []
+        ), userInitiated: true)
+
+        #expect(availableVersion == nil)
+        #expect(updater.availableRelease == nil)
+        #expect(message?.contains("being prepared") == true)
+    }
+
     @Test("GitHub release metadata decodes its signed asset digest")
     func releaseMetadataDecodes() throws {
-        let json = #"{"tag_name":"v1.2.3","html_url":"https://example.com/release","assets":[{"name":"ALO-macos-arm64.zip","browser_download_url":"https://example.com/app.zip","digest":"sha256:abc","size":123}]}"#
+        let json = ###"{"tag_name":"v1.2.3","name":"ALO 1.2.3","body":"## Highlights\n- Better sync","html_url":"https://example.com/release","assets":[{"name":"ALO-macos-arm64.zip","browser_download_url":"https://example.com/app.zip","digest":"sha256:abc","size":123}]}"###
         let release = try JSONDecoder().decode(AppUpdater.Release.self, from: Data(json.utf8))
         #expect(release.tagName == "v1.2.3")
         #expect(release.assets.first?.name == "ALO-macos-arm64.zip")
         #expect(release.assets.first?.digest == "sha256:abc")
+        #expect(release.name == "ALO 1.2.3")
+        #expect(release.body == "## Highlights\n- Better sync")
     }
 
     @Test("Update archives stay inside the expected app root")

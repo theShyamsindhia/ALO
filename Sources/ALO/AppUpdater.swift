@@ -1,11 +1,12 @@
 import AppKit
+import Combine
 import CryptoKit
 import Foundation
 import Security
 import ALOCore
 
 @MainActor
-final class AppUpdater {
+final class AppUpdater: ObservableObject {
     struct Release: Decodable, Sendable {
         struct Asset: Decodable, Sendable {
             let name: String
@@ -20,13 +21,52 @@ final class AppUpdater {
         }
 
         let tagName: String
+        let name: String?
+        let body: String?
         let htmlURL: URL
         let assets: [Asset]
 
+        init(
+            tagName: String,
+            name: String? = nil,
+            body: String? = nil,
+            htmlURL: URL,
+            assets: [Asset]
+        ) {
+            self.tagName = tagName
+            self.name = name
+            self.body = body
+            self.htmlURL = htmlURL
+            self.assets = assets
+        }
+
         enum CodingKeys: String, CodingKey {
-            case assets
+            case name, body, assets
             case tagName = "tag_name"
             case htmlURL = "html_url"
+        }
+
+        var installableAsset: Asset? {
+            assets.first { asset in
+                guard asset.name == "ALO-macos-arm64.zip",
+                      asset.size > 0, asset.size <= 250_000_000,
+                      let digest = asset.digest,
+                      digest.hasPrefix("sha256:")
+                else { return false }
+                let value = digest.dropFirst("sha256:".count)
+                return value.count == 64 && value.allSatisfy(\.isHexDigit)
+            }
+        }
+    }
+
+    enum InstallationState: Equatable {
+        case idle
+        case installing
+        case failed(String)
+
+        var isInstalling: Bool {
+            if case .installing = self { return true }
+            return false
         }
     }
 
@@ -65,8 +105,9 @@ final class AppUpdater {
         #endif
     }
     private static let checkInterval: TimeInterval = 6 * 60 * 60
+    private static let lastPresentedVersionKey = "lastPresentedUpdateVersion"
 
-    var updateAvailableHandler: ((String) -> Void)?
+    var updateAvailableHandler: ((Release, Bool) -> Void)?
     var updateAvailabilityHandler: ((String?) -> Void)?
     var messageHandler: ((String) -> Void)?
     private(set) var availableRelease: Release? {
@@ -76,8 +117,17 @@ final class AppUpdater {
     }
     private var checkTimer: Timer?
     private var checkTask: Task<Void, Never>?
+    private var incompleteReleaseRetryTask: Task<Void, Never>?
+    private var installTask: Task<Void, Never>?
+    private let defaults: UserDefaults
     private var lastPresentedVersion: String?
     private var lastAutomaticCheck: Date?
+    @Published private(set) var installationState = InstallationState.idle
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        lastPresentedVersion = defaults.string(forKey: Self.lastPresentedVersionKey)
+    }
 
     var currentVersion: AppVersion {
         let raw = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
@@ -115,16 +165,29 @@ final class AppUpdater {
 
     func handleFetchedRelease(_ release: Release, userInitiated: Bool) {
         guard let version = AppVersion(release.tagName), version > currentVersion else {
+            incompleteReleaseRetryTask?.cancel()
+            incompleteReleaseRetryTask = nil
             availableRelease = nil
             if userInitiated { messageHandler?("ALO \(currentVersion) is up to date.") }
             return
         }
+        guard release.installableAsset != nil else {
+            availableRelease = nil
+            scheduleIncompleteReleaseRetry()
+            if userInitiated {
+                messageHandler?("ALO \(version) is being prepared. ALO will check again after its signed download finishes uploading.")
+            }
+            return
+        }
+        incompleteReleaseRetryTask?.cancel()
+        incompleteReleaseRetryTask = nil
         // Availability remains visible even when the once-per-version alert
         // has already been dismissed with Later.
         availableRelease = release
         if userInitiated || lastPresentedVersion != version.description {
             lastPresentedVersion = version.description
-            updateAvailableHandler?(version.description)
+            defaults.set(version.description, forKey: Self.lastPresentedVersionKey)
+            updateAvailableHandler?(release, userInitiated)
         }
     }
 
@@ -134,23 +197,38 @@ final class AppUpdater {
     }
 
     func installAvailableUpdate() {
+        guard installTask == nil else { return }
         guard Self.supportsAutomaticInstallation else {
-            messageHandler?(UpdateError.unsupportedArchitecture.localizedDescription)
+            installationState = .failed(UpdateError.unsupportedArchitecture.localizedDescription)
             return
         }
         guard let release = availableRelease else {
             checkForUpdates(userInitiated: true)
             return
         }
-        Task { [weak self] in
+        installationState = .installing
+        installTask = Task { [weak self] in
             guard let self else { return }
             do {
                 let app = try await Self.downloadAndValidate(release, currentVersion: currentVersion)
                 try Self.launchInstaller(for: app)
                 NSApp.terminate(nil)
             } catch {
-                messageHandler?("Could not install the update: \(error.localizedDescription)")
+                guard !Task.isCancelled else { return }
+                installationState = .failed("Could not install the update: \(error.localizedDescription)")
             }
+            installTask = nil
+        }
+    }
+
+    private func scheduleIncompleteReleaseRetry() {
+        guard incompleteReleaseRetryTask == nil else { return }
+        incompleteReleaseRetryTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(300))
+            guard !Task.isCancelled, let self else { return }
+            incompleteReleaseRetryTask = nil
+            lastAutomaticCheck = nil
+            checkForUpdates(userInitiated: false)
         }
     }
 
@@ -176,7 +254,7 @@ final class AppUpdater {
         guard let releaseVersion = AppVersion(release.tagName), releaseVersion > currentVersion else {
             throw UpdateError.notNewer
         }
-        guard let asset = release.assets.first(where: { $0.name == "ALO-macos-arm64.zip" }) else {
+        guard let asset = release.installableAsset else {
             throw UpdateError.noCompatibleAsset
         }
         guard asset.size > 0, asset.size <= 250_000_000 else { throw UpdateError.invalidArchive }

@@ -595,6 +595,7 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     private var diagnosticsController: DiagnosticsWindowController?
     private var settingsController: AppSettingsWindowController?
     private var deviceMessagingController: MacDeviceMessagingController?
+    private var updateDetailsController: UpdateDetailsWindowController?
     private var shortcutManager: GlobalShortcutManager?
     private var shortcutMapperController: ShortcutMapperWindowController?
     private var phaseObserver: AnyCancellable?
@@ -651,7 +652,7 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
         window.contentView = NSHostingView(rootView: ALOView(
             model: model,
             checkForUpdates: ALOAppFlavor.isDevelopment ? nil : { [weak self] in
-                self?.updater.checkForUpdates(userInitiated: true)
+                self?.checkForUpdates(nil)
             }
         ))
         if model.account.identityReady, let screen = window.screen ?? NSScreen.main {
@@ -664,13 +665,24 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         self.window = window
-        statusMenuController = ALOStatusMenuController(model: model) { [weak self] in
-            guard let window = self?.window else { return }
-            toggleALOSetupWindow(window)
-        }
+        statusMenuController = ALOStatusMenuController(
+            model: model,
+            toggleMainWindow: { [weak self] in
+                guard let window = self?.window else { return }
+                toggleALOSetupWindow(window)
+            },
+            presentUpdate: { [weak self] in self?.presentAvailableUpdate() }
+        )
         if !ALOAppFlavor.isDevelopment {
             updater.updateAvailabilityHandler = { [weak model] version in model?.availableUpdateVersion = version }
-            updater.updateAvailableHandler = { [weak self] version in self?.presentUpdate(version: version) }
+            updater.updateAvailableHandler = { [weak self] release, userInitiated in
+                guard let self else { return }
+                if userInitiated {
+                    self.presentUpdate(release: release)
+                } else {
+                    self.statusMenuController?.showPopover(allowWhenIdle: true)
+                }
+            }
             updater.messageHandler = { [weak self] message in self?.presentUpdateMessage(message) }
             model.peerVersionHandler = { [weak updater] version in updater?.observePeerVersion(version) }
             updater.start()
@@ -1041,7 +1053,11 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func checkForUpdates(_ sender: Any?) {
-        updater.checkForUpdates(userInitiated: true)
+        if updater.availableRelease != nil {
+            presentAvailableUpdate()
+        } else {
+            updater.checkForUpdates(userInitiated: true)
+        }
     }
 
     @objc func showDiagnostics(_ sender: Any?) {
@@ -1068,18 +1084,21 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
         shortcutMapperController?.show()
     }
 
-    private func presentUpdate(version: String) {
-        let alert = NSAlert()
-        alert.messageText = "ALO \(version) is available"
-        alert.informativeText = "ALO will download only the GitHub release and verify its checksum, Developer ID signature, and notarization before installation."
-        alert.addButton(withTitle: "Install and Relaunch")
-        alert.addButton(withTitle: "Later")
-        alert.addButton(withTitle: "View Release")
-        switch alert.runModal() {
-        case .alertFirstButtonReturn: updater.installAvailableUpdate()
-        case .alertThirdButtonReturn: updater.openReleasePage()
-        default: break
+    private func presentAvailableUpdate() {
+        guard let release = updater.availableRelease else {
+            updater.checkForUpdates(userInitiated: true)
+            return
         }
+        presentUpdate(release: release)
+    }
+
+    private func presentUpdate(release: AppUpdater.Release) {
+        let controller = UpdateDetailsWindowController(
+            release: release,
+            updater: updater
+        )
+        updateDetailsController = controller
+        controller.show()
     }
 
     private func presentUpdateMessage(_ message: String) {
@@ -1094,9 +1113,13 @@ final class ALOAppDelegate: NSObject, NSApplicationDelegate {
 struct ALOStatusPopoverContent: View {
     @ObservedObject var model: ALOViewModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var presentUpdate: () -> Void = {}
 
     var body: some View {
         VStack(spacing: 0) {
+            if let version = model.availableUpdateVersion {
+                AppUpdateBanner(version: version, action: presentUpdate)
+            }
             FloatingRoomView(model: model, presentation: .menuBar)
             RoomPlaybackProgressDivider(model: model)
             WalkieTalkieBar(model: model, showsCloseButton: false)
@@ -1185,6 +1208,7 @@ final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
     private var roomTouchBar: RoomTouchBarController?
     private let model: ALOViewModel
     private let toggleMainWindow: () -> Void
+    private let presentUpdate: () -> Void
     private let statusItem: NSStatusItem
     private let popover = NSPopover()
     private var recordView: ALOStatusRecordView?
@@ -1200,11 +1224,17 @@ final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
     private var pinnedControls: ALOPinnedMenuBarController?
     private var notchSettingsResizeGeneration = 0
 
-    init(model: ALOViewModel, menuBarPreferences: ALOMenuBarPreferences? = nil, toggleMainWindow: @escaping () -> Void) {
+    init(
+        model: ALOViewModel,
+        menuBarPreferences: ALOMenuBarPreferences? = nil,
+        toggleMainWindow: @escaping () -> Void,
+        presentUpdate: @escaping () -> Void = {}
+    ) {
         let preferences = menuBarPreferences ?? .shared
         self.model = model
         self.menuBarPreferences = preferences
         self.toggleMainWindow = toggleMainWindow
+        self.presentUpdate = presentUpdate
         statusItem = NSStatusBar.system.statusItem(withLength: ALOMenuBarRecord.statusItemWidth)
         super.init()
         statusItem.autosaveName = "ALO.launcher"
@@ -1239,7 +1269,13 @@ final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
         popover.animates = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         popover.delegate = self
         popover.contentSize = panelSize
-        let popoverController = NSHostingController(rootView: ALOStatusPopoverContent(model: model))
+        let popoverController = NSHostingController(rootView: ALOStatusPopoverContent(
+            model: model,
+            presentUpdate: { [weak self] in
+                self?.closePopover()
+                self?.presentUpdate()
+            }
+        ))
         popoverController.sizingOptions = []
         popoverController.view.wantsLayer = true
         popoverController.view.layer?.backgroundColor = NSColor.clear.cgColor
@@ -1310,6 +1346,10 @@ final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
             .sink { [weak self] visible in
                 self?.scheduleNotchSettingsResize(visible: visible)
             }.store(in: &observers)
+        model.$availableUpdateVersion.removeDuplicates().dropFirst()
+            .sink { [weak self] _ in
+                DispatchQueue.main.async { self?.resizePopover() }
+            }.store(in: &observers)
     }
 
     func showPopover(allowWhenIdle: Bool = false) {
@@ -1360,6 +1400,7 @@ final class ALOStatusMenuController: NSObject, NSPopoverDelegate {
                 + FloatingMetrics.walkieBarHeight
                 + FloatingMetrics.separatorHeight
                 + settingsHeight
+                + (model.availableUpdateVersion == nil ? 0 : FloatingMetrics.updateBannerHeight)
         )
     }
 
@@ -1474,6 +1515,7 @@ private enum FloatingMetrics {
     static let windowInset: CGFloat = 4
     static var windowWidth: CGFloat { width + windowInset * 2 }
     static let separatorHeight: CGFloat = 1
+    static let updateBannerHeight: CGFloat = 82
     static let expansionDuration: TimeInterval = 0.24
     static let messagePreviewHeight: CGFloat = 116
     static let chatHeight: CGFloat = 380

@@ -452,16 +452,22 @@ software to Apple's notarization service. The imported P12 must contain the
 To publish a downloadable build on the repository's **Releases** page:
 
 1. Update `CFBundleShortVersionString` and `CFBundleVersion` in `Resources/Info.plist`.
-2. Commit and push the version change to `main`.
-3. Create a tag matching `CFBundleShortVersionString` exactly, with an optional leading
+2. Add `docs/releases/<version>.md` with the user-facing summary and highlights that ALO
+   should show in its native **What's New** window.
+3. Commit and push the version change to `main`.
+4. Create a tag matching `CFBundleShortVersionString` exactly, with an optional leading
    `v`, and publish a GitHub Release for that tag. For example:
 
    ```sh
-   gh release create v0.9.0 --target main --generate-notes
+   gh release create v0.9.0 --target main --notes-file docs/releases/0.9.0.md
    ```
 
 Publishing the release automatically attaches notarized and stapled
-`ALO-macos-arm64.zip` and `ALO-macos-arm64.dmg` downloads to the release.
+`ALO-macos-arm64.zip` and `ALO-macos-arm64.dmg` downloads to the release. Once the signed
+ZIP and its GitHub digest are available, installed copies show the update banner and the
+release body in **What's New**. ALO retries while the release workflow is still attaching
+the package, so users are not offered an update that cannot be installed yet. Ordinary
+source pushes run verification but do not advertise an unfinished build to installed apps.
 
 If an older ad-hoc-signed copy appears enabled under **Privacy & Security → Screen &
 System Audio Recording** but still cannot broadcast, remove the old ALO entries,

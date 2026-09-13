@@ -177,5 +177,93 @@ extension NativePresentationTests {
                 try png.write(to: folder.appendingPathComponent("talk-bar-\(unread)-\(dark ? "dark" : "light")-\(floating ? "floating" : "menu").png"))
             }
         }
+
+        @Test("Update banner and What's New window render as native ALO surfaces")
+        func nativeUpdatePresentationRenders() async throws {
+            _ = NSApplication.shared
+            let previousIcon = NSApp.applicationIconImage
+            let repository = URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+            if let icon = NSImage(contentsOf: repository.appendingPathComponent("Resources/ALOLogo-1024.png")) {
+                NSApp.applicationIconImage = icon
+            }
+            defer { NSApp.applicationIconImage = previousIcon }
+            let bannerSize = NSSize(width: 560, height: 82)
+            let banner = NSHostingView(rootView: AppUpdateBanner(version: "0.14.12", action: {})
+                .transaction { $0.disablesAnimations = true }
+                .environment(\.colorScheme, .dark)
+                .background(Color(nsColor: .windowBackgroundColor))
+                .frame(width: bannerSize.width, height: bannerSize.height))
+            let bannerWindow = NSWindow(
+                contentRect: NSRect(origin: NSPoint(x: -10_000, y: -10_000), size: bannerSize),
+                styleMask: .borderless,
+                backing: .buffered,
+                defer: false
+            )
+            bannerWindow.isReleasedWhenClosed = false
+            bannerWindow.appearance = NSAppearance(named: .darkAqua)
+            bannerWindow.contentView = banner
+            defer { bannerWindow.close() }
+            bannerWindow.orderBack(nil)
+            try await Task.sleep(for: .milliseconds(150))
+            banner.layoutSubtreeIfNeeded()
+            let bannerBitmap = try #require(banner.bitmapImageRepForCachingDisplay(in: banner.bounds))
+            banner.cacheDisplay(in: banner.bounds, to: bannerBitmap)
+            #expect(bannerBitmap.pixelsWide > 0 && bannerBitmap.pixelsHigh > 0)
+
+            let asset = AppUpdater.Release.Asset(
+                name: "ALO-macos-arm64.zip",
+                browserDownloadURL: URL(string: "https://example.com/ALO.zip")!,
+                digest: "sha256:" + String(repeating: "a", count: 64),
+                size: 1_024
+            )
+            let release = AppUpdater.Release(
+                tagName: "v0.14.12",
+                name: "Faster rooms and clearer updates",
+                body: "## Summary\nALO now keeps rooms aligned for longer.\n\n## Highlights\n- See release details before installing.\n- Get clearer update progress and errors.",
+                htmlURL: URL(string: "https://example.com/release")!,
+                assets: [asset]
+            )
+            let details = UpdateDetailsWindowController(release: release, updater: AppUpdater())
+            let detailsWindow = try #require(details.window)
+            detailsWindow.setFrameOrigin(NSPoint(x: -10_000, y: -10_000))
+            defer { detailsWindow.close() }
+            detailsWindow.orderBack(nil)
+            try await Task.sleep(for: .milliseconds(150))
+            let detailsView = try #require(detailsWindow.contentView)
+            detailsView.layoutSubtreeIfNeeded()
+            let detailsBitmap = try #require(detailsView.bitmapImageRepForCachingDisplay(in: detailsView.bounds))
+            detailsView.cacheDisplay(in: detailsView.bounds, to: detailsBitmap)
+            #expect(detailsBitmap.pixelsWide > 0 && detailsBitmap.pixelsHigh > 0)
+
+            let support = UpdateDetailsWindowController(
+                release: release,
+                updater: AppUpdater(),
+                initialPage: .support
+            )
+            let supportWindow = try #require(support.window)
+            supportWindow.setFrameOrigin(NSPoint(x: -10_000, y: -10_000))
+            defer { supportWindow.close() }
+            supportWindow.orderBack(nil)
+            try await Task.sleep(for: .milliseconds(150))
+            let supportView = try #require(supportWindow.contentView)
+            supportView.layoutSubtreeIfNeeded()
+            let supportBitmap = try #require(supportView.bitmapImageRepForCachingDisplay(in: supportView.bounds))
+            supportView.cacheDisplay(in: supportView.bounds, to: supportBitmap)
+            #expect(supportBitmap.pixelsWide > 0 && supportBitmap.pixelsHigh > 0)
+
+            if let directory = ProcessInfo.processInfo.environment["ALO_SPACES_SNAPSHOT_DIR"] {
+                let folder = URL(fileURLWithPath: directory, isDirectory: true)
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                try #require(bannerBitmap.representation(using: .png, properties: [:]))
+                    .write(to: folder.appendingPathComponent("update-banner.png"))
+                try #require(detailsBitmap.representation(using: .png, properties: [:]))
+                    .write(to: folder.appendingPathComponent("whats-new.png"))
+                try #require(supportBitmap.representation(using: .png, properties: [:]))
+                    .write(to: folder.appendingPathComponent("update-support.png"))
+            }
+        }
     }
 }
