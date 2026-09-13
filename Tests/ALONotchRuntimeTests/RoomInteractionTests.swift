@@ -4,6 +4,18 @@ import XCTest
 
 @MainActor
 final class RoomInteractionTests: XCTestCase {
+    func testRoomModelReleasesFromSynchronousBackgroundCallback() async {
+        let payload = RoomModelReleasePayload(RoomInteractionModel())
+        weak var retained = payload.object
+        let released = expectation(description: "Room model released outside a Swift task")
+        DispatchQueue.global(qos: .utility).async {
+            payload.object = nil
+            released.fulfill()
+        }
+        await fulfillment(of: [released], timeout: 2)
+        XCTAssertNil(retained)
+    }
+
     func testQuickActionsHaveCompactBoundsAndResizeKeepsExpansion() async throws {
         let model = RoomInteractionModel()
         let display = CGSize(width: 1440, height: 900)
@@ -125,4 +137,11 @@ final class RoomInteractionTests: XCTestCase {
         XCTAssertEqual(content.expandedSize(baseWidth: 300, baseHeight: 32), model.availableSize)
         XCTAssertEqual(content.expandedDynamicIslandSize(baseWidth: 300, baseHeight: 32), model.availableSize)
     }
+}
+
+/// Transfer the only strong reference to a single callback, as SwiftUI/Dispatch
+/// can do when disposing the content of a dismissed notch transition.
+nonisolated private final class RoomModelReleasePayload: @unchecked Sendable {
+    var object: AnyObject?
+    init(_ object: AnyObject) { self.object = object }
 }
