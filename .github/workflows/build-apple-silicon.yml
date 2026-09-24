@@ -1,4 +1,4 @@
-name: Build Apple Silicon app
+name: Build Mac apps
 
 on:
   release:
@@ -77,8 +77,16 @@ jobs:
               print(report.read_text(errors="replace")[:100_000])
           PY
 
-  build-arm64:
-    runs-on: macos-15
+  build-macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: arm64
+            runner: macos-15
+          - architecture: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     env:
       # Match the locally validated compiler and keep the entrypoint workaround
@@ -97,8 +105,8 @@ jobs:
           app_version="$(plutil -extract CFBundleShortVersionString raw Resources/Info.plist)"
           test "${RELEASE_TAG#v}" = "$app_version"
 
-      - name: Verify Apple Silicon runner
-        run: test "$(uname -m)" = "arm64"
+      - name: Verify runner architecture
+        run: test "$(uname -m)" = "${{ matrix.architecture }}"
 
       - name: Verify pinned toolchain
         run: |
@@ -125,10 +133,10 @@ jobs:
           test -n "$ALO_CODESIGN_IDENTITY"
           security find-identity -v -p codesigning | grep -F "$ALO_CODESIGN_IDENTITY"
 
-      - name: Build and package arm64 app
+      - name: Build and package app
         env:
           ALO_CODESIGN_IDENTITY: ${{ vars.ALO_CODESIGN_IDENTITY || vars.WERAI_CODESIGN_IDENTITY }}
-        run: ./Scripts/package.sh --arm64-only
+        run: ./Scripts/package.sh --${{ matrix.architecture }}-only
 
       - name: Verify packaged app icon matches current artwork
         run: bash Scripts/test-app-icon.sh --verify dist/ALO.app/Contents/Resources/AppIcon.icns
@@ -147,24 +155,24 @@ jobs:
           trap 'rm -f "$api_key_path"' EXIT
           printf '%s' "$APP_STORE_CONNECT_API_KEY_BASE64" | /usr/bin/base64 -D > "$api_key_path"
 
-          xcrun notarytool submit dist/ALO-macos-arm64.zip \
+          xcrun notarytool submit dist/ALO-macos-${{ matrix.architecture }}.zip \
             --key "$api_key_path" \
             --key-id "$APP_STORE_CONNECT_KEY_ID" \
             --issuer "$APP_STORE_CONNECT_ISSUER_ID" \
             --wait \
             --timeout 15m
           xcrun stapler staple dist/ALO.app
-          ./Scripts/create_distribution_archives.sh arm64
+          ./Scripts/create_distribution_archives.sh ${{ matrix.architecture }}
           codesign --force --timestamp --sign "$ALO_CODESIGN_IDENTITY" \
-            dist/ALO-macos-arm64.dmg
+            dist/ALO-macos-${{ matrix.architecture }}.dmg
 
-          xcrun notarytool submit dist/ALO-macos-arm64.dmg \
+          xcrun notarytool submit dist/ALO-macos-${{ matrix.architecture }}.dmg \
             --key "$api_key_path" \
             --key-id "$APP_STORE_CONNECT_KEY_ID" \
             --issuer "$APP_STORE_CONNECT_ISSUER_ID" \
             --wait \
             --timeout 15m
-          xcrun stapler staple dist/ALO-macos-arm64.dmg
+          xcrun stapler staple dist/ALO-macos-${{ matrix.architecture }}.dmg
 
       - name: Verify architecture, signature, and Gatekeeper acceptance
         env:
@@ -172,18 +180,18 @@ jobs:
         run: |
           test -n "$APPLE_TEAM_ID"
           file dist/ALO.app/Contents/MacOS/alo
-          lipo dist/ALO.app/Contents/MacOS/alo -verify_arch arm64
+          lipo dist/ALO.app/Contents/MacOS/alo -verify_arch "${{ matrix.architecture }}"
           codesign --verify --deep --strict --verbose=2 dist/ALO.app
           signature="$(codesign -dvvv dist/ALO.app 2>&1)"
           grep -F "Authority=Developer ID Application:" <<< "$signature"
           grep -F "TeamIdentifier=$APPLE_TEAM_ID" <<< "$signature"
           codesign -d --entitlements - --xml dist/ALO.app > "$RUNNER_TEMP/alo-entitlements.plist"
           test "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.audio-input' "$RUNNER_TEMP/alo-entitlements.plist")" = "true"
-          codesign --verify --strict --verbose=2 dist/ALO-macos-arm64.dmg
+          codesign --verify --strict --verbose=2 dist/ALO-macos-${{ matrix.architecture }}.dmg
           xcrun stapler validate dist/ALO.app
-          xcrun stapler validate dist/ALO-macos-arm64.dmg
+          xcrun stapler validate dist/ALO-macos-${{ matrix.architecture }}.dmg
           spctl --assess --type execute --verbose=4 dist/ALO.app
-          if zipinfo -l dist/ALO-macos-arm64.zip | awk '$1 ~ /^l/ { print; found=1 } END { exit !found }'; then
+          if zipinfo -l dist/ALO-macos-${{ matrix.architecture }}.zip | awk '$1 ~ /^l/ { print; found=1 } END { exit !found }'; then
             echo "Release ZIP contains a symbolic link rejected by older ALO updaters" >&2
             exit 1
           fi
@@ -196,42 +204,58 @@ jobs:
       - name: Upload app
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ALO-macos-arm64
+          name: ALO-macos-${{ matrix.architecture }}
           path: |
-            dist/ALO-macos-arm64.zip
-            dist/ALO-macos-arm64.dmg
+            dist/ALO-macos-${{ matrix.architecture }}.zip
+            dist/ALO-macos-${{ matrix.architecture }}.dmg
           if-no-files-found: error
 
   verify-distribution:
-    needs: build-arm64
-    runs-on: macos-15
+    needs: build-macos
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: arm64
+            runner: macos-15
+          - architecture: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
     steps:
       # This machine has no checkout or SwiftPM build directory: a generated
       # bundle accessor must not mask missing app resources with a build path.
       - name: Download packaged app on a clean machine
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: ALO-macos-arm64
+          name: ALO-macos-${{ matrix.architecture }}
           path: dist
       - name: Verify relocated game resources and scene launch
         run: |
-          ditto -x -k dist/ALO-macos-arm64.zip relocated
+          test "$(uname -m)" = "${{ matrix.architecture }}"
+          ditto -x -k dist/ALO-macos-${{ matrix.architecture }}.zip relocated
+          lipo relocated/ALO.app/Contents/MacOS/alo -verify_arch "${{ matrix.architecture }}"
           relocated/ALO.app/Contents/MacOS/alo verify-game-resources
           relocated/ALO.app/Contents/MacOS/alo verify-secure-identity
           relocated/ALO.app/Contents/MacOS/alo verify-network-configuration
 
   publish-release:
     if: github.event_name == 'release'
-    needs: [mac-tests, build-arm64, verify-distribution]
+    needs: [mac-tests, build-macos, verify-distribution]
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-      - name: Download verified app
+      - name: Download verified Apple Silicon app
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ALO-macos-arm64
+          path: dist
+
+      - name: Download verified Intel app
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ALO-macos-x86_64
           path: dist
 
       - name: Attach app to GitHub Release
@@ -243,4 +267,6 @@ jobs:
           gh release upload "$RELEASE_TAG" \
             dist/ALO-macos-arm64.zip \
             dist/ALO-macos-arm64.dmg \
+            dist/ALO-macos-x86_64.zip \
+            dist/ALO-macos-x86_64.dmg \
             --clobber
