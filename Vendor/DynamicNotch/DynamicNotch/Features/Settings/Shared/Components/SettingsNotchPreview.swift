@@ -16,12 +16,8 @@ struct SettingsNotchPreview<Overlay: View>: View {
     let previewHeight: CGFloat
     let topCornerRadius: CGFloat
     let bottomCornerRadius: CGFloat
-    let backgroundStyle: NotchBackgroundStyle
     let isDynamicIsland: Bool
     let dynamicIslandCornerRadius: CGFloat
-    let showsStroke: Bool
-    let strokeColor: Color
-    let strokeWidth: CGFloat
     let lightBackgroundImage: Image?
     let darkBackgroundImage: Image?
     let backgroundImageContentMode: ContentMode
@@ -36,12 +32,8 @@ struct SettingsNotchPreview<Overlay: View>: View {
         previewHeight: CGFloat = 138,
         topCornerRadius: CGFloat = 9,
         bottomCornerRadius: CGFloat = 13,
-        backgroundStyle: NotchBackgroundStyle = .black,
         isDynamicIsland: Bool = false,
         dynamicIslandCornerRadius: CGFloat = 0,
-        showsStroke: Bool = true,
-        strokeColor: Color = .green.opacity(0.3),
-        strokeWidth: CGFloat = 1.5,
         lightBackgroundImage: Image? = nil,
         darkBackgroundImage: Image? = nil,
         backgroundImageContentMode: ContentMode = .fill,
@@ -54,12 +46,8 @@ struct SettingsNotchPreview<Overlay: View>: View {
         self.previewHeight = previewHeight
         self.topCornerRadius = topCornerRadius
         self.bottomCornerRadius = bottomCornerRadius
-        self.backgroundStyle = backgroundStyle
         self.isDynamicIsland = isDynamicIsland
         self.dynamicIslandCornerRadius = dynamicIslandCornerRadius
-        self.showsStroke = showsStroke
-        self.strokeColor = strokeColor
-        self.strokeWidth = strokeWidth
         self.lightBackgroundImage = lightBackgroundImage
         self.darkBackgroundImage = darkBackgroundImage
         self.backgroundImageContentMode = backgroundImageContentMode
@@ -119,15 +107,10 @@ struct SettingsNotchPreview<Overlay: View>: View {
     @ViewBuilder
     private var notchSurface: some View {
         NotchBackgroundSurface(
-            style: backgroundStyle,
             topCornerRadius: topCornerRadius,
             bottomCornerRadius: bottomCornerRadius,
             isDynamicIsland: isDynamicIsland,
-            dynamicIslandCornerRadius: dynamicIslandCornerRadius,
-            strokeColor: showsStroke ? strokeColor : .clear,
-            strokeWidth: strokeWidth,
-            height: height,
-            baseHeight: height
+            dynamicIslandCornerRadius: dynamicIslandCornerRadius
         )
     }
 }

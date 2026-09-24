@@ -63,10 +63,6 @@ struct DragAndDropSettingsView: View {
                 previewHeight: 166,
                 topCornerRadius: 24,
                 bottomCornerRadius: 36,
-                backgroundStyle: .black,
-                showsStroke: appearanceSettings.isShowNotchStrokeEnabled,
-                strokeColor: dragAndDropPreviewStrokeColor,
-                strokeWidth: appearanceSettings.notchStrokeWidth,
                 lightBackgroundImage: NotchImage("backgroundLight"),
                 darkBackgroundImage: NotchImage("backgroundDark")
             ) {
@@ -115,33 +111,6 @@ struct DragAndDropSettingsView: View {
         }
         .padding(.horizontal, AirDropDropZoneMetrics.horizontalPadding)
         .padding(.vertical, AirDropDropZoneMetrics.verticalPadding)
-    }
-
-    private var dragAndDropPreviewStrokeColor: Color {
-        guard appearanceSettings.isShowNotchStrokeEnabled else {
-            return .clear
-        }
-
-        let baseColor: Color
-        if appearanceSettings.isDefaultActivityStrokeEnabled {
-            baseColor = .white.opacity(0.2)
-        } else {
-            baseColor = dragAndDropPreviewBaseStrokeColor
-        }
-        return baseColor.opacity(appearanceSettings.notchStrokeOpacity)
-    }
-
-    private var dragAndDropPreviewBaseStrokeColor: Color {
-        switch mediaSettings.dragAndDropActivityMode {
-        case .tray:
-            return DragAndDropTarget.tray.activityStrokeColor
-
-        case .airDrop:
-            return DragAndDropTarget.airDrop.activityStrokeColor
-
-        case .combined:
-            return .white.opacity(0.2)
-        }
     }
 
     private var dragAndDropPreviewWidth: CGFloat {
