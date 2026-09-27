@@ -13,11 +13,15 @@ for argument in "$@"; do
             architectures=(arm64)
             archive_suffix="arm64"
             ;;
+        --x86_64-only)
+            architectures=(x86_64)
+            archive_suffix="x86_64"
+            ;;
         --dev)
             development_build=true
             ;;
         *)
-            echo "Usage: $0 [--arm64-only] [--dev]" >&2
+            echo "Usage: $0 [--arm64-only|--x86_64-only] [--dev]" >&2
             exit 2
             ;;
     esac

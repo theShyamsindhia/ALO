@@ -6,7 +6,7 @@ Listen together.
 
 Share what’s playing on your Mac. Hear it together, in sync.
 
-[Download for Apple Silicon](https://github.com/theShyamsindhia/ALO/releases/latest/download/ALO-macos-arm64.dmg) · [Release notes](https://github.com/theShyamsindhia/ALO/releases/latest) · [Build from source](#build-it)
+[Download for Apple Silicon](https://github.com/theShyamsindhia/ALO/releases/latest/download/ALO-macos-arm64.dmg) · [Download for Intel](https://github.com/theShyamsindhia/ALO/releases/latest/download/ALO-macos-x86_64.dmg) · [Release notes](https://github.com/theShyamsindhia/ALO/releases/latest) · [Build from source](#build-it)
 
 Free and open source. Made for macOS. Audio, screens, voice, and chat between locally connected Macs.
 
@@ -99,7 +99,7 @@ buttons continue to control the local Mac.
 ALO checks its GitHub Releases page shortly after launch and every six hours. Choose
 **ALO → Check for Updates…** at any time for a manual check. Channel members also advertise
 their app version, so seeing a newer member triggers the same official-release check.
-Updates are never copied from another channel member: ALO downloads the Apple Silicon ZIP
+Updates are never copied from another channel member: ALO downloads the ZIP for this Mac's architecture
 from GitHub, verifies GitHub's SHA-256 digest, the `in.werai.audio` bundle identity,
 Developer ID team `R9QFK9NM3Y`, and Gatekeeper acceptance, then replaces and relaunches
 the app. macOS asks for administrator approval only when the app's folder requires it.
@@ -433,8 +433,8 @@ input, and fragmented messages.
 
 ## GitHub builds and releases
 
-Publishing a GitHub Release runs **Build Apple Silicon app** on an Apple Silicon GitHub
-runner. The workflow imports the repository's encrypted Developer ID certificate into an
+Publishing a GitHub Release runs **Build Mac apps** on Apple Silicon and Intel GitHub
+runners. The workflow imports the repository's encrypted Developer ID certificate into an
 ephemeral keychain, enables the hardened runtime, submits the app and disk image to Apple's
 notarization service, staples the approval tickets, and verifies Gatekeeper acceptance.
 Manual workflow dispatch remains available for signing diagnostics.
@@ -462,12 +462,13 @@ To publish a downloadable build on the repository's **Releases** page:
    gh release create v0.9.0 --target main --notes-file docs/releases/0.9.0.md
    ```
 
-Publishing the release automatically attaches notarized and stapled
-`ALO-macos-arm64.zip` and `ALO-macos-arm64.dmg` downloads to the release. Once the signed
-ZIP and its GitHub digest are available, installed copies show the update banner and the
-release body in **What's New**. ALO retries while the release workflow is still attaching
-the package, so users are not offered an update that cannot be installed yet. Ordinary
-source pushes run verification but do not advertise an unfinished build to installed apps.
+Publishing the release automatically attaches notarized and stapled ZIP and DMG
+downloads for both `arm64` and `x86_64`. The updater selects the archive matching
+the current Mac and verifies that architecture in the downloaded executable. Once
+the signed ZIP and its GitHub digest are available, installed copies show the update
+banner and release body in **What's New**. ALO retries while the release workflow
+attaches the package, so users are not offered an update they cannot install yet.
+Ordinary source pushes run verification without advertising an unfinished build.
 
 If an older ad-hoc-signed copy appears enabled under **Privacy & Security → Screen &
 System Audio Recording** but still cannot broadcast, remove the old ALO entries,

@@ -121,7 +121,7 @@ func renderInNotch<V: View>(_ view: V, name: String, size: CGSize) async throws 
     #expect(notch.isDisplayingExpandedLiveActivity)
     #expect(notch.presentedNotchSize == size)
     let bounds = NSRect(origin: .zero, size: size)
-    let host = NSHostingView(rootView: NotchSurfaceContainerView(notchViewModel: notch, settingsViewModel: settings)
+    let host = NSHostingView(rootView: NotchSurfaceContainerView(notchViewModel: notch)
         .frame(width: size.width, height: size.height)
         .coordinateSpace(name: "NotchRender")
         .environment(\.colorScheme, .dark).defaultAppStorage(defaults))

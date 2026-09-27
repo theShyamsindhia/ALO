@@ -18,10 +18,6 @@ struct FileTraySettingsView: View {
                 previewHeight: 166,
                 topCornerRadius: 24,
                 bottomCornerRadius: 36,
-                backgroundStyle: .black,
-                showsStroke: appearanceSettings.isShowNotchStrokeEnabled,
-                strokeColor: .white.opacity(0.2),
-                strokeWidth: appearanceSettings.notchStrokeWidth,
                 lightBackgroundImage: NotchImage("backgroundLight"),
                 darkBackgroundImage: NotchImage("backgroundDark")
             ) {

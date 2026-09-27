@@ -5,8 +5,8 @@ set -euo pipefail
 cd "${0:A:h}/.."
 
 archive_suffix="${1:-}"
-if [[ "$archive_suffix" != "arm64" && "$archive_suffix" != "universal" ]]; then
-    echo "Usage: $0 <arm64|universal>" >&2
+if [[ "$archive_suffix" != "arm64" && "$archive_suffix" != "x86_64" && "$archive_suffix" != "universal" ]]; then
+    echo "Usage: $0 <arm64|x86_64|universal>" >&2
     exit 2
 fi
 

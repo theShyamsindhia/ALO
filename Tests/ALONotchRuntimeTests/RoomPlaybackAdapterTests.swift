@@ -61,10 +61,16 @@ final class RoomPlaybackAdapterTests: XCTestCase {
         let model = NowPlayingViewModel(service: InactiveNowPlayingService(), lyricsProvider: InactiveLyricsProvider(), favoritesStore: defaults)
         let original = NowPlayingNotchContent(nowPlayingViewModel: model, settings: settings.mediaAndFiles, applicationSettings: settings.application)
         let room = RoomNowPlayingNotchContent(original: original)
+        let navigableRoom = RoomNowPlayingNotchContent(original: original, openRoom: {})
         XCTAssertEqual(room.size(baseWidth: 190, baseHeight: 32), original.size(baseWidth: 190, baseHeight: 32))
         XCTAssertEqual(room.expandedSize(baseWidth: 190, baseHeight: 32), original.expandedSize(baseWidth: 190, baseHeight: 32))
         XCTAssertEqual(room.dynamicIslandSize(baseWidth: 190, baseHeight: 32), original.dynamicIslandSize(baseWidth: 190, baseHeight: 32))
         XCTAssertEqual(room.expandedDynamicIslandSize(baseWidth: 190, baseHeight: 32), original.expandedDynamicIslandSize(baseWidth: 190, baseHeight: 32))
+        XCTAssertEqual(navigableRoom.expandedSize(baseWidth: 190, baseHeight: 32),
+                       room.expandedSize(baseWidth: 190, baseHeight: 32),
+                       "Conversation navigation must not add a footer or enlarge the player")
+        XCTAssertEqual(navigableRoom.expandedDynamicIslandSize(baseWidth: 190, baseHeight: 32),
+                       room.expandedDynamicIslandSize(baseWidth: 190, baseHeight: 32))
         XCTAssertNotEqual(room.id, original.id)
         XCTAssertTrue(room.isExpandable)
         XCTAssertNil(room.windowLink, "Clicking ALO's Notch must expand it instead of opening another window")
@@ -119,7 +125,8 @@ final class RoomPlaybackAdapterTests: XCTestCase {
                 applicationSettings: settings.application,
                 initiallyShowsLyrics: true
             )
-            notch.send(.showLiveActivity(RoomNowPlayingNotchContent(original: original)))
+            notch.send(.showLiveActivity(RoomNowPlayingNotchContent(original: original,
+                openRoom: { XCTFail("Rendering must not navigate") })))
             let deadline = Date().addingTimeInterval(2)
             while notch.notchModel.content == nil && Date() < deadline { try await Task.sleep(for: .milliseconds(20)) }
             func render(_ filename: String) async throws {

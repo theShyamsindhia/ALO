@@ -16,6 +16,7 @@ struct NowPlayingExpandedNotchView: View {
     @ObservedObject var applicationSettings: ApplicationSettingsStore
     
     let onOpenPlaybackSource: @MainActor () -> Void
+    let onOpenRoom: (() -> Void)?
     
     @State private var scrubProgress: CGFloat?
     @State private var showsLyrics: Bool
@@ -26,12 +27,14 @@ struct NowPlayingExpandedNotchView: View {
         settings: MediaAndFilesSettingsStore,
         applicationSettings: ApplicationSettingsStore,
         onOpenPlaybackSource: @escaping @MainActor () -> Void,
-        initiallyShowsLyrics: Bool = false
+        initiallyShowsLyrics: Bool = false,
+        onOpenRoom: (() -> Void)? = nil
     ) {
         self.nowPlayingViewModel = nowPlayingViewModel
         self.settings = settings
         self.applicationSettings = applicationSettings
         self.onOpenPlaybackSource = onOpenPlaybackSource
+        self.onOpenRoom = onOpenRoom
         _showsLyrics = State(initialValue: initiallyShowsLyrics)
     }
     
@@ -86,60 +89,65 @@ struct NowPlayingExpandedNotchView: View {
             isDefaultActivityStrokeEnabled: applicationSettings.isDefaultActivityStrokeEnabled
         )
 
-        return VStack {
-            Spacer()
-
+        return VStack(spacing: 12) {
             Group {
                 if showsLyrics {
-                    lyricsSection(elapsedTime: displayedElapsedTime)
+                    HStack(spacing: 8) {
+                        lyricsSection(elapsedTime: displayedElapsedTime)
+                        if onOpenRoom != nil { roomNavigationButton }
+                    }
                         .transition(.opacity.combined(with: .scale(scale: 0.98)))
                 } else {
                     headerSection(snapshot: snapshot, appearance: appearance)
                         .transition(.opacity.combined(with: .scale(scale: 0.98)))
                 }
             }
-            .frame(height: 78)
+            .frame(height: 60)
             .animation(.easeInOut(duration: 0.2), value: showsLyrics)
 
-            Spacer()
-
-            PlayerProgressBar(
-                progress: displayedProgress,
-                displayedElapsedTime: displayedElapsedTime,
-                duration: snapshot.duration,
-                isInteractive: snapshot.duration > 0 && nowPlayingViewModel.canSend(.seek(0)),
-                tintGradient: {
-                    switch appearance.progressTintStyle {
-                    case .default:
-                        return nil
-                    case .artwork:
-                        return nowPlayingViewModel.artworkPalette.equalizerGradient
-                    case .systemAccent:
-                        return LinearGradient(
-                            colors: [.accentColor, .accentColor.opacity(0.7)],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
+            if snapshot.duration > 0 {
+                PlayerProgressBar(
+                    progress: displayedProgress,
+                    displayedElapsedTime: displayedElapsedTime,
+                    duration: snapshot.duration,
+                    isInteractive: nowPlayingViewModel.canSend(.seek(0)),
+                    tintGradient: {
+                        switch appearance.progressTintStyle {
+                        case .default:
+                            return nil
+                        case .artwork:
+                            return nowPlayingViewModel.artworkPalette.equalizerGradient
+                        case .systemAccent:
+                            return LinearGradient(
+                                colors: [.accentColor, .accentColor.opacity(0.7)],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        }
+                    }(),
+                    primaryColor: progressTimeColor(isPrimary: true, appearance: appearance),
+                    secondaryColor: progressTimeColor(isPrimary: false, appearance: appearance),
+                    onScrubChanged: { newProgress in
+                        scrubProgress = newProgress
+                    },
+                    onScrubEnded: { newProgress in
+                        nowPlayingViewModel.seek(to: snapshot.duration * TimeInterval(newProgress))
+                        scrubProgress = nil
                     }
-                }(),
-                primaryColor: progressTimeColor(isPrimary: true, appearance: appearance),
-                secondaryColor: progressTimeColor(isPrimary: false, appearance: appearance),
-                onScrubChanged: { newProgress in
-                    scrubProgress = newProgress
-                },
-                onScrubEnded: { newProgress in
-                    nowPlayingViewModel.seek(to: snapshot.duration * TimeInterval(newProgress))
-                    scrubProgress = nil
-                }
-            )
-
-            Spacer()
+                )
+            } else {
+                Text("Live audio")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.65))
+                    .frame(maxWidth: .infinity, minHeight: 18)
+            }
 
             controlsSection(snapshot: snapshot, appearance: appearance)
         }
-        .padding(.horizontal, isDynamicIsland ? 50 : 70)
-        .padding(.top, isDynamicIsland ? 15 : 25)
-        .padding(.bottom, 15)
+        .padding(.horizontal, isDynamicIsland ? 24 : 52)
+        .padding(.top, isDynamicIsland ? 16 : 36)
+        .padding(.bottom, 16)
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     @ViewBuilder
@@ -222,9 +230,7 @@ struct NowPlayingExpandedNotchView: View {
     @ViewBuilder
     private func headerSection(snapshot: NowPlayingSnapshot, appearance: NowPlayingAppearanceOptions) -> some View {
         HStack(spacing: 15) {
-            Button(action: {
-                openPlaybackSource()
-            }) {
+            playbackSourceLabel {
                 ArtworkView(
                     nowPlayingViewModel: nowPlayingViewModel,
                     width: 60,
@@ -234,19 +240,15 @@ struct NowPlayingExpandedNotchView: View {
                 )
                 .contentShape(Rectangle())
             }
-            .buttonStyle(PlaybackSourceButtonStyle())
-            .disabled(!nowPlayingViewModel.canOpenPlaybackSource)
 
             HStack(alignment: .top, spacing: 10) {
-                Button(action: {
-                    openPlaybackSource()
-                }) {
+                playbackSourceLabel {
                     VStack(alignment: .leading, spacing: 2) {
                         MarqueeText(
                             .constant(displayTitle(for: snapshot)),
                             font: .system(size: 16, weight: .medium),
                             nsFont: .headline,
-                            textColor: .white.opacity(0.8),
+                            textColor: .white.opacity(0.95),
                             backgroundColor: .clear,
                             minDuration: 2.0,
                             frameWidth: 170
@@ -256,7 +258,7 @@ struct NowPlayingExpandedNotchView: View {
                             .constant(displayArtist(for: snapshot)),
                             font: .system(size: 14),
                             nsFont: .headline,
-                            textColor: .white.opacity(0.5),
+                            textColor: .white.opacity(0.65),
                             backgroundColor: .clear,
                             minDuration: 3.0,
                             frameWidth: 170
@@ -264,22 +266,50 @@ struct NowPlayingExpandedNotchView: View {
                     }
                     .contentShape(Rectangle())
                 }
-                .buttonStyle(PlaybackSourceButtonStyle())
-                .disabled(!nowPlayingViewModel.canOpenPlaybackSource)
 
                 Spacer()
 
-                LightweightNowPlayingEqualizerView(
-                    isPlaying: snapshot.isPlaying,
-                    colors: [
-                        nowPlayingViewModel.artworkPalette.equalizerHighlightColor,
-                        nowPlayingViewModel.artworkPalette.equalizerBaseColor
-                    ],
-                    barHeight: 23,
-                    barWidth: 2.7
-                )
-                .frame(width: 23, height: 18)
+                if onOpenRoom != nil {
+                    roomNavigationButton
+                } else {
+                    LightweightNowPlayingEqualizerView(
+                        isPlaying: snapshot.isPlaying,
+                        colors: [
+                            nowPlayingViewModel.artworkPalette.equalizerHighlightColor,
+                            nowPlayingViewModel.artworkPalette.equalizerBaseColor
+                        ],
+                        barHeight: 23,
+                        barWidth: 2.7
+                    )
+                    .frame(width: 23, height: 18)
+                }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var roomNavigationButton: some View {
+        if let onOpenRoom {
+            Button(action: onOpenRoom) {
+                Image(systemName: "bubble.left.and.bubble.right")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.8))
+            }
+            .buttonStyle(PressedButtonStyle(width: 32, height: 32,
+                cornerRadius: 10, hoverBackground: .white.opacity(0.12)))
+            .help("Conversation and files")
+            .accessibilityLabel("Conversation and files")
+        }
+    }
+
+    @ViewBuilder
+    private func playbackSourceLabel<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        if nowPlayingViewModel.canOpenPlaybackSource {
+            Button(action: openPlaybackSource, label: content)
+                .buttonStyle(PlaybackSourceButtonStyle())
+        } else {
+            // Room metadata is information, not a disabled launch button.
+            content()
         }
     }
 

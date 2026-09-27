@@ -6,8 +6,7 @@ struct NotchInteractiveBodyView: View {
     
     var body: some View {
         NotchSurfaceContainerView(
-            notchViewModel: notchViewModel,
-            settingsViewModel: settingsViewModel
+            notchViewModel: notchViewModel
         )
         .shadow(
             color: (notchViewModel.presentedNotchSize.height >= notchViewModel.notchModel.baseHeight + 30)
@@ -15,14 +14,15 @@ struct NotchInteractiveBodyView: View {
         )
         .frame(
             width: notchViewModel.presentedNotchSize.width,
-            height: notchViewModel.presentedNotchSize.height
+            height: notchViewModel.presentedNotchSize.height,
+            alignment: .top
         )
         .customNotchPressable(
             notchViewModel: notchViewModel,
             isPressed: $notchViewModel.isPressed,
             baseSize: notchViewModel.presentedNotchSize
         )
-        .offset(y: notchViewModel.isDynamicIsland ? 3 : 1)
+        .offset(y: notchViewModel.isDynamicIsland ? 3 : 0)
         .customNotchMouseSwipeable(
             notchViewModel: notchViewModel,
             isEnabled: shouldEnableNotchSwipeGestures
@@ -35,8 +35,6 @@ struct NotchInteractiveBodyView: View {
             NotchContextMenu(settingsViewModel: settingsViewModel)
         }
         .environment(\.colorScheme, .dark)
-        .animation(notchViewModel.animations.strokeVisibility, value: notchViewModel.shouldRenderStroke)
-        .animation(notchViewModel.animations.strokeVisibility, value: settingsViewModel.isShowNotchStrokeEnabled)
         .animation(notchViewModel.animations.notchVisibility, value: notchViewModel.showNotch)
     }
     

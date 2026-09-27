@@ -81,7 +81,7 @@ final class RoomPlaybackService: NowPlayingMonitoring, NowPlayingCommandAvailabi
 }
 
 /// Separate identity prevents system-player hide events from hiding room media.
-/// Every visual, size and corner is delegated to the original content.
+/// Shares the player layout; room navigation stays inside its header.
 struct RoomNowPlayingNotchContent: NotchContentProtocol, DynamicIslandCustomizable {
     static let activityID = "alo.room.nowPlaying"
     let original: NowPlayingNotchContent
@@ -95,25 +95,25 @@ struct RoomNowPlayingNotchContent: NotchContentProtocol, DynamicIslandCustomizab
     var windowLink: (@MainActor () -> Void)? { nil }
     func size(baseWidth: CGFloat, baseHeight: CGFloat) -> CGSize { original.size(baseWidth: baseWidth, baseHeight: baseHeight) }
     func expandedSize(baseWidth: CGFloat, baseHeight: CGFloat) -> CGSize {
-        let size = original.expandedSize(baseWidth: baseWidth, baseHeight: baseHeight)
-        return CGSize(width: size.width, height: size.height + (openRoom == nil ? 0 : 36))
+        original.expandedSize(baseWidth: baseWidth, baseHeight: baseHeight)
     }
     func cornerRadius(baseRadius: CGFloat) -> (top: CGFloat, bottom: CGFloat) { original.cornerRadius(baseRadius: baseRadius) }
     func expandedCornerRadius(baseRadius: CGFloat) -> (top: CGFloat, bottom: CGFloat) { original.expandedCornerRadius(baseRadius: baseRadius) }
     func dynamicIslandSize(baseWidth: CGFloat, baseHeight: CGFloat) -> CGSize { original.dynamicIslandSize(baseWidth: baseWidth, baseHeight: baseHeight) }
     func expandedDynamicIslandSize(baseWidth: CGFloat, baseHeight: CGFloat) -> CGSize {
-        let size = original.expandedDynamicIslandSize(baseWidth: baseWidth, baseHeight: baseHeight)
-        return CGSize(width: size.width, height: size.height + (openRoom == nil ? 0 : 36))
+        original.expandedDynamicIslandSize(baseWidth: baseWidth, baseHeight: baseHeight)
     }
     func dynamicIslandCornerRadius(baseHeight: CGFloat) -> CGFloat { original.dynamicIslandCornerRadius(baseHeight: baseHeight) }
     func expandedDynamicIslandCornerRadius(baseHeight: CGFloat) -> CGFloat { original.expandedDynamicIslandCornerRadius(baseHeight: baseHeight) }
     func makeView() -> AnyView { original.makeView() }
     func makeExpandedView() -> AnyView {
-        guard let openRoom else { return original.makeExpandedView() }
-        return AnyView(VStack(spacing: 0) {
-            original.makeExpandedView()
-            Button(action: openRoom) { Label("Conversation and files", systemImage: "bubble.left.and.bubble.right") }
-                .buttonStyle(.plain).font(.callout).frame(height: 36)
-        })
+        AnyView(NowPlayingExpandedNotchView(
+            nowPlayingViewModel: original.nowPlayingViewModel,
+            settings: original.settings,
+            applicationSettings: original.applicationSettings,
+            onOpenPlaybackSource: original.onOpenPlaybackSource,
+            initiallyShowsLyrics: original.initiallyShowsLyrics,
+            onOpenRoom: openRoom
+        ))
     }
 }

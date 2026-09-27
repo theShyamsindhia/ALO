@@ -2,7 +2,6 @@ import SwiftUI
 
 struct NotchSurfaceContainerView: View {
     @ObservedObject var notchViewModel: NotchViewModel
-    @ObservedObject var settingsViewModel: SettingsViewModel
     
     var body: some View {
         notchSurface
@@ -16,15 +15,10 @@ struct NotchSurfaceContainerView: View {
         let isDynamicIsland = notchViewModel.isDynamicIsland
         
         NotchBackgroundSurface(
-            style: settingsViewModel.application.notchBackgroundStyle,
             topCornerRadius: notchViewModel.interactiveCornerRadius.top,
             bottomCornerRadius: notchViewModel.interactiveCornerRadius.bottom,
             isDynamicIsland: isDynamicIsland,
-            dynamicIslandCornerRadius: notchViewModel.dynamicIslandCornerRadius,
-            strokeColor: shouldShowStroke ? visibleStrokeColor : .clear,
-            strokeWidth: settingsViewModel.notchStrokeWidth,
-            height: notchViewModel.interactiveNotchSize.height,
-            baseHeight: notchViewModel.notchModel.baseHeight
+            dynamicIslandCornerRadius: notchViewModel.dynamicIslandCornerRadius
         )
         .scaleEffect(
             x: shouldApplyPressScale ? notchViewModel.pressScale : 1,
@@ -119,21 +113,4 @@ struct NotchSurfaceContainerView: View {
         return !isExpandedPresentation && !isPresentationHidden && !isScreenshotContent
     }
     
-    private var visibleStrokeColor: Color {
-        let strokeOpacity = settingsViewModel.application.notchStrokeOpacity
-        let isDefaultStroke = settingsViewModel.application.isDefaultActivityStrokeEnabled
-        
-        let baseColor: Color
-        if isDefaultStroke {
-            baseColor = .white.opacity(0.2)
-        } else {
-            baseColor = notchViewModel.displayedContent?.strokeColor ?? notchViewModel.cachedStrokeColor
-        }
-        return baseColor.opacity(strokeOpacity)
-    }
-    
-    private var shouldShowStroke: Bool {
-        let isStrokeEnabled = settingsViewModel.application.isShowNotchStrokeEnabled
-        return isStrokeEnabled && notchViewModel.shouldRenderStroke
-    }
 }
