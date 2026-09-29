@@ -192,7 +192,8 @@ struct MacNetworkSetupView: View {
                 channels: account.channels.map { .init(id: $0.id.uuidString, name: $0.name, isPrivate: $0.isPrivate, isMain: $0.isMain) },
                 selectedChannelID: selectedChannelID,
                 onOpenChannel: openChannel,
-                nowPlaying: model.phase == .live && !model.nowPlaying.isEmpty ? AnyView(nowPlayingCard) : nil)
+                nowPlaying: model.phase == .live && !model.nowPlaying.isEmpty ? AnyView(nowPlayingCard) : nil,
+                onSmokingStats: { model.smokingLog.showHistory() })
                 .disabled(model.phase == .starting)
         } detail: {
             channelConversation

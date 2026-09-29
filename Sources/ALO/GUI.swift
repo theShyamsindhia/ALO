@@ -1994,6 +1994,7 @@ final class ALOViewModel: ObservableObject {
     private let audioOutput = RoomAudioOutputEngine()
     private var localNowPlayingMonitor: NowPlayingMonitor?
     private var deviceIdentityEditor: DeviceIdentityEditorController?
+    lazy var smokingLog = SmokingLogController(model: self)
     private var incomingMessagePreviewTask: Task<Void, Never>?
     private var chatViewportsAtLatest = Set<UUID>()
     private var openLineInvitationTimeoutTask: Task<Void, Never>?

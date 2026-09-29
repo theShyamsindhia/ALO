@@ -280,6 +280,7 @@ public struct ALONetworkSidebar: View {
     private let onRetryNearby: () -> Void
     private let onCancelJoin: (UUID) -> Void
     private let onExportRecovery: (() -> Void)?
+    private let onSmokingStats: (() -> Void)?
     private let channels: [ALOChannelSummary]
     private let selectedChannelID: String?
     private let onOpenChannel: (String) -> Void
@@ -314,7 +315,8 @@ public struct ALONetworkSidebar: View {
         channels: [ALOChannelSummary] = [],
         selectedChannelID: String? = nil,
         onOpenChannel: @escaping (String) -> Void = { _ in },
-        nowPlaying: AnyView? = nil
+        nowPlaying: AnyView? = nil,
+        onSmokingStats: (() -> Void)? = nil
     ) {
         self.networks = networks
         _selectedNetworkID = selectedNetworkID
@@ -333,6 +335,7 @@ public struct ALONetworkSidebar: View {
         self.selectedChannelID = selectedChannelID
         self.onOpenChannel = onOpenChannel
         self.nowPlaying = nowPlaying
+        self.onSmokingStats = onSmokingStats
     }
 
     public var body: some View {
@@ -669,6 +672,11 @@ public struct ALONetworkSidebar: View {
                 Text(identityName).font(ALONetworkTypography.label).lineLimit(1).help(identityName)
                 Spacer(minLength: 4)
                 Menu {
+                    if let onSmokingStats {
+                        Button("Stats · Smoking…", systemImage: "chart.xyaxis.line", action: onSmokingStats)
+                            .accessibilityIdentifier("ALO.Identity.SmokingStats")
+                        Divider()
+                    }
                     Button("Share public identity…", systemImage: "square.and.arrow.up", action: onExportPublicIdentity)
                         .accessibilityIdentifier("ALO.Identity.SharePublic")
                     Button("View identity fingerprint…") { showingIdentity = true }
