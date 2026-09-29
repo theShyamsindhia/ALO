@@ -300,7 +300,7 @@ struct SmokingLogStoreTests {
         #expect(fall[2].day.timeIntervalSince(fall[1].day) == 25 * 3600)
     }
 
-    @Test func typicalIntervalIgnoresOvernightAndDuplicateTimestamps() {
+    @Test func typicalIntervalIgnoresOvernightAndDuplicateTimestamps() throws {
         let kolkata = calendar("Asia/Kolkata")
         let rows = [
             entry(date(kolkata, 2026, 9, 1, 8)), entry(date(kolkata, 2026, 9, 1, 9)),
@@ -309,11 +309,15 @@ struct SmokingLogStoreTests {
             entry(date(kolkata, 2026, 9, 3, 23, 50)), entry(date(kolkata, 2026, 9, 4, 0, 10))
         ]
         // Same-day gaps are 1h, 2h and 3h; the 20h overnight and 20m cross-midnight gaps must not count.
-        #expect(SmokingAnalytics.typicalInterval(entries: rows.reversed(), calendar: kolkata) == 2 * 3600)
+        let median = try #require(SmokingAnalytics.typicalInterval(entries: rows.reversed(), calendar: kolkata))
+        // Calendar-backed Date values can differ by a floating-point ULP across OS versions.
+        // Verify to one microsecond, far below the log's displayed minute resolution.
+        #expect(abs(median - 2 * 3600) < 0.000_001, "Median seconds: \(String(format: "%.17g", median))")
 
         let even = [entry(date(kolkata, 2026, 9, 1, 8)), entry(date(kolkata, 2026, 9, 1, 9)),
                     entry(date(kolkata, 2026, 9, 2, 7)), entry(date(kolkata, 2026, 9, 2, 11))]
-        #expect(SmokingAnalytics.typicalInterval(entries: even, calendar: kolkata) == 2.5 * 3600)
+        let evenMedian = try #require(SmokingAnalytics.typicalInterval(entries: even, calendar: kolkata))
+        #expect(abs(evenMedian - 2.5 * 3600) < 0.000_001, "Median seconds: \(String(format: "%.17g", evenMedian))")
 
         let noon = date(kolkata, 2026, 9, 1, 12)
         #expect(SmokingAnalytics.typicalInterval(entries: [entry(noon)], calendar: kolkata) == nil)
