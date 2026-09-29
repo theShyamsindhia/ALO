@@ -2,7 +2,7 @@ import AppKit
 import Combine
 
 enum ALOMenuBarControl: String, CaseIterable, Identifiable {
-    case record, playback, next, chat, people, screen, sync, mute
+    case record, playback, next, chat, people, screen, sync, mute, smokingLog
 
     var id: String { rawValue }
     var title: String {
@@ -15,6 +15,7 @@ enum ALOMenuBarControl: String, CaseIterable, Identifiable {
         case .screen: "Screen sharing"
         case .sync: "Sync all"
         case .mute: "Mute room media"
+        case .smokingLog: "Smoking log"
         }
     }
     var symbol: String {
@@ -27,6 +28,7 @@ enum ALOMenuBarControl: String, CaseIterable, Identifiable {
         case .screen: "rectangle.on.rectangle"
         case .sync: "arrow.triangle.2.circlepath"
         case .mute: "speaker.wave.2"
+        case .smokingLog: "chart.xyaxis.line"
         }
     }
 }
@@ -68,14 +70,14 @@ struct ALOMenuBarControlState: Equatable {
     var unread: Int
 
     func enabled(_ control: ALOMenuBarControl) -> Bool {
-        if control == .record { return true }
+        if control == .record || control == .smokingLog { return true }
         guard live else { return false }
         switch control {
         case .playback, .next: return playbackAvailable && !busy
         case .sync: return broadcaster && !busy
         case .screen: return videoAvailable
         case .chat, .people, .mute: return true
-        case .record: return true
+        case .record, .smokingLog: return true
         }
     }
 
@@ -250,6 +252,7 @@ final class ALOPinnedMenuBarController {
             else { model.toggleVideoFromFloatingBar(presentation: .menuBar) }
         case .sync: model.syncAllDevices()
         case .mute: model.toggleIncomingMediaMute()
+        case .smokingLog: model.smokingLog.showQuickLog(from: items[control]?.button)
         }
         refresh()
     }

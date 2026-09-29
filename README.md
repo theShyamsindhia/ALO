@@ -106,6 +106,22 @@ the app. macOS asks for administrator approval only when the app's folder requir
 The interface follows macOS accessibility preferences for reduced motion, reduced
 transparency, increased contrast, and the user-selected control accent.
 
+## Personal smoking log
+
+On Mac, open your profile menu in **Spaces → Stats · Smoking…**. For quick logging,
+enable **Smoking log** under **Pin to menu bar**. Choose Classic Connect (₹430/20,
+₹21.50 each) or Marlboro Clove Mix (₹240/10, ₹24 each), then log now or an earlier
+time. Entries can be edited or deleted, with undo for the latest deletion.
+Day view shows individual times; Week and Month show daily counts or estimated
+consumption cost. The typical gap is the median within-day interval, excluding
+overnight gaps. Empty days mean nothing was logged, not confirmed abstinence.
+
+Logs belong to your ALO identity but stay on this Mac; they do not sync to other
+devices or appear on other people's profiles. Production and ALO Dev keep separate
+logs. **Share today’s summary…** previews a single count/cost message for the current
+channel before sending. Exact times and optional context tags are not included.
+There are no automatic announcements, rankings, or reminders to smoke.
+
 ## Build it
 
 The executable is `alo`. Shared Swift targets have explicit responsibilities:

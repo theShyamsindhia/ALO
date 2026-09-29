@@ -21,15 +21,18 @@ extension NativePresentationTests {
             #expect(ALOMenuBarPreferences(defaults: defaults).controls.isEmpty)
             defaults.set(["unknown-future-control", "people"], forKey: ALOMenuBarPreferences.storageKey)
             #expect(ALOMenuBarPreferences(defaults: defaults).controls == [.people])
+            preferences.setPinned(.smokingLog, true)
+            #expect(ALOMenuBarPreferences(defaults: defaults).controls.contains(.smokingLog))
         }
 
         @Test func controlsRespectRoomAndPlaybackAvailability() {
             var state = ALOMenuBarControlState(live: false, playbackAvailable: true, playing: true,
                 broadcaster: true, busy: false, videoAvailable: true, hasVideo: false, muted: false, unread: 0)
-            for control in ALOMenuBarControl.allCases where control != .record {
+            for control in ALOMenuBarControl.allCases where control != .record && control != .smokingLog {
                 #expect(!state.enabled(control))
             }
             #expect(state.enabled(.record))
+            #expect(state.enabled(.smokingLog), "Personal logging works outside a room")
             state.live = true
             #expect(state.enabled(.playback))
             #expect(state.symbol(.playback) == "pause.fill")
