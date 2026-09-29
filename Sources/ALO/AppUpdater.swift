@@ -315,14 +315,19 @@ final class AppUpdater: ObservableObject {
               let rawVersion = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
               let version = AppVersion(rawVersion), version == releaseVersion, version > currentVersion
         else { throw UpdateError.invalidArchive }
-        do {
-            try run("/usr/bin/lipo", ["-verify_arch", architecture, executable.path])
-        } catch {
-            throw UpdateError.invalidArchive
-        }
+        try validateArchitecture(executable, for: architecture)
         try validateSignature(app)
         try run("/usr/sbin/spctl", ["--assess", "--type", "execute", "--verbose=2", app.path])
         return app
+    }
+
+    nonisolated static func validateArchitecture(_ executable: URL, for architecture: String) throws {
+        do {
+            // -verify_arch consumes all following arguments as architecture names.
+            try run("/usr/bin/lipo", [executable.path, "-verify_arch", architecture])
+        } catch {
+            throw UpdateError.invalidArchive
+        }
     }
 
     nonisolated static func archiveEntriesAreSafe(_ entries: [String]) -> Bool {

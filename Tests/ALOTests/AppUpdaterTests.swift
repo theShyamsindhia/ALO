@@ -113,6 +113,28 @@ struct AppUpdaterTests {
         #expect(AppUpdater.compatibleAsset(in: release, for: "other") == nil)
     }
 
+    @Test("The real architecture checker accepts a native executable and rejects incompatible or invalid files")
+    func architectureValidation() throws {
+        let architecture = try #require(AppUpdater.updateArchitecture)
+        let binary = try #require(Bundle(for: AppUpdaterTestBundleMarker.self).executableURL)
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("alo updater test \(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let executable = root.appendingPathComponent("alo")
+        try FileManager.default.copyItem(at: binary, to: executable)
+
+        try AppUpdater.validateArchitecture(executable, for: architecture)
+        #expect(throws: AppUpdater.UpdateError.self) {
+            try AppUpdater.validateArchitecture(executable, for: "ppc64")
+        }
+        let invalid = root.appendingPathComponent("not a Mach-O")
+        try Data("invalid executable".utf8).write(to: invalid)
+        #expect(throws: AppUpdater.UpdateError.self) {
+            try AppUpdater.validateArchitecture(invalid, for: architecture)
+        }
+    }
+
     @Test("GitHub release metadata decodes its signed asset digest")
     func releaseMetadataDecodes() throws {
         let json = ###"{"tag_name":"v1.2.3","name":"ALO 1.2.3","body":"## Highlights\n- Better sync","html_url":"https://example.com/release","assets":[{"name":"ALO-macos-arm64.zip","browser_download_url":"https://example.com/app.zip","digest":"sha256:abc","size":123}]}"###
@@ -189,3 +211,5 @@ struct AppUpdaterTests {
         #expect(AppUpdater.developerIDRequirement.contains(AppUpdater.teamID))
     }
 }
+
+private final class AppUpdaterTestBundleMarker: NSObject {}

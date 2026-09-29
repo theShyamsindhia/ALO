@@ -29,13 +29,27 @@ import ALOCore
         address.initializeMemory(as: UInt8.self, repeating: 127,
             count: CVPixelBufferGetBytesPerRow(buffer) * CVPixelBufferGetHeight(buffer))
         CVPixelBufferUnlockBaseAddress(buffer, [])
+        // Session creation is lazy and can consume the whole short cadence
+        // window on a cold VideoToolbox service. Require bounded startup first,
+        // through the production capture path (no flush), then measure cadence.
+        let started = ContinuousClock.now
+        let startupDeadline = started.advanced(by: .seconds(3))
+        while output.count == 0 && ContinuousClock.now < startupDeadline {
+            encoder.encode(buffer, captureTimeNanos: MonotonicClock.nowNanos())
+            try await Task.sleep(for: .milliseconds(33))
+        }
+        try #require(output.count > 0, "Continuous capture must produce its first frame within three seconds without a flush")
+        let initialCount = output.count
+        print("VIDEO_ENCODER_STARTUP elapsed=\(started.duration(to: .now)) frames=\(initialCount)")
         for _ in 0..<20 {
             encoder.encode(buffer, captureTimeNanos: MonotonicClock.nowNanos())
             try await Task.sleep(for: .milliseconds(33))
         }
         // Deliberately no flushForTesting/stop before this assertion: capture
         // and callback-driven admission must make forward progress themselves.
-        #expect(output.count >= 10, "Continuous capture must not deadlock behind a single hardware output callback")
+        let measuredCount = output.count - initialCount
+        print("VIDEO_ENCODER_CADENCE frames=\(measuredCount)")
+        #expect(measuredCount >= 10, "Continuous capture must not deadlock behind a single hardware output callback")
     }
     private final class Output: @unchecked Sendable {
         let lock = NSLock()

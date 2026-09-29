@@ -98,17 +98,18 @@ struct NativeEnqueueRaceTests {
                 absoluteMarker = (delayed ? 0 : 120 + renderedInHook) + block * 240 + index
             }
         }
-        let marker = try #require(absoluteMarker)
         player.maintainSync()
         let recovery = try #require(player.renderObservation?.sample.contentRecovery)
         #expect(recovery.enqueueWindow == (delayed ? 1 : 0))
         let expected = delayed ? 0 : Double(240) / Double(rate)
-        print("NATIVE_ENQUEUE_RACE rate=\(rate) delayed=\(delayed) beforeSample=\(before) afterSample=\(after) controlledHookMs=\(Double(hookElapsed)/1_000_000) marker=\(marker) expected=\(expected) displacementMs=\((Double(marker)-expected)/48) late=\(player.syncReport().latePacketCount) resync=\(player.syncReport().resyncCount)")
         if mode == 3 {
-            // Deliberately independent clocks pin the AND policy gate only.
-            // This does not claim a physical underrun can occur in zero time.
-            #expect(Double(marker) > expected + 960)
+            // This impossible clock combination pins only the AND policy gate.
+            // After offline rendering past the whole buffer, native playback
+            // may drop it or play it late; neither implies a wall-clock stall.
+            #expect(absoluteMarker == nil || Double(absoluteMarker!) > expected + 960)
         } else {
+            let marker = try #require(absoluteMarker, "Timely or recovered PCM must reach native output")
+            print("NATIVE_ENQUEUE_RACE rate=\(rate) delayed=\(delayed) beforeSample=\(before) afterSample=\(after) controlledHookMs=\(Double(hookElapsed)/1_000_000) marker=\(marker) expected=\(expected) displacementMs=\((Double(marker)-expected)/48) late=\(player.syncReport().latePacketCount) resync=\(player.syncReport().resyncCount)")
             #expect(Double(marker) <= expected + 960,
                     "An uncertain stalled enqueue must recover on fresh real PCM; ordinary enqueue must retain its original source position")
         }
