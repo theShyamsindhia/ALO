@@ -13,6 +13,7 @@ public struct ALOAddMemberView: View {
     private let onCancel: () -> Void
     @State private var localError: String?
     @FocusState private var identityFocused: Bool
+    @State private var showsInvitationText = false
 
     public init(
         networkName: String,
@@ -39,69 +40,83 @@ public struct ALOAddMemberView: View {
     }
 
     public var body: some View {
-        Form {
-            Section {
-                Text("Add a person to \(networkName) using their public identity. They can then discover and join its public channels, including #Main.")
-                    .foregroundStyle(.secondary)
-                if invitationText == nil {
-                    Button(action: onImportPublicIdentityFile) {
-                        ALOActionLabel(title: "Import public identity file…", systemImage: "doc.badge.arrow.up")
-                    }.disabled(isBusy)
-                    ALOPackageTextEditor(title: "Public identity contents", text: $publicIdentityText, focus: $identityFocused)
-                        .disabled(isBusy)
-                    Text("Ask them to share their public identity from Networks. Never ask for their private recovery kit.")
-                        .font(.callout).foregroundStyle(.secondary)
+        ALOSheet(systemImage: invitationText == nil ? "person.badge.plus" : "checkmark.circle.fill",
+                 title: invitationText == nil ? "Add someone" : "Invitation ready",
+                 subtitle: invitationText == nil
+                    ? "Add a person to \(networkName). They'll be able to join its public channels, including Main."
+                    : "Send this invitation to them. It only works for the person you added.") {
+            if invitationText == nil {
+                Button(action: onImportPublicIdentityFile) {
+                    ALOActionLabel(title: "Choose their public identity…", systemImage: "doc.badge.arrow.up")
+                        .frame(maxWidth: .infinity)
                 }
-                if let recipient {
-                    Label(recipient.name, systemImage: "person.crop.circle").fontWeight(.medium)
-                    ALOFingerprint(value: recipient.fingerprint)
-                }
-            } header: {
-                Text("Add network member").accessibilityAddTraits(.isHeader)
+                .buttonStyle(.aloSecondary)
+                .disabled(isBusy)
+                ALOPackageTextEditor(title: "Or paste it here", text: $publicIdentityText, focus: $identityFocused)
+                    .disabled(isBusy)
+                Label("They can share it from their profile menu. Never ask for their recovery key.",
+                      systemImage: "info.circle")
+                    .font(ALOFont.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-
+            if let recipient {
+                HStack(spacing: 12) {
+                    ALOAvatar(name: recipient.name, seed: recipient.fingerprint, size: 40)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(recipient.name).font(ALOFont.label)
+                        Text("Added to \(networkName)").font(ALOFont.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                    ALOTag("Member", tint: .blue)
+                }
+                .padding(12)
+                .aloWell()
+                ALOFingerprint(value: recipient.fingerprint, title: "Their verification code")
+            }
             if let invitationText {
-                Section("Invitation ready") {
-                    Label("Membership added", systemImage: "checkmark.circle")
-                    Text("Send this invitation to the person whose public identity you imported. It works only with their identity.")
-                        .foregroundStyle(.secondary)
+                Button(showsInvitationText ? "Hide invitation text" : "Show invitation text") {
+                    showsInvitationText.toggle()
+                }
+                .buttonStyle(.aloQuiet)
+                if showsInvitationText {
                     ScrollView {
                         Text(invitationText)
                             .font(.system(.caption, design: .monospaced))
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                    }.frame(minHeight: 80, maxHeight: 160)
-                    Button(action: onExportInvitation) {
-                        ALOActionLabel(title: "Export invitation…", systemImage: "square.and.arrow.up", isBusy: isBusy)
+                            .padding(10)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(isBusy)
+                    .frame(minHeight: 80, maxHeight: 140)
+                    .aloWell(cornerRadius: ALOMetrics.fieldRadius)
                 }
+                Text("Private channels need separate access, given when you create or edit them.")
+                    .font(ALOFont.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if let message = localError ?? errorMessage {
-                Section { ALOInlineError(message: message) }
+                ALOInlineError(message: message)
             }
-
-            Section {
-                if invitationText == nil {
-                    Button(action: createInvitation) {
-                        ALOActionLabel(title: "Add member and create invitation", systemImage: "person.badge.plus", isBusy: isBusy)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.return, modifiers: .command)
-                    .disabled(isBusy)
+        } actions: {
+            Button(invitationText == nil ? "Cancel" : "Done", action: onCancel)
+                .buttonStyle(.aloSecondary)
+                .keyboardShortcut(.cancelAction)
+                .disabled(isBusy)
+            if invitationText == nil {
+                Button(action: createInvitation) {
+                    ALOActionLabel(title: "Add and create invitation", systemImage: "person.badge.plus", isBusy: isBusy)
                 }
-                Button(action: onCancel) {
-                    ALOActionLabel(title: invitationText == nil ? "Cancel" : "Done")
+                .buttonStyle(.aloPrimary)
+                .keyboardShortcut(.return, modifiers: .command)
+                .disabled(isBusy)
+            } else {
+                Button(action: onExportInvitation) {
+                    ALOActionLabel(title: "Save invitation…", systemImage: "square.and.arrow.up", isBusy: isBusy)
                 }
-                    .keyboardShortcut(.cancelAction)
-                    .disabled(isBusy)
-            } footer: {
-                Text("Private channels require separate, explicit access.")
+                .buttonStyle(.aloPrimary)
+                .disabled(isBusy)
             }
         }
-        .formStyle(.grouped)
         .navigationTitle("Add network member")
         .onAppear { if invitationText == nil { identityFocused = true } }
     }

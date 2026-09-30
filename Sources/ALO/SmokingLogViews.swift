@@ -29,7 +29,7 @@ final class SmokingLogController {
               let root = model.account.identity?.publicIdentity.userID else {
             let alert = NSAlert()
             alert.messageText = "Set up your ALO profile first"
-            alert.informativeText = "The smoking log belongs to your personal profile. Finish setup in Spaces, then open it again."
+            alert.informativeText = "The smoking log belongs to your personal profile. Finish setup in Networks, then open it again."
             alert.runModal()
             return nil
         }

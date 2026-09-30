@@ -115,6 +115,17 @@ public final class NetworkAccountModel: ObservableObject {
         errorMessage = nil
     }
 
+    /// Renames the person's display label. The name is informational; the identity is unchanged.
+    public func updateDisplayName(_ name: String) throws {
+        let previous = displayName
+        displayName = name
+        do { try validateName() } catch {
+            displayName = previous
+            throw error
+        }
+        defaults.set(displayName, forKey: Self.displayNameKey)
+    }
+
     public func recoveryData() throws -> Data {
         guard let identity else { throw NetworkAccountError.setupRequired }
         return IdentityRecoveryDocument(identity: identity).serializedData()
@@ -488,12 +499,13 @@ public final class NetworkAccountModel: ObservableObject {
 
     private static func describeListingDiagnostics(_ listing: NetworkRepository.Listing) -> String? {
         guard listing.unavailableRecordCount > 0 else { return nil }
-        let affected = listing.diagnostics.prefix(3).map {
-            "\($0.networkID.uuidString.lowercased()) (\($0.reason == .quarantined ? "conflicting policy" : "unreadable or invalid"))"
-        }.joined(separator: ", ")
-        let summary = listing.unavailableRecordCount == 1 ? "One saved network is unavailable."
-            : "\(listing.unavailableRecordCount) saved networks are unavailable."
-        return "\(summary) Verified networks remain available. Check unreadable policy files and their permissions. Conflicting signed policies require a new network and invitation from the owner. Affected records: \(affected)."
+        let conflicting = listing.diagnostics.contains { $0.reason == .quarantined }
+        let summary = listing.unavailableRecordCount == 1 ? "One saved network can't be opened."
+            : "\(listing.unavailableRecordCount) saved networks can't be opened."
+        let advice = conflicting
+            ? "Its owner sent conflicting rules, so ask them to start a new network and invite you again."
+            : "Its saved settings couldn't be read."
+        return "\(summary) \(advice) Your other networks still work."
     }
 
     /// Device labels are informational. Bound an OS-provided name before signing rather than
@@ -522,13 +534,13 @@ public final class NetworkAccountModel: ObservableObject {
             case .ownerRequired: return "Only the network owner can change membership and channels."
             case .invalidName: return "Enter a network or channel name between 1 and 80 characters."
             case .rollback: return "This invitation is older than the network policy already saved on this device."
-            case .quarantined, .revisionConflict: return "Conflicting signed policies permanently blocked this network on this device. Ask the owner to create a new network and send a new invitation."
-            case .invalidStorage: return "Saved network policy could not be read. Access is blocked until this device's network storage is repaired."
+            case .quarantined, .revisionConflict: return "This network received two different sets of rules from its owner, so ALO blocked it on this device to keep you safe. Ask the owner to start a new network and invite you again."
+            case .invalidStorage: return "ALO couldn't read this network's saved settings, so it's blocked on this device for now."
             case .networkNotFound: return "This network is no longer saved on this device. Ask the owner for an invitation."
-            default: return "The network document could not be verified (\(error))."
+            default: return "ALO couldn't verify this network's details. Ask the owner for a fresh invitation."
             }
         }
-        if error is UserIdentityError { return "The identity could not be loaded or verified. Check the recovery file and Keychain access, then retry." }
+        if error is UserIdentityError { return "ALO couldn't open your identity. If you're restoring, check you chose the right recovery key, and that ALO can use your Keychain." }
         return error.localizedDescription
     }
 }

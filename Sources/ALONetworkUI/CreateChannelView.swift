@@ -38,77 +38,120 @@ public struct ALOCreateChannelView: View {
     }
 
     public var body: some View {
-        Form {
-            Section {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Channel name").font(.subheadline.weight(.medium))
-                    TextField("For example, Music", text: $name)
-                        .textFieldStyle(.roundedBorder)
-                        .accessibilityLabel("Channel name")
-                        .focused($nameFocused)
-                        .onSubmit(create)
-                        .disabled(isBusy)
-                }
-                Text("In \(networkName)").font(.callout).foregroundStyle(.secondary)
-            } header: {
-                Text("Create channel").accessibilityAddTraits(.isHeader)
+        ALOSheet(systemImage: isPrivate ? "lock.fill" : "number", title: "Create a channel",
+                 subtitle: "In \(networkName)") {
+            ALOFieldGroup("Channel name") {
+                TextField("For example, Music", text: $name)
+                    .aloField()
+                    .accessibilityLabel("Channel name")
+                    .focused($nameFocused)
+                    .onSubmit(create)
+                    .disabled(isBusy)
             }
 
-            Section("Access") {
-                Toggle(isOn: $isPrivate) {
-                    Label("Private channel", systemImage: "lock")
-                }.disabled(isBusy)
-                Text(isPrivate
-                     ? "Only network members you select can see and join this channel. You always have access."
-                     : "Every member of \(networkName) can see and join this channel. People outside the network cannot discover it.")
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 8) {
+                ALOSectionLabel("Who can join")
+                HStack(spacing: 10) {
+                    accessOption(title: "Everyone", detail: "All members of \(networkName)",
+                                 systemImage: "person.2.fill", selected: !isPrivate) { isPrivate = false }
+                    accessOption(title: "Private", detail: "Only people you pick",
+                                 systemImage: "lock.fill", selected: isPrivate) { isPrivate = true }
+                }
+                .disabled(isBusy)
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel("Private channel")
+                .accessibilityValue(isPrivate ? "On" : "Off")
             }
 
             if isPrivate {
-                Section("Members with access") {
-                    ForEach(members) { member in
-                        Toggle(isOn: memberSelection(member)) {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(member.name + (member.isCurrentUser ? " (you)" : ""))
-                                Text(member.fingerprint)
-                                    .font(.system(.caption, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(2)
+                VStack(alignment: .leading, spacing: 8) {
+                    ALOSectionLabel("Members with access")
+                    VStack(spacing: 0) {
+                        ForEach(members) { member in
+                            memberRow(member)
+                            if member.id != members.last?.id {
+                                Rectangle().fill(ALOBrand.hairline).frame(height: 1).padding(.leading, 56)
                             }
-                            .padding(.vertical, 4)
                         }
-                        .frame(minHeight: ALONetworkMetrics.actionHeight)
-                        .disabled(isBusy || member.isCurrentUser)
-                        .accessibilityHint(member.isCurrentUser ? "The channel creator always has access" : "Allow this network member to see and join the private channel")
                     }
+                    .aloWell()
                     if members.allSatisfy(\.isCurrentUser) {
-                        Text("You are the only member available. Add people to the network to give them private channel access.")
-                            .foregroundStyle(.secondary)
+                        Text("You're the only member so far. Add people to the network first, then give them access here.")
+                            .font(ALOFont.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
 
             if let message = localError ?? errorMessage {
-                Section { ALOInlineError(message: message) }
+                ALOInlineError(message: message)
             }
-            Section {
-                Button(action: create) {
-                    ALOActionLabel(title: "Create channel", systemImage: isPrivate ? "lock" : "number", isBusy: isBusy)
-                }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.defaultAction)
+        } actions: {
+            Button("Cancel", action: onCancel)
+                .buttonStyle(.aloSecondary)
+                .keyboardShortcut(.cancelAction)
                 .disabled(isBusy)
-                Button(action: onCancel) {
-                    ALOActionLabel(title: "Cancel")
-                }
-                    .keyboardShortcut(.cancelAction)
-                    .disabled(isBusy)
+            Button(action: create) {
+                ALOActionLabel(title: "Create channel", systemImage: isPrivate ? "lock" : "number", isBusy: isBusy)
             }
+            .buttonStyle(.aloPrimary)
+            .keyboardShortcut(.defaultAction)
+            .disabled(isBusy)
         }
-        .formStyle(.grouped)
         .navigationTitle("Create channel")
         .onAppear { nameFocused = true }
+    }
+
+    private func accessOption(title: String, detail: String, systemImage: String, selected: Bool,
+                              action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(alignment: .top, spacing: 10) {
+                ALOIconBadge(systemImage, tint: selected ? .blue : .neutral, size: 32)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title).font(ALOFont.label).foregroundStyle(.primary)
+                    Text(detail).font(ALOFont.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(selected ? ALOBrand.blueText : Color.secondary)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(selected ? ALOBrand.blueSoft : ALOBrand.neutralSoft,
+                        in: RoundedRectangle(cornerRadius: ALOMetrics.rowRadius, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: ALOMetrics.rowRadius, style: .continuous)
+                .strokeBorder(selected ? ALOBrand.blue.opacity(0.45) : ALOBrand.hairline, lineWidth: selected ? 1.5 : 1))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityHint(detail)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private func memberRow(_ member: ALOMemberSummary) -> some View {
+        Toggle(isOn: memberSelection(member)) {
+            HStack(spacing: 12) {
+                ALOAvatar(name: member.name, seed: member.fingerprint, isCurrentUser: member.isCurrentUser)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(member.name).font(ALOFont.label).lineLimit(1)
+                        if member.isCurrentUser { ALOTag("You", tint: .coral) }
+                    }
+                    Text(ALOIdentityCode.short(member.fingerprint))
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        #if os(macOS)
+        .toggleStyle(.checkbox)
+        #endif
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .frame(minHeight: ALONetworkMetrics.actionHeight)
+        .disabled(isBusy || member.isCurrentUser)
+        .accessibilityHint(member.isCurrentUser ? "The channel creator always has access" : "Allow this network member to see and join the private channel")
     }
 
     private func memberSelection(_ member: ALOMemberSummary) -> Binding<Bool> {

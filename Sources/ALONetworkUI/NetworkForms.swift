@@ -19,40 +19,31 @@ public struct ALOCreateNetworkView: View {
     }
 
     public var body: some View {
-        Form {
-            Section {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Network name").font(.subheadline.weight(.medium))
-                    TextField("For example, Studio", text: $name)
-                        .textFieldStyle(.roundedBorder)
-                        .accessibilityLabel("Network name")
-                        .focused($nameFocused)
-                        .onSubmit(create)
-                        .disabled(isBusy)
-                }
-            } header: {
-                Text("Create network").accessibilityAddTraits(.isHeader)
-            } footer: {
-                Text("Your network starts with a Main channel. People nearby can ask to join; you decide who gets in.")
-            }
-            if let message = localError ?? errorMessage {
-                Section { ALOInlineError(message: message) }
-            }
-            Section {
-                Button(action: create) {
-                    ALOActionLabel(title: "Create network", systemImage: "plus", isBusy: isBusy)
-                }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.defaultAction)
-                .disabled(isBusy)
-                Button(action: onCancel) {
-                    ALOActionLabel(title: "Cancel")
-                }
-                    .keyboardShortcut(.cancelAction)
+        ALOSheet(systemImage: "person.2.fill", title: "Create a network",
+                 subtitle: "A home for your group. It starts with a Main channel, and you decide who gets in.") {
+            ALOFieldGroup("Network name", footnote: "People nearby see this name when they ask to join.") {
+                TextField("For example, Studio", text: $name)
+                    .aloField()
+                    .accessibilityLabel("Network name")
+                    .focused($nameFocused)
+                    .onSubmit(create)
                     .disabled(isBusy)
             }
+            if let message = localError ?? errorMessage {
+                ALOInlineError(message: message)
+            }
+        } actions: {
+            Button("Cancel", action: onCancel)
+                .buttonStyle(.aloSecondary)
+                .keyboardShortcut(.cancelAction)
+                .disabled(isBusy)
+            Button(action: create) {
+                ALOActionLabel(title: "Create network", systemImage: "plus", isBusy: isBusy)
+            }
+            .buttonStyle(.aloPrimary)
+            .keyboardShortcut(.defaultAction)
+            .disabled(isBusy)
         }
-        .formStyle(.grouped)
         .navigationTitle("Create network")
         .onAppear { nameFocused = true }
     }
@@ -91,38 +82,35 @@ public struct ALOImportInvitationView: View {
     }
 
     public var body: some View {
-        Form {
-            Section {
-                Text("An invitation adds this identity to a network or gives it access to a private channel.")
-                    .foregroundStyle(.secondary)
-                Button(action: onImportFile) {
-                    ALOActionLabel(title: "Choose invitation file…", systemImage: "doc.badge.arrow.up")
-                }.disabled(isBusy)
-                ALOPackageTextEditor(title: "Invitation contents", text: $invitationText, focus: $textFocused)
-                    .disabled(isBusy)
-            } header: {
-                Text("Import invitation").accessibilityAddTraits(.isHeader)
-            } footer: {
-                Text("Use an invitation issued to your public identity. ALO checks its signature and access before adding it.")
+        ALOSheet(systemImage: "envelope.open.fill", title: "Open an invitation",
+                 subtitle: "Someone invited you to their network or a private channel.") {
+            Button(action: onImportFile) {
+                ALOActionLabel(title: "Choose invitation file…", systemImage: "doc.badge.arrow.up")
+                    .frame(maxWidth: .infinity)
             }
-            if let message = localError ?? errorMessage {
-                Section { ALOInlineError(message: message) }
-            }
-            Section {
-                Button(action: importInvitation) {
-                    ALOActionLabel(title: "Import invitation", systemImage: "square.and.arrow.down", isBusy: isBusy)
-                }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.return, modifiers: .command)
+            .buttonStyle(.aloSecondary)
+            .disabled(isBusy)
+            ALOPackageTextEditor(title: "Or paste the invitation", text: $invitationText, focus: $textFocused)
                 .disabled(isBusy)
-                Button(action: onCancel) {
-                    ALOActionLabel(title: "Cancel")
-                }
-                    .keyboardShortcut(.cancelAction)
-                    .disabled(isBusy)
+            Label("ALO checks who sent it and that it was made for you before anything changes.",
+                  systemImage: "checkmark.shield")
+                .font(ALOFont.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let message = localError ?? errorMessage {
+                ALOInlineError(message: message)
             }
+        } actions: {
+            Button("Cancel", action: onCancel)
+                .buttonStyle(.aloSecondary)
+                .keyboardShortcut(.cancelAction)
+                .disabled(isBusy)
+            Button(action: importInvitation) {
+                ALOActionLabel(title: "Open invitation", systemImage: "square.and.arrow.down", isBusy: isBusy)
+            }
+            .buttonStyle(.aloPrimary)
+            .keyboardShortcut(.return, modifiers: .command)
+            .disabled(isBusy)
         }
-        .formStyle(.grouped)
         .navigationTitle("Import invitation")
         .onAppear { textFocused = true }
     }

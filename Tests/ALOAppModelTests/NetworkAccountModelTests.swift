@@ -702,8 +702,9 @@ struct NetworkAccountModelTests {
         #expect(fixture.model.networkRecordDiagnostics.map(\.networkID) == [damaged.id])
         #expect(fixture.model.additionalNetworkRecordDiagnosticCount == 0)
         let warning = try #require(fixture.model.errorMessage)
-        #expect(warning.contains(damaged.id.uuidString.lowercased()))
-        #expect(warning.contains("Verified networks remain available"))
+        // People see plain language; the record ID stays in networkRecordDiagnostics.
+        #expect(!warning.contains(damaged.id.uuidString.lowercased()))
+        #expect(warning.contains("Your other networks still work"))
         #expect(warning.utf8.count < 1_024)
         let resumed = fixture.anotherModel()
         await resumed.resume()

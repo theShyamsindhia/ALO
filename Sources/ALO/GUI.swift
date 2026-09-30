@@ -3159,7 +3159,7 @@ final class ALOViewModel: ObservableObject {
             return
         }
         let editor = DeviceIdentityEditorController(
-            name: currentUserName,
+            name: account.displayName.isEmpty ? currentUserName : account.displayName,
             icon: currentDeviceIcon,
             colorHex: currentDeviceColorHex,
             profileImageData: currentDeviceProfileImageData,
@@ -3184,6 +3184,11 @@ final class ALOViewModel: ObservableObject {
         profileImageData: Data?
     ) {
         guard !name.isEmpty else { return }
+        if account.identityReady, name != account.displayName {
+            do { try account.updateDisplayName(name) } catch {
+                errorMessage = NetworkAccountModel.describe(error)
+            }
+        }
         let appearance = DeviceAppearance(
             icon: icon,
             colorHex: colorHex

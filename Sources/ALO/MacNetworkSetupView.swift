@@ -46,7 +46,7 @@ struct MacNetworkSetupView: View {
             }
         }
         .sheet(item: $sheet) { selection in
-            sheetView(selection).frame(width: 600, height: 520)
+            sheetView(selection).frame(width: 540, height: sheetHeight(selection))
                 .interactiveDismissDisabled(busy)
                 .alert(confirmationTitle, isPresented: Binding(
                     get: { pendingImport != nil || pendingMember != nil || removingMember != nil },
@@ -83,43 +83,53 @@ struct MacNetworkSetupView: View {
 
     private var onboardingContainer: some View {
         GeometryReader { geometry in
-        VStack(spacing: 0) {
-            HStack {
-                Text("ALO").font(.title3.weight(.bold))
-                Text("Set up ALO").foregroundStyle(.secondary)
-                Spacer()
-                Button { NSApp.keyWindow?.close() } label: { Image(systemName: "xmark").frame(width: 40, height: 40) }
-                    .help("Hide this window").accessibilityLabel("Hide this window")
-            }.buttonStyle(.borderless).controlSize(.large)
-                .padding(18)
-            Divider()
-            identitySetup
-        }
-        .frame(width: geometry.size.width, height: geometry.size.height)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24))
-        .clipShape(RoundedRectangle(cornerRadius: 24))
+            ZStack(alignment: .topTrailing) {
+                identitySetup
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+                Button { NSApp.keyWindow?.close() } label: {
+                    Image(systemName: "xmark").font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 30, height: 30)
+                        .background(ALOBrand.neutralSoft, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .padding(16)
+                .help("Hide this window").accessibilityLabel("Hide this window")
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
         }
         .padding(10)
     }
 
+    private func sheetHeight(_ selection: Sheet) -> CGFloat {
+        switch selection {
+        case .createNetwork: 360
+        case .importNetwork: 500
+        case .addMember: invitation == nil ? 540 : 600
+        case .createChannel: privateChannel ? 600 : 440
+        case .members: 520
+        }
+    }
+
     private var confirmationTitle: String {
-        if pendingImport != nil { return "Trust this network owner?" }
-        if pendingMember != nil { return "Add this identity to the network?" }
-        return "Remove network member?"
+        if let pendingImport { return "Join \(pendingImport.manifest.name)?" }
+        if pendingMember != nil { return "Add this person?" }
+        return "Remove this person?"
     }
 
     private var confirmationMessage: String {
         if let pendingImport {
-            return "\(pendingImport.manifest.name)\nOwner: \(pendingImport.manifest.owner.userID)\n\nConfirm the owner's full fingerprint through a trusted exchange before importing."
+            return "Owner's verification code: \(ALOIdentityCode.short(pendingImport.manifest.owner.userID))\n\nAsk the owner to read their code from their profile menu. Continue only if it matches."
         }
         if let pendingMember {
-            return "\(pendingMember.identity.userID)\n\nVerify this public identity with the person. All devices they authorize will gain access to public channels."
+            return "Their verification code: \(ALOIdentityCode.short(pendingMember.identity.userID))\n\nCheck it matches the code on their screen. They'll be able to join every public channel."
         }
-        return "Their devices lose access when they learn this signed policy. Disconnected devices must reconnect to an updated peer to learn about the removal."
+        return "They lose access as soon as their devices hear about it. Devices that are offline find out the next time they connect."
     }
 
     private var confirmationAction: String {
-        pendingImport != nil ? "Trust owner and import" : pendingMember != nil ? "Add verified member" : "Remove member"
+        pendingImport != nil ? "Codes match, join" : pendingMember != nil ? "Codes match, add" : "Remove"
     }
 
     private func clearConfirmation() {
@@ -165,7 +175,10 @@ struct MacNetworkSetupView: View {
             ALONetworkSidebar(networks: account.networks.map(summary), selectedNetworkID: $account.selectedNetworkID,
                 identityName: account.displayName, identityFingerprint: account.identity?.publicIdentity.userID ?? "",
                 onCreateNetwork: { present(.createNetwork) }, onImportNetwork: { present(.importNetwork) },
-                onExportPublicIdentity: { perform { try savePublic(try account.publicIdentityData(), name: "ALO-public-identity.json") } },
+                onExportPublicIdentity: { perform { try savePublic(try account.publicIdentityData(),
+                    name: "\(account.displayName.isEmpty ? "My" : account.displayName) - ALO public identity.json",
+                    title: "Share your public identity",
+                    message: "Send this file to a network owner so they can add you. It contains no secrets.") } },
                 nearbyNetworks: account.nearbyNetworks.map { .init(id: $0.id, name: $0.name, status: account.joinRequestStatus[$0.id].map(joinState)) },
                 joinRequests: account.pendingJoinRequests.map { request in
                     .init(id: request.id, name: request.displayName,
@@ -193,7 +206,9 @@ struct MacNetworkSetupView: View {
                 selectedChannelID: selectedChannelID,
                 onOpenChannel: openChannel,
                 nowPlaying: model.phase == .live && !model.nowPlaying.isEmpty ? AnyView(nowPlayingCard) : nil,
-                onSmokingStats: { model.smokingLog.showHistory() })
+                onSmokingStats: { model.smokingLog.showHistory() },
+                onEditProfile: { model.editDeviceIdentity() },
+                onCreateChannel: createChannelAction)
                 .disabled(model.phase == .starting)
         } detail: {
             channelConversation
@@ -218,7 +233,7 @@ struct MacNetworkSetupView: View {
             if model.phase == .live, selectedChannelID == model.selectedRoomID {
                 RoomChatPanel(messages: model.messages, currentParticipantID: model.currentParticipantID,
                     roomTitle: selectedChannelTitle, firstUnreadMessageID: model.firstUnreadMessageID,
-                    unreadCount: model.unreadMessageCount, isPresented: controlActiveState == .active, accent: .blue,
+                    unreadCount: model.unreadMessageCount, isPresented: controlActiveState == .active, accent: ALOBrand.blue,
                     onLatestVisibilityChanged: model.setChatViewportAtLatest, send: model.sendChatOperation,
                     sendAttachment: model.sendChatAttachment, attachmentURL: model.chatAttachmentURL,
                     draft: $model.draftMessage, notificationMode: $model.chatNotificationMode,
@@ -229,8 +244,9 @@ struct MacNetworkSetupView: View {
                     headerActions: AnyView(channelActions), channelMenu: AnyView(channelMenu))
                     .id(model.selectedRoomID)
             } else if model.phase == .starting {
-                NetworkConversationHeader(title: selectedChannelTitle, subtitle: "Opening channel…") { channelActions }
-                ProgressView("Opening channel…").frame(maxWidth: .infinity, maxHeight: .infinity)
+                NetworkConversationHeader(title: selectedChannelTitle, subtitle: "Connecting…") { channelActions }
+                ALOStateView(.loading, title: "Opening \(selectedChannelTitle)…",
+                             message: "Finding the people here and lining up the clock so you hear the same moment.")
             } else {
                 NetworkConversationHeader(title: selectedChannelTitle, subtitle: channelSubtitle) {
                     channelActions
@@ -238,12 +254,11 @@ struct MacNetworkSetupView: View {
                         .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
                         .accessibilityLabel("Channel options")
                 }
-                ContentUnavailableView("Choose a channel", systemImage: "bubble.left.and.bubble.right",
-                    description: Text("Open a channel in the sidebar to join the conversation."))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                idleConversationState
             }
-            if let message = nearbyJoinFeedback.errorMessage ?? error ?? account.errorMessage ?? model.errorMessage {
-                Text(message).foregroundStyle(.secondary).padding()
+            if let message = bannerMessage {
+                ALOInlineError(message: message)
+                    .padding(.horizontal, 20).padding(.bottom, 16)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -251,7 +266,63 @@ struct MacNetworkSetupView: View {
 
     private var selectedChannelTitle: String {
         account.channels.first(where: { $0.id.uuidString == selectedChannelID })?.name
-            ?? account.selectedNetwork?.name ?? "Spaces"
+            ?? account.selectedNetwork?.name ?? "Networks"
+    }
+
+    private var isNetworkOwner: Bool {
+        account.selectedNetwork != nil
+            && account.selectedNetwork?.owner.userID == account.identity?.publicIdentity.userID
+    }
+
+    private var createChannelAction: (() -> Void)? {
+        guard isNetworkOwner else { return nil }
+        return { present(.createChannel) }
+    }
+
+    /// Errors that belong to the whole window. A failed channel open is shown in the
+    /// conversation state instead, with its own retry.
+    private var bannerMessage: String? {
+        let channelFailure = model.phase == .failed && selectedChannelID != nil
+        return nearbyJoinFeedback.errorMessage ?? error ?? account.errorMessage
+            ?? (channelFailure ? nil : model.errorMessage)
+    }
+
+    @ViewBuilder private var idleConversationState: some View {
+        if model.phase == .failed, let id = selectedChannelID {
+            ALOStateView(.problem, systemImage: "wifi.exclamationmark", title: "Couldn't open \(selectedChannelTitle)",
+                         message: model.errorMessage ?? "Make sure you're on the same Wi-Fi as the others, then try again.") {
+                Button { openChannel(id) } label: { ALOActionLabel(title: "Try again", systemImage: "arrow.clockwise") }
+                    .buttonStyle(.aloPrimary)
+            }
+        } else if account.selectedNetwork == nil {
+            ALOStateView(systemImage: "person.2.wave.2.fill", title: "Listen together",
+                         message: "Start a network for your group, or join one nearby from the sidebar.") {
+                Button("Open invitation…") { present(.importNetwork) }.buttonStyle(.aloSecondary)
+                Button { present(.createNetwork) } label: { ALOActionLabel(title: "Create network", systemImage: "plus") }
+                    .buttonStyle(.aloPrimary)
+            }
+        } else if account.channels.isEmpty {
+            if isNetworkOwner {
+                ALOStateView(systemImage: "number", title: "No channels yet",
+                             message: "Channels are where people listen and chat. Make one to get started.") {
+                    Button { present(.createChannel) } label: { ALOActionLabel(title: "Create channel", systemImage: "plus") }
+                        .buttonStyle(.aloPrimary)
+                }
+            } else {
+                ALOStateView(systemImage: "lock", title: "No channels you can join",
+                             message: "Ask the owner of \(account.selectedNetwork?.name ?? "this network") for access, then open the invitation they send.") {
+                    Button("Open invitation…") { present(.importNetwork) }.buttonStyle(.aloSecondary)
+                }
+            }
+        } else if let first = account.channels.first(where: \.isMain) ?? account.channels.first {
+            ALOStateView(systemImage: "headphones", title: "Pick a channel",
+                         message: "Join a channel to hear what's playing and chat with everyone in it.") {
+                Button { openChannel(first.id.uuidString) } label: {
+                    ALOActionLabel(title: "Join \(first.name)", systemImage: first.isPrivate ? "lock" : "number")
+                }
+                .buttonStyle(.aloPrimary)
+            }
+        }
     }
 
     private var channelSubtitle: String {
@@ -276,12 +347,12 @@ struct MacNetworkSetupView: View {
     }
 
     @ViewBuilder private var channelMenu: some View {
-        if account.selectedNetwork?.owner.userID == account.identity?.publicIdentity.userID,
-           account.selectedNetwork != nil {
+        if isNetworkOwner {
             Button("Create channel…") { present(.createChannel) }
-            Button("Add member…") { present(.addMember) }
+            Button("Add someone…") { present(.addMember) }
         }
-        Button("Import invitation…") { present(.importNetwork) }
+        Button("People…") { present(.members) }
+        Button("Open invitation…") { present(.importNetwork) }
         if model.phase == .live { Button("Leave channel") { model.stop() } }
     }
 
@@ -318,7 +389,10 @@ struct MacNetworkSetupView: View {
                     confirmationNetworkID = network.id
                 } },
                 onImportPublicIdentityFile: { openFile { url in packageText = String(decoding: try boundedRead(url, maximum: 4096), as: UTF8.self) } },
-                onExportInvitation: { perform { if let invitation { try savePublic(invitation.encoded(), name: "ALO-network-invitation.json") } } },
+                onExportInvitation: { perform { if let invitation { try savePublic(invitation.encoded(),
+                    name: "\(account.selectedNetwork?.name ?? "ALO") invitation.json",
+                    title: "Save invitation",
+                    message: "Send this file to the person you added. It only works for them.") } } },
                 onCancel: { sheet = nil })
         case .createChannel:
             ALOCreateChannelView(networkName: account.selectedNetwork?.name ?? "", name: $name, isPrivate: $privateChannel,
@@ -334,35 +408,27 @@ struct MacNetworkSetupView: View {
                     }
                 }, onCancel: { sheet = nil })
         case .members:
-            VStack(alignment: .leading) {
-                Text("Network members").font(.title2).padding()
-                List(account.selectedNetwork?.members ?? [], id: \.userID) { member in
-                    HStack {
-                        VStack(alignment: .leading) {
-                            Text(member.role == .owner ? "Owner" : "Member").font(.headline)
-                            Text(member.userID).font(.caption.monospaced()).textSelection(.enabled)
-                        }
-                        Spacer()
-                        if account.selectedNetwork?.owner == account.identity?.publicIdentity, member.role != .owner {
-                            Button("Remove", role: .destructive) {
-                                guard !busy else { return }
-                                confirmationNetworkID = account.selectedNetwork?.id
-                                removingMember = member
-                            }
-                            .disabled(busy)
-                        }
-                    }.padding(.vertical, 8)
-                }
-                if let error { Text(error).foregroundStyle(.red).padding() }
-                HStack { Spacer(); Button("Done") { sheet = nil }.keyboardShortcut(.cancelAction).disabled(busy) }.padding()
-            }
+            ALOMembersView(networkName: account.selectedNetwork?.name ?? "this network", members: memberSummaries,
+                canManage: isNetworkOwner, isBusy: busy, errorMessage: error,
+                onRemove: { userID in
+                    guard !busy, let member = account.selectedNetwork?.members.first(where: { $0.userID == userID }) else { return }
+                    confirmationNetworkID = account.selectedNetwork?.id
+                    removingMember = member
+                },
+                onAddMember: { present(.addMember) },
+                onDone: { sheet = nil })
         }
     }
 
+    /// The signed roster carries identities, not names, so other people are labelled by role
+    /// and shown with their verification code.
     private var memberSummaries: [ALOMemberSummary] {
         (account.selectedNetwork?.members ?? []).map { member in
-            ALOMemberSummary(id: member.userID, name: member.identity == account.identity?.publicIdentity ? account.displayName : "Member \(member.userID.suffix(8))",
-                fingerprint: member.userID, isCurrentUser: member.identity == account.identity?.publicIdentity)
+            let isCurrentUser = member.identity == account.identity?.publicIdentity
+            let isOwner = member.role == .owner
+            return ALOMemberSummary(id: member.userID,
+                name: isCurrentUser ? account.displayName : (isOwner ? "Network owner" : "Member"),
+                fingerprint: member.userID, isCurrentUser: isCurrentUser, isOwner: isOwner)
         }
     }
 
@@ -406,7 +472,7 @@ struct MacNetworkSetupView: View {
             guard let identity = account.identity else { throw NetworkAccountError.setupRequired }
             let panel = NSSavePanel()
             panel.title = "Save your recovery key"
-            panel.message = "Anyone with this file can impersonate you. Save it privately."
+            panel.message = "Anyone with this file can sign in as you. Keep it somewhere private."
             panel.nameFieldStringValue = "ALO-identity-\(identity.publicIdentity.userID.suffix(8)).txt"
             panel.directoryURL = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
             panel.allowedContentTypes = [.plainText]
@@ -418,6 +484,7 @@ struct MacNetworkSetupView: View {
 
     private func openFile(_ action: (URL) throws -> Void) {
         let panel = NSOpenPanel(); panel.canChooseDirectories = false; panel.allowsMultipleSelection = false
+        panel.message = "Choose the file someone sent you."; panel.prompt = "Open"
         panel.allowedContentTypes = [.plainText, .json, .data]
         guard panel.runModal() == .OK, let url = panel.url else { return }
         perform { try action(url) }
@@ -429,8 +496,10 @@ struct MacNetworkSetupView: View {
         return data
     }
 
-    private func savePublic(_ data: Data, name: String) throws {
-        let panel = NSSavePanel(); panel.nameFieldStringValue = name; panel.allowedContentTypes = [.json]
+    private func savePublic(_ data: Data, name: String, title: String, message: String) throws {
+        let safeName = name.map { "/:\\".contains($0) ? "-" : $0 }
+        let panel = NSSavePanel(); panel.nameFieldStringValue = String(safeName); panel.allowedContentTypes = [.json]
+        panel.title = title; panel.message = message
         guard panel.runModal() == .OK, let url = panel.url else { return }
         try data.write(to: url, options: .atomic)
     }

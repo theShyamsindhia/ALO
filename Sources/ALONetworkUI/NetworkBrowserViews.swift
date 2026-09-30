@@ -281,6 +281,8 @@ public struct ALONetworkSidebar: View {
     private let onCancelJoin: (UUID) -> Void
     private let onExportRecovery: (() -> Void)?
     private let onSmokingStats: (() -> Void)?
+    private let onEditProfile: (() -> Void)?
+    private let onCreateChannel: (() -> Void)?
     private let channels: [ALOChannelSummary]
     private let selectedChannelID: String?
     private let onOpenChannel: (String) -> Void
@@ -316,7 +318,9 @@ public struct ALONetworkSidebar: View {
         selectedChannelID: String? = nil,
         onOpenChannel: @escaping (String) -> Void = { _ in },
         nowPlaying: AnyView? = nil,
-        onSmokingStats: (() -> Void)? = nil
+        onSmokingStats: (() -> Void)? = nil,
+        onEditProfile: (() -> Void)? = nil,
+        onCreateChannel: (() -> Void)? = nil
     ) {
         self.networks = networks
         _selectedNetworkID = selectedNetworkID
@@ -336,6 +340,8 @@ public struct ALONetworkSidebar: View {
         self.onOpenChannel = onOpenChannel
         self.nowPlaying = nowPlaying
         self.onSmokingStats = onSmokingStats
+        self.onEditProfile = onEditProfile
+        self.onCreateChannel = onCreateChannel
     }
 
     public var body: some View {
@@ -507,7 +513,7 @@ public struct ALONetworkSidebar: View {
     private var desktopSidebar: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("Spaces").font(ALONetworkTypography.title).tracking(-0.4)
+                Text("Networks").font(ALONetworkTypography.title).tracking(-0.4)
                     .accessibilityAddTraits(.isHeader)
                 NetworkSidebarToggle()
                 Spacer()
@@ -517,8 +523,9 @@ public struct ALONetworkSidebar: View {
                     Button("Import invitation…", systemImage: "square.and.arrow.down", action: onImportNetwork)
                         .accessibilityIdentifier("ALO.Network.Import")
                 } label: {
-                    Image(systemName: "plus").font(.system(size: 16, weight: .regular))
-                        .frame(width: 32, height: 32).foregroundStyle(Color.accentColor)
+                    Image(systemName: "plus").font(.system(size: 16, weight: .semibold))
+                        .frame(width: 32, height: 32).foregroundStyle(ALOBrand.blueText)
+                        .background(ALOBrand.blueSoft, in: Circle())
                 }
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
                 .help("Add a network").accessibilityLabel("Add a network")
@@ -527,7 +534,7 @@ public struct ALONetworkSidebar: View {
             .padding(.top, 60 - ALONativeNetworkLayout.panelInset).padding(.bottom, compactLayout ? 12 : 16)
             HStack(spacing: 9) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("Search spaces", text: $search).textFieldStyle(.plain)
+                TextField("Search", text: $search).textFieldStyle(.plain)
                     .accessibilityLabel("Search networks and channels")
                 if !search.isEmpty {
                     Button { search = "" } label: { Image(systemName: "xmark.circle.fill") }
@@ -535,7 +542,7 @@ public struct ALONetworkSidebar: View {
                 }
             }
             .font(ALONetworkTypography.body).padding(.horizontal, 12).frame(height: compactLayout ? 34 : 38)
-            .background(.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 11))
+            .background(ALOBrand.neutralSoft, in: RoundedRectangle(cornerRadius: ALOMetrics.fieldRadius, style: .continuous))
             .padding(.horizontal, compactLayout ? 12 : 16).padding(.bottom, compactLayout ? 12 : 20)
 
             ScrollView {
@@ -544,10 +551,7 @@ public struct ALONetworkSidebar: View {
                     ForEach(visibleNetworks) { network in
                         Button { selectedNetworkID = network.id } label: {
                             HStack(spacing: 8) {
-                                Image(systemName: "person.2.fill")
-                                    .font(.system(size: 16)).foregroundStyle(Color.accentColor)
-                                    .frame(width: 32, height: 32)
-                                    .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+                                ALOIconBadge("person.2.fill", tint: .blue, size: 32)
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(network.name).font(ALONetworkTypography.label).lineLimit(2)
                                     Text("\(network.memberCount) \(network.memberCount == 1 ? "person" : "people")\(network.isOwner ? " · Your network" : "")")
@@ -588,15 +592,38 @@ public struct ALONetworkSidebar: View {
                                 .accessibilityAddTraits(selectedChannelID == channel.id ? .isSelected : [])
                                 .accessibilityIdentifier("ALO.Channel.Open.\(channel.id)")
                             }
+                            if channels.isEmpty && search.isEmpty {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    Text(onCreateChannel == nil ? "No channels you can join yet." : "No channels yet.")
+                                        .font(ALONetworkTypography.caption).foregroundStyle(.secondary)
+                                    if let onCreateChannel {
+                                        Button("Create channel…", systemImage: "plus", action: onCreateChannel)
+                                            .buttonStyle(.aloQuiet).disabled(isBusy)
+                                            .accessibilityIdentifier("ALO.Channel.CreateEmpty")
+                                    }
+                                }
+                                .padding(.leading, 48).padding(.vertical, 4)
+                            }
                         }
                     }
                     if networks.isEmpty {
-                        Text("Join a nearby network or create one for your group.")
-                            .font(.callout).foregroundStyle(.secondary)
-                        Button("Create network…", action: onCreateNetwork)
-                            .buttonStyle(.borderless).foregroundStyle(Color.accentColor)
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Find your people").font(ALONetworkTypography.label)
+                            Text("Join a network nearby, or start one for your group.")
+                                .font(ALONetworkTypography.caption).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Button(action: onCreateNetwork) {
+                                ALOActionLabel(title: "Create network", systemImage: "plus")
+                            }
+                            .buttonStyle(.aloPrimary).controlSize(.small)
+                            .accessibilityIdentifier("ALO.Network.CreateEmpty")
+                        }
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .aloWell()
                     } else if visibleNetworks.isEmpty {
-                        Text("No matching spaces").font(.callout).foregroundStyle(.secondary)
+                        Text("No matches").font(ALONetworkTypography.caption).foregroundStyle(.secondary)
+                            .padding(.horizontal, 8)
                     }
                     if !joinRequests.isEmpty {
                         sidebarHeading("Requests · \(joinRequests.count)").padding(.top, 12)
@@ -631,20 +658,25 @@ public struct ALONetworkSidebar: View {
                             Spacer(minLength: 4)
                             if network.status == .waitingForApproval {
                                 Button("Cancel") { onCancelJoin(network.id) }
-                                    .buttonStyle(.borderless).foregroundStyle(Color.accentColor)
+                                    .buttonStyle(.aloQuiet)
                                     .accessibilityLabel("Cancel request to join \(network.name)")
                             } else if network.status != .joined {
                                 Button("Join") { onJoin(network.id) }.disabled(isBusy)
-                                    .buttonStyle(.borderless).foregroundStyle(Color.accentColor)
+                                    .buttonStyle(.aloSecondary)
                                     .accessibilityLabel("Join \(network.name)")
                             }
                         }
                         .controlSize(.small)
                         .padding(.horizontal, 8).padding(.vertical, 4)
                     }
-                    if nearbyNetworks.isEmpty {
-                        Text("No nearby networks").font(.callout).foregroundStyle(.secondary)
-                            .help("Networks appear while their owner has ALO open on the same local network.")
+                    if nearbyNetworks.isEmpty && nearbyError == nil {
+                        HStack(alignment: .top, spacing: 8) {
+                            ProgressView().controlSize(.small).frame(width: 32, height: 20)
+                            Text("Looking for networks nearby. They show up while the owner has ALO open on the same Wi-Fi.")
+                                .font(ALONetworkTypography.caption).foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(.horizontal, 8)
                     }
                     if let nearbyNotice {
                         Text(nearbyNotice).font(.caption).foregroundStyle(.secondary)
@@ -653,7 +685,7 @@ public struct ALONetworkSidebar: View {
                     if let nearbyError {
                         ALOInlineError(message: nearbyError)
                         Button("Try again", action: onRetryNearby)
-                            .buttonStyle(.borderless).foregroundStyle(Color.accentColor)
+                            .buttonStyle(.aloQuiet)
                     }
                 }
                 .padding(.horizontal, compactLayout ? 12 : 16).padding(.bottom, 12)
@@ -666,12 +698,15 @@ public struct ALONetworkSidebar: View {
             }
             Divider().opacity(0.5).padding(.horizontal, compactLayout ? 20 : 24)
             HStack(spacing: 8) {
-                Text(String(identityName.prefix(1)).uppercased())
-                    .font(ALONetworkTypography.label).foregroundStyle(Color.accentColor)
-                    .frame(width: 32, height: 32).background(Color.accentColor.opacity(0.09), in: Circle())
-                Text(identityName).font(ALONetworkTypography.label).lineLimit(1).help(identityName)
+                ALOAvatar(name: identityName, seed: identityFingerprint, isCurrentUser: true)
+                Text(identityName).font(ALONetworkTypography.label).lineLimit(1).truncationMode(.tail).help(identityName)
                 Spacer(minLength: 4)
                 Menu {
+                    if let onEditProfile {
+                        Button("Edit profile…", systemImage: "person.crop.circle", action: onEditProfile)
+                            .accessibilityIdentifier("ALO.Identity.EditProfile")
+                        Divider()
+                    }
                     if let onSmokingStats {
                         Button("Stats · Smoking…", systemImage: "chart.xyaxis.line", action: onSmokingStats)
                             .accessibilityIdentifier("ALO.Identity.SmokingStats")
@@ -679,39 +714,56 @@ public struct ALONetworkSidebar: View {
                     }
                     Button("Share public identity…", systemImage: "square.and.arrow.up", action: onExportPublicIdentity)
                         .accessibilityIdentifier("ALO.Identity.SharePublic")
-                    Button("View identity fingerprint…") { showingIdentity = true }
+                    Button("Show my verification code…", systemImage: "checkmark.shield") { showingIdentity = true }
                     if let onExportRecovery {
                         Divider()
-                        Button("Export identity recovery file…", systemImage: "key", action: onExportRecovery)
+                        Button("Save recovery key…", systemImage: "key", action: onExportRecovery)
                             .accessibilityIdentifier("ALO.Identity.ExportRecovery")
                     }
                 } label: { Image(systemName: "ellipsis").frame(width: 24, height: 24) }
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-                .help("Identity options").accessibilityLabel("Identity options")
+                .help("Profile and identity").accessibilityLabel("Profile and identity")
             }.padding(.horizontal, compactLayout ? 20 : 24).padding(.vertical, compactLayout ? 10 : 16)
         }
         .sheet(item: $reviewingRequest) { request in
-            VStack(alignment: .leading, spacing: 20) {
-                Text("Request to join").font(.title2.weight(.semibold))
-                Text("\(request.name) wants to join \(request.networkName).")
+            ALOSheet(systemImage: "person.crop.circle.badge.questionmark", title: "Request to join",
+                     subtitle: "\(request.name) wants to join \(request.networkName).") {
+                HStack(spacing: 12) {
+                    ALOAvatar(name: request.name, seed: request.fingerprint, size: 40)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(request.name).font(ALOFont.label)
+                        Text("Nearby · name chosen by them").font(ALOFont.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(12)
+                .aloWell()
+                ALOFingerprint(value: request.fingerprint, title: "Their verification code")
+                Label("Ask them to read their code from their profile menu. Approve only if it matches.",
+                      systemImage: "checkmark.shield")
+                    .font(ALOFont.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Text("Approve only if you recognize this person. Compare their fingerprint through a trusted conversation.")
-                    .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                ALOFingerprint(value: request.fingerprint)
-                HStack {
-                    Button("Cancel") { reviewingRequest = nil }.keyboardShortcut(.cancelAction)
-                    Spacer()
-                    Button("Decline", role: .destructive) { onDecline(request.id); reviewingRequest = nil }
-                    Button("Approve") { onApprove(request.id); reviewingRequest = nil }.buttonStyle(.borderedProminent)
-                }.disabled(isBusy)
-            }.padding(24).frame(width: 440).interactiveDismissDisabled(isBusy)
+            } actions: {
+                Button("Not now") { reviewingRequest = nil }
+                    .buttonStyle(.aloQuiet).keyboardShortcut(.cancelAction)
+                Button("Decline") { onDecline(request.id); reviewingRequest = nil }
+                    .buttonStyle(.aloSecondary)
+                Button("Approve") { onApprove(request.id); reviewingRequest = nil }
+                    .buttonStyle(.aloPrimary).keyboardShortcut(.defaultAction)
+            }
+            .disabled(isBusy)
+            .frame(width: 460, height: 460)
+            .interactiveDismissDisabled(isBusy)
         }
         .sheet(isPresented: $showingIdentity) {
-            VStack(alignment: .leading, spacing: 20) {
-                Text(identityName).font(.title2.weight(.semibold))
-                ALOFingerprint(value: identityFingerprint)
-                HStack { Spacer(); Button("Done") { showingIdentity = false }.keyboardShortcut(.cancelAction) }
-            }.padding(24).frame(width: 440)
+            ALOSheet(systemImage: "checkmark.shield.fill", title: identityName,
+                     subtitle: "Read this code to someone who wants to confirm it's really you.") {
+                ALOFingerprint(value: identityFingerprint, title: "Your verification code")
+            } actions: {
+                Button("Done") { showingIdentity = false }
+                    .buttonStyle(.aloPrimary).keyboardShortcut(.cancelAction)
+            }
+            .frame(width: 440, height: 330)
         }
         .onChange(of: joinRequests.map(\.id)) { _, ids in
             if let request = reviewingRequest, !ids.contains(request.id) { reviewingRequest = nil }

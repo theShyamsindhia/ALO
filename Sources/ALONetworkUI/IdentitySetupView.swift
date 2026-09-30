@@ -58,23 +58,27 @@ public struct ALOIdentitySetupView: View {
 
     public var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 22) {
+                VStack(alignment: .leading, spacing: 10) {
+                    ALOBrandMark(size: 52)
                     Text(
                         stage == .identity
                             ? (mode == .create ? "What should we call you?" : "Welcome back")
                             : "Save your recovery key"
                     )
-                    .font(.title2.weight(.semibold))
+                    .font(ALOFont.title)
                     .accessibilityAddTraits(.isHeader)
                     Text(
                         stage == .identity
-                            ? "Choose the name people will see in ALO."
-                            : "Your key brings you back if you lose or change your device."
+                            ? (mode == .create
+                                ? "This is the name people see when you listen together."
+                                : "Restore your identity from the recovery key you saved.")
+                            : "It brings you back if you lose or replace this device."
                     )
+                    .font(ALOFont.body)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                }.padding(.vertical, 4)
+                }
                 if stage == .identity {
                     identitySection
                 } else {
@@ -85,10 +89,14 @@ public struct ALOIdentitySetupView: View {
                     ALOInlineError(message: message)
                 }
             }
-            .frame(maxWidth: 420, alignment: .leading)
-            .padding(24)
+            .frame(maxWidth: 400, alignment: .leading)
+            .padding(26)
+            .aloCard(cornerRadius: 26)
+            .padding(18)
             .frame(maxWidth: .infinity, alignment: .center)
         }
+        .scrollBounceBehavior(.basedOnSize)
+        .background(ALOBackdrop())
         .navigationTitle(stage == .identity ? "Welcome to ALO" : "Recovery key")
         .onAppear { if stage == .identity { nameFocused = true } }
         .onChange(of: stage) { _, _ in localError = nil }
@@ -100,13 +108,11 @@ public struct ALOIdentitySetupView: View {
     }
 
     private var identitySection: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Your name").font(.subheadline.weight(.medium))
-                TextField("Name", text: $displayName)
+        VStack(alignment: .leading, spacing: 14) {
+            ALOFieldGroup("Your name") {
+                TextField("For example, Raj", text: $displayName)
                     .textContentType(.nickname)
-                    .textFieldStyle(.roundedBorder)
-                    .controlSize(.large)
+                    .aloField()
                     .accessibilityLabel("Your name")
                     .accessibilityHint(localError ?? "The name people will see")
                     .focused($nameFocused)
@@ -115,74 +121,84 @@ public struct ALOIdentitySetupView: View {
             }
             if mode == .create {
                 Button(action: createIdentity) {
-                    ALOActionLabel(title: "Continue", isBusy: isBusy)
+                    ALOActionLabel(title: "Continue", isBusy: isBusy).frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.aloPrimary)
                 .keyboardShortcut(.defaultAction)
                 .disabled(isBusy)
                 .accessibilityIdentifier("ALO.Identity.Create")
             } else {
-                Text("Choose your saved recovery key, or paste its contents.")
-                    .foregroundStyle(.secondary)
                 Button(action: onImportRecoveryFile) {
                     ALOActionLabel(title: "Choose recovery key…", systemImage: "doc.badge.arrow.up")
-                }.disabled(isBusy)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.aloSecondary)
+                .disabled(isBusy)
                 ALOPackageTextEditor(
-                    title: "Recovery key contents", text: $recoveryImportText, focus: $recoveryFocused
+                    title: "Or paste its contents", text: $recoveryImportText, focus: $recoveryFocused
                 )
                 .disabled(isBusy)
                 Button(action: restoreIdentity) {
                     ALOActionLabel(
                         title: "Restore identity", systemImage: "person.crop.circle.badge.checkmark",
                         isBusy: isBusy)
+                    .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.aloPrimary)
                 .keyboardShortcut(.return, modifiers: .command)
                 .disabled(isBusy)
                 .accessibilityIdentifier("ALO.Identity.Restore")
             }
             Button(
-                mode == .create ? "Restore an existing identity" : "Create a new identity"
+                mode == .create ? "I already have a recovery key" : "Start fresh instead"
             ) {
                 mode = mode == .create ? .restore : .create
             }
-            .buttonStyle(.borderless)
-            .frame(minHeight: ALONetworkMetrics.actionHeight)
+            .buttonStyle(.aloQuiet)
+            .frame(maxWidth: .infinity)
             .disabled(isBusy)
         }
     }
 
     private var recoverySection: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Label {
-                Text(
-                    "This key is unencrypted. Anyone with it can become you and access your networks. Save it somewhere private."
-                )
-            } icon: {
-                Image(systemName: "exclamationmark.shield").accessibilityHidden(true)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 12) {
+                ALOIconBadge("key.fill", tint: .coral, size: 36)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Keep it private").font(ALOFont.label)
+                    Text("Anyone with this key can sign in as you. Store it somewhere only you can reach, like a password manager.")
+                        .font(ALOFont.body).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
-            .fixedSize(horizontal: false, vertical: true)
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .aloWell()
 
             if !recoveryExported {
                 Button(action: onExportRecovery) {
                     ALOActionLabel(
                         title: "Save recovery key…", systemImage: "square.and.arrow.down", isBusy: isBusy)
+                    .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.aloPrimary)
                 .disabled(isBusy)
                 .keyboardShortcut(.defaultAction)
                 .accessibilityIdentifier("ALO.Identity.ExportRecovery")
             } else {
-                Label("Recovery key saved", systemImage: "checkmark.circle")
+                Label("Recovery key saved", systemImage: "checkmark.circle.fill")
+                    .font(ALOFont.label)
+                    .foregroundStyle(ALOBrand.blueText)
                 Button(action: continueSetup) {
-                    ALOActionLabel(title: "I saved it privately — Continue", isBusy: isBusy)
+                    ALOActionLabel(title: "Continue", isBusy: isBusy).frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.aloPrimary)
                 .disabled(isBusy)
                 .keyboardShortcut(.defaultAction)
                 .accessibilityIdentifier("ALO.Identity.Continue")
                 Button("Save another copy…", action: onExportRecovery)
-                    .frame(minHeight: ALONetworkMetrics.actionHeight)
+                    .buttonStyle(.aloQuiet)
+                    .frame(maxWidth: .infinity)
                     .disabled(isBusy)
             }
         }
