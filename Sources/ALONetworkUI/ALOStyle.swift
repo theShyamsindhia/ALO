@@ -80,7 +80,7 @@ public enum ALOBrand {
         highContrastLight: ALOColorValue? = nil, highContrastDark: ALOColorValue? = nil
     ) -> Color {
         #if os(macOS)
-        Color(nsColor: NSColor(name: nil) { appearance in
+        return Color(nsColor: NSColor(name: nil) { appearance in
             let value: ALOColorValue
             switch appearance.bestMatch(from: [
                 .accessibilityHighContrastDarkAqua, .accessibilityHighContrastAqua, .darkAqua, .aqua,
@@ -93,7 +93,7 @@ public enum ALOBrand {
             return NSColor(srgbRed: value.red, green: value.green, blue: value.blue, alpha: value.alpha)
         })
         #else
-        Color(uiColor: UIColor { traits in
+        return Color(uiColor: UIColor { traits in
             let isDark = traits.userInterfaceStyle == .dark
             let isHigh = traits.accessibilityContrast == .high
             let value: ALOColorValue
