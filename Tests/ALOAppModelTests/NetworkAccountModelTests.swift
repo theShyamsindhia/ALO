@@ -57,7 +57,9 @@ struct NetworkAccountModelTests {
         #expect(fixture.model.errorMessage?.contains("not allowed") != true)
         #expect(fixture.model.errorMessage?.contains("Old network A") != true)
         if let damaged {
-            #expect(fixture.model.errorMessage?.contains(damaged.id.uuidString.lowercased()) == true)
+            // The unreadable-record warning remains; people see plain language, not record IDs.
+            #expect(fixture.model.errorMessage?.contains("saved network can't be opened") == true)
+            #expect(fixture.model.errorMessage?.contains(damaged.id.uuidString.lowercased()) != true)
         } else {
             #expect(fixture.model.errorMessage == nil)
         }
@@ -277,7 +279,8 @@ struct NetworkAccountModelTests {
         let message = try #require(fixture.model.errorMessage)
         let accessLoss = "Network “Selected network” is no longer available. " + NetworkAccountModel.describe(NetworkAuthorityError.notMember)
         #expect(message.hasPrefix(accessLoss))
-        #expect(message.contains(unrelated.id.uuidString.lowercased()))
+        #expect(message.contains("saved network can't be opened"))
+        #expect(!message.contains(unrelated.id.uuidString.lowercased()))
         #expect(fixture.model.networks.isEmpty)
         #expect(fixture.model.room(channelID: joined.mainChannel.id.uuidString) == nil)
         await fixture.model.refresh()
