@@ -6,15 +6,17 @@ import ALOCore
 
 /// Personal records never enter the room transport. Sharing sends only a reviewed text summary.
 @MainActor
-final class SmokingLogController {
+final class SmokingLogController: NSObject, NSPopoverDelegate {
     private weak var model: ALOViewModel?
     private var store: SmokingLogStore?
     private var window: NSWindow?
     private var popover: NSPopover?
     private var identityObserver: AnyCancellable?
+    @Published private(set) var isQuickLogPresented = false
 
     init(model: ALOViewModel) {
         self.model = model
+        super.init()
         identityObserver = model.account.$identityReady.combineLatest(model.account.$identity)
             .map { ready, identity in ready ? identity?.publicIdentity.userID : nil }
             .removeDuplicates().sink { [weak self] root in
@@ -41,13 +43,39 @@ final class SmokingLogController {
         guard let anchor else { showHistory(); return }
         if popover?.isShown == true { popover?.close(); return }
         guard let store = personalStore() else { return }
+        presentQuickLog(store: store, from: anchor)
+    }
+
+    @discardableResult
+    func presentQuickLog(store: SmokingLogStore, from anchor: NSView) -> NSPopover {
         let popover = NSPopover()
         popover.behavior = .transient
-        popover.contentViewController = NSHostingController(rootView: SmokingQuickLogView(store: store) { [weak self] in
+        popover.delegate = self
+        popover.animates = false
+        let host = NSHostingController(rootView: SmokingQuickLogView(store: store, onHistory: { [weak self] in
             self?.showHistory()
-        })
+        }, onSizeChange: { [weak popover] size in
+            guard let popover, popover.contentSize != size else { return }
+            popover.contentSize = size
+        }))
+        // Own the popover size before presentation and when Details changes it.
+        // Otherwise AppKit positions a default-sized host before SwiftUI lays it out.
+        host.sizingOptions = []
+        popover.contentViewController = host
+        popover.contentSize = host.view.fittingSize
         self.popover = popover
-        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+        NSApp.activate(ignoringOtherApps: true)
+        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: anchor.isFlipped ? .maxY : .minY)
+        popover.contentViewController?.view.window?.makeKey()
+        return popover
+    }
+
+    func popoverWillShow(_ notification: Notification) {
+        isQuickLogPresented = true
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        isQuickLogPresented = false
     }
 
     func showHistory() {
@@ -76,80 +104,139 @@ final class SmokingLogController {
 struct SmokingQuickLogView: View {
     @ObservedObject var store: SmokingLogStore
     let onHistory: () -> Void
+    var onSizeChange: (CGSize) -> Void = { _ in }
+    @State private var brand = SmokingBrand.classicConnect
+    @State private var showsDetails = false
+    @State private var earlier = false
+    @State private var time = Date()
+    @State private var context: SmokingContext?
+    @State private var lastAdded: SmokingEntry?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack {
-                Text("Smoking log").font(.headline)
-                Spacer()
-                Label("Private", systemImage: "lock").font(.caption).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(spacing: 2) {
+                ForEach(SmokingBrand.allCases) { option in
+                    Button { brand = option } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "checkmark").font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(Color.accentColor).opacity(brand == option ? 1 : 0)
+                                .frame(width: 14)
+                            Text(option.title)
+                            Spacer(minLength: 4)
+                            Text(SmokingAnalytics.money(option.pricePaise)).monospacedDigit().foregroundStyle(.secondary)
+                        }.frame(height: 24).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("\(SmokingAnalytics.money(option.packPricePaise)) per pack of \(option.packCount)")
+                    .accessibilityLabel("\(option.title), \(SmokingAnalytics.money(option.pricePaise)) per cigarette")
+                    .accessibilityAddTraits(brand == option ? .isSelected : [])
+                    .accessibilityIdentifier("ALO.Smoking.Brand.\(option.rawValue)")
+                }
             }
-            SmokingEntryForm(store: store)
+            if showsDetails {
+                VStack(alignment: .leading, spacing: 6) {
+                    Toggle("Earlier time", isOn: $earlier).toggleStyle(.checkbox)
+                        .accessibilityIdentifier("ALO.Smoking.Earlier")
+                    if earlier {
+                        DatePicker("Smoked at", selection: $time, in: ...Date(), displayedComponents: [.date, .hourAndMinute])
+                            .datePickerStyle(.field).labelsHidden()
+                            .accessibilityIdentifier("ALO.Smoking.Time")
+                    }
+                    Picker("Context", selection: $context) {
+                        Text("Not specified").tag(Optional<SmokingContext>.none)
+                        ForEach(SmokingContext.allCases) { Text($0.title).tag(Optional($0)) }
+                    }.accessibilityIdentifier("ALO.Smoking.Context")
+                }.controlSize(.small)
+            }
+            HStack(spacing: 8) {
+                if let lastAdded {
+                    Text("Logged").foregroundStyle(.secondary)
+                    Button("Undo") {
+                        if store.remove(id: lastAdded.id) { self.lastAdded = nil }
+                    }.buttonStyle(.borderless).accessibilityIdentifier("ALO.Smoking.Undo")
+                } else {
+                    Text(earlier ? time.formatted(date: .omitted, time: .shortened) : "Now")
+                        .foregroundStyle(.secondary)
+                    Button(showsDetails ? "Done" : "Details…") { showsDetails.toggle() }
+                        .buttonStyle(.borderless).accessibilityIdentifier("ALO.Smoking.Details")
+                }
+                Spacer(minLength: 4)
+                Button("Log") {
+                    lastAdded = store.add(brand: brand, smokedAt: earlier ? time : Date(), context: context)
+                }
+                .buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                .disabled(!store.isReadable || lastAdded != nil)
+                .accessibilityLabel("Log cigarette")
+                .accessibilityIdentifier("ALO.Smoking.Save")
+            }.frame(height: 24)
+            if let error = store.errorMessage {
+                Text(error).font(.caption).foregroundStyle(.red).lineLimit(nil).fixedSize(horizontal: false, vertical: true)
+                if !store.isReadable { Button("Reload saved log") { store.reload() } }
+            }
             Divider()
             TimelineView(.periodic(from: .now, by: 60)) { timeline in
                 let day = Calendar.current.startOfDay(for: timeline.date)
                 let nextDay = Calendar.current.date(byAdding: .day, value: 1, to: day)!
                 let today = SmokingAnalytics.entries(in: store.entries, from: day, to: nextDay)
-                HStack {
-                    Text("Today · \(today.count) logged").foregroundStyle(.secondary)
-                    Spacer()
-                    Text(SmokingAnalytics.money(SmokingAnalytics.costPaise(entries: today))).monospacedDigit()
-                }.font(.callout)
+                HStack(spacing: 6) {
+                    Image(systemName: "lock").accessibilityLabel("Private, saved only on this Mac")
+                        .help("Saved to your profile on this Mac. Nothing is shared automatically.")
+                    Text("Today \(today.count) · \(SmokingAnalytics.money(SmokingAnalytics.costPaise(entries: today)))")
+                        .monospacedDigit()
+                    Spacer(minLength: 4)
+                    Button("History…", action: onHistory).buttonStyle(.borderless)
+                        .accessibilityIdentifier("ALO.Smoking.History")
+                }.font(.system(size: 11)).foregroundStyle(.secondary).frame(height: 18)
             }
-            Button("View history & stats", action: onHistory).buttonStyle(.link)
-        }.padding(20).frame(width: 340)
+        }
+        .font(.system(size: 13)).lineLimit(1)
+        .padding(12).frame(width: 280).fixedSize(horizontal: true, vertical: true)
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { onSizeChange($0) }
+        .onAppear { if let latest = store.entries.last { brand = latest.brand } }
+        .task(id: lastAdded?.id) {
+            guard lastAdded != nil else { return }
+            do { try await Task.sleep(for: .seconds(6)) } catch { return }
+            lastAdded = nil
+        }
     }
 }
 
 struct SmokingEntryForm: View {
     @ObservedObject var store: SmokingLogStore
     var entry: SmokingEntry?
+    var onCancel: () -> Void = {}
     var onSaved: () -> Void = {}
     @State private var brand = SmokingBrand.classicConnect
     @State private var context: SmokingContext?
-    @State private var earlier = false
     @State private var time = Date()
-    @State private var lastAdded: SmokingEntry?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Picker("Cigarette", selection: $brand) {
-                ForEach(SmokingBrand.allCases) { brand in
-                    Text("\(brand.title) · \(SmokingAnalytics.money(brand.pricePaise))").tag(brand)
-                }
-            }.accessibilityIdentifier("ALO.Smoking.Brand")
-            Text("\(SmokingAnalytics.money(brand.packPricePaise)) per pack of \(brand.packCount)")
-                .font(.caption).foregroundStyle(.secondary)
-            if entry == nil { Toggle("Log an earlier time", isOn: $earlier) }
-            if earlier || entry != nil {
-                DatePicker("Smoked at", selection: $time, in: ...Date(), displayedComponents: [.date, .hourAndMinute])
-                    .accessibilityIdentifier("ALO.Smoking.Time")
-            } else {
-                Label("Time · Now", systemImage: "clock").foregroundStyle(.secondary)
+                ForEach(SmokingBrand.allCases) { Text("\($0.title) · \(SmokingAnalytics.money($0.pricePaise))").tag($0) }
             }
-            Picker("Context · optional", selection: $context) {
+            DatePicker("Smoked at", selection: $time, in: ...Date(), displayedComponents: [.date, .hourAndMinute])
+                .datePickerStyle(.field).accessibilityIdentifier("ALO.Smoking.Time")
+            Picker("Context", selection: $context) {
                 Text("Not specified").tag(Optional<SmokingContext>.none)
                 ForEach(SmokingContext.allCases) { Text($0.title).tag(Optional($0)) }
-            }
+            }.accessibilityIdentifier("ALO.Smoking.Context")
             if let error = store.errorMessage {
                 Text(error).font(.callout).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
                 if !store.isReadable { Button("Reload saved log") { store.reload() } }
             }
             HStack {
-                if lastAdded != nil {
-                    Text("Logged").font(.callout).foregroundStyle(.secondary)
-                    Button("Undo") {
-                        if let lastAdded, store.remove(id: lastAdded.id) { self.lastAdded = nil }
-                    }.accessibilityIdentifier("ALO.Smoking.Undo")
-                }
                 Spacer()
+                Button("Cancel", action: onCancel).keyboardShortcut(.cancelAction)
                 Button(entry == nil ? "Log cigarette" : "Save changes", action: save)
-                    .buttonStyle(.borderedProminent).disabled(!store.isReadable)
+                    .keyboardShortcut(.defaultAction).disabled(!store.isReadable)
                     .accessibilityIdentifier("ALO.Smoking.Save")
-            }
+            }.padding(.top, 8)
         }
         .onAppear {
-            if let entry { brand = entry.brand; context = entry.context; time = entry.smokedAt }
+            if let entry {
+                brand = entry.brand; context = entry.context; time = entry.smokedAt
+            }
             else if let latest = store.entries.last { brand = latest.brand }
         }
     }
@@ -157,8 +244,7 @@ struct SmokingEntryForm: View {
     private func save() {
         if let entry {
             if store.update(id: entry.id, brand: brand, smokedAt: time, context: context) { onSaved() }
-        } else if let added = store.add(brand: brand, smokedAt: earlier ? time : Date(), context: context) {
-            lastAdded = added
+        } else if store.add(brand: brand, smokedAt: time, context: context) != nil {
             onSaved()
         }
     }
@@ -231,15 +317,13 @@ struct SmokingHistoryView: View {
         .sheet(isPresented: $adding) {
             VStack(alignment: .leading, spacing: 20) {
                 Text("Log cigarette").font(.title3.weight(.semibold))
-                SmokingEntryForm(store: store) { adding = false }
-                HStack { Spacer(); Button("Cancel") { adding = false }.keyboardShortcut(.cancelAction) }
+                SmokingEntryForm(store: store, onCancel: { adding = false }, onSaved: { adding = false })
             }.padding(24).frame(width: 380)
         }
         .sheet(item: $editing) { entry in
             VStack(alignment: .leading, spacing: 20) {
                 Text("Edit entry").font(.title3.weight(.semibold))
-                SmokingEntryForm(store: store, entry: entry) { editing = nil }
-                HStack { Spacer(); Button("Cancel") { editing = nil }.keyboardShortcut(.cancelAction) }
+                SmokingEntryForm(store: store, entry: entry, onCancel: { editing = nil }, onSaved: { editing = nil })
             }.padding(24).frame(width: 380)
         }
         .onChange(of: period) { _, _ in selectedTime = nil }

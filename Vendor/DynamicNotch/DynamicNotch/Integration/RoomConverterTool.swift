@@ -5,7 +5,7 @@ import UniformTypeIdentifiers
 struct RoomConverterTool: View {
     @ObservedObject var model: FileConverterViewModel
     let onShare: ([URL]) -> Void
-    @State private var options = FileConverterConversionOptions()
+    @Binding var options: FileConverterConversionOptions
     @State private var selectionError: String?
 
     var body: some View {
@@ -69,6 +69,7 @@ struct RoomConverterTool: View {
         let picker = NSOpenPanel()
         picker.allowedContentTypes = [.image, .movie, .audio]
         picker.canChooseDirectories = false
+        NSApp.activate(ignoringOtherApps: true)
         picker.begin { response in
             guard response == .OK, let url = picker.url else { return }
             _ = select(url)

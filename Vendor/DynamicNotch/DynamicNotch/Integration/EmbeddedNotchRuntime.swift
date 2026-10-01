@@ -61,6 +61,7 @@ public final class EmbeddedNotchRuntime: ObservableObject {
     private let roomPresence = RoomPresenceModel()
     private var roomPresenceVisible = false
     private let roomInteraction = RoomInteractionModel()
+    private var roomToolSession = RoomToolSession()
     private var roomToolStaging = RoomToolStaging()
     private var roomToolStagingUsed = false
     private var expandRoomInteractionWhenVisible = false
@@ -85,6 +86,21 @@ public final class EmbeddedNotchRuntime: ObservableObject {
             && !delegate.notchViewModel.isActivityPresentationHidden && !isLocked && !shouldHideInFullscreen
     }
     public var interactiveScreenRect: CGRect? { delegate.activeNotchScreenRect }
+    private var fileDragApproachActive = false
+
+    public func beginFileDragApproach() {
+        guard canPresentRoomInteraction else { return }
+        fileDragApproachActive = true
+        if roomSharingAvailable { onRoomFilesDragEntered?() }
+        else { delegate.airDropController.isTargeted = true }
+    }
+
+    public func endFileDragApproach() {
+        guard fileDragApproachActive else { return }
+        fileDragApproachActive = false
+        delegate.airDropController.resetTargetState()
+    }
+
     public var canvasSize: CGSize { OverlayWindowLayout.appCanvasSize }
     public var windowYOffset: CGFloat { 1 }
 
@@ -217,11 +233,15 @@ public final class EmbeddedNotchRuntime: ObservableObject {
             onShare: onShare, onTransfers: onTransfers,
             onStartTimer: { [weak self] in self?.activation.retainRoomToolTimer() },
             isPresented: isRoomInteractionExpanded,
-            onSelectionChanged: { [weak self] selected in self?.setRoomInteractionLayout(selected ? .tool : .tray) }))
+            session: roomToolSession,
+            onSelectionChanged: { [weak self] selected in self?.setRoomInteractionLayout(selected ? .tool : .tools) }))
     }
+
+    public var roomToolsLayout: RoomNotchLayout { roomToolSession.selected == nil ? .tools : .tool }
 
     /// Call after leaving the room, once its pending transfers have stopped.
     public func clearRoomToolCopies() {
+        roomToolSession = RoomToolSession()
         guard roomToolStagingUsed else { return }
         roomToolStagingUsed = false
         let completedRoom = roomToolStaging
@@ -402,6 +422,7 @@ public final class EmbeddedNotchRuntime: ObservableObject {
         guard canPresentRoomInteraction, let screen = preferredScreen else { return false }
         roomInteraction.title = title
         roomInteraction.subtitle = subtitle
+        roomInteraction.layout = layout
         roomInteraction.content = content
         roomInteraction.open = { [weak self] in self?.delegate.notchViewModel.expandActiveLiveActivity() }
         roomInteraction.availableSize = layout.size(display: screen.visibleFrame.size)
@@ -431,6 +452,7 @@ public final class EmbeddedNotchRuntime: ObservableObject {
     public func setRoomInteractionLayout(_ layout: RoomNotchLayout) {
         guard isRoomInteractionVisible, let screen = preferredScreen else { return }
         let size = layout.size(display: screen.visibleFrame.size)
+        roomInteraction.layout = layout
         guard roomInteraction.availableSize != size else { return }
         roomInteraction.availableSize = size
         // Updating the same activity resizes it without collapsing or remounting

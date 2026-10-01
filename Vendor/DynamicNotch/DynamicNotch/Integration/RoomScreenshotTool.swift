@@ -8,7 +8,7 @@ struct RoomScreenshotTool: View {
     let shelf: FileTrayViewModel
     let staging: RoomToolStaging
     let onShare: ([URL]) -> Void
-    @State private var chosen: ScreenshotModel?
+    @Binding var chosen: ScreenshotModel?
     @State private var text: String?
     @State private var notice: String?
     @State private var working = false
@@ -22,6 +22,7 @@ struct RoomScreenshotTool: View {
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Button("Choose image…", action: chooseImage)
+                    .accessibilityIdentifier("ALO.Tools.ChooseImage")
                 if chosen != nil, model.latestScreenshot != nil {
                     Button("Use latest capture") { chosen = nil }
                 }
@@ -29,6 +30,7 @@ struct RoomScreenshotTool: View {
             if let screenshot {
                 Image(nsImage: screenshot.image).resizable().scaledToFit().frame(maxWidth: .infinity)
                     .frame(height: 140).accessibilityLabel("Screenshot preview")
+                    .accessibilityIdentifier("ALO.Tools.ScreenshotPreview")
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), alignment: .leading)], alignment: .leading, spacing: 8) {
                     actions(screenshot)
                 }.disabled(working)
@@ -97,6 +99,7 @@ struct RoomScreenshotTool: View {
         let picker = NSOpenPanel()
         picker.allowedContentTypes = [.image]
         picker.canChooseDirectories = false
+        NSApp.activate(ignoringOtherApps: true)
         picker.begin { response in
             guard response == .OK, let url = picker.url else { return }
             let scoped = url.startAccessingSecurityScopedResource()

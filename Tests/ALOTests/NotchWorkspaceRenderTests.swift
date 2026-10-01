@@ -5,6 +5,7 @@ import ALOCore
 @testable import ALONotchRuntime
 @testable import ALO
 
+extension NativePresentationTests {
 @Suite("Whole notch workspace layout", .serialized) @MainActor
 struct NotchWorkspaceRenderTests {
     @Test func renderOriginalRoomShelfAndPrivateShelfInTheSharedShell() async throws {
@@ -46,12 +47,12 @@ struct NotchWorkspaceRenderTests {
         let staging = RoomToolStaging(root: FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
         for selected in [nil] + RoomTool.allCases.map(Optional.some) {
             let tool = RoomToolsView(container: container, staging: staging, onShare: { _ in },
-                onTransfers: {}, onStartTimer: {}, selected: selected)
+                onTransfers: {}, onStartTimer: {}, session: RoomToolSession(selected: selected))
             try await renderInNotch(VStack(spacing: 10) {
                 Label("Tools", systemImage: "square.grid.2x2.fill").font(.system(size: 12, weight: .semibold))
                 tool
             }, name: "notch-tool-\(selected?.rawValue ?? "index")",
-               size: (selected == nil ? RoomNotchLayout.tray : .tool).size(display: CGSize(width: 1440, height: 900)))
+               size: (selected == nil ? RoomNotchLayout.tools : .tool).size(display: CGSize(width: 1440, height: 900)))
         }
     }
 
@@ -74,7 +75,7 @@ struct NotchWorkspaceRenderTests {
                 navigation.page = page
                 let view = ALONotchRoomWorkspace(model: model, navigation: navigation, runtime: runtime, close: {})
                 try await renderInNotch(view, name: "workspace-\(page.rawValue)-\(Int(displayWidth))",
-                                        size: navigation.layout.size(display: display))
+                                        size: navigation.layout.size(display: display), layout: navigation.layout)
             }
             for choosing in [false, true] {
                 navigation.choosingRecipient = choosing
@@ -95,11 +96,12 @@ struct NotchWorkspaceRenderTests {
         #expect(navigation.composer.chosenMentionIDs == ["raj"])
     }
 }
+}
 
 /// Use the production surface, engine expansion, shape and content mask. A plain
 /// rectangle missed the clipped headers and controls in the previous UI pass.
 @MainActor
-func renderInNotch<V: View>(_ view: V, name: String, size: CGSize) async throws {
+func renderInNotch<V: View>(_ view: V, name: String, size: CGSize, layout: RoomNotchLayout = .tray) async throws {
     let suite = "NotchRender.\(UUID())"
     let defaults = try #require(UserDefaults(suiteName: suite))
     defer { defaults.removePersistentDomain(forName: suite) }
@@ -113,6 +115,7 @@ func renderInNotch<V: View>(_ view: V, name: String, size: CGSize) async throws 
         Color.clear.onAppear { measured.rect = geometry.frame(in: .named("NotchRender")) }
     }))
     interaction.availableSize = size
+    interaction.layout = layout
     notch.send(.showLiveActivity(RoomInteractionContent(model: interaction)))
     let deadline = Date().addingTimeInterval(2)
     while notch.displayedContent == nil, Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }

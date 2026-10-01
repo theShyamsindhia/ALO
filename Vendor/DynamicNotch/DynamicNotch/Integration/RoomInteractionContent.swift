@@ -1,17 +1,18 @@
 import SwiftUI
 
 public enum RoomNotchLayout: CaseIterable {
-    case tray, recipients, conversation, files, canvasPreview, canvas, tool
+    case tray, recipients, conversation, files, canvasPreview, canvas, tools, tool
 
     public func size(display: CGSize) -> CGSize {
         let desired: CGSize
         switch self {
         case .tray: desired = CGSize(width: 460, height: 190)
-        case .recipients: desired = CGSize(width: 460, height: 220)
+        case .recipients: desired = CGSize(width: 460, height: 280)
         case .conversation: desired = CGSize(width: 520, height: 350)
         case .files: desired = CGSize(width: 480, height: 290)
         case .canvasPreview: desired = CGSize(width: 460, height: 220)
         case .canvas: desired = CGSize(width: 520, height: 400)
+        case .tools: desired = CGSize(width: 460, height: 286)
         case .tool: desired = CGSize(width: 460, height: 310)
         }
         return CGSize(width: min(desired.width, display.width - 32),
@@ -60,6 +61,7 @@ final class RoomInteractionModel: ObservableObject {
     nonisolated deinit {}
 
     @Published var title = "Room"
+    @Published var layout: RoomNotchLayout = .tray
     @Published var subtitle = ""
     @Published var content = AnyView(EmptyView())
     var availableSize = RoomNotchLayout.tray.size(display: CGSize(width: 1440, height: 900))
@@ -123,6 +125,7 @@ private struct RoomInteractionBody: View {
     var body: some View {
         model.content
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            .padding(.top, 36).padding(.horizontal, isDynamicIsland ? 22 : 42).padding(.bottom, 20)
+            .padding(.top, 36).padding(.horizontal, isDynamicIsland ? 22 : 42)
+            .padding(.bottom, model.layout == .conversation ? 8 : 16)
     }
 }

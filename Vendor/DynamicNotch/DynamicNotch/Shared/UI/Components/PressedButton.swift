@@ -45,6 +45,7 @@ struct PressedButtonStyle: ButtonStyle {
                 .foregroundStyle(foreground)
                 .background(backgroundColor)
                 .cornerRadius(cornerRadius)
+                .contentShape(RoundedRectangle(cornerRadius: cornerRadius))
                 .scaleEffect(configuration.isPressed ? 0.80 : 1.0)
                 .animation(.easeInOut(duration: 0.12), value: configuration.isPressed)
                 #if os(macOS)

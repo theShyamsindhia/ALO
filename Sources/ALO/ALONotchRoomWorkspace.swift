@@ -25,7 +25,8 @@ final class NotchRoomNavigation: ObservableObject {
     let composer = RoomChatComposerContext()
     var layout: RoomNotchLayout {
         switch page {
-        case .home, .tools: .tray
+        case .home: .tray
+        case .tools: .tools
         case .conversation: .conversation
         case .files: choosingRecipient ? .recipients : .files
         case .canvas: .canvasPreview
@@ -44,34 +45,8 @@ struct ALONotchRoomWorkspace: View {
     let close: () -> Void
 
     var body: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 8) {
-                if navigation.page != .home {
-                    Button { navigation.page = .home } label: {
-                        Image(systemName: "chevron.left").frame(width: 24, height: 24)
-                    }.buttonStyle(.plain).help("Back to room actions").accessibilityLabel("Back to room actions")
-                }
-                Label(navigation.page == .home ? model.roomTitle : navigation.page.rawValue,
-                      systemImage: navigation.page.symbol)
-                    .font(.system(size: 12, weight: .semibold)).lineLimit(1)
-                Spacer(minLength: 8)
-                if navigation.page != .conversation, model.unreadMessageCount > 0 {
-                    Button { navigation.page = .conversation } label: {
-                        Label("\(model.unreadMessageCount)", systemImage: "bubble.left")
-                    }
-                    .help("Unread messages in this room")
-                    .accessibilityLabel("\(model.unreadMessageCount) unread messages. Open conversation")
-                }
-                if let sharing = model.roomFileSharing {
-                    NotchPendingFileButton(sharing: sharing) {
-                        navigation.fileSection = 0
-                        navigation.choosingRecipient = false
-                        navigation.page = .files
-                    }
-                }
-                Button(action: close) { Image(systemName: "xmark").frame(width: 24, height: 24) }
-                    .buttonStyle(.plain).accessibilityLabel("Close room workspace")
-            }
+        VStack(spacing: navigation.page == .home || navigation.page == .conversation ? 12 : 22) {
+            if navigation.page != .home { workspaceHeader }
             Group {
             if model.phase != .live {
                 Text("You left the room. Join again to continue.")
@@ -83,7 +58,7 @@ struct ALONotchRoomWorkspace: View {
                             Image(systemName: page.symbol)
                         }
                     }
-                }
+                }.frame(height: 94)
             } else if navigation.page == .conversation {
                 RoomChatPanel(messages: model.messages, currentParticipantID: model.currentParticipantID,
                     roomTitle: model.roomTitle, firstUnreadMessageID: model.firstUnreadMessageID,
@@ -119,6 +94,7 @@ struct ALONotchRoomWorkspace: View {
                     .font(.caption).foregroundStyle(.secondary).frame(maxHeight: .infinity)
             }
             }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            if navigation.page == .home { workspaceHeader }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onDisappear { model.notchChatIsPresented = false }
@@ -133,8 +109,39 @@ struct ALONotchRoomWorkspace: View {
         .accessibilityIdentifier("ALO.Notch.RoomWorkspace")
     }
 
+    private var workspaceHeader: some View {
+        HStack(spacing: 12) {
+            if navigation.page != .home {
+                Button { navigation.page = .home } label: {
+                    Image(systemName: "chevron.left").frame(width: 24, height: 24)
+                }.buttonStyle(.plain).help("Back to room actions").accessibilityLabel("Back to room actions")
+            }
+            Text(navigation.page == .home ? model.roomTitle : navigation.page.rawValue)
+                .font(.system(size: 12, weight: navigation.page == .home ? .medium : .semibold))
+                .foregroundStyle(navigation.page == .home ? .secondary : .primary).lineLimit(1)
+            Spacer(minLength: 8)
+            if navigation.page != .conversation, model.unreadMessageCount > 0 {
+                Button { navigation.page = .conversation } label: {
+                    Label("\(model.unreadMessageCount)", systemImage: "bubble.left")
+                }
+                .help("Unread messages in this room")
+                .accessibilityLabel("\(model.unreadMessageCount) unread messages. Open conversation")
+            }
+            if let sharing = model.roomFileSharing {
+                NotchPendingFileButton(sharing: sharing) {
+                    navigation.fileSection = 0
+                    navigation.choosingRecipient = false
+                    navigation.page = .files
+                }
+            }
+            Button(action: close) { Image(systemName: "xmark").frame(width: 24, height: 24) }
+                .buttonStyle(.plain).accessibilityLabel("Close room workspace")
+        }
+    }
+
     private var members: [RoomParticipant] { model.participants.filter { $0.id != model.currentParticipantID } }
     private var currentLayout: RoomNotchLayout {
+        if navigation.page == .tools { return runtime.roomToolsLayout }
         if navigation.page == .canvas, let canvas = model.roomCanvas,
            canvas.snapshot != nil || canvas.state != nil { return .canvas }
         return navigation.layout
@@ -166,7 +173,7 @@ struct NotchRoomFiles: View {
         VStack(spacing: 10) {
           if navigation.choosingRecipient {
             HStack {
-                Text(navigation.pendingFiles.isEmpty ? "Drop onto a person or destination"
+                Text(navigation.pendingFiles.isEmpty ? "Where should this go?"
                      : navigation.pendingFiles.count == 1 ? navigation.pendingFiles[0].lastPathComponent
                      : "\(navigation.pendingFiles.count) files ready")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -174,9 +181,12 @@ struct NotchRoomFiles: View {
                 Button("Cancel") { navigation.pendingFiles = []; navigation.choosingRecipient = false }
                     .controlSize(.small)
             }
-            RoomNotchTray {
+            VStack(spacing: 8) {
+                if model.participants.contains(where: { $0.id != model.currentParticipantID }) {
+                  ScrollView(.horizontal) {
+                    HStack(spacing: 8) {
                     ForEach(model.participants.filter { $0.id != model.currentParticipantID }) { person in
-                        NotchPersonFileTarget(name: person.name, choose: {
+                        NotchPersonFileTarget(name: person.name, subtitle: "Private", person: person, choose: {
                             if navigation.pendingFiles.isEmpty {
                                 sharing.chooseFile(to: person.id)
                                 navigation.choosingRecipient = false
@@ -193,23 +203,29 @@ struct NotchRoomFiles: View {
                                 navigation.fileSection = 0; navigation.choosingRecipient = false
                             })
                     }
-                    NotchPersonFileTarget(name: "Everyone", symbol: "person.2", choose: chooseRoomFiles,
+                    }.padding(.vertical, 2)
+                  }.scrollIndicators(.automatic)
+                    .frame(height: 84)
+                }
+                HStack(spacing: 8) {
+                    NotchPersonFileTarget(name: "Everyone", subtitle: "This channel", symbol: "person.2", choose: chooseRoomFiles,
                         receive: { urls in
                             model.addRoomTrayFiles(urls)
                             navigation.fileSection = 1; navigation.choosingRecipient = false
                         })
-                    NotchPersonFileTarget(name: "My shelf", symbol: "tray", choose: {
+                    NotchPersonFileTarget(name: "My shelf", subtitle: "Only you", symbol: "tray", choose: {
                         navigation.fileSection = 2
                         if !navigation.pendingFiles.isEmpty { keepLocally(navigation.pendingFiles) }
                         else { navigation.choosingRecipient = false }
                     }, receive: keepLocally)
-                    NotchPersonFileTarget(name: "AirDrop", symbol: "airplay.audio", choose: {
+                    NotchPersonFileTarget(name: "AirDrop", subtitle: "Nearby", symbol: "antenna.radiowaves.left.and.right", choose: {
                         if !navigation.pendingFiles.isEmpty { airDrop(navigation.pendingFiles) }
                         else {
                             let picker = NSOpenPanel(); picker.allowsMultipleSelection = true; picker.canChooseDirectories = false
                             picker.begin { if $0 == .OK { airDrop(picker.urls) } }
                         }
                     }, receive: airDrop)
+                }
             }
           } else {
             HStack {
@@ -305,20 +321,46 @@ struct NotchRoomFiles: View {
 
 }
 
-private struct NotchPersonFileTarget: View {
+struct NotchPersonFileTarget: View {
     let name: String
+    let subtitle: String
     var symbol: String? = nil
+    var person: RoomParticipant? = nil
     let choose: () -> Void
     let receive: ([URL]) -> Void
     @State private var targeted = false
+    @State private var hovered = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
-        RoomNotchTile(name, action: choose) {
+        Button(action: choose) {
+            VStack(spacing: 4) {
                 Group {
-                    if let symbol { Image(systemName: symbol) }
-                    else { Text(String(name.prefix(1)).uppercased()) }
-                }.foregroundStyle(targeted ? Color.accentColor : .white)
+                    if let person {
+                        let appearance = DeviceAppearance.generated(from: person.id)
+                        DeviceAvatar(emoji: person.icon ?? appearance.icon,
+                                     colorHex: person.colorHex ?? appearance.colorHex,
+                                     profileImageData: person.profileImageData, size: 32)
+                    } else if let symbol {
+                        Image(systemName: symbol).font(.system(size: 20, weight: .medium))
+                            .foregroundStyle(Color.accentColor).frame(height: 25)
+                    }
+                }.scaleEffect(targeted && !reduceMotion ? 1.08 : 1)
+                Text(name).font(.system(size: 11, weight: .medium)).lineLimit(1)
+                Text(targeted ? "Drop here" : subtitle)
+                    .font(.system(size: 9)).foregroundStyle(targeted ? Color.accentColor : Color.secondary)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 6).padding(.vertical, 8)
+            .frame(width: person == nil ? nil : 68)
+            .frame(maxWidth: person == nil ? .infinity : nil)
+            .background(targeted ? Color.accentColor.opacity(0.18) : Color.primary.opacity(hovered ? 0.10 : 0.05),
+                        in: RoundedRectangle(cornerRadius: 14))
+            .contentShape(RoundedRectangle(cornerRadius: 14))
         }
-            .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(targeted ? Color.accentColor : .clear, lineWidth: 2))
+            .buttonStyle(.plain)
+            .onHover { hovered = $0 }
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: targeted)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: hovered)
             .accessibilityLabel(symbol == nil ? "Send a file privately to \(name)" : "Choose \(name) as the file destination")
             .help(symbol == nil ? "Private file offer to \(name)" : name == "Everyone" ? "Share on the room shelf" : name == "My shelf" ? "Keep a private copy" : "Open Apple’s AirDrop interface")
             .onDrop(of: [UTType.fileURL.identifier], isTargeted: $targeted) {

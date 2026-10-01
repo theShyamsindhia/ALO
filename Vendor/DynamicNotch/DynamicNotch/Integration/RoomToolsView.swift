@@ -13,7 +13,7 @@ enum RoomTool: String, CaseIterable, Identifiable {
         case .converter: "Convert"
         case .camera: "Camera"
         case .systemTimer: "Clock"
-        case .statistics: "CPU & memory"
+        case .statistics: "System"
         default: rawValue
         }
     }
@@ -43,6 +43,17 @@ enum RoomTool: String, CaseIterable, Identifiable {
     }
 }
 
+@MainActor
+final class RoomToolSession: ObservableObject {
+    nonisolated deinit {}
+
+    @Published var selected: RoomTool?
+    @Published var screenshot: ScreenshotModel?
+    @Published var conversionOptions = FileConverterConversionOptions()
+
+    init(selected: RoomTool? = nil) { self.selected = selected }
+}
+
 struct RoomToolsView: View {
     let container: AppContainer
     let staging: RoomToolStaging
@@ -50,42 +61,48 @@ struct RoomToolsView: View {
     let onTransfers: () -> Void
     let onStartTimer: () -> Void
     var isPresented = true
-    @State var selected: RoomTool?
+    @ObservedObject var session: RoomToolSession
     var onSelectionChanged: (Bool) -> Void = { _ in }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if let selected {
+            if let selected = session.selected {
                 HStack {
-                    Button { self.selected = nil } label: { Label("Tools", systemImage: "chevron.left") }
+                    Button { session.selected = nil } label: {
+                        Label(selected.rawValue, systemImage: "chevron.left")
+                            .font(.system(size: 12, weight: .semibold))
+                    }.buttonStyle(.plain).help("Back to all tools")
                     Spacer()
-                    Label(selected.rawValue, systemImage: selected.symbol).font(.system(size: 12, weight: .semibold))
                 }.controlSize(.small)
                 ScrollView {
                     tool(selected).frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 4)
                 }
             } else {
-                RoomNotchTray {
+                ScrollView {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 80), spacing: 10)], spacing: 12) {
                         ForEach(RoomTool.allCases) { tool in
-                            RoomNotchTile(tool.trayLabel, action: { selected = tool }) {
+                            RoomNotchTile(tool.trayLabel, action: { session.selected = tool }) {
                                 Image(systemName: tool.symbol)
                             }.help(tool.detail).accessibilityLabel(tool.rawValue).accessibilityHint(tool.detail)
+                                .accessibilityIdentifier("ALO.Tools.\(tool.id)")
                         }
+                    }.padding(.vertical, 3)
                 }
             }
         }
         .controlSize(.small)
-        .onAppear { onSelectionChanged(selected != nil) }
-        .onChange(of: selected) { _, value in onSelectionChanged(value != nil) }
+        .onAppear { onSelectionChanged(session.selected != nil) }
+        .onChange(of: session.selected) { _, value in onSelectionChanged(value != nil) }
     }
 
     @ViewBuilder private func tool(_ tool: RoomTool) -> some View {
         switch tool {
         case .screenshots:
             RoomScreenshotTool(model: container.screenshotViewModel, settings: container.settingsViewModel.screenRecording,
-                shelf: container.fileTrayViewModel, staging: staging, onShare: onShare)
+                shelf: container.fileTrayViewModel, staging: staging, onShare: onShare,
+                chosen: $session.screenshot)
         case .converter:
-            RoomConverterTool(model: container.fileConverterViewModel, onShare: onShare)
+            RoomConverterTool(model: container.fileConverterViewModel, onShare: onShare, options: $session.conversionOptions)
         case .downloads:
             RoomDownloadsTool(model: container.downloadViewModel, settings: container.settingsViewModel.mediaAndFiles,
                 onTransfers: onTransfers)

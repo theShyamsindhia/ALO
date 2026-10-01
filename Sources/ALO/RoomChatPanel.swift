@@ -170,7 +170,8 @@ struct RoomChatPanel: View {
                 .overlay(RoundedRectangle(cornerRadius: 23).strokeBorder(.primary.opacity(usesNativeLayout ? 0.1 : 0)))
             }.font(isNotch ? .system(size: 13) : usesNativeLayout ? ALONetworkTypography.body : .system(size: 12))
                 .padding(.horizontal, usesNativeLayout ? (!showsHeader ? 0 : (compactLayout ? 16 : 24)) : 10)
-                .padding(.vertical, usesNativeLayout ? (compactLayout ? 10 : 14) : 7)
+                .padding(.top, isNotch ? 10 : usesNativeLayout ? (compactLayout ? 10 : 14) : 7)
+                .padding(.bottom, isNotch ? 0 : usesNativeLayout ? (compactLayout ? 10 : 14) : 7)
                 .background(.primary.opacity(usesNativeLayout ? 0 : 0.045), in: RoundedRectangle(cornerRadius: 12))
                 .padding(.horizontal, usesNativeLayout ? 0 : 10).padding(.vertical, usesNativeLayout ? 0 : 6)
 
