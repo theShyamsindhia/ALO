@@ -94,34 +94,34 @@ extension NativePresentationTests {
             let compactSize = popover.contentSize
             let top = window.frame.maxY
             let host = try #require(popover.contentViewController?.view)
-            try press("ALO.Smoking.Details", in: host)
+            try await press("ALO.Smoking.Details", in: host)
             try await Task.sleep(for: .milliseconds(150))
             #expect(popover.contentSize.height > compactSize.height)
-            try press("ALO.Smoking.Earlier", in: host)
+            try await press("ALO.Smoking.Earlier", in: host)
             try await Task.sleep(for: .milliseconds(150))
             let expandedSize = popover.contentSize
             #expect(expandedSize.height <= 240)
             #expect(abs(window.frame.maxY - top) < 1, "Details must grow downward without moving the anchor")
             #expect(screen.frame.contains(window.frame))
-            try press("ALO.Smoking.Save", in: host)
+            try await press("ALO.Smoking.Save", in: host)
             try await Task.sleep(for: .milliseconds(100))
             #expect(store.entries.count == 1)
             #expect(popover.contentSize == expandedSize, "Logged/Undo must not add a row")
-            try press("ALO.Smoking.Undo", in: host)
+            try await press("ALO.Smoking.Undo", in: host)
             try await Task.sleep(for: .milliseconds(100))
             #expect(store.entries.isEmpty)
             #expect(popover.contentSize == expandedSize)
-            try press("ALO.Smoking.Details", in: host)
+            try await press("ALO.Smoking.Details", in: host)
             try await Task.sleep(for: .milliseconds(100))
             #expect(popover.contentSize == compactSize)
             #expect(abs(window.frame.maxY - top) < 1)
-            try press("ALO.Smoking.Brand.marlboroCloveMix", in: host)
-            try press("ALO.Smoking.Save", in: host)
+            try await press("ALO.Smoking.Brand.marlboroCloveMix", in: host)
+            try await press("ALO.Smoking.Save", in: host)
             try await Task.sleep(for: .milliseconds(100))
             #expect(store.entries.last?.brand == .marlboroCloveMix)
             #expect(popover.contentSize == compactSize)
             try await Task.sleep(for: .milliseconds(6200))
-            try press("ALO.Smoking.Details", in: host)
+            try await press("ALO.Smoking.Details", in: host)
             #expect(store.entries.count == 1, "The confirmation timeout must not add another entry")
             popover.close()
             #expect(!model.smokingLog.isQuickLogPresented)
@@ -165,7 +165,7 @@ extension NativePresentationTests {
             required init?(coder: NSCoder) { fatalError("Test fixture") }
         }
 
-        private func press(_ identifier: String, in root: Any) throws {
+        private func press(_ identifier: String, in root: Any) async throws {
             // SwiftUI's virtual nodes implement the selectors without declaring
             // conformance to AppKit's NSAccessibilityProtocol.
             func find(_ object: Any) -> AnyObject? {
@@ -176,7 +176,14 @@ extension NativePresentationTests {
                 }
                 return nil
             }
-            let element = try #require(find(root), "Missing control: \(identifier)")
+            // SwiftUI publishes accessibility changes asynchronously after state updates.
+            let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+            var match = find(root)
+            while match == nil && ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(50))
+                match = find(root)
+            }
+            let element = try #require(match, "Missing control: \(identifier)")
             #expect(element.accessibilityPerformPress?() == true, "Control must be operable: \(identifier)")
         }
 
