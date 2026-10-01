@@ -55,7 +55,7 @@ final class RoomToolsTests: XCTestCase {
                 let view = RoomToolsView(container: container, staging: staging,
                     onShare: { _ in XCTFail("Rendering must not share files") },
                     onTransfers: { XCTFail("Rendering must not navigate") },
-                    onStartTimer: { XCTFail("Rendering must not start a timer") }, selected: selected)
+                    onStartTimer: { XCTFail("Rendering must not start a timer") }, session: RoomToolSession(selected: selected))
                 try await render(view.defaultAppStorage(defaults),
                     name: "tools-\(selected?.id ?? "index")-\(Int(width))", width: width)
             }
@@ -88,6 +88,56 @@ final class RoomToolsTests: XCTestCase {
         activation.setEnabled(true)
         XCTAssertEqual(container.localTimerViewModel.state, .stopped)
         XCTAssertTrue(activation.running.isEmpty)
+    }
+
+    func testToolSelectionAndImageSurviveClosingAndReopeningWorkspace() async throws {
+        _ = NSApplication.shared
+        let enhancedUI = NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface")
+        let previousAccessibility = NSApp.accessibilityAttributeValue(enhancedUI)
+        NSApp.accessibilitySetValue(true, forAttribute: enhancedUI)
+        defer { NSApp.accessibilitySetValue(previousAccessibility ?? false, forAttribute: enhancedUI) }
+        let (container, _) = fixture()
+        let session = RoomToolSession()
+        let view = RoomToolsView(container: container, staging: RoomToolStaging(),
+            onShare: { _ in }, onTransfers: {}, onStartTimer: {}, session: session)
+        let host = NSHostingView(rootView: AnyView(view.frame(width: 400, height: 350)))
+        let window = NSWindow(contentRect: NSRect(x: -3000, y: -3000, width: 400, height: 350),
+            styleMask: .borderless, backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        window.orderBack(nil)
+        defer { window.close() }
+
+        func element(_ identifier: String) async throws -> AnyObject {
+            func find(_ object: Any) -> AnyObject? {
+                let element = object as AnyObject
+                if element.accessibilityIdentifier?() == identifier { return element }
+                for child in element.accessibilityChildren?() ?? [] {
+                    if let match = find(child) { return match }
+                }
+                return nil
+            }
+            let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+            while ContinuousClock.now < deadline {
+                if let match = find(host) { return match }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+            return try XCTUnwrap(find(host), "Missing control: \(identifier)")
+        }
+
+        let tile = try await element("ALO.Tools.Screenshots & text")
+        XCTAssertTrue(tile.accessibilityPerformPress?() == true)
+        _ = try await element("ALO.Tools.ChooseImage")
+        XCTAssertEqual(session.selected, .screenshots)
+        host.rootView = AnyView(EmptyView())
+        try await Task.sleep(for: .milliseconds(100))
+        // A native picker's result can arrive while the notch is collapsed.
+        session.screenshot = ScreenshotModel(image: sampleImage(), fileURL: nil, tempFileURL: nil,
+            targetDestinationURL: nil, fileName: "Review.tiff", recognizedText: "", isRecognizing: false, timestamp: Date())
+        host.rootView = AnyView(view.frame(width: 400, height: 350))
+        _ = try await element("ALO.Tools.ScreenshotPreview")
+        _ = try await element("ALO.Tools.ChooseImage")
+        XCTAssertEqual(session.selected, .screenshots)
     }
 
     func testRoomTimerCompletionUsesASingleChime() {
@@ -164,7 +214,7 @@ final class RoomToolsTests: XCTestCase {
         for width in [340.0, 540.0] {
             for selected in [RoomTool.screenshots, .converter] {
                 let view = RoomToolsView(container: container, staging: staging, onShare: { _ in },
-                    onTransfers: {}, onStartTimer: {}, selected: selected)
+                    onTransfers: {}, onStartTimer: {}, session: RoomToolSession(selected: selected))
                 try await render(view.defaultAppStorage(defaults), name: "tools-\(selected.id)-populated-\(Int(width))", width: width)
             }
         }

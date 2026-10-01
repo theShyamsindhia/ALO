@@ -25,7 +25,8 @@ final class NotchRoomNavigation: ObservableObject {
     let composer = RoomChatComposerContext()
     var layout: RoomNotchLayout {
         switch page {
-        case .home, .tools: .tray
+        case .home: .tray
+        case .tools: .tools
         case .conversation: .conversation
         case .files: choosingRecipient ? .recipients : .files
         case .canvas: .canvasPreview
@@ -44,34 +45,8 @@ struct ALONotchRoomWorkspace: View {
     let close: () -> Void
 
     var body: some View {
-        VStack(spacing: 10) {
-            HStack(spacing: 8) {
-                if navigation.page != .home {
-                    Button { navigation.page = .home } label: {
-                        Image(systemName: "chevron.left").frame(width: 24, height: 24)
-                    }.buttonStyle(.plain).help("Back to room actions").accessibilityLabel("Back to room actions")
-                }
-                Label(navigation.page == .home ? model.roomTitle : navigation.page.rawValue,
-                      systemImage: navigation.page.symbol)
-                    .font(.system(size: 12, weight: .semibold)).lineLimit(1)
-                Spacer(minLength: 8)
-                if navigation.page != .conversation, model.unreadMessageCount > 0 {
-                    Button { navigation.page = .conversation } label: {
-                        Label("\(model.unreadMessageCount)", systemImage: "bubble.left")
-                    }
-                    .help("Unread messages in this room")
-                    .accessibilityLabel("\(model.unreadMessageCount) unread messages. Open conversation")
-                }
-                if let sharing = model.roomFileSharing {
-                    NotchPendingFileButton(sharing: sharing) {
-                        navigation.fileSection = 0
-                        navigation.choosingRecipient = false
-                        navigation.page = .files
-                    }
-                }
-                Button(action: close) { Image(systemName: "xmark").frame(width: 24, height: 24) }
-                    .buttonStyle(.plain).accessibilityLabel("Close room workspace")
-            }
+        VStack(spacing: navigation.page == .home || navigation.page == .conversation ? 12 : 22) {
+            if navigation.page != .home { workspaceHeader }
             Group {
             if model.phase != .live {
                 Text("You left the room. Join again to continue.")
@@ -83,7 +58,7 @@ struct ALONotchRoomWorkspace: View {
                             Image(systemName: page.symbol)
                         }
                     }
-                }
+                }.frame(height: 94)
             } else if navigation.page == .conversation {
                 RoomChatPanel(messages: model.messages, currentParticipantID: model.currentParticipantID,
                     roomTitle: model.roomTitle, firstUnreadMessageID: model.firstUnreadMessageID,
@@ -119,6 +94,7 @@ struct ALONotchRoomWorkspace: View {
                     .font(.caption).foregroundStyle(.secondary).frame(maxHeight: .infinity)
             }
             }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            if navigation.page == .home { workspaceHeader }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .onDisappear { model.notchChatIsPresented = false }
@@ -133,8 +109,39 @@ struct ALONotchRoomWorkspace: View {
         .accessibilityIdentifier("ALO.Notch.RoomWorkspace")
     }
 
+    private var workspaceHeader: some View {
+        HStack(spacing: 12) {
+            if navigation.page != .home {
+                Button { navigation.page = .home } label: {
+                    Image(systemName: "chevron.left").frame(width: 24, height: 24)
+                }.buttonStyle(.plain).help("Back to room actions").accessibilityLabel("Back to room actions")
+            }
+            Text(navigation.page == .home ? model.roomTitle : navigation.page.rawValue)
+                .font(.system(size: 12, weight: navigation.page == .home ? .medium : .semibold))
+                .foregroundStyle(navigation.page == .home ? .secondary : .primary).lineLimit(1)
+            Spacer(minLength: 8)
+            if navigation.page != .conversation, model.unreadMessageCount > 0 {
+                Button { navigation.page = .conversation } label: {
+                    Label("\(model.unreadMessageCount)", systemImage: "bubble.left")
+                }
+                .help("Unread messages in this room")
+                .accessibilityLabel("\(model.unreadMessageCount) unread messages. Open conversation")
+            }
+            if let sharing = model.roomFileSharing {
+                NotchPendingFileButton(sharing: sharing) {
+                    navigation.fileSection = 0
+                    navigation.choosingRecipient = false
+                    navigation.page = .files
+                }
+            }
+            Button(action: close) { Image(systemName: "xmark").frame(width: 24, height: 24) }
+                .buttonStyle(.plain).accessibilityLabel("Close room workspace")
+        }
+    }
+
     private var members: [RoomParticipant] { model.participants.filter { $0.id != model.currentParticipantID } }
     private var currentLayout: RoomNotchLayout {
+        if navigation.page == .tools { return runtime.roomToolsLayout }
         if navigation.page == .canvas, let canvas = model.roomCanvas,
            canvas.snapshot != nil || canvas.state != nil { return .canvas }
         return navigation.layout
