@@ -74,10 +74,19 @@ extension NativePresentationTests {
             defer { NSStatusBar.system.removeStatusItem(item) }
             let button = try #require(item.button)
             button.image = NSImage(systemSymbolName: "checkmark", accessibilityDescription: "Placement test")
-            try await Task.sleep(for: .milliseconds(150))
+            // AppKit can initially give a new status item an offscreen frame.
+            let placementDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+            while ContinuousClock.now < placementDeadline {
+                if let window = button.window, let screen = window.screen,
+                   window.isVisible, screen.frame.contains(window.convertToScreen(button.convert(button.bounds, to: nil))) {
+                    break
+                }
+                try await Task.sleep(for: .milliseconds(50))
+            }
             let anchorWindow = try #require(button.window)
             let anchor = anchorWindow.convertToScreen(button.convert(button.bounds, to: nil))
             let screen = try #require(anchorWindow.screen)
+            try #require(anchorWindow.isVisible && screen.frame.contains(anchor), "Status item must be laid out before testing popover placement")
             let popover = model.smokingLog.presentQuickLog(store: store, from: button)
             defer { popover.close() }
             print("Smoking anchor: flipped=\(button.isFlipped) anchor=\(anchor) visible=\(anchorWindow.isVisible) screen=\(screen.visibleFrame) shown=\(popover.isShown)")
