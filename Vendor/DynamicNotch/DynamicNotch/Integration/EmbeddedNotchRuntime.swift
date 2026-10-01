@@ -85,6 +85,21 @@ public final class EmbeddedNotchRuntime: ObservableObject {
             && !delegate.notchViewModel.isActivityPresentationHidden && !isLocked && !shouldHideInFullscreen
     }
     public var interactiveScreenRect: CGRect? { delegate.activeNotchScreenRect }
+    private var fileDragApproachActive = false
+
+    public func beginFileDragApproach() {
+        guard canPresentRoomInteraction else { return }
+        fileDragApproachActive = true
+        if roomSharingAvailable { onRoomFilesDragEntered?() }
+        else { delegate.airDropController.isTargeted = true }
+    }
+
+    public func endFileDragApproach() {
+        guard fileDragApproachActive else { return }
+        fileDragApproachActive = false
+        delegate.airDropController.resetTargetState()
+    }
+
     public var canvasSize: CGSize { OverlayWindowLayout.appCanvasSize }
     public var windowYOffset: CGFloat { 1 }
 

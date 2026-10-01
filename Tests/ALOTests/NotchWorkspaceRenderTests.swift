@@ -5,6 +5,7 @@ import ALOCore
 @testable import ALONotchRuntime
 @testable import ALO
 
+extension NativePresentationTests {
 @Suite("Whole notch workspace layout", .serialized) @MainActor
 struct NotchWorkspaceRenderTests {
     @Test func renderOriginalRoomShelfAndPrivateShelfInTheSharedShell() async throws {
@@ -94,6 +95,7 @@ struct NotchWorkspaceRenderTests {
         #expect(navigation.fileSection == 2)
         #expect(navigation.composer.chosenMentionIDs == ["raj"])
     }
+}
 }
 
 /// Use the production surface, engine expansion, shape and content mask. A plain

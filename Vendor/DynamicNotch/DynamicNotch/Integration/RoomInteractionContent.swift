@@ -7,7 +7,7 @@ public enum RoomNotchLayout: CaseIterable {
         let desired: CGSize
         switch self {
         case .tray: desired = CGSize(width: 460, height: 190)
-        case .recipients: desired = CGSize(width: 460, height: 220)
+        case .recipients: desired = CGSize(width: 460, height: 280)
         case .conversation: desired = CGSize(width: 520, height: 350)
         case .files: desired = CGSize(width: 480, height: 290)
         case .canvasPreview: desired = CGSize(width: 460, height: 220)
