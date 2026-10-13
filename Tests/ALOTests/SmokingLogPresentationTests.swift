@@ -61,6 +61,12 @@ extension NativePresentationTests {
             defer { NSApp.setActivationPolicy(activationPolicy) }
             NSApp.setActivationPolicy(.accessory)
             NSApp.activate(ignoringOtherApps: true)
+            NSApp.finishLaunching()
+            // Recreate the accessory status-bar host after preceding native
+            // presentation fixtures may have left AppKit mid-transition.
+            NSApp.setActivationPolicy(.regular)
+            NSApp.setActivationPolicy(.accessory)
+            NSApp.activate(ignoringOtherApps: true)
             // SwiftUI otherwise leaves its lazy accessibility tree empty in an in-process fixture.
             let enhancedUI = NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface")
             let previousAccessibility = NSApp.accessibilityAttributeValue(enhancedUI)
@@ -72,21 +78,28 @@ extension NativePresentationTests {
             let model = ALOViewModel(discoverRooms: false)
             let item = NSStatusBar.system.statusItem(withLength: 28)
             defer { NSStatusBar.system.removeStatusItem(item) }
+            item.autosaveName = "ALO.smoking.placement.\(UUID().uuidString)"
+            item.isVisible = false
+            item.isVisible = true
             let button = try #require(item.button)
             button.image = NSImage(systemSymbolName: "checkmark", accessibilityDescription: "Placement test")
             // AppKit can initially give a new status item an offscreen frame.
             let placementDeadline = ContinuousClock.now.advanced(by: .seconds(5))
             while ContinuousClock.now < placementDeadline {
                 if let window = button.window, let screen = window.screen,
-                   window.isVisible, screen.frame.contains(window.convertToScreen(button.convert(button.bounds, to: nil))) {
-                    break
+                   window.isVisible {
+                    let buttonFrame = window.convertToScreen(button.convert(button.bounds, to: nil))
+                    if screen.frame.contains(buttonFrame) {
+                        break
+                    }
                 }
                 try await Task.sleep(for: .milliseconds(50))
             }
             let anchorWindow = try #require(button.window)
             let anchor = anchorWindow.convertToScreen(button.convert(button.bounds, to: nil))
             let screen = try #require(anchorWindow.screen)
-            try #require(anchorWindow.isVisible && screen.frame.contains(anchor), "Status item must be laid out before testing popover placement")
+            try #require(anchorWindow.isVisible && screen.frame.contains(anchor),
+                         "Status item must be laid out before testing popover placement")
             let popover = model.smokingLog.presentQuickLog(store: store, from: button)
             defer { popover.close() }
             print("Smoking anchor: flipped=\(button.isFlipped) anchor=\(anchor) visible=\(anchorWindow.isVisible) screen=\(screen.visibleFrame) shown=\(popover.isShown)")

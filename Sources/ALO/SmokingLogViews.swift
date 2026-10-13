@@ -56,7 +56,13 @@ final class SmokingLogController: NSObject, NSPopoverDelegate {
             self?.showHistory()
         }, onSizeChange: { [weak popover] size in
             guard let popover, popover.contentSize != size else { return }
+            let top = popover.contentViewController?.view.window?.frame.maxY
             popover.contentSize = size
+            if let window = popover.contentViewController?.view.window, let top {
+                var frame = window.frame
+                frame.origin.y = top - frame.height
+                window.setFrame(frame, display: false)
+            }
         }))
         // Own the popover size before presentation and when Details changes it.
         // Otherwise AppKit positions a default-sized host before SwiftUI lays it out.
@@ -65,7 +71,15 @@ final class SmokingLogController: NSObject, NSPopoverDelegate {
         popover.contentSize = host.view.fittingSize
         self.popover = popover
         NSApp.activate(ignoringOtherApps: true)
-        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: anchor.isFlipped ? .maxY : .minY)
+        let anchorFrame = anchor.window.map { $0.convertToScreen(anchor.convert(anchor.bounds, to: nil)) }
+        let preferredEdge: NSRectEdge = if let screen = anchor.window?.screen,
+                                            let anchorFrame,
+                                            anchorFrame.midY < screen.visibleFrame.midY {
+            .minY
+        } else {
+            anchor.isFlipped ? .maxY : .minY
+        }
+        popover.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: preferredEdge)
         popover.contentViewController?.view.window?.makeKey()
         return popover
     }
