@@ -55,18 +55,9 @@ import Testing
 extension NativePresentationTests {
     @Suite(.serialized) @MainActor
     struct SmokingLogRenderTests {
-        @Test func realStatusItemPopoverStaysBelowItsAnchorThroughDetailsAndUndo() async throws {
+        @Test(arguments: [false, true])
+        func menuBarPopoverStaysBelowItsAnchorThroughDetailsAndUndo(flipped: Bool) async throws {
             _ = NSApplication.shared
-            let activationPolicy = NSApp.activationPolicy()
-            defer { NSApp.setActivationPolicy(activationPolicy) }
-            NSApp.setActivationPolicy(.accessory)
-            NSApp.activate(ignoringOtherApps: true)
-            NSApp.finishLaunching()
-            // Recreate the accessory status-bar host after preceding native
-            // presentation fixtures may have left AppKit mid-transition.
-            NSApp.setActivationPolicy(.regular)
-            NSApp.setActivationPolicy(.accessory)
-            NSApp.activate(ignoringOtherApps: true)
             // SwiftUI otherwise leaves its lazy accessibility tree empty in an in-process fixture.
             let enhancedUI = NSAccessibility.Attribute(rawValue: "AXEnhancedUserInterface")
             let previousAccessibility = NSApp.accessibilityAttributeValue(enhancedUI)
@@ -76,30 +67,22 @@ extension NativePresentationTests {
             defer { try? FileManager.default.removeItem(at: directory) }
             let store = SmokingLogStore(userID: "placement-fixture", directory: directory)
             let model = ALOViewModel(discoverRooms: false)
-            let item = NSStatusBar.system.statusItem(withLength: 28)
-            defer { NSStatusBar.system.removeStatusItem(item) }
-            item.autosaveName = "ALO.smoking.placement.\(UUID().uuidString)"
-            item.isVisible = false
-            item.isVisible = true
-            let button = try #require(item.button)
-            button.image = NSImage(systemSymbolName: "checkmark", accessibilityDescription: "Placement test")
-            // AppKit can initially give a new status item an offscreen frame.
-            let placementDeadline = ContinuousClock.now.advanced(by: .seconds(5))
-            while ContinuousClock.now < placementDeadline {
-                if let window = button.window, let screen = window.screen,
-                   window.isVisible {
-                    let buttonFrame = window.convertToScreen(button.convert(button.bounds, to: nil))
-                    if screen.frame.contains(buttonFrame) {
-                        break
-                    }
-                }
-                try await Task.sleep(for: .milliseconds(50))
-            }
-            let anchorWindow = try #require(button.window)
+            // The CI menu-bar host can leave NSStatusItem offscreen indefinitely.
+            // Own the anchor geometry while exercising the real AppKit popover.
+            let screen = try #require(NSScreen.main)
+            let menuBarHeight = max(NSStatusBar.system.thickness, screen.frame.maxY - screen.visibleFrame.maxY)
+            let anchorWindow = NSWindow(contentRect: NSRect(x: screen.frame.midX - 14,
+                y: screen.frame.maxY - menuBarHeight, width: 28, height: menuBarHeight),
+                styleMask: .borderless, backing: .buffered, defer: false)
+            anchorWindow.isReleasedWhenClosed = false
+            anchorWindow.level = .statusBar
+            let button = PlacementAnchor(flipped: flipped)
+            anchorWindow.contentView = button
+            anchorWindow.orderFrontRegardless()
+            defer { anchorWindow.close() }
             let anchor = anchorWindow.convertToScreen(button.convert(button.bounds, to: nil))
-            let screen = try #require(anchorWindow.screen)
             try #require(anchorWindow.isVisible && screen.frame.contains(anchor),
-                         "Status item must be laid out before testing popover placement")
+                         "Menu-bar anchor must be onscreen before testing popover placement")
             let popover = model.smokingLog.presentQuickLog(store: store, from: button)
             defer { popover.close() }
             print("Smoking anchor: flipped=\(button.isFlipped) anchor=\(anchor) visible=\(anchorWindow.isVisible) screen=\(screen.visibleFrame) shown=\(popover.isShown)")
