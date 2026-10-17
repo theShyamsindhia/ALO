@@ -372,15 +372,29 @@ struct FileTransferProgressView: View {
             VStack(alignment: .leading, spacing: 16) {
                 if model.progress.isEmpty && model.message == nil {
                     if showsShareAction {
-                        VStack(spacing: 8) {
-                            Image(systemName: "arrow.left.arrow.right").font(.title3)
-                            Text("No transfers yet").font(.callout.weight(.medium))
-                            Text("Choose Share to send a file. Incoming offers appear here for you to accept or decline.")
-                                .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                        }.frame(maxWidth: .infinity).padding(.vertical, 20)
+                        VStack(spacing: 6) {
+                            Image(systemName: "arrow.left.arrow.right")
+                                .font(.system(size: 20, weight: .medium))
+                                .foregroundStyle(.white.opacity(0.75))
+                            Text("No active or recent transfers")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.white.opacity(0.9))
+                            Text("Click Share… to send a file privately, or drop files onto the notch. Incoming offers appear here.")
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                                .lineLimit(2)
+                        }
+                        .padding(16)
+                        .frame(maxWidth: .infinity, minHeight: 132)
+                        .background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .strokeBorder(.white.opacity(0.09), lineWidth: 0.75)
+                        }
                     } else {
-                    ContentUnavailableView("No transfers yet", systemImage: "arrow.left.arrow.right",
-                        description: Text("Drop a file onto someone in the room to send it privately."))
+                        ContentUnavailableView("No transfers yet", systemImage: "arrow.left.arrow.right",
+                            description: Text("Drop a file onto someone in the room to send it privately."))
                     }
                 }
                 ForEach(model.progress) { item in
@@ -426,7 +440,7 @@ struct FileTransferProgressView: View {
                     .padding(12).background(.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 12))
                 }
                 if let message = model.message { Text(message).font(.callout) }
-            }.padding(showsShareAction ? 4 : 20)
+            }.padding(showsShareAction ? 0 : 20)
         }
         .confirmationDialog("Discard temporary copy?", isPresented: Binding(
             get: { discarding != nil }, set: { if !$0 { discarding = nil } }), presenting: discarding) { item in

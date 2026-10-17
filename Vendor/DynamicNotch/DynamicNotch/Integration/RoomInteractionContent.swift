@@ -12,7 +12,7 @@ public enum RoomNotchLayout: CaseIterable {
         case .files: desired = CGSize(width: 480, height: 290)
         case .canvasPreview: desired = CGSize(width: 460, height: 220)
         case .canvas: desired = CGSize(width: 520, height: 400)
-        case .tools: desired = CGSize(width: 460, height: 286)
+        case .tools: desired = CGSize(width: 460, height: 190)
         case .tool: desired = CGSize(width: 460, height: 310)
         }
         return CGSize(width: min(desired.width, display.width - 32),
@@ -35,21 +35,56 @@ public struct RoomNotchTray<Content: View>: View {
 
 public struct RoomNotchTile<Icon: View>: View {
     let title: String
+    let flexibleWidth: Bool
     let action: () -> Void
     let icon: Icon
-    public init(_ title: String, action: @escaping () -> Void, @ViewBuilder icon: () -> Icon) {
-        self.title = title; self.action = action; self.icon = icon()
+    public init(_ title: String, flexibleWidth: Bool = false, action: @escaping () -> Void, @ViewBuilder icon: () -> Icon) {
+        self.title = title
+        self.flexibleWidth = flexibleWidth
+        self.action = action
+        self.icon = icon()
     }
     public var body: some View {
         Button(action: action) {
             VStack(spacing: 7) {
-                icon.font(.system(size: 25, weight: .medium)).frame(width: 40, height: 36)
-                Text(title).font(.system(size: 10, weight: .medium)).lineLimit(1).frame(width: 72)
+                icon.font(.system(size: 24, weight: .medium)).frame(width: 40, height: 34)
+                Text(title)
+                    .font(.system(size: 10.5, weight: .medium))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .frame(maxWidth: flexibleWidth ? .infinity : 72)
             }
+            .padding(.horizontal, flexibleWidth ? 4 : 0)
+            .frame(maxWidth: flexibleWidth ? .infinity : nil)
         }
-        .buttonStyle(PressedButtonStyle(width: 80, height: 84, cornerRadius: 16))
-        .background(.white.opacity(0.1), in: RoundedRectangle(cornerRadius: 16))
+        .buttonStyle(RoomNotchTileButtonStyle(width: flexibleWidth ? nil : 80, height: 84, cornerRadius: 16))
+        .frame(maxWidth: flexibleWidth ? .infinity : nil)
+        .background(.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(.white.opacity(0.09), lineWidth: 0.75)
+        }
         .accessibilityLabel(title)
+    }
+}
+
+private struct RoomNotchTileButtonStyle: ButtonStyle {
+    var width: CGFloat?
+    var height: CGFloat
+    var cornerRadius: CGFloat
+    @State private var isHovering = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .frame(width: width, height: height)
+            .frame(maxWidth: width == nil ? .infinity : nil)
+            .foregroundStyle(.primary)
+            .background(isHovering ? Color.white.opacity(0.09) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+            .scaleEffect(configuration.isPressed ? 0.94 : 1.0)
+            .animation(.easeInOut(duration: 0.12), value: configuration.isPressed)
+            .onHover { isHovering = $0 }
     }
 }
 

@@ -73,18 +73,21 @@ public struct RoomCanvasSnapshot: Codable, Equatable, Sendable {
               annotations.presenterID == ownerID.uuidString, annotations.revision < UInt64.max,
               annotations.objects.count <= AnnotationAuthority.maximumObjects,
               Set(annotations.objects.map(\.id)).count == annotations.objects.count,
-              annotations.leases.isEmpty, annotations.commandSequences.count <= 128,
+              annotations.leases.count <= AnnotationAuthority.maximumObjects, annotations.commandSequences.count <= 128,
               annotations.commandSequences[ownerID.uuidString] != nil,
               annotations.commandSequences.allSatisfy({ UUID(uuidString: $0.key) != nil && $0.value < UInt64.max }),
               annotations.policy.approvedIDs.count <= 128, annotations.policy.disabledIDs.count <= 128,
               annotations.policy.approvedIDs.union(annotations.policy.disabledIDs).allSatisfy({ UUID(uuidString: $0) != nil })
         else { return false }
         return annotations.objects.allSatisfy {
-            $0.tool == .pencil && $0.stickerID == nil && $0.expiresAtHostNanos == nil
-                && UUID(uuidString: $0.authorID) != nil && $0.revision > 0 && $0.revision <= annotations.revision
+            UUID(uuidString: $0.authorID) != nil && $0.revision > 0 && $0.revision <= annotations.revision
                 && !$0.points.isEmpty && $0.points.count <= AnnotationAuthority.maximumPoints
                 && $0.points.allSatisfy(\.isValid) && AnnotationAuthority.colors.contains($0.color)
                 && $0.width.isFinite && (0.001...0.05).contains($0.width)
+                && $0.cornerRadius.isFinite && (0...0.5).contains($0.cornerRadius)
+                && ($0.tool == .sticker
+                    ? ($0.stickerID != nil && $0.points.count == 1)
+                    : ($0.stickerID == nil && $0.expiresAtHostNanos == nil))
         }
     }
 }
@@ -157,7 +160,10 @@ public struct RoomCanvasAuthority: Sendable {
         // This prototype is drawing, undo and owner moderation—not every tool
         // available to the separate screen-annotation feature.
         switch command.action {
-        case .beginDrawing(_, .pencil, _, _, _), .appendDrawing, .endDrawing, .undo, .clear, .deleteObject: break
+        case .beginDrawing, .appendDrawing, .endDrawing, .updateShape,
+             .placeSticker, .acquireSticker, .moveSticker, .releaseSticker,
+             .undo, .clear, .clearDrawings, .clearStickers, .deleteObject:
+            break
         case .setPolicy(let policy):
             guard policy.approvedIDs.union(policy.disabledIDs).allSatisfy({ UUID(uuidString: $0) != nil }) else {
                 return .init(events: [], rejection: .invalidPayload)

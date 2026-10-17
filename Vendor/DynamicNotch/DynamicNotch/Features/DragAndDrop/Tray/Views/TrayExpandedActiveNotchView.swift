@@ -18,27 +18,41 @@ struct TrayExpandedActiveNotchView: View {
     @State private var pendingRemoval: [String] = []
 
     var body: some View {
-        ZStack {
-            VStack(alignment: .leading) {
-                header
-                Spacer()
-            }
-            .padding(.top, isEmbedded ? 0 : isDynamicIsland ? 8.scaled(by: scale) : 4.scaled(by: scale))
-            .padding(.horizontal, isEmbedded ? 0 : isDynamicIsland ? 30 : 42)
-            
-            VStack(alignment: .leading) {
-                Spacer()
+        Group {
+            if isEmbedded {
+                VStack(alignment: .leading, spacing: 8) {
+                    header
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 10) {
+                            trayItemViews
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: 100, alignment: .leading)
+                }
+            } else {
+                ZStack {
+                    VStack(alignment: .leading) {
+                        header
+                        Spacer()
+                    }
+                    .padding(.top, isDynamicIsland ? 8.scaled(by: scale) : 4.scaled(by: scale))
+                    .padding(.horizontal, isDynamicIsland ? 30 : 42)
+                    
+                    VStack(alignment: .leading) {
+                        Spacer()
 
-                ScrollView(scrollDirection.scrollAxis, showsIndicators: false) {
-                    trayItems
-                }
-                .frame(maxHeight: 100)
-                .mask {
-                    ScrollFadeMask(cornerRadius: 24, maskType: .all)
+                        ScrollView(scrollDirection.scrollAxis, showsIndicators: false) {
+                            trayItems
+                        }
+                        .frame(maxHeight: 100)
+                        .mask {
+                            ScrollFadeMask(cornerRadius: 24, maskType: .all)
+                        }
+                    }
+                    .padding(.horizontal, isDynamicIsland ? 20 : 34)
+                    .padding(.bottom, isDynamicIsland ? 7 : 14)
                 }
             }
-            .padding(.horizontal, isEmbedded ? 0 : isDynamicIsland ? 20 : 34)
-            .padding(.bottom, isEmbedded ? 0 : isDynamicIsland ? 7 : 14)
         }
         .confirmationDialog("Remove from the room shelf?", isPresented: Binding(
             get: { !pendingRemoval.isEmpty }, set: { if !$0 { pendingRemoval = [] } })) {

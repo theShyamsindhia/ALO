@@ -234,10 +234,20 @@ public final class EmbeddedNotchRuntime: ObservableObject {
             onStartTimer: { [weak self] in self?.activation.retainRoomToolTimer() },
             isPresented: isRoomInteractionExpanded,
             session: roomToolSession,
-            onSelectionChanged: { [weak self] selected in self?.setRoomInteractionLayout(selected ? .tool : .tools) }))
+            showsHeader: false,
+            onSelectionChanged: { [weak self] selected in
+                self?.objectWillChange.send()
+                self?.setRoomInteractionLayout(selected ? .tool : .tools)
+            }))
     }
 
     public var roomToolsLayout: RoomNotchLayout { roomToolSession.selected == nil ? .tools : .tool }
+    public var selectedRoomToolTitle: String? { roomToolSession.selected?.rawValue }
+    public func clearSelectedRoomTool() {
+        roomToolSession.selected = nil
+        objectWillChange.send()
+        setRoomInteractionLayout(.tools)
+    }
 
     /// Call after leaving the room, once its pending transfers have stopped.
     public func clearRoomToolCopies() {

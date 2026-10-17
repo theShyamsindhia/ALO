@@ -49,7 +49,7 @@ final class RoomToolsTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let staging = RoomToolStaging(root: root)
         defer { try? FileManager.default.removeItem(at: root) }
-        XCTAssertEqual(RoomTool.allCases.count, 8)
+        XCTAssertEqual(RoomTool.allCases.count, 4)
         for width in [340.0, 540.0] {
             for selected in [nil] + RoomTool.allCases.map(Optional.some) {
                 let view = RoomToolsView(container: container, staging: staging,

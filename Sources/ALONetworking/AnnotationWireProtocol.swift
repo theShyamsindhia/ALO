@@ -57,7 +57,8 @@ public enum AnnotationWireMessage: Codable, Sendable {
               !object.points.isEmpty, object.points.count <= AnnotationAuthority.maximumPoints,
               object.points.allSatisfy({ $0.x.isFinite && $0.y.isFinite && (0...1).contains($0.x) && (0...1).contains($0.y) }),
               AnnotationAuthority.colors.contains(object.color), object.width.isFinite,
-              (0.001...0.05).contains(object.width) else { throw SecureTransportError.malformed }
+              (0.001...0.05).contains(object.width),
+              object.cornerRadius.isFinite, (0...0.5).contains(object.cornerRadius) else { throw SecureTransportError.malformed }
     }
 }
 
