@@ -135,11 +135,6 @@ struct NowPlayingExpandedNotchView: View {
                         scrubProgress = nil
                     }
                 )
-            } else {
-                Text("Live audio")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.65))
-                    .frame(maxWidth: .infinity, minHeight: 18)
             }
 
             controlsSection(snapshot: snapshot, appearance: appearance)
@@ -251,7 +246,7 @@ struct NowPlayingExpandedNotchView: View {
                             textColor: .white.opacity(0.95),
                             backgroundColor: .clear,
                             minDuration: 2.0,
-                            frameWidth: 170
+                            frameWidth: onOpenRoom == nil ? 170 : 140
                         )
 
                         MarqueeText(
@@ -261,7 +256,7 @@ struct NowPlayingExpandedNotchView: View {
                             textColor: .white.opacity(0.65),
                             backgroundColor: .clear,
                             minDuration: 3.0,
-                            frameWidth: 170
+                            frameWidth: onOpenRoom == nil ? 170 : 140
                         )
                     }
                     .contentShape(Rectangle())
@@ -291,14 +286,14 @@ struct NowPlayingExpandedNotchView: View {
     private var roomNavigationButton: some View {
         if let onOpenRoom {
             Button(action: onOpenRoom) {
-                Image(systemName: "bubble.left.and.bubble.right")
-                    .font(.system(size: 15, weight: .medium))
+                Label("Room", systemImage: "square.grid.2x2")
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.white.opacity(0.8))
             }
-            .buttonStyle(PressedButtonStyle(width: 32, height: 32,
+            .buttonStyle(PressedButtonStyle(width: 64, height: 32,
                 cornerRadius: 10, hoverBackground: .white.opacity(0.12)))
-            .help("Conversation and files")
-            .accessibilityLabel("Conversation and files")
+            .help("Open room actions: chat, files, canvas and tools")
+            .accessibilityLabel("Open room actions")
         }
     }
 

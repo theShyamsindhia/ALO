@@ -46,7 +46,7 @@ struct NowPlayingNotchContent: NotchContentProtocol, DynamicIslandCustomizable {
     }
     
     func size(baseWidth: CGFloat, baseHeight: CGFloat) -> CGSize {
-        .init(width: baseWidth + 70, height: baseHeight)
+        .init(width: baseWidth + 114, height: baseHeight)
     }
     
     func dynamicIslandSize(baseWidth: CGFloat, baseHeight: CGFloat) -> CGSize {
@@ -54,11 +54,11 @@ struct NowPlayingNotchContent: NotchContentProtocol, DynamicIslandCustomizable {
     }
     
     func expandedSize(baseWidth: CGFloat, baseHeight: CGFloat) -> CGSize {
-        .init(width: baseWidth + 240, height: baseHeight + 160)
+        .init(width: baseWidth + 240, height: baseHeight + ((nowPlayingViewModel.snapshot?.duration ?? 0) > 0 ? 160 : 130))
     }
 
     func expandedDynamicIslandSize(baseWidth: CGFloat, baseHeight: CGFloat) -> CGSize {
-        .init(width: baseWidth + 270, height: baseHeight + 160)
+        .init(width: baseWidth + 270, height: baseHeight + ((nowPlayingViewModel.snapshot?.duration ?? 0) > 0 ? 160 : 130))
     }
     
     func expandedCornerRadius(baseRadius: CGFloat) -> (top: CGFloat, bottom: CGFloat) {

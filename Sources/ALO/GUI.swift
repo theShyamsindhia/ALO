@@ -6032,7 +6032,7 @@ private struct WindowDragRegion: NSViewRepresentable {
     }
 }
 
-private struct DeviceAvatar: View {
+struct DeviceAvatar: View {
     let emoji: String
     let colorHex: String
     let profileImageData: Data?

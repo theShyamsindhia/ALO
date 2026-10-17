@@ -39,13 +39,43 @@ public struct AnnotationObject: Codable, Sendable, Equatable, Identifiable {
     public let stickerID: AnnotationStickerID?
     public let expiresAtHostNanos: UInt64?
     public var isComplete: Bool
+    /// Corner radius as a fraction (0...0.5) of a rectangle's shorter dimension. 0 = sharp corners.
+    public var cornerRadius: Double
 
     public init(id: UUID = UUID(), authorID: String, revision: UInt64 = 0, tool: AnnotationTool,
                 points: [AnnotationPoint], color: String = "red", width: Double = 0.005,
                 stickerID: AnnotationStickerID? = nil, expiresAtHostNanos: UInt64? = nil, isComplete: Bool = true) {
+        self.init(id: id, authorID: authorID, revision: revision, tool: tool, points: points,
+                  color: color, width: width, cornerRadius: 0, stickerID: stickerID,
+                  expiresAtHostNanos: expiresAtHostNanos, isComplete: isComplete)
+    }
+
+    public init(id: UUID = UUID(), authorID: String, revision: UInt64 = 0, tool: AnnotationTool,
+                points: [AnnotationPoint], color: String = "red", width: Double = 0.005,
+                cornerRadius: Double, stickerID: AnnotationStickerID? = nil,
+                expiresAtHostNanos: UInt64? = nil, isComplete: Bool = true) {
         self.id = id; self.authorID = authorID; self.revision = revision; self.tool = tool
-        self.points = points; self.color = color; self.width = width; self.stickerID = stickerID
-        self.expiresAtHostNanos = expiresAtHostNanos; self.isComplete = isComplete
+        self.points = points; self.color = color; self.width = width; self.cornerRadius = cornerRadius
+        self.stickerID = stickerID; self.expiresAtHostNanos = expiresAtHostNanos; self.isComplete = isComplete
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, authorID, revision, tool, points, color, width, cornerRadius, stickerID, expiresAtHostNanos, isComplete
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        authorID = try container.decode(String.self, forKey: .authorID)
+        revision = try container.decode(UInt64.self, forKey: .revision)
+        tool = try container.decode(AnnotationTool.self, forKey: .tool)
+        points = try container.decode([AnnotationPoint].self, forKey: .points)
+        color = try container.decode(String.self, forKey: .color)
+        width = try container.decode(Double.self, forKey: .width)
+        cornerRadius = try container.decodeIfPresent(Double.self, forKey: .cornerRadius) ?? 0
+        stickerID = try container.decodeIfPresent(AnnotationStickerID.self, forKey: .stickerID)
+        expiresAtHostNanos = try container.decodeIfPresent(UInt64.self, forKey: .expiresAtHostNanos)
+        isComplete = try container.decode(Bool.self, forKey: .isComplete)
     }
 }
 
@@ -74,6 +104,7 @@ public enum AnnotationAction: Codable, Sendable, Equatable {
     case setDefaultStickerTTL(AnnotationTTL)
     case undo
     case setPolicy(AnnotationPolicy)
+    case updateShape(id: UUID, points: [AnnotationPoint], cornerRadius: Double = 0, editID: UUID = UUID())
 }
 
 /// No actor identity is accepted from the wire. The host supplies the authenticated connection identity.
@@ -168,6 +199,7 @@ public struct AnnotationAuthority: Sendable {
         let objectID: UUID
         var expectedRevision: UInt64
         let previousPoints: [AnnotationPoint]?
+        var previousCornerRadius: Double? = nil
         var previousRevision: UInt64? = nil
         var leaseID: UUID? = nil
     }
@@ -275,6 +307,34 @@ public struct AnnotationAuthority: Sendable {
             guard let object = objects[id] else { return rejected(.missingObject) }
             guard gestures[actorID] == id, object.authorID == actorID else { return rejected(.noGesture) }
             events += finishGesture(actorID: actorID, command: command)
+        case let .updateShape(id, points, cornerRadius, editID):
+            guard var object = objects[id], object.isComplete, object.tool != .sticker else { return rejected(.missingObject) }
+            guard gestures.values.allSatisfy({ $0 != id }) else { return rejected(.gestureInProgress) }
+            guard valid(points), !points.isEmpty,
+                  (object.tool == .pencil || points.count == 2),
+                  cornerRadius.isFinite, (0...0.5).contains(cornerRadius) else { return rejected(.invalidPayload) }
+            let previousPoints = object.points
+            let previousRadius = object.cornerRadius
+            let previousRevision = object.revision
+            object.points = points
+            object.cornerRadius = object.tool == .rectangle ? cornerRadius : 0
+            object.revision = revision + 1
+            objects[id] = object
+            if let index = undoActions.lastIndex(where: { $0.actorID == actorID && $0.objectID == id }),
+               undoActions[index].leaseID == editID, undoActions[index].expectedRevision == previousRevision {
+                undoActions[index].expectedRevision = object.revision
+            } else {
+                remember(.init(
+                    actorID: actorID,
+                    objectID: id,
+                    expectedRevision: object.revision,
+                    previousPoints: previousPoints,
+                    previousCornerRadius: previousRadius,
+                    previousRevision: previousRevision,
+                    leaseID: editID
+                ))
+            }
+            events.append(emit(.upsert(object), command: command, actorID: actorID))
         case let .placeSticker(id, stickerID, position, ttl):
             guard position.isValid else { return rejected(.invalidPayload) }
             guard gestures[actorID] == nil else { return rejected(.gestureInProgress) }
@@ -331,7 +391,11 @@ public struct AnnotationAuthority: Sendable {
             let action = undoActions.remove(at: index)
             guard var object = objects[action.objectID], object.revision == action.expectedRevision else { return rejected(.staleRevision) }
             if let previous = action.previousPoints {
-                object.points = previous; object.revision = revision + 1; objects[object.id] = object
+                object.points = previous
+                if let previousRadius = action.previousCornerRadius {
+                    object.cornerRadius = previousRadius
+                }
+                object.revision = revision + 1; objects[object.id] = object
                 if let earlier = undoActions.lastIndex(where: { $0.actorID == actorID && $0.objectID == object.id }),
                    undoActions[earlier].expectedRevision == action.previousRevision {
                     undoActions[earlier].expectedRevision = object.revision

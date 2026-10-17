@@ -51,7 +51,7 @@ struct ChatTranscript<Row: View>: View {
                             .id(ChatScrollState.Target.latest)
                     }
                     .padding(.horizontal, horizontalInset ?? (usesNativeLayout ? (compactLayout ? 16 : 24) : 14))
-                    .padding(.top, usesNativeLayout ? (compactLayout ? 16 : 24) : 10)
+                    .padding(.top, horizontalInset == 0 ? 6 : (usesNativeLayout ? (compactLayout ? 16 : 24) : 10))
                     .background {
                         GeometryReader { content in
                             Color.clear.preference(

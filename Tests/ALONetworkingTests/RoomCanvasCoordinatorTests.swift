@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import Testing
+import ALOCore
 @testable import ALONetworking
 
 struct RoomCanvasCoordinatorTests {

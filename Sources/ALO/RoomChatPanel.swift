@@ -92,7 +92,7 @@ struct RoomChatPanel: View {
                 if !usesNativeLayout || !showsHeader { chatMenu }
             }
             .font(.system(size: 11))
-            .padding(.horizontal, 14)
+            .padding(.horizontal, isNotch ? 4 : 14)
             .frame(height: showsSearch || onlyPins ? 32 : 24)
             }
             ChatTranscript(messages: filtered, currentParticipantID: currentParticipantID,
@@ -111,7 +111,7 @@ struct RoomChatPanel: View {
                         }.foregroundStyle(.secondary).allowsHitTesting(false)
                     }
                 }
-            Divider().opacity(0.4)
+            if !isNotch { Divider().opacity(0.4) }
             if let target = composer.editing ?? composer.replyTo, let message = messages.first(where: { $0.id == target }) {
                 HStack {
                     Label(composer.editing == nil ? "Reply to \(message.sender)" : "Editing your message", systemImage: composer.editing == nil ? "arrowshape.turn.up.left" : "pencil")
@@ -170,7 +170,8 @@ struct RoomChatPanel: View {
                 .overlay(RoundedRectangle(cornerRadius: 23).strokeBorder(.primary.opacity(usesNativeLayout ? 0.1 : 0)))
             }.font(isNotch ? .system(size: 13) : usesNativeLayout ? ALONetworkTypography.body : .system(size: 12))
                 .padding(.horizontal, usesNativeLayout ? (!showsHeader ? 0 : (compactLayout ? 16 : 24)) : 10)
-                .padding(.vertical, usesNativeLayout ? (compactLayout ? 10 : 14) : 7)
+                .padding(.top, isNotch ? 10 : usesNativeLayout ? (compactLayout ? 10 : 14) : 7)
+                .padding(.bottom, isNotch ? 0 : usesNativeLayout ? (compactLayout ? 10 : 14) : 7)
                 .background(.primary.opacity(usesNativeLayout ? 0 : 0.045), in: RoundedRectangle(cornerRadius: 12))
                 .padding(.horizontal, usesNativeLayout ? 0 : 10).padding(.vertical, usesNativeLayout ? 0 : 6)
 

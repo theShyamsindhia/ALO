@@ -91,6 +91,64 @@ struct RoomCanvasAppTests {
         #expect(tall == CGRect(x: 75, y: 0, width: 150, height: 300))
     }
 
+    @Test func blankBoardShapesStampsAndBorderlessPopoutCollaborateCleanly() async throws {
+        let fixture = try CanvasAppNetwork()
+        defer { fixture.stop() }
+        fixture.host.startBlankBoard(width: 800, height: 500)
+        try await canvasEventually { fixture.host.canDraw && fixture.host.isBlankBoard }
+        try await canvasEventually {
+            fixture.viewerState.read { $0.participants.first(where: { $0.id == fixture.hostID.uuidString })?.canvas != nil }
+        }
+        let advertisement = try #require(fixture.viewerState.read { $0.participants.first(where: { $0.id == fixture.hostID.uuidString })?.canvas })
+        fixture.viewer.join(ownerID: fixture.hostID, advertisement: advertisement)
+        try await canvasEventually { fixture.viewer.canDraw && fixture.viewer.isBlankBoard }
+
+        // Collaborator draws an arrow and places a stamp; host draws a box and moves the stamp
+        let arrowID = UUID(), boxID = UUID(), stampID = UUID()
+        fixture.viewer.submit(.beginDrawing(id: arrowID, tool: .arrow, points: [.init(x: 0.1, y: 0.2), .init(x: 0.5, y: 0.6)], color: "purple", width: 0.006))
+        fixture.viewer.submit(.endDrawing(id: arrowID))
+        fixture.viewer.submit(.placeSticker(id: stampID, stickerID: .star, position: .init(x: 0.3, y: 0.3), ttl: .threeHundred))
+        fixture.host.submit(.beginDrawing(id: boxID, tool: .rectangle, points: [.init(x: 0.2, y: 0.2), .init(x: 0.8, y: 0.8)], color: "green", width: 0.006))
+        fixture.host.submit(.endDrawing(id: boxID))
+        try await canvasEventually { fixture.viewer.snapshot?.annotations.objects.count == 3 }
+        #expect(fixture.viewer.snapshot?.annotations.objects.first(where: { $0.id == boxID })?.cornerRadius == 0)
+
+        // Round the rectangle's corners live and verify coalesced undo restores sharp corners (0)
+        let roundEditID = UUID()
+        fixture.host.submit(.updateShape(id: boxID, points: [.init(x: 0.2, y: 0.2), .init(x: 0.8, y: 0.8)], cornerRadius: 0.15, editID: roundEditID))
+        fixture.host.submit(.updateShape(id: boxID, points: [.init(x: 0.2, y: 0.2), .init(x: 0.8, y: 0.8)], cornerRadius: 0.32, editID: roundEditID))
+        try await canvasEventually {
+            abs((fixture.viewer.snapshot?.annotations.objects.first(where: { $0.id == boxID })?.cornerRadius ?? 0) - 0.32) < 0.001
+        }
+        fixture.host.submit(.undo)
+        try await canvasEventually {
+            fixture.viewer.snapshot?.annotations.objects.first(where: { $0.id == boxID })?.cornerRadius == 0
+        }
+
+        // Verify trackpad pan & cursor-anchored zoom
+        fixture.host.pan(by: CGSize(width: 140, height: -90))
+        #expect(fixture.host.panOffset == CGSize(width: 140, height: -90))
+        fixture.host.zoom(to: 2.0, anchor: CGPoint(x: 200, y: 150), in: CGSize(width: 800, height: 500))
+        #expect(fixture.host.zoomScale == 2.0)
+        fixture.host.resetViewport()
+        #expect(fixture.host.zoomScale == 1.0 && fixture.host.panOffset == .zero)
+
+        fixture.host.submit(.acquireSticker(id: stampID))
+        try await canvasEventually { fixture.host.snapshot?.annotations.leases.first?.objectID == stampID }
+        let lease = try #require(fixture.host.snapshot?.annotations.leases.first)
+        fixture.host.submit(.moveSticker(id: stampID, leaseID: lease.id, position: .init(x: 0.75, y: 0.25)))
+        fixture.host.submit(.releaseSticker(id: stampID, leaseID: lease.id))
+        try await canvasEventually {
+            fixture.viewer.snapshot?.annotations.objects.first(where: { $0.id == stampID })?.points.first == .init(x: 0.75, y: 0.25)
+        }
+
+        // Pop out borderless black canvas and shrink back into notch
+        fixture.host.popOut()
+        #expect(fixture.host.isPoppedOut)
+        fixture.host.shrinkToNotch()
+        #expect(!fixture.host.isPoppedOut)
+    }
+
     @Test func renderNativeCanvasDiscoveryDrawingAndPausedStatesAtBothWidths() async throws {
         _ = NSApplication.shared
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("alo-canvas-render-source-\(UUID())")

@@ -28,10 +28,17 @@ final class ALONotchWindowController {
     private var panel: NSPanel?
     private var observers = Set<AnyCancellable>()
     private var timer: Timer?
+    private var quickLogIsPresented = false
+    private var fileDragApproach = NotchFileDragApproach()
 
     init(model: ALOViewModel, preferences: ALONotchPreferences? = nil) {
         self.preferences = preferences ?? .shared
         features.configure(model: model)
+        model.smokingLog.$isQuickLogPresented.removeDuplicates()
+            .sink { [weak self] presented in
+                self?.quickLogIsPresented = presented
+                self?.updateVisibility()
+            }.store(in: &observers)
         self.preferences.$enabled.receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.updateVisibility() }.store(in: &observers)
         features.objectWillChange.receive(on: RunLoop.main)
@@ -63,7 +70,9 @@ final class ALONotchWindowController {
         if panel.contentView == nil {
             Self.mountOriginalContent(in: panel, makeContent: runtime.makeHostView)
         }
-        guard !runtime.isLocked, !runtime.shouldHideInFullscreen,
+        // The notch is hosted above ordinary AppKit popovers. Yield the whole
+        // panel while logging, without disabling features or stopping playback.
+        guard !quickLogIsPresented, !runtime.isLocked, !runtime.shouldHideInFullscreen,
               let screen = runtime.preferredScreen else {
             panel.orderOut(nil)
             timer?.invalidate()
@@ -91,6 +100,38 @@ final class ALONotchWindowController {
 
     private func updatePointerPassThrough() {
         guard let panel, panel.isVisible, let runtime = features.runtime else { return }
-        panel.ignoresMouseEvents = !(runtime.interactiveScreenRect?.contains(NSEvent.mouseLocation) ?? false)
+        let pointer = NSEvent.mouseLocation
+        let pasteboard = NSPasteboard(name: .drag)
+        let dragging = NSEvent.pressedMouseButtons & 1 != 0
+        if fileDragApproach.shouldReveal(mouseDown: dragging, changeCount: pasteboard.changeCount,
+            hasFileURLs: pasteboard.types?.contains(.fileURL) == true, pointer: pointer,
+            notch: runtime.interactiveScreenRect) {
+            runtime.beginFileDragApproach()
+        }
+        if !dragging { runtime.endFileDragApproach() }
+        panel.ignoresMouseEvents = !(runtime.interactiveScreenRect?.contains(pointer) ?? false)
+    }
+}
+
+/// Reveal below the menu bar, before a file reaches macOS's Mission Control
+/// hot edge. A stale drag pasteboard must never turn a window/text drag into a file drop.
+struct NotchFileDragApproach {
+    private var idleChangeCount: Int?
+    private var revealed = false
+
+    mutating func shouldReveal(mouseDown: Bool, changeCount: Int, hasFileURLs: Bool,
+                               pointer: CGPoint, notch: CGRect?) -> Bool {
+        guard mouseDown else {
+            idleChangeCount = changeCount
+            revealed = false
+            return false
+        }
+        guard !revealed, let idleChangeCount, changeCount != idleChangeCount,
+              hasFileURLs, let notch else { return false }
+        let approach = CGRect(x: notch.minX - 24, y: notch.minY - 80,
+                              width: notch.width + 48, height: notch.height + 80)
+        guard approach.contains(pointer) else { return false }
+        revealed = true
+        return true
     }
 }

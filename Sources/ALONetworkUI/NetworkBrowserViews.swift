@@ -151,6 +151,7 @@ private final class NetworkSplitController: NSSplitViewController {
     var onCollapse: ((Bool) -> Void)?
     private var collapseObservation: NSKeyValueObservation?
     private var positionedSidebar = false
+    private var sidebarWidthBeforeCollapse: CGFloat?
 
     override func loadView() {
         splitView = NetworkSplitView()
@@ -204,8 +205,18 @@ private final class NetworkSplitController: NSSplitViewController {
 
     override func toggleSidebar(_ sender: Any?) {
         let item = splitViewItems[0]
+        let restoreWidth = item.isCollapsed ? sidebarWidthBeforeCollapse : splitView.arrangedSubviews.first?.frame.width
+        if !item.isCollapsed {
+            sidebarWidthBeforeCollapse = restoreWidth
+        }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : 0.25
+            context.completionHandler = { [weak self] in
+                guard let self, !self.splitViewItems[0].isCollapsed,
+                      let restoreWidth else { return }
+                self.splitView.setPosition(restoreWidth, ofDividerAt: 0)
+                self.sidebarWidthBeforeCollapse = nil
+            }
             item.animator().isCollapsed = !item.isCollapsed
         }
     }

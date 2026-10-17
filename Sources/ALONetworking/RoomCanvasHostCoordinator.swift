@@ -123,8 +123,12 @@ public final class RoomCanvasHostCoordinator {
         let sequence = snapshot.annotations.commandSequences[ownerID.uuidString] ?? 0
         guard sequence < UInt64.max - 1 else { return }
         let baseRevision: UInt64?
-        if case .deleteObject(let id) = action { baseRevision = snapshot.annotations.objects.first(where: { $0.id == id })?.revision }
-        else { baseRevision = nil }
+        switch action {
+        case .deleteObject(let id), .acquireSticker(let id), .moveSticker(let id, _, _), .releaseSticker(let id, _):
+            baseRevision = snapshot.annotations.objects.first(where: { $0.id == id })?.revision
+        default:
+            baseRevision = nil
+        }
         let command = AnnotationCommand(sessionID: snapshot.annotations.sessionID, sequence: sequence + 1,
                                         baseRevision: baseRevision, action: action)
         let result = authority.process(command, from: ownerID, nowNanos: nowNanos)

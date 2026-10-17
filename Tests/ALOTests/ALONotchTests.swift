@@ -6,6 +6,33 @@ import Testing
 
 @Suite(.serialized) @MainActor
 struct ALONotchTests {
+    @Test func freshFileDragsRevealBelowTheNotchOnlyOnce() {
+        var approach = NotchFileDragApproach()
+        let notch = CGRect(x: 500, y: 850, width: 200, height: 32)
+        let below = CGPoint(x: 600, y: 800)
+        #expect(!notch.contains(below))
+        let idle = approach.shouldReveal(mouseDown: false, changeCount: 10, hasFileURLs: true, pointer: below, notch: notch)
+        #expect(!idle)
+        let stale = approach.shouldReveal(mouseDown: true, changeCount: 10, hasFileURLs: true, pointer: below, notch: notch)
+        #expect(!stale,
+                "A window drag must not reuse files from an old pasteboard")
+        let textDrag = approach.shouldReveal(mouseDown: true, changeCount: 11, hasFileURLs: false, pointer: below, notch: notch)
+        #expect(!textDrag)
+        let outside = approach.shouldReveal(mouseDown: true, changeCount: 11, hasFileURLs: true,
+                                            pointer: CGPoint(x: 100, y: 800), notch: notch)
+        #expect(!outside)
+        let first = approach.shouldReveal(mouseDown: true, changeCount: 11, hasFileURLs: true, pointer: below, notch: notch)
+        #expect(first)
+        let repeated = approach.shouldReveal(mouseDown: true, changeCount: 11, hasFileURLs: true, pointer: below, notch: notch)
+        #expect(!repeated)
+        let released = approach.shouldReveal(mouseDown: false, changeCount: 11, hasFileURLs: true, pointer: below, notch: notch)
+        #expect(!released)
+        let missingNotch = approach.shouldReveal(mouseDown: true, changeCount: 12, hasFileURLs: true, pointer: below, notch: nil)
+        #expect(!missingNotch)
+        let nextDrag = approach.shouldReveal(mouseDown: true, changeCount: 12, hasFileURLs: true, pointer: below, notch: notch)
+        #expect(nextDrag)
+    }
+
     @Test func firstMountReplacesAppKitDefaultContentInsteadOfLeavingBlankPanel() throws {
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 300, height: 100),
             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
