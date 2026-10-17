@@ -652,6 +652,38 @@ struct SecureMeshTests {
         #expect(a.state.read { $0.connectionAttempts } == expiredAttempts)
         #expect(await a.control.secureConnectionsForTesting() == expected)
     }
+
+    @Test func awdlPeerChannelsAndDirectoryHintsUseBonjourServiceEndpointWhenAdvertising() throws {
+        #expect(MeshControlPlane.shouldDialPeerViaBonjourService(advertises: true, host: "fe80::b47a:b7ff:fe8e:81e1%awdl0"))
+        #expect(MeshControlPlane.shouldDialPeerViaBonjourService(advertises: true, host: nil))
+        #expect(!MeshControlPlane.shouldDialPeerViaBonjourService(advertises: true, host: "192.168.1.42"))
+        #expect(!MeshControlPlane.shouldDialPeerViaBonjourService(advertises: false, host: "fe80::b47a:b7ff:fe8e:81e1%awdl0"))
+
+        let room = RoomConfiguration.secure(name: "AWDL Bonjour endpoint")
+        let identity = try InstallationIdentity.ephemeral()
+        let control = MeshControlPlane(
+            room: room,
+            nodeID: identity.publicIdentity.nodeID.uuidString,
+            displayName: "Peer",
+            replicaHandler: { _ in },
+            participantsHandler: { _ in },
+            installationIdentity: identity,
+            peerPins: MemoryPeerPinStore()
+        )
+        let targetID = UUID().uuidString
+        let awdlHint = MeshPeerDirectoryHint(
+            peerID: targetID,
+            incarnationID: UUID().uuidString,
+            host: "fe80::b47a:b7ff:fe8e:81e1%awdl0",
+            port: 53_864
+        )
+        #expect(
+            control.directoryEndpoint(awdlHint) == .hostPort(
+                host: NWEndpoint.Host("fe80::b47a:b7ff:fe8e:81e1%awdl0"),
+                port: 53_864
+            )
+        )
+    }
 }
 
 private final class MeshInitializationObservation: @unchecked Sendable {

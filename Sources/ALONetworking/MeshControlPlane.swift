@@ -560,9 +560,12 @@ public final class MeshControlPlane: @unchecked Sendable {
                   let identity = self.installationIdentity, let pins = self.peerPins,
                   let roomID = UUID(uuidString: self.room.id),
                   let peer = self.peers[peerID.uuidString], peer.authenticated,
-                  peer.authenticatedPeer?.nodeID == peerID,
-                  let host = self.remoteHost(of: peer), let rawPort = peer.listeningPort,
-                  let port = NWEndpoint.Port(rawValue: rawPort) else {
+                  peer.authenticatedPeer?.nodeID == peerID else {
+                completion(.failure(SecurePeerChannelError.notAuthenticated)); return
+            }
+            let remoteHost = self.remoteHost(of: peer)
+            let useBonjourService = Self.shouldDialPeerViaBonjourService(advertises: self.advertises, host: remoteHost)
+            guard useBonjourService || (remoteHost != nil && peer.listeningPort.flatMap(NWEndpoint.Port.init(rawValue:)) != nil) else {
                 completion(.failure(SecurePeerChannelError.notAuthenticated)); return
             }
             if role == .roomCanvas {
@@ -575,8 +578,15 @@ public final class MeshControlPlane: @unchecked Sendable {
                 completion(.failure(SecureTransportError.capacity)); return
             }
             do {
-                let connection = NWConnection(host: NWEndpoint.Host(host), port: port,
-                    using: try self.transportParameters(expectedPeerID: peerID))
+                let parameters = try self.transportParameters(expectedPeerID: peerID)
+                let connection: NWConnection
+                if useBonjourService {
+                    connection = NWConnection(to: self.peerServiceEndpoint(peerID: peerID.uuidString), using: parameters)
+                } else if let host = remoteHost, let rawPort = peer.listeningPort, let port = NWEndpoint.Port(rawValue: rawPort) {
+                    connection = NWConnection(host: NWEndpoint.Host(host), port: port, using: parameters)
+                } else {
+                    completion(.failure(SecurePeerChannelError.notAuthenticated)); return
+                }
                 let admission: SecureRoomAdmission = self.room.isPrivate
                     ? .privateRoom(secret: self.room.secureJoinSecret ?? Data()) : .publicRoom
                 let configuration = try SecurePeerConfiguration(roomID: roomID, incarnationID: self.incarnationID,
@@ -1472,12 +1482,27 @@ public final class MeshControlPlane: @unchecked Sendable {
         repairSecureDirectory(nowNanos: now)
     }
 
-    private func directoryEndpoint(_ hint: MeshPeerDirectoryHint) -> NWEndpoint {
-        if let host = hint.host, let rawPort = hint.port, let port = NWEndpoint.Port(rawValue: rawPort) {
+    static func shouldDialPeerViaBonjourService(advertises: Bool, host: String?) -> Bool {
+        guard advertises else { return false }
+        guard let host else { return true }
+        return host.lowercased().contains("%awdl")
+    }
+
+    private func peerServiceEndpoint(peerID: String) -> NWEndpoint {
+        .service(
+            name: "\(room.id.prefix(8))-\(peerID.prefix(8))",
+            type: room.transportPolicy == .secureV2 ? MeshRoomBrowser.secureServiceType : MeshRoomBrowser.serviceType,
+            domain: "local.",
+            interface: nil
+        )
+    }
+
+    func directoryEndpoint(_ hint: MeshPeerDirectoryHint) -> NWEndpoint {
+        if !Self.shouldDialPeerViaBonjourService(advertises: advertises, host: hint.host),
+           let host = hint.host, let rawPort = hint.port, let port = NWEndpoint.Port(rawValue: rawPort) {
             return .hostPort(host: NWEndpoint.Host(host), port: port)
         }
-        return .service(name: "\(room.id.prefix(8))-\(hint.peerID.prefix(8))", type: MeshRoomBrowser.secureServiceType,
-                        domain: "local.", interface: nil)
+        return peerServiceEndpoint(peerID: hint.peerID)
     }
 
     private func repairSecureDirectory(nowNanos now: UInt64) {
@@ -2450,6 +2475,11 @@ public final class MeshControlPlane: @unchecked Sendable {
             return
         }
         if room.transportPolicy == .secureV2, (reconnectAttempts[peerID] ?? 0) >= 4 {
+            reconnectWorkItems.removeValue(forKey: peerID)?.cancel()
+            reconnectAttempts.removeValue(forKey: peerID)
+            if peers.isEmpty {
+                scanWindowExpiresAtNanos = MonotonicClock.nowNanos() + 15_000_000_000
+            }
             startSecureScan(); return
         }
         reconnectWorkItems.removeValue(forKey: peerID)?.cancel()
@@ -2532,7 +2562,13 @@ public final class MeshControlPlane: @unchecked Sendable {
             expireDisconnectedParticipantsIfNeeded(nowNanos: now)
             publishParticipants() // Expire stale playback telemetry even on an otherwise quiet room.
             if room.transportPolicy == .secureV2 {
+                retireStaleSecurePeersIfNeeded(nowNanos: now)
                 repairSecureDirectory(nowNanos: now)
+                if advertises, peers.isEmpty, browser == nil, reconnectWorkItems.isEmpty,
+                   !links.values.contains(where: { !$0.authenticated }) {
+                    scanWindowExpiresAtNanos = now + 15_000_000_000
+                    startSecureScan()
+                }
                 if now >= lastDirectoryPublishNanos, now - lastDirectoryPublishNanos >= 5_000_000_000 {
                     lastDirectoryPublishNanos = now
                     publishSecureDirectory()
@@ -2558,6 +2594,17 @@ public final class MeshControlPlane: @unchecked Sendable {
             MeshEnvelope(type: "heartbeat", nodeID: originID, heartbeatSequence: sequence, heartbeatGeneration: generation),
             excluding: source
         )
+    }
+
+    private func retireStaleSecurePeersIfNeeded(nowNanos now: UInt64) {
+        guard room.transportPolicy == .secureV2 else { return }
+        let staleLeaseNanos = max(participantLeaseNanos * 3, broadcasterLeaseNanos * 2, heartbeatIntervalNanos * 12)
+        for link in Array(peers.values) {
+            guard link.lastPayloadNanos > 0,
+                  now >= link.lastPayloadNanos,
+                  now - link.lastPayloadNanos >= staleLeaseNanos else { continue }
+            cancel(link)
+        }
     }
 
     private func expireDisconnectedParticipantsIfNeeded(nowNanos: UInt64) {
